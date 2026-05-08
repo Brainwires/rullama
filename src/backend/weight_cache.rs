@@ -4,13 +4,10 @@
 //! calls return clones of the same buffer (wgpu Buffers are Arc-internally, so
 //! cloning is `Arc::clone` and free). Eliminates the per-call weight upload that
 //! dominates `forward_token_gpu` cost.
-//!
-//! Thread-safety: we use `RefCell` rather than `Mutex` because all forward-pass code
-//! is single-threaded inside a single Rust task. If we later need parallel kernel
-//! dispatch (multiple decoder threads), swap to `Mutex`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::error::{Result, RullamaError};
 use crate::gguf::{GgmlDtype, GgufReader};
@@ -24,17 +21,17 @@ pub struct TiledTensor {
     pub n_rows: usize,
 }
 
-pub struct WeightCache<'a> {
-    reader: &'a GgufReader<'a>,
-    device: &'a wgpu::Device,
-    queue: &'a wgpu::Queue,
+pub struct WeightCache {
+    reader: Arc<GgufReader>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
     buffers: RefCell<HashMap<String, wgpu::Buffer>>,
     tiles: RefCell<HashMap<(String, usize), Vec<wgpu::Buffer>>>,
     tile_meta: RefCell<HashMap<(String, usize), Vec<(usize, usize)>>>,
 }
 
-impl<'a> WeightCache<'a> {
-    pub fn new(reader: &'a GgufReader<'a>, device: &'a wgpu::Device, queue: &'a wgpu::Queue) -> Self {
+impl WeightCache {
+    pub fn new(reader: Arc<GgufReader>, device: wgpu::Device, queue: wgpu::Queue) -> Self {
         Self {
             reader,
             device,
@@ -47,10 +44,9 @@ impl<'a> WeightCache<'a> {
 
     /// Borrow of the underlying GGUF reader (for callers that occasionally need an
     /// f32 dequant outside the GPU buffer path — e.g. the small RoPE freq-factors tensor).
-    pub fn reader(&self) -> &GgufReader<'a> { self.reader }
+    pub fn reader(&self) -> &GgufReader { &self.reader }
 
-    /// Get the GPU buffer for the named tensor, uploading on first access. Returns a
-    /// cheap clone (Arc::clone internally).
+    /// Get the GPU buffer for the named tensor, uploading on first access.
     pub fn buffer(&self, name: &str) -> Result<wgpu::Buffer> {
         if let Some(b) = self.buffers.borrow().get(name) {
             return Ok(b.clone());
@@ -68,8 +64,7 @@ impl<'a> WeightCache<'a> {
         Ok(cloned)
     }
 
-    /// Optional buffer — returns Ok(None) if the tensor is absent (e.g. `rope_freqs.weight`
-    /// is only present on some Gemma 4 variants).
+    /// Best-effort buffer fetch: Ok(None) if the tensor is absent.
     pub fn buffer_opt(&self, name: &str) -> Result<Option<wgpu::Buffer>> {
         if self.reader.tensor(name).is_err() {
             return Ok(None);
@@ -82,12 +77,10 @@ impl<'a> WeightCache<'a> {
         Ok(self.reader.tensor(name)?.dtype)
     }
 
-    /// Number of cached buffers (for diagnostics).
     pub fn cached_count(&self) -> usize {
         self.buffers.borrow().len()
     }
 
-    /// Total bytes of cached tensor data on the GPU (sum of buffer sizes, tiles included).
     pub fn cached_bytes(&self) -> u64 {
         let single: u64 = self.buffers.borrow().values().map(|b| b.size()).sum();
         let tiled: u64 = self.tiles.borrow().values()
@@ -97,17 +90,9 @@ impl<'a> WeightCache<'a> {
     }
 
     /// Split a 2-D quantized tensor along its slow (second) axis into multiple GPU
-    /// buffers, each ≤ `max_bytes_per_tile` bytes. Used to work around WebGPU's
-    /// `max_storage_buffer_binding_size = 128 MiB` for the giant `token_embd.weight`
-    /// (Q6_K, 1536 × 262144 ≈ 330 MB).
-    ///
-    /// Returns one [`TiledTensor`] per chunk, in row order.
-    ///
-    /// Cached: the (name, max_bytes_per_tile) pair maps to the same GPU buffers across
-    /// calls, so multi-token decode pays the upload cost exactly once.
+    /// buffers, each ≤ `max_bytes_per_tile` bytes.
     pub fn buffer_tiles(&self, name: &str, max_bytes_per_tile: usize) -> Result<Vec<TiledTensor>> {
         let key = (name.to_string(), max_bytes_per_tile);
-        // Fast path: tiles already exist.
         {
             let tiles = self.tiles.borrow();
             let meta = self.tile_meta.borrow();
@@ -120,15 +105,14 @@ impl<'a> WeightCache<'a> {
             }
         }
 
-        // Slow path: build the tiles.
         let desc = self.reader.tensor(name)?;
         if desc.dims.len() != 2 {
             return Err(RullamaError::Inference(format!(
                 "buffer_tiles: tensor {name} has {} dims, expected 2", desc.dims.len()
             )));
         }
-        let row_len = desc.dims[0] as usize;            // fastest-varying / k axis
-        let n_rows = desc.dims[1] as usize;             // slow / n axis
+        let row_len = desc.dims[0] as usize;
+        let n_rows = desc.dims[1] as usize;
         let block_elems = desc.dtype.block_elems();
         if row_len % block_elems != 0 {
             return Err(RullamaError::Inference(format!(
@@ -142,8 +126,6 @@ impl<'a> WeightCache<'a> {
                 "buffer_tiles: row_bytes is 0 for {name}"
             )));
         }
-
-        // Each tile gets at most `max_bytes_per_tile` bytes, on row boundaries.
         let rows_per_tile = (max_bytes_per_tile / row_bytes).max(1);
         let all_bytes = self.reader.tensor_bytes(name)?;
 

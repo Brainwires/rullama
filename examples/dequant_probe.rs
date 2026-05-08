@@ -25,7 +25,7 @@ fn main() -> ExitCode {
         Ok(b) => b,
         Err(e) => { eprintln!("read error: {e}"); return ExitCode::from(1); }
     };
-    let r = match GgufReader::new(&bytes) {
+    let r = match GgufReader::new(bytes) {
         Ok(r) => r,
         Err(e) => { eprintln!("parse error: {e}"); return ExitCode::from(1); }
     };

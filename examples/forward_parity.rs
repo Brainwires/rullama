@@ -20,9 +20,10 @@ fn main() -> ExitCode {
         None => { eprintln!("usage: forward_parity <gguf>"); return ExitCode::from(2); }
     };
     let bytes = fs::read(&path).expect("read");
-    let r = GgufReader::new(&bytes).expect("parse");
-    let cfg = Gemma4Config::from_gguf(&r).expect("config");
-    let weights = Weights::new(&r);
+    let reader = GgufReader::new(bytes).expect("parse");
+    let cfg = Gemma4Config::from_gguf(&reader).expect("config");
+    let r_arc = std::sync::Arc::new(reader);
+    let weights = Weights::new(r_arc.clone());
 
     let bos = cfg.bos_id.unwrap_or(2);
 
@@ -30,7 +31,7 @@ fn main() -> ExitCode {
     let t0 = Instant::now();
     let ctx = pollster::block_on(WgpuCtx::new()).expect("wgpu");
     let pipes = Pipelines::new(&ctx.device);
-    let wcache = WeightCache::new(&r, &ctx.device, &ctx.queue);
+    let wcache = WeightCache::new(r_arc.clone(), ctx.device.clone(), ctx.queue.clone());
     println!("  done in {:?}", t0.elapsed());
 
     println!("CPU forward at pos=0, token={bos} ...");

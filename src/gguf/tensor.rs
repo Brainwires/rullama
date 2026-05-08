@@ -14,7 +14,7 @@ use super::reader::GgufReader;
 /// The vector is laid out in the same element order GGUF stores: `dims[0]` is the
 /// fastest-varying axis. For a `[k, n]` weight, that means the row of length `k` is
 /// contiguous in memory.
-pub fn dequant_tensor_to_f32(r: &GgufReader<'_>, name: &str) -> Result<Vec<f32>> {
+pub fn dequant_tensor_to_f32(r: &GgufReader, name: &str) -> Result<Vec<f32>> {
     let desc = r.tensor(name)?;
     let bytes = r.tensor_bytes(name)?;
     let elems = desc.elem_count() as usize;
@@ -30,7 +30,7 @@ pub fn dequant_tensor_to_f32(r: &GgufReader<'_>, name: &str) -> Result<Vec<f32>>
 /// (logical) f32 layout. For block-quantized types we require the row to be aligned
 /// to the block boundary along `dims[0]` (Gemma 4's row sizes are all multiples of 256
 /// along the leading axis, so this always holds).
-pub fn dequant_row_to_f32(r: &GgufReader<'_>, name: &str, row_idx: usize) -> Result<Vec<f32>> {
+pub fn dequant_row_to_f32(r: &GgufReader, name: &str, row_idx: usize) -> Result<Vec<f32>> {
     let desc = r.tensor(name)?;
     if desc.dims.len() != 2 {
         return Err(RullamaError::Gguf(format!(
@@ -73,6 +73,6 @@ pub fn dequant_row_to_f32(r: &GgufReader<'_>, name: &str, row_idx: usize) -> Res
 
 /// Convenience: known dtype helper.
 #[allow(dead_code)]
-pub(crate) fn dtype_of(r: &GgufReader<'_>, name: &str) -> Result<GgmlDtype> {
+pub(crate) fn dtype_of(r: &GgufReader, name: &str) -> Result<GgmlDtype> {
     Ok(r.tensor(name)?.dtype)
 }

@@ -49,7 +49,7 @@ pub struct BpeTokenizer {
 impl BpeTokenizer {
     /// Build a tokenizer from the metadata embedded in a GGUF file. Reads
     /// `tokenizer.ggml.tokens`, `tokenizer.ggml.token_type`, `tokenizer.ggml.merges`.
-    pub fn from_gguf(r: &GgufReader<'_>) -> Result<Self> {
+    pub fn from_gguf(r: &GgufReader) -> Result<Self> {
         let tokens = r.get("tokenizer.ggml.tokens")?.as_string_array()?.to_vec();
         let types = r.get("tokenizer.ggml.token_type")?.as_u32_array()?;
         if types.len() != tokens.len() {

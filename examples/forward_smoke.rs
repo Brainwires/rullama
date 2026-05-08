@@ -27,7 +27,7 @@ fn main() -> ExitCode {
         Ok(b) => b,
         Err(e) => { eprintln!("read error: {e}"); return ExitCode::from(1); }
     };
-    let r = match GgufReader::new(&bytes) {
+    let r = match GgufReader::new(bytes) {
         Ok(r) => r,
         Err(e) => { eprintln!("gguf parse error: {e}"); return ExitCode::from(1); }
     };
@@ -35,7 +35,8 @@ fn main() -> ExitCode {
         Ok(c) => c,
         Err(e) => { eprintln!("config error: {e}"); return ExitCode::from(1); }
     };
-    let weights = Weights::new(&r);
+    let r_arc = std::sync::Arc::new(r);
+    let weights = Weights::new(r_arc.clone());
     let mut kv = KvState::new(&cfg);
 
     let bos = cfg.bos_id.unwrap_or(2);

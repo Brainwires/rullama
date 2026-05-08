@@ -33,8 +33,8 @@ use crate::reference::weights::Weights;
 /// non-shared layers.
 pub async fn forward_token_gpu(
     cfg: &Gemma4Config,
-    weights: &Weights<'_>,
-    wcache: &WeightCache<'_>,
+    weights: &Weights,
+    wcache: &WeightCache,
     ctx: &WgpuCtx,
     pipes: &Pipelines,
     kv_state: &mut KvState,
@@ -96,8 +96,8 @@ pub async fn forward_token_gpu(
 
 async fn prepare_per_layer_inputs_gpu(
     cfg: &Gemma4Config,
-    weights: &Weights<'_>,
-    wcache: &WeightCache<'_>,
+    weights: &Weights,
+    wcache: &WeightCache,
     ctx: &WgpuCtx,
     pipes: &Pipelines,
     hidden: &[f32],
@@ -137,8 +137,8 @@ async fn prepare_per_layer_inputs_gpu(
 
 async fn layer_forward_gpu(
     cfg: &Gemma4Config,
-    weights: &Weights<'_>,
-    wcache: &WeightCache<'_>,
+    weights: &Weights,
+    wcache: &WeightCache,
     ctx: &WgpuCtx,
     pipes: &Pipelines,
     kv_state: &mut KvState,
@@ -216,8 +216,8 @@ async fn layer_forward_gpu(
 
 async fn self_attention_gpu(
     cfg: &Gemma4Config,
-    weights: &Weights<'_>,
-    wcache: &WeightCache<'_>,
+    weights: &Weights,
+    wcache: &WeightCache,
     ctx: &WgpuCtx,
     pipes: &Pipelines,
     kv_state: &mut KvState,
@@ -311,7 +311,7 @@ async fn self_attention_gpu(
 
 async fn apply_rope_gpu(
     cfg: &Gemma4Config,
-    wcache: &WeightCache<'_>,
+    wcache: &WeightCache,
     ctx: &WgpuCtx,
     pipes: &Pipelines,
     layer: u32,

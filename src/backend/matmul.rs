@@ -264,7 +264,7 @@ mod tests {
             return;
         }
         let bytes = std::fs::read(path).expect("read");
-        let r = crate::gguf::GgufReader::new(&bytes).expect("parse");
+        let r = crate::gguf::GgufReader::new(bytes).expect("parse");
 
         // Deterministic input: a normalized-ish vector of length d_model = 1536.
         let d_model = 1536usize;
@@ -343,7 +343,7 @@ mod tests {
             return;
         }
         let bytes = std::fs::read(path).expect("read");
-        let r = crate::gguf::GgufReader::new(&bytes).expect("parse");
+        let r = crate::gguf::GgufReader::new(bytes).expect("parse");
 
         // attn_q.weight is Q4_K with shape [1536, 2048] in our E2B fixture.
         let name = "blk.0.attn_q.weight";
@@ -389,7 +389,7 @@ mod tests {
             return;
         }
         let bytes = std::fs::read(path).expect("read");
-        let r = crate::gguf::GgufReader::new(&bytes).expect("parse");
+        let r = crate::gguf::GgufReader::new(bytes).expect("parse");
 
         // attn_v.weight is Q6_K with shape [1536, 256] in our E2B fixture:
         //   k = 1536, n = 256

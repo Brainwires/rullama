@@ -42,7 +42,10 @@ console_log = "1.0.0"
 
 [features]
 default = []
-# Build a CPU f32 reference forward pass into the binary; the parity oracle for WGSL kernels.
+# Reserved: was used to feature-gate the CPU reference forward; that path is now
+# always built since the GPU forward shares KvState/Weights with it. The flag is
+# kept (no-op) so existing `cargo test --features cpu-reference` invocations
+# keep working without a script bump.
 cpu-reference = []
 
 [profile.release]

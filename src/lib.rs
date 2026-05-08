@@ -8,12 +8,10 @@ pub mod error;
 pub mod gguf;
 pub mod kernels;
 pub mod model;
+pub mod reference;
 pub mod sampling;
 pub mod template;
 pub mod tokenizer;
-
-#[cfg(feature = "cpu-reference")]
-pub mod reference;
 
 pub use error::RullamaError;
 

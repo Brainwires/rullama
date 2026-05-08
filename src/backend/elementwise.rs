@@ -825,7 +825,7 @@ mod tests {
             return;
         }
         let bytes = std::fs::read(path).unwrap();
-        let r = crate::gguf::GgufReader::new(&bytes).unwrap();
+        let r = crate::gguf::GgufReader::new(bytes).unwrap();
         let w = crate::gguf::dequant_tensor_to_f32(&r, "blk.0.attn_norm.weight").unwrap();
         let x = rand_vec(w.len(), 0xFEEDFACE);
         let mut cpu = vec![0f32; w.len()];

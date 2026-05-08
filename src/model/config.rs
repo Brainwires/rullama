@@ -75,7 +75,7 @@ pub struct Gemma4Config {
 }
 
 impl Gemma4Config {
-    pub fn from_gguf(r: &GgufReader<'_>) -> Result<Self> {
+    pub fn from_gguf(r: &GgufReader) -> Result<Self> {
         let arch = r.get("general.architecture")?.as_str()?;
         if arch != "gemma4" {
             return Err(RullamaError::Config(format!("expected architecture 'gemma4', got '{arch}'")));

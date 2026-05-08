@@ -50,8 +50,11 @@ impl TensorDesc {
 }
 
 /// Decoded view of a GGUF byte buffer.
-pub struct GgufReader<'a> {
-    data: &'a [u8],
+///
+/// Owns the raw bytes so callers don't have to thread lifetimes through every type
+/// that holds a reader.
+pub struct GgufReader {
+    data: Vec<u8>,
     metadata: HashMap<String, GgufValue>,
     tensors: Vec<TensorDesc>,
     /// Absolute byte offset where tensor data begins. Tensor `offset` fields are relative to this.
@@ -60,9 +63,9 @@ pub struct GgufReader<'a> {
     version: u32,
 }
 
-impl<'a> GgufReader<'a> {
-    pub fn new(data: &'a [u8]) -> Result<Self> {
-        let mut c = Cursor { buf: data, pos: 0 };
+impl GgufReader {
+    pub fn new(data: Vec<u8>) -> Result<Self> {
+        let mut c = Cursor { buf: &data, pos: 0 };
 
         let magic = c.read_u32()?;
         if magic != GGUF_MAGIC {
@@ -112,10 +115,11 @@ impl<'a> GgufReader<'a> {
             .unwrap_or(DEFAULT_ALIGNMENT);
         let unaligned = c.pos as u64;
         let data_offset = align_up(unaligned, alignment) as usize;
-        if data_offset > data.len() {
+        let data_len = data.len();
+        drop(c);
+        if data_offset > data_len {
             return Err(RullamaError::Gguf(format!(
-                "data section starts at {data_offset} but buffer is only {} bytes",
-                data.len()
+                "data section starts at {data_offset} but buffer is only {data_len} bytes"
             )));
         }
 
@@ -155,7 +159,7 @@ impl<'a> GgufReader<'a> {
     }
 
     /// Borrowed bytes for a tensor's payload.
-    pub fn tensor_bytes(&self, name: &str) -> Result<&'a [u8]> {
+    pub fn tensor_bytes(&self, name: &str) -> Result<&[u8]> {
         let t = self.tensor(name)?;
         let start = self.data_offset + t.offset as usize;
         let end = start + t.byte_len() as usize;
@@ -328,7 +332,7 @@ mod tests {
     #[test]
     fn parses_minimal_gguf() {
         let bytes = synth();
-        let r = GgufReader::new(&bytes).expect("parse");
+        let r = GgufReader::new(bytes).expect("parse");
         assert_eq!(r.version(), 3);
         assert_eq!(r.tensors().len(), 0);
         assert_eq!(r.get("x").unwrap().as_u32().unwrap(), 42);

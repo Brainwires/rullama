@@ -31,8 +31,9 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    let n_bytes = bytes.len();
 
-    let r = match GgufReader::new(&bytes) {
+    let r = match GgufReader::new(bytes) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("failed to parse {path}: {e}");
@@ -41,7 +42,7 @@ fn main() -> ExitCode {
     };
 
     println!("file:        {path}");
-    println!("size:        {} bytes ({:.2} GB)", bytes.len(), bytes.len() as f64 / 1e9);
+    println!("size:        {} bytes ({:.2} GB)", n_bytes, n_bytes as f64 / 1e9);
     println!("gguf v{}", r.version());
     println!("alignment:   {}", r.alignment());
     println!("metadata kv: {}", r.metadata().len());
@@ -116,7 +117,7 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn print_keys(r: &GgufReader<'_>, prefix: &str) {
+fn print_keys(r: &GgufReader, prefix: &str) {
     let mut keys: Vec<_> = r.metadata().keys().filter(|k| k.starts_with(prefix)).collect();
     keys.sort();
     for k in keys {

@@ -9,7 +9,7 @@ fn main() {
     let path = args.next().expect("usage: encode_lookup <gguf> <text>");
     let text: String = args.collect::<Vec<_>>().join(" ");
     let bytes = fs::read(&path).expect("read");
-    let r = GgufReader::new(&bytes).expect("parse");
+    let r = GgufReader::new(bytes).expect("parse");
     let tok = BpeTokenizer::from_gguf(&r).expect("tokenizer");
     let ids = tok.encode(&text);
     println!("input:  {:?}", text);

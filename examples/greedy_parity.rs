@@ -27,10 +27,11 @@ fn main() -> ExitCode {
 
     println!("== rullama side ==");
     let bytes = fs::read(&path).expect("read");
-    let r = GgufReader::new(&bytes).expect("parse");
-    let cfg = Gemma4Config::from_gguf(&r).expect("config");
-    let weights = Weights::new(&r);
-    let tok = BpeTokenizer::from_gguf(&r).expect("tokenizer");
+    let reader = GgufReader::new(bytes).expect("parse");
+    let cfg = Gemma4Config::from_gguf(&reader).expect("config");
+    let tok = BpeTokenizer::from_gguf(&reader).expect("tokenizer");
+    let r_arc = std::sync::Arc::new(reader);
+    let weights = Weights::new(r_arc.clone());
 
     let prompt_ids = tok.encode(&prompt);
     println!("prompt: {prompt:?}");

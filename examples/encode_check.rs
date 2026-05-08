@@ -14,7 +14,7 @@ fn main() -> ExitCode {
         None => { eprintln!("usage: encode_check <gguf>"); return ExitCode::from(2); }
     };
     let bytes = fs::read(&path).expect("read");
-    let r = GgufReader::new(&bytes).expect("parse");
+    let r = GgufReader::new(bytes).expect("parse");
     let tok = match BpeTokenizer::from_gguf(&r) {
         Ok(t) => t,
         Err(e) => { eprintln!("tokenizer build error: {e}"); return ExitCode::from(1); }

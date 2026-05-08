@@ -3,7 +3,7 @@ use rullama::gguf::GgufReader;
 fn main() {
     let path = env::args().nth(1).unwrap();
     let bytes = fs::read(&path).unwrap();
-    let r = GgufReader::new(&bytes).unwrap();
+    let r = GgufReader::new(bytes).unwrap();
     let mut names: Vec<_> = r.tensors().iter().map(|t| (t.name.clone(), format!("{:?}", t.dtype), format!("{:?}", t.dims))).collect();
     names.sort();
     for (n, d, dims) in &names {

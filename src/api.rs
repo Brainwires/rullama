@@ -1,22 +1,162 @@
 //! JS-facing types and entry points.
 //!
 //! On wasm32 these are exposed via wasm-bindgen. On native they remain Rust-only
-//! and are used by integration tests.
+//! and are used by integration tests / examples.
+//!
+//! Minimal API surface (M5 v0):
+//!   - `Model::load(bytes)` — parse GGUF, init wgpu, upload pipelines (no weights yet).
+//!   - `Model::encode(text)` / `Model::token_str(id)` — tokenizer access.
+//!   - `Model::step(token_id)` — feed a single token at the current position; returns
+//!     the argmax of the resulting next-token logits. Mutates internal KV cache.
+//!   - `Model::reset()` — clear KV state to start a fresh conversation.
+//!   - `Model::is_eos(id)` — checks against the GGUF's eos token id list.
+//!
+//! Streaming is JS's responsibility: loop `step` and call `token_str(id)` per step.
+//! A `ReadableStream<string>` wrapper lands in v0.2.
+
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+
+use crate::backend::{Pipelines, WeightCache, WgpuCtx};
+use crate::error::Result;
+use crate::gguf::GgufReader;
+use crate::model::config::Gemma4Config;
+use crate::reference::{KvState, Weights, forward_token_gpu};
+use crate::tokenizer::BpeTokenizer;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-/// M0 smoke export: doubles every f32 in `input` on the GPU and returns the result.
-/// Lets JS confirm the WebGPU path is wired up before we ship real inference.
+/// M0 smoke export: doubles every f32 on the GPU. Useful from JS to confirm WebGPU
+/// is wired up before loading the full model.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(js_name = computeSpike)]
-pub async fn compute_spike_js(input: Vec<f32>) -> Result<Vec<f32>, JsError> {
+pub async fn compute_spike_js(input: Vec<f32>) -> std::result::Result<Vec<f32>, JsError> {
     crate::backend::compute_spike(&input)
         .await
         .map_err(|e| JsError::new(&format!("{e}")))
 }
+
+// ---------- public Model surface ----------
+
+/// A loaded Gemma 4 model with all GPU resources allocated. One `Model` corresponds to
+/// one conversation: it owns the KV cache and tracks the current position.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub struct Model {
+    cfg: Gemma4Config,
+    weights: Weights,
+    wcache: WeightCache,
+    ctx: WgpuCtx,
+    pipes: Pipelines,
+    tokenizer: BpeTokenizer,
+    kv_state: KvState,
+    pos: u32,
+}
+
+impl Model {
+    /// Native-friendly constructor: takes ownership of GGUF bytes, initializes WebGPU,
+    /// and prepares all the on-GPU resources (compute pipelines, weight cache).
+    pub async fn load_native(bytes: Vec<u8>) -> Result<Self> {
+        let reader = GgufReader::new(bytes)?;
+        let cfg = Gemma4Config::from_gguf(&reader)?;
+        let tokenizer = BpeTokenizer::from_gguf(&reader)?;
+        let r_arc = Arc::new(reader);
+        let weights = Weights::new(r_arc.clone());
+        let ctx = WgpuCtx::new().await?;
+        let pipes = Pipelines::new(&ctx.device);
+        let wcache = WeightCache::new(r_arc, ctx.device.clone(), ctx.queue.clone());
+        let kv_state = KvState::new(&cfg);
+        Ok(Self {
+            cfg, weights, wcache, ctx, pipes, tokenizer, kv_state, pos: 0,
+        })
+    }
+
+    /// Encode text → token IDs (Ollama-matching BPE).
+    pub fn encode_tokens(&self, text: &str) -> Vec<u32> {
+        self.tokenizer.encode(text)
+    }
+
+    /// Look up a token ID's string form (raw vocab entry; SentencePiece `▁` markers
+    /// are not stripped — the caller does that in JS if it wants display text).
+    pub fn token_str_native(&self, id: u32) -> Option<String> {
+        self.tokenizer.id_to_str(id).map(|s| s.to_string())
+    }
+
+    /// Number of tokens in the vocab.
+    pub fn vocab_size_native(&self) -> u32 { self.cfg.vocab_size }
+
+    /// Current sequence position (number of tokens fed so far).
+    pub fn position_native(&self) -> u32 { self.pos }
+
+    /// True iff `id` is one of the GGUF's EOS / EOT / end-of-turn tokens.
+    pub fn is_eos_native(&self, id: u32) -> bool {
+        self.cfg.eos_ids.iter().any(|&e| e == id)
+    }
+
+    /// Reset KV state so the next call starts from an empty conversation.
+    pub fn reset_native(&mut self) {
+        self.kv_state = KvState::new(&self.cfg);
+        self.pos = 0;
+    }
+
+    /// Feed one token at the current position. Returns the argmax of next-token logits
+    /// (i.e., the greedy prediction for the *next* token). Internal pos advances by 1.
+    pub async fn step_native(&mut self, token_id: u32) -> Result<u32> {
+        let logits = forward_token_gpu(
+            &self.cfg, &self.weights, &self.wcache, &self.ctx, &self.pipes,
+            &mut self.kv_state, token_id, self.pos,
+        ).await?;
+        self.pos += 1;
+        Ok(argmax(&logits) as u32)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl Model {
+    /// JS entry point: build a Model from raw GGUF bytes (e.g. a `Uint8Array` from
+    /// `fetch().then(r => r.arrayBuffer())`).
+    #[wasm_bindgen(js_name = load)]
+    pub async fn load_js(bytes: Vec<u8>) -> std::result::Result<Model, JsError> {
+        Self::load_native(bytes).await.map_err(|e| JsError::new(&format!("{e}")))
+    }
+
+    #[wasm_bindgen(js_name = encode)]
+    pub fn encode_js(&self, text: &str) -> Vec<u32> { self.encode_tokens(text) }
+
+    #[wasm_bindgen(js_name = tokenStr)]
+    pub fn token_str_js(&self, id: u32) -> Option<String> { self.token_str_native(id) }
+
+    #[wasm_bindgen(js_name = vocabSize, getter)]
+    pub fn vocab_size_js(&self) -> u32 { self.vocab_size_native() }
+
+    #[wasm_bindgen(js_name = position, getter)]
+    pub fn position_js(&self) -> u32 { self.position_native() }
+
+    #[wasm_bindgen(js_name = isEos)]
+    pub fn is_eos_js(&self, id: u32) -> bool { self.is_eos_native(id) }
+
+    #[wasm_bindgen(js_name = reset)]
+    pub fn reset_js(&mut self) { self.reset_native() }
+
+    /// Feed one token, advance pos, return argmax of next-token logits.
+    #[wasm_bindgen(js_name = step)]
+    pub async fn step_js(&mut self, token_id: u32) -> std::result::Result<u32, JsError> {
+        self.step_native(token_id).await.map_err(|e| JsError::new(&format!("{e}")))
+    }
+}
+
+fn argmax(v: &[f32]) -> usize {
+    let mut best_i = 0usize;
+    let mut best_v = f32::NEG_INFINITY;
+    for (i, &x) in v.iter().enumerate() {
+        if x > best_v { best_v = x; best_i = i; }
+    }
+    best_i
+}
+
+// ---------- (legacy) options shapes — retained from M0 stub for future use ----------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
