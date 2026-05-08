@@ -53,6 +53,11 @@ impl KvState {
     }
 }
 
+/// Public re-export so the GPU forward path can reuse the donor-map logic.
+pub fn build_donor_map_pub(cfg: &Gemma4Config) -> Vec<Option<u32>> {
+    build_donor_map(cfg)
+}
+
 /// Compute donor layer index for KV-shared layers.
 ///
 /// Mirrors the logic in `newTextModel` (model_text.go:127-141): the last
