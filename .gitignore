@@ -1,0 +1,14 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# wasm-pack / trunk output
+/pkg
+/dist
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
