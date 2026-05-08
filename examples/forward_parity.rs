@@ -9,7 +9,7 @@ use std::fs;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use rullama::backend::{Pipelines, WgpuCtx};
+use rullama::backend::{Pipelines, WeightCache, WgpuCtx};
 use rullama::gguf::GgufReader;
 use rullama::model::config::Gemma4Config;
 use rullama::reference::{KvState, Weights, forward_token, forward_token_gpu};
@@ -30,6 +30,7 @@ fn main() -> ExitCode {
     let t0 = Instant::now();
     let ctx = pollster::block_on(WgpuCtx::new()).expect("wgpu");
     let pipes = Pipelines::new(&ctx.device);
+    let wcache = WeightCache::new(&r, &ctx.device, &ctx.queue);
     println!("  done in {:?}", t0.elapsed());
 
     println!("CPU forward at pos=0, token={bos} ...");
@@ -38,16 +39,28 @@ fn main() -> ExitCode {
     let logits_cpu = forward_token(&cfg, &weights, &mut kv_cpu, bos, 0).expect("cpu");
     let dt_cpu = t0.elapsed();
 
-    println!("GPU forward at pos=0, token={bos} ...");
+    // Run two GPU forwards back-to-back. The first uploads weights to GPU on demand
+    // (cold cache); the second reuses them (hot cache) — measures the steady-state
+    // per-token cost we'd see during multi-token decode.
+    println!("GPU forward #1 (cold cache) at pos=0 ...");
     let mut kv_gpu = KvState::new(&cfg);
     let t0 = Instant::now();
-    let logits_gpu = pollster::block_on(forward_token_gpu(&cfg, &weights, &ctx, &pipes, &mut kv_gpu, bos, 0))
+    let logits_gpu = pollster::block_on(forward_token_gpu(&cfg, &weights, &wcache, &ctx, &pipes, &mut kv_gpu, bos, 0))
         .expect("gpu");
-    let dt_gpu = t0.elapsed();
+    let dt_gpu_cold = t0.elapsed();
+
+    println!("GPU forward #2 (hot cache, fresh KV) at pos=0 ...");
+    let mut kv_gpu2 = KvState::new(&cfg);
+    let t0 = Instant::now();
+    let _logits_gpu2 = pollster::block_on(forward_token_gpu(&cfg, &weights, &wcache, &ctx, &pipes, &mut kv_gpu2, bos, 0))
+        .expect("gpu hot");
+    let dt_gpu_hot = t0.elapsed();
 
     println!("CPU forward: {dt_cpu:?}");
-    println!("GPU forward: {dt_gpu:?}  (speedup vs CPU: {:.1}x)",
-        dt_cpu.as_secs_f64() / dt_gpu.as_secs_f64());
+    println!("GPU forward (cold): {dt_gpu_cold:?}  → speedup vs CPU: {:.1}x", dt_cpu.as_secs_f64() / dt_gpu_cold.as_secs_f64());
+    println!("GPU forward (hot):  {dt_gpu_hot:?}  → speedup vs CPU: {:.1}x", dt_cpu.as_secs_f64() / dt_gpu_hot.as_secs_f64());
+    println!("WeightCache: {} tensors, {:.1} MB on GPU",
+        wcache.cached_count(), wcache.cached_bytes() as f64 / 1e6);
 
     // Distribution diff
     let n = logits_cpu.len();

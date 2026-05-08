@@ -1,31 +1,31 @@
 //! GPU-backed forward pass for Gemma 4. Mirrors `forward.rs` op-for-op but dispatches
 //! each weight matmul, normalization, RoPE, attention, and GeGLU through cached wgpu
-//! pipelines.
+//! pipelines. Matmul weights live in a [`WeightCache`] so they're uploaded to the GPU
+//! exactly once per model session.
 //!
 //! Output projection (tied to `token_embd`, vocab=262144 wide) stays on the CPU side:
 //! the full Q6_K weight (~330 MB) exceeds WebGPU's `max_storage_buffer_binding_size`
-//! limit and would need tiling. Tiling is a perf concern, not a correctness one — the
-//! CPU output projection path is exercised by M1 and is a few hundred ms in release.
-//!
-//! Build only with `cpu-reference` feature (the CPU oracle is co-required for the
-//! parity diff harness).
+//! limit and would need tiling. Tiling lands in a follow-up M4 change.
 //!
 //! Behavior versus `forward_token`:
 //!   * embed lookup, embed scale, vector-add residuals, scalar multiplies, per-layer
 //!     slicing — kept on CPU (cheap, would just add GPU roundtrips otherwise).
-//!   * Every matmul (Q/K/V/O, gate/up/down, PLE projector + per-layer gate/proj),
-//!     RMSNorm, RoPE, attention, GeGLU, softcap — runs on GPU through `dispatch::*_cached`.
+//!   * Every matmul (Q/K/V/O, gate/up/down, PLE projector + per-layer gate/proj)
+//!     runs as a single GPU dispatch over a *cached* weight buffer.
+//!   * RMSNorm, RoPE, attention, GeGLU, softcap — go through cached pipelines but
+//!     re-upload their (small) f32 inputs each call. Caching those is a future
+//!     optimization once we get rid of intermediate readbacks.
 
 use crate::backend::dispatch::{
-    attention_cached, geglu_cached, matmul_q4_k_cached, matmul_q6_k_cached,
+    attention_cached, geglu_cached, matmul_q4_k_buf, matmul_q6_k_buf,
     rmsnorm_cached, rope_neox_cached, softcap_cached,
 };
-use crate::backend::{Pipelines, WgpuCtx};
+use crate::backend::{Pipelines, WeightCache, WgpuCtx};
 use crate::error::{Result, RullamaError};
 use crate::gguf::GgmlDtype;
 use crate::model::config::{Gemma4Config, LayerKind};
 use crate::reference::forward::{KvState, build_donor_map_pub};
-use crate::reference::ops::{add_into, matvec, scale};
+use crate::reference::ops::{add_into, scale};
 use crate::reference::weights::Weights;
 
 /// Run one forward step at `pos` for the single token `token_id` on the GPU. Returns
@@ -34,6 +34,7 @@ use crate::reference::weights::Weights;
 pub async fn forward_token_gpu(
     cfg: &Gemma4Config,
     weights: &Weights<'_>,
+    wcache: &WeightCache<'_>,
     ctx: &WgpuCtx,
     pipes: &Pipelines,
     kv_state: &mut KvState,
@@ -47,13 +48,13 @@ pub async fn forward_token_gpu(
     }
     let d_model = cfg.d_model as usize;
 
-    // ---- token embedding (CPU) ----
+    // ---- token embedding (CPU; one row of Q6_K) ----
     let mut hidden = weights.load_row("token_embd.weight", token_id as usize)?;
     scale(&mut hidden, (d_model as f32).sqrt());
 
     // ---- per-layer inputs (PLE) ----
     let per_layer_inputs: Option<Vec<Vec<f32>>> = if cfg.has_ple() {
-        Some(prepare_per_layer_inputs_gpu(cfg, weights, ctx, pipes, &hidden, token_id).await?)
+        Some(prepare_per_layer_inputs_gpu(cfg, weights, wcache, ctx, pipes, &hidden, token_id).await?)
     } else {
         None
     };
@@ -62,7 +63,7 @@ pub async fn forward_token_gpu(
     let donor_map = build_donor_map_pub(cfg);
     for i in 0..cfg.n_layers {
         let pli = per_layer_inputs.as_ref().map(|all| all[i as usize].as_slice());
-        layer_forward_gpu(cfg, weights, ctx, pipes, kv_state, &donor_map, i, pos, &mut hidden, pli).await?;
+        layer_forward_gpu(cfg, weights, wcache, ctx, pipes, kv_state, &donor_map, i, pos, &mut hidden, pli).await?;
     }
 
     // ---- final norm (GPU) ----
@@ -70,16 +71,20 @@ pub async fn forward_token_gpu(
     let x = rmsnorm_cached(ctx, pipes, &hidden, Some(&final_norm_w), cfg.rms_norm_eps).await?;
     drop(final_norm_w);
 
-    // ---- output projection (CPU; weight is too big for one GPU dispatch) ----
-    // Reuse the M1 strategy: dequant one vocab row at a time and dot.
+    // ---- output projection (GPU, tiled) ----
+    // token_embd is Q6_K [d_model, vocab=262144] ≈ 330 MB; > 128 MiB binding limit.
+    // Split into ~80 MiB tiles along the vocab axis, run matmul per tile, concatenate.
+    const MAX_TILE_BYTES: usize = 80 * 1024 * 1024;
+    let tiles = wcache.buffer_tiles("token_embd.weight", MAX_TILE_BYTES)?;
     let mut logits = vec![0f32; cfg.vocab_size as usize];
-    for v in 0..cfg.vocab_size as usize {
-        let row = weights.load_row("token_embd.weight", v)?;
-        let mut acc = 0f32;
-        for k_i in 0..d_model {
-            acc += x[k_i] * row[k_i];
-        }
-        logits[v] = acc;
+    let token_embd_dtype = wcache.dtype("token_embd.weight")?;
+    for tile in &tiles {
+        let part = match token_embd_dtype {
+            GgmlDtype::Q6_K => matmul_q6_k_buf(ctx, pipes, &tile.buffer, &x, d_model, tile.n_rows).await?,
+            GgmlDtype::Q4_K => matmul_q4_k_buf(ctx, pipes, &tile.buffer, &x, d_model, tile.n_rows).await?,
+            other => return Err(RullamaError::Inference(format!("token_embd dtype {other:?} not supported"))),
+        };
+        logits[tile.row_start..tile.row_start + tile.n_rows].copy_from_slice(&part);
     }
 
     // ---- softcap (GPU) ----
@@ -92,6 +97,7 @@ pub async fn forward_token_gpu(
 async fn prepare_per_layer_inputs_gpu(
     cfg: &Gemma4Config,
     weights: &Weights<'_>,
+    wcache: &WeightCache<'_>,
     ctx: &WgpuCtx,
     pipes: &Pipelines,
     hidden: &[f32],
@@ -101,22 +107,16 @@ async fn prepare_per_layer_inputs_gpu(
     let n_layers = cfg.n_layers as usize;
     let d_model = cfg.d_model as usize;
 
-    // (1) per_layer_token_embd row → scale sqrt(ple_dim).
     let mut inputs_per_layer = weights.load_row("per_layer_token_embd.weight", token_id as usize)?;
     scale(&mut inputs_per_layer, (ple_dim as f32).sqrt());
 
-    // (2) per_layer_model_proj × hidden  (Q4_K [d_model, n_layers*ple_dim]).
-    let proj_desc = weights.reader().tensor("per_layer_model_proj.weight")?;
-    if proj_desc.dtype != GgmlDtype::Q4_K {
-        return Err(RullamaError::Inference(format!(
-            "per_layer_model_proj.weight expected Q4_K, got {:?}", proj_desc.dtype
-        )));
+    if wcache.dtype("per_layer_model_proj.weight")? != GgmlDtype::Q4_K {
+        return Err(RullamaError::Inference("per_layer_model_proj expected Q4_K".into()));
     }
-    let proj_bytes = weights.reader().tensor_bytes("per_layer_model_proj.weight")?;
-    let mut projection = matmul_q4_k_cached(ctx, pipes, proj_bytes, hidden, d_model, n_layers * ple_dim).await?;
+    let proj_buf = wcache.buffer("per_layer_model_proj.weight")?;
+    let mut projection = matmul_q4_k_buf(ctx, pipes, &proj_buf, hidden, d_model, n_layers * ple_dim).await?;
     scale(&mut projection, 1.0 / (d_model as f32).sqrt());
 
-    // (3) RMSNorm with per_layer_proj_norm (size ple_dim) applied per-layer slice.
     let proj_norm_w = weights.load("per_layer_proj_norm.weight")?;
     let mut normed = vec![0f32; n_layers * ple_dim];
     for layer in 0..n_layers {
@@ -127,7 +127,6 @@ async fn prepare_per_layer_inputs_gpu(
     }
     drop(proj_norm_w);
 
-    // (4) add inputs_per_layer, scale by 1/sqrt(2).
     add_into(&mut normed, &inputs_per_layer);
     scale(&mut normed, 1.0 / 2.0_f32.sqrt());
 
@@ -139,6 +138,7 @@ async fn prepare_per_layer_inputs_gpu(
 async fn layer_forward_gpu(
     cfg: &Gemma4Config,
     weights: &Weights<'_>,
+    wcache: &WeightCache<'_>,
     ctx: &WgpuCtx,
     pipes: &Pipelines,
     kv_state: &mut KvState,
@@ -154,12 +154,11 @@ async fn layer_forward_gpu(
 
     // ===== ATTENTION =====
     let residual = hidden.clone();
-
     let attn_norm_w = weights.load(&format!("{prefix}attn_norm.weight"))?;
     let x = rmsnorm_cached(ctx, pipes, hidden, Some(&attn_norm_w), eps).await?;
     drop(attn_norm_w);
 
-    let attn_out = self_attention_gpu(cfg, weights, ctx, pipes, kv_state, donor_map, i, pos, &x).await?;
+    let attn_out = self_attention_gpu(cfg, weights, wcache, ctx, pipes, kv_state, donor_map, i, pos, &x).await?;
 
     let post_attn_w = weights.load(&format!("{prefix}post_attention_norm.weight"))?;
     let mut h2 = rmsnorm_cached(ctx, pipes, &attn_out, Some(&post_attn_w), eps).await?;
@@ -175,20 +174,19 @@ async fn layer_forward_gpu(
     let x = rmsnorm_cached(ctx, pipes, hidden, Some(&mlp_norm_w), eps).await?;
     drop(mlp_norm_w);
 
-    let gate_bytes = weights.reader().tensor_bytes(&format!("{prefix}ffn_gate.weight"))?;
-    let gate = matmul_q4_k_cached(ctx, pipes, gate_bytes, &x, d_model, ffn_n).await?;
-    let up_bytes = weights.reader().tensor_bytes(&format!("{prefix}ffn_up.weight"))?;
-    let up = matmul_q4_k_cached(ctx, pipes, up_bytes, &x, d_model, ffn_n).await?;
+    let gate_buf = wcache.buffer(&format!("{prefix}ffn_gate.weight"))?;
+    let gate = matmul_q4_k_buf(ctx, pipes, &gate_buf, &x, d_model, ffn_n).await?;
+    let up_buf = wcache.buffer(&format!("{prefix}ffn_up.weight"))?;
+    let up = matmul_q4_k_buf(ctx, pipes, &up_buf, &x, d_model, ffn_n).await?;
     let act = geglu_cached(ctx, pipes, &gate, &up).await?;
     drop(gate); drop(up);
 
-    let down_bytes = weights.reader().tensor_bytes(&format!("{prefix}ffn_down.weight"))?;
-    // ffn_down can be Q6_K or Q4_K depending on quant level; check at runtime.
-    let down_desc = weights.reader().tensor(&format!("{prefix}ffn_down.weight"))?;
-    let mlp_out = match down_desc.dtype {
-        GgmlDtype::Q6_K => matmul_q6_k_cached(ctx, pipes, down_bytes, &act, ffn_n, d_model).await?,
-        GgmlDtype::Q4_K => matmul_q4_k_cached(ctx, pipes, down_bytes, &act, ffn_n, d_model).await?,
-        other => return Err(RullamaError::Inference(format!("ffn_down dtype {other:?} not supported"))),
+    let down_name = format!("{prefix}ffn_down.weight");
+    let down_buf = wcache.buffer(&down_name)?;
+    let mlp_out = match wcache.dtype(&down_name)? {
+        GgmlDtype::Q6_K => matmul_q6_k_buf(ctx, pipes, &down_buf, &act, ffn_n, d_model).await?,
+        GgmlDtype::Q4_K => matmul_q4_k_buf(ctx, pipes, &down_buf, &act, ffn_n, d_model).await?,
+        other => return Err(RullamaError::Inference(format!("ffn_down dtype {other:?} unsupported"))),
     };
 
     let post_ffw_w = weights.load(&format!("{prefix}post_ffw_norm.weight"))?;
@@ -199,18 +197,17 @@ async fn layer_forward_gpu(
 
     // ===== PLE injection =====
     if let Some(pli) = per_layer_input {
-        let inp_gate_bytes = weights.reader().tensor_bytes(&format!("{prefix}inp_gate.weight"))?;
-        let ple_state = matmul_q4_k_cached(ctx, pipes, inp_gate_bytes, hidden, d_model, cfg.ple_dim as usize).await?;
+        let inp_gate_buf = wcache.buffer(&format!("{prefix}inp_gate.weight"))?;
+        let ple_state = matmul_q4_k_buf(ctx, pipes, &inp_gate_buf, hidden, d_model, cfg.ple_dim as usize).await?;
         let activated = geglu_cached(ctx, pipes, &ple_state, pli).await?;
-        let proj_bytes = weights.reader().tensor_bytes(&format!("{prefix}proj.weight"))?;
-        let projected = matmul_q4_k_cached(ctx, pipes, proj_bytes, &activated, cfg.ple_dim as usize, d_model).await?;
+        let proj_buf = wcache.buffer(&format!("{prefix}proj.weight"))?;
+        let projected = matmul_q4_k_buf(ctx, pipes, &proj_buf, &activated, cfg.ple_dim as usize, d_model).await?;
         let post_norm_w = weights.load(&format!("{prefix}post_norm.weight"))?;
         let normed = rmsnorm_cached(ctx, pipes, &projected, Some(&post_norm_w), eps).await?;
         drop(post_norm_w);
         add_into(hidden, &normed);
     }
 
-    // ===== layer scalar =====
     if let Some(scalar) = weights.load_opt(&format!("{prefix}layer_output_scale.weight"))? {
         if let Some(&s) = scalar.first() { scale(hidden, s); }
     }
@@ -220,6 +217,7 @@ async fn layer_forward_gpu(
 async fn self_attention_gpu(
     cfg: &Gemma4Config,
     weights: &Weights<'_>,
+    wcache: &WeightCache<'_>,
     ctx: &WgpuCtx,
     pipes: &Pipelines,
     kv_state: &mut KvState,
@@ -235,9 +233,8 @@ async fn self_attention_gpu(
     let head_dim = cfg.head_dim(i) as usize;
     let eps = cfg.rms_norm_eps;
 
-    // Q (Q4_K) → Q-norm per head
-    let q_bytes = weights.reader().tensor_bytes(&format!("{prefix}attn_q.weight"))?;
-    let q = matmul_q4_k_cached(ctx, pipes, q_bytes, x, d_model, n_heads * head_dim).await?;
+    let q_buf = wcache.buffer(&format!("{prefix}attn_q.weight"))?;
+    let q = matmul_q4_k_buf(ctx, pipes, &q_buf, x, d_model, n_heads * head_dim).await?;
     let q_norm_w = weights.load(&format!("{prefix}attn_q_norm.weight"))?;
     let mut q_normed = vec![0f32; n_heads * head_dim];
     for h in 0..n_heads {
@@ -250,9 +247,8 @@ async fn self_attention_gpu(
 
     let donor = donor_map[i as usize];
     if donor.is_none() {
-        // K (Q4_K) → K-norm
-        let k_bytes = weights.reader().tensor_bytes(&format!("{prefix}attn_k.weight"))?;
-        let k = matmul_q4_k_cached(ctx, pipes, k_bytes, x, d_model, n_kv_heads * head_dim).await?;
+        let k_buf = wcache.buffer(&format!("{prefix}attn_k.weight"))?;
+        let k = matmul_q4_k_buf(ctx, pipes, &k_buf, x, d_model, n_kv_heads * head_dim).await?;
         let k_norm_w = weights.load(&format!("{prefix}attn_k_norm.weight"))?;
         let mut k_normed = vec![0f32; n_kv_heads * head_dim];
         for h in 0..n_kv_heads {
@@ -262,12 +258,11 @@ async fn self_attention_gpu(
         }
         drop(k_norm_w);
 
-        // V (Q6_K) → unweighted V-norm
-        let v_bytes = weights.reader().tensor_bytes(&format!("{prefix}attn_v.weight"))?;
-        let v_desc = weights.reader().tensor(&format!("{prefix}attn_v.weight"))?;
-        let v = match v_desc.dtype {
-            GgmlDtype::Q6_K => matmul_q6_k_cached(ctx, pipes, v_bytes, x, d_model, n_kv_heads * head_dim).await?,
-            GgmlDtype::Q4_K => matmul_q4_k_cached(ctx, pipes, v_bytes, x, d_model, n_kv_heads * head_dim).await?,
+        let v_name = format!("{prefix}attn_v.weight");
+        let v_buf = wcache.buffer(&v_name)?;
+        let v = match wcache.dtype(&v_name)? {
+            GgmlDtype::Q6_K => matmul_q6_k_buf(ctx, pipes, &v_buf, x, d_model, n_kv_heads * head_dim).await?,
+            GgmlDtype::Q4_K => matmul_q4_k_buf(ctx, pipes, &v_buf, x, d_model, n_kv_heads * head_dim).await?,
             other => return Err(RullamaError::Inference(format!("attn_v dtype {other:?} unsupported"))),
         };
         let mut v_normed = vec![0f32; n_kv_heads * head_dim];
@@ -277,11 +272,9 @@ async fn self_attention_gpu(
             v_normed[off..off + head_dim].copy_from_slice(&nh);
         }
 
-        // RoPE on Q and K
-        let q_rotated = apply_rope_gpu(cfg, weights, ctx, pipes, i, pos, head_dim, n_heads, q).await?;
-        let k_rotated = apply_rope_gpu(cfg, weights, ctx, pipes, i, pos, head_dim, n_kv_heads, k_normed).await?;
+        let q_rotated = apply_rope_gpu(cfg, wcache, ctx, pipes, i, pos, head_dim, n_heads, q).await?;
+        let k_rotated = apply_rope_gpu(cfg, wcache, ctx, pipes, i, pos, head_dim, n_kv_heads, k_normed).await?;
 
-        // Cache append
         let lkv = &mut kv_state.layers[i as usize];
         lkv.n_kv_heads = n_kv_heads as u32;
         lkv.head_dim = head_dim as u32;
@@ -295,13 +288,11 @@ async fn self_attention_gpu(
             &kv_state.layers[kv_layer].k, &kv_state.layers[kv_layer].v,
             head_dim, n_heads, n_kv_heads, pos as usize, history_len, window).await?;
 
-        // Output projection (Q4_K)
-        let o_bytes = weights.reader().tensor_bytes(&format!("{prefix}attn_output.weight"))?;
-        return matmul_q4_k_cached(ctx, pipes, o_bytes, &attn, n_heads * head_dim, d_model).await;
+        let o_buf = wcache.buffer(&format!("{prefix}attn_output.weight"))?;
+        return matmul_q4_k_buf(ctx, pipes, &o_buf, &attn, n_heads * head_dim, d_model).await;
     }
 
-    // KV-shared layer: only Q is recomputed (and rotated).
-    let q_rotated = apply_rope_gpu(cfg, weights, ctx, pipes, i, pos, head_dim, n_heads, q).await?;
+    let q_rotated = apply_rope_gpu(cfg, wcache, ctx, pipes, i, pos, head_dim, n_heads, q).await?;
     let donor_idx = donor.unwrap() as usize;
     let lkv = &kv_state.layers[donor_idx];
     if lkv.head_dim as usize != head_dim || lkv.n_kv_heads as usize != n_kv_heads {
@@ -314,13 +305,13 @@ async fn self_attention_gpu(
     let window = if matches!(cfg.kind(i), LayerKind::SlidingWindow) { cfg.sliding_window as usize } else { 0 };
     let attn = attention_cached(ctx, pipes, &q_rotated, &lkv.k, &lkv.v,
         head_dim, n_heads, n_kv_heads, pos as usize, history_len, window).await?;
-    let o_bytes = weights.reader().tensor_bytes(&format!("{prefix}attn_output.weight"))?;
-    matmul_q4_k_cached(ctx, pipes, o_bytes, &attn, n_heads * head_dim, d_model).await
+    let o_buf = wcache.buffer(&format!("{prefix}attn_output.weight"))?;
+    matmul_q4_k_buf(ctx, pipes, &o_buf, &attn, n_heads * head_dim, d_model).await
 }
 
 async fn apply_rope_gpu(
     cfg: &Gemma4Config,
-    weights: &Weights<'_>,
+    wcache: &WeightCache<'_>,
     ctx: &WgpuCtx,
     pipes: &Pipelines,
     layer: u32,
@@ -334,13 +325,11 @@ async fn apply_rope_gpu(
         LayerKind::Global        => (cfg.rope_freq_base,     cfg.rope_dim_global as usize),
     };
     let factors = if matches!(cfg.kind(layer), LayerKind::Global) {
-        weights.load_opt("rope_freqs.weight")?
+        // The RoPE factors tensor is tiny (head_dim/2 f32s); we read it as f32 each
+        // call rather than building yet another GPU buffer plumbing path for it.
+        crate::gguf::dequant_tensor_to_f32(wcache.reader(), "rope_freqs.weight").ok()
     } else {
         None
     };
     rope_neox_cached(ctx, pipes, &x, head_dim, n_heads, pos as usize, rope_dims, base, factors.as_deref()).await
 }
-
-// (silence clippy: matvec import used only in conditional code paths during dev)
-#[allow(unused_imports)]
-use matvec as _matvec_used;

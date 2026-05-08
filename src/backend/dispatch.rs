@@ -164,6 +164,63 @@ pub async fn matmul_f16_cached(ctx: &WgpuCtx, p: &Pipelines, w_bytes: &[u8], x: 
     run_matmul(ctx, &p.f16_matmul, "f16_matmul", w_bytes, x, k, n).await
 }
 
+// ---------- buffer-based matmul: weight already on GPU ----------
+//
+// These take a pre-uploaded `&wgpu::Buffer` instead of `&[u8]`, avoiding the
+// per-call upload. Used by `forward_token_gpu_cached` with a [`WeightCache`].
+
+async fn run_matmul_buf(
+    ctx: &WgpuCtx,
+    pipeline: &wgpu::ComputePipeline,
+    label: &str,
+    w_buf: &wgpu::Buffer,
+    x: &[f32],
+    k: usize,
+    n: usize,
+) -> Result<Vec<f32>> {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = MatmulParams { k: k as u32, n: n as u32, _p0: 0, _p1: 0 };
+    let p_buf = write_uniform(device, queue, &format!("{label}.params"), &params);
+    let x_buf = write_storage_f32(device, queue, &format!("{label}.x"), x);
+    let n_bytes = (n * 4) as u64;
+    let (y_buf, read_buf) = make_output_pair(device, label, n_bytes);
+
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(&format!("{label}.bg")),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: w_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: x_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: y_buf.as_entire_binding() },
+        ],
+    });
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some(&format!("{label}.encoder")),
+    });
+    {
+        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some(label), timestamp_writes: None });
+        cp.set_pipeline(pipeline);
+        cp.set_bind_group(0, &bg, &[]);
+        cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+    }
+    enc.copy_buffer_to_buffer(&y_buf, 0, &read_buf, 0, n_bytes);
+    queue.submit(Some(enc.finish()));
+    read_back_f32(device, &read_buf).await
+}
+
+pub async fn matmul_q4_k_buf(ctx: &WgpuCtx, p: &Pipelines, w: &wgpu::Buffer, x: &[f32], k: usize, n: usize) -> Result<Vec<f32>> {
+    run_matmul_buf(ctx, &p.q4_k_matmul, "q4k_matmul_buf", w, x, k, n).await
+}
+pub async fn matmul_q6_k_buf(ctx: &WgpuCtx, p: &Pipelines, w: &wgpu::Buffer, x: &[f32], k: usize, n: usize) -> Result<Vec<f32>> {
+    run_matmul_buf(ctx, &p.q6_k_matmul, "q6k_matmul_buf", w, x, k, n).await
+}
+#[allow(dead_code)]
+pub async fn matmul_f16_buf(ctx: &WgpuCtx, p: &Pipelines, w: &wgpu::Buffer, x: &[f32], k: usize, n: usize) -> Result<Vec<f32>> {
+    run_matmul_buf(ctx, &p.f16_matmul, "f16_matmul_buf", w, x, k, n).await
+}
+
 // ---------- rmsnorm ----------
 
 pub async fn rmsnorm_cached(ctx: &WgpuCtx, p: &Pipelines, x: &[f32], weight: Option<&[f32]>, eps: f32) -> Result<Vec<f32>> {
