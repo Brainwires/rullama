@@ -4,6 +4,8 @@
 //! The text language model is unchanged — multimodal features become "soft tokens"
 //! injected into the residual stream via `Forward::step_with_embedding`.
 
+pub mod audio_features;
 pub mod vision;
 
 pub use vision::{VisionConfig, VisionForward};
+pub use audio_features::{MelEngine, decode_wav, MEL_BINS, SAMPLE_RATE};
