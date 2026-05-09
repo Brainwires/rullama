@@ -116,8 +116,15 @@
         </div>
     </details>
     <div id="chat-history"></div>
+    <div id="img-attach" class="row" style="display:none">
+        <img id="img-thumb" style="max-height:80px;border-radius:4px;border:1px solid #6664" />
+        <small id="img-info" class="grow"></small>
+        <button id="img-remove" class="danger">remove</button>
+    </div>
     <div class="row">
         <input type="text" id="prompt" placeholder='e.g. "What is the capital of France?"' class="grow" />
+        <button id="img-btn" title="Attach an image (vision-capable models only)">📎</button>
+        <input type="file" id="img-input" accept="image/*" style="display:none" />
         <button id="send-btn" disabled>Send</button>
         <button id="stop-btn" disabled>Stop</button>
         <button id="reset-btn" disabled>New chat</button>
@@ -128,6 +135,7 @@
 <script type="module">
 import init, { Model, computeSpike } from "/pkg/rullama.js";
 import { fetchAndCache, listCached, deleteCached } from "./cache.js";
+import { preprocessImage } from "./image_preprocess.js";
 
 const $ = (id) => document.getElementById(id);
 const setPill = (el, text, cls) => { el.textContent = text; el.className = "pill" + (cls ? " " + cls : ""); };
@@ -370,12 +378,46 @@ function renderChat() {
         div.className = "msg msg-" + (m.role === "user" ? "user" : "model");
         div.innerHTML =
             `<div class="msg-role">${m.role}</div>` +
+            (m.imageDataUrl
+                ? `<img src="${m.imageDataUrl}" style="max-height:120px;border-radius:4px;margin-bottom:0.3rem;display:block" />`
+                : "") +
             `<div class="msg-body"></div>`;
         div.querySelector(".msg-body").textContent = m.content;
         host.appendChild(div);
     }
     host.scrollTop = host.scrollHeight;
 }
+
+// ---- image attachment state (M12.3) ----------------------------------------
+let pendingImage = null;       // {pixels, h, w, dataUrl}
+$("img-btn").addEventListener("click", () => $("img-input").click());
+$("img-input").addEventListener("change", async (ev) => {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    if (!model) {
+        log($("chat-log"), "load a model before attaching images");
+        return;
+    }
+    if (!model.hasVision) {
+        log($("chat-log"), "this model has no vision tower — image attachment ignored");
+        return;
+    }
+    try {
+        pendingImage = await preprocessImage(file);
+        $("img-thumb").src = pendingImage.dataUrl;
+        $("img-info").textContent =
+            `${pendingImage.w}×${pendingImage.h} → ${model.imageSoftTokenCount(pendingImage.h, pendingImage.w)} soft tokens`;
+        $("img-attach").style.display = "";
+    } catch (e) {
+        log($("chat-log"), "image preprocess error: " + (e?.message ?? String(e)));
+    } finally {
+        ev.target.value = "";  // allow re-selecting the same file
+    }
+});
+$("img-remove").addEventListener("click", () => {
+    pendingImage = null;
+    $("img-attach").style.display = "none";
+});
 
 $("reset-btn").addEventListener("click", () => {
     if (!model) return;
@@ -392,18 +434,39 @@ $("stop-btn").addEventListener("click", () => {
 $("send-btn").addEventListener("click", async () => {
     if (!model) return;
     const text = $("prompt").value.trim();
-    if (!text) return;
+    if (!text && !pendingImage) return;
     $("send-btn").disabled = true;
     $("stop-btn").disabled = false;
     $("prompt").value = "";
 
-    // Build the messages array including any system prompt.
+    // Snapshot the image attachment for this turn, then clear it from the UI.
+    const turnImage = pendingImage;
+    pendingImage = null;
+    $("img-attach").style.display = "none";
+
+    // Build user message. When there's an image, prepend the model's image
+    // sentinels around an empty placeholder — JS will splice the soft tokens
+    // between them during the feed loop. For chat history rendering, we strip
+    // the sentinels and just show the typed text + thumbnail.
     const sys = $("sys-prompt").value.trim();
-    const userMsg = { role: "user", content: text };
+    const visibleContent = text;
+    const promptContent = turnImage ? `<|image><image|>${text}` : text;
+    const userMsg = {
+        role: "user",
+        content: visibleContent,
+        imageDataUrl: turnImage?.dataUrl,
+        _promptContent: promptContent,   // used by the feed loop only
+    };
     chatMessages.push(userMsg);
     const messages = sys
-        ? [{ role: "system", content: sys }, ...chatMessages]
-        : [...chatMessages];
+        ? [{ role: "system", content: sys }, ...chatMessages.map(m => ({
+            role: m.role,
+            content: m._promptContent ?? m.content,
+        }))]
+        : chatMessages.map(m => ({
+            role: m.role,
+            content: m._promptContent ?? m.content,
+        }));
 
     // Append a placeholder assistant bubble that we stream into.
     const assistantMsg = { role: "model", content: "" };
@@ -431,16 +494,48 @@ $("send-btn").addEventListener("click", async () => {
 
         const prompt = model.renderChat(messages, false);
         const ids = model.encode(prompt);
-        log($("chat-log"), `prompt-eval starting: ${ids.length} tokens`);
+
+        // Image soft tokens (encoded once per send if attached).
+        let softTokens = null;       // Float32Array, n_soft × d_text
+        let nSoft = 0;
+        let dText = 0;
+        let beginId = -1, endId = -1;
+        if (turnImage) {
+            const sent = model.imageSentinelIds();
+            if (sent) {
+                beginId = sent[0]; endId = sent[1];
+            }
+            log($("chat-log"), `encoding image ${turnImage.w}×${turnImage.h} ...`);
+            const tImg = performance.now();
+            softTokens = await model.encodeImage(turnImage.pixels, turnImage.h, turnImage.w);
+            nSoft = model.imageSoftTokenCount(turnImage.h, turnImage.w);
+            dText = softTokens.length / nSoft;
+            log($("chat-log"),
+                `encoded ${nSoft} soft tokens × ${dText} dim in ${(performance.now()-tImg).toFixed(0)}ms`);
+        }
+
+        log($("chat-log"), `prompt-eval starting: ${ids.length} tokens` + (turnImage ? ` + ${nSoft} soft` : ""));
 
         const t0 = performance.now();
         let next = 0;
-        for (const id of ids) {
+        let i = 0;
+        while (i < ids.length) {
             if (cancelGen) throw new Error("cancelled");
+            const id = ids[i];
             next = await model.step(id);
+            i++;
+            // After feeding the begin marker, splice in soft tokens until the next
+            // ids[i] is the end marker.
+            if (turnImage && id === beginId && softTokens) {
+                for (let r = 0; r < nSoft; r++) {
+                    if (cancelGen) throw new Error("cancelled");
+                    const row = softTokens.subarray(r * dText, (r + 1) * dText);
+                    next = await model.stepWithEmbedding(row);
+                }
+            }
         }
         log($("chat-log"),
-            `prompt-eval: ${(performance.now()-t0).toFixed(0)}ms (${ids.length} tokens)`);
+            `prompt-eval: ${(performance.now()-t0).toFixed(0)}ms (${ids.length}${turnImage ? `+${nSoft}` : ""} positions)`);
 
         const max = parseInt($("maxtok").value, 10);
         const tg0 = performance.now();
