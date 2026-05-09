@@ -52,6 +52,15 @@ struct ResAddParams { n: u32, _p0: u32, _p1: u32, _p2: u32 }
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct ScaleParams { n: u32, s: f32, _p0: u32, _p1: u32 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct RmsPerRowParams {
+    n_rows: u32,
+    row_dim: u32,
+    eps: f32,
+    has_weight: u32,
+}
+
 // ---------- helpers ----------
 
 fn write_uniform<T: Pod>(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, data: &T) -> wgpu::Buffer {
@@ -514,6 +523,41 @@ pub fn rmsnorm_chained(
     cp.set_pipeline(&p.rmsnorm);
     cp.set_bind_group(0, &bg, &[]);
     cp.dispatch_workgroups(1, 1, 1);
+}
+
+/// Chained per-row RMSNorm: dispatches one workgroup per row, each computing
+/// `y[r,:] = x[r,:] / rms(x[r,:]) * (w[:] if has_weight else 1)`. Used for
+/// per-head Q/K/V norm and per-layer PLE proj_norm — the cases where the old
+/// path looped per head/layer with one CPU readback each.
+pub fn rmsnorm_per_row_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    x: &wgpu::Buffer, weight: Option<&wgpu::Buffer>, dummy: &wgpu::Buffer,
+    y: &wgpu::Buffer, n_rows: usize, row_dim: usize, eps: f32,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = RmsPerRowParams {
+        n_rows: n_rows as u32, row_dim: row_dim as u32, eps,
+        has_weight: weight.is_some() as u32,
+    };
+    let p_buf = write_uniform(device, queue, "rmspr_chain.params", &params);
+    let w_buf = weight.unwrap_or(dummy);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("rmspr_chain.bg"),
+        layout: &p.rmsnorm_per_row.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: w_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("rmspr_chain.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.rmsnorm_per_row);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups(n_rows as u32, 1, 1);
 }
 
 /// Chained softcap: in-place would be ideal, but the WGSL has separate `x`, `y`

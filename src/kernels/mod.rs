@@ -10,6 +10,7 @@ pub const Q4_K_DEQUANT_MATMUL: &str = include_str!("wgsl/q4_k_dequant_matmul.wgs
 pub const Q6_K_DEQUANT_MATMUL: &str = include_str!("wgsl/q6_k_dequant_matmul.wgsl");
 pub const RESIDUAL_ADD: &str = include_str!("wgsl/residual_add.wgsl");
 pub const RMSNORM: &str = include_str!("wgsl/rmsnorm.wgsl");
+pub const RMSNORM_PER_ROW: &str = include_str!("wgsl/rmsnorm_per_row.wgsl");
 pub const ROPE_NEOX: &str = include_str!("wgsl/rope_neox.wgsl");
 pub const SCALE: &str = include_str!("wgsl/scale.wgsl");
 pub const SOFTCAP: &str = include_str!("wgsl/softcap.wgsl");

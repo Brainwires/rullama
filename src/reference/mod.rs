@@ -10,6 +10,7 @@
 pub mod ops;
 pub mod weights;
 pub mod forward;
+pub mod forward_chained;
 pub mod forward_gpu;
 
 pub use forward::{KvState, LayerKv, forward_token};
