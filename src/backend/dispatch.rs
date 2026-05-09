@@ -104,6 +104,18 @@ struct PosEmbedAddParams {
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct VisionAttnParams { head_dim: u32, n_heads: u32, n_patches: u32, _pad: u32 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct GluSplitParams { seq: u32, inner: u32, _p0: u32, _p1: u32 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct DepthwiseConv1dParams { seq: u32, channels: u32, kernel: u32, _p: u32 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct ScalarNParams { n: u32, _p0: u32, _p1: u32, _p2: u32 }
+
 // ---------- helpers ----------
 
 fn write_uniform<T: Pod>(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, data: &T) -> wgpu::Buffer {
@@ -576,6 +588,117 @@ pub fn rmsnorm_chained(
     cp.set_pipeline(&p.rmsnorm);
     cp.set_bind_group(0, &bg, &[]);
     cp.dispatch_workgroups(1, 1, 1);
+}
+
+/// Half-residual add: x[i] = x[i] + 0.5 * y[i] (Conformer FFW).
+pub fn half_residual_add_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    x: &wgpu::Buffer, y: &wgpu::Buffer, n: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = ScalarNParams { n: n as u32, _p0: 0, _p1: 0, _p2: 0 };
+    let p_buf = write_uniform(device, queue, "halfres.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("halfres.bg"),
+        layout: &p.half_residual_add.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: y.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("halfres.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.half_residual_add);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+}
+
+/// In-place SiLU: x[i] = x[i] * sigmoid(x[i]).
+pub fn silu_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    x: &wgpu::Buffer, n: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = ScalarNParams { n: n as u32, _p0: 0, _p1: 0, _p2: 0 };
+    let p_buf = write_uniform(device, queue, "silu.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("silu.bg"),
+        layout: &p.silu.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: x.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("silu.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.silu);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+}
+
+/// GLU split: y[t, d] = x[t, d] * sigmoid(x[t, inner + d]).
+/// `x` is `[seq, 2 * inner]`, `y` is `[seq, inner]`.
+pub fn glu_split_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    x: &wgpu::Buffer, y: &wgpu::Buffer, seq: usize, inner: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = GluSplitParams { seq: seq as u32, inner: inner as u32, _p0: 0, _p1: 0 };
+    let p_buf = write_uniform(device, queue, "glu.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("glu.bg"),
+        layout: &p.glu_split.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: y.as_entire_binding() },
+        ],
+    });
+    let total = (seq * inner) as u32;
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("glu.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.glu_split);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
+}
+
+/// Depthwise 1D convolution along the time axis (Conformer LightConv).
+/// `x`: `[seq, channels]` f32. `w`: `[channels, kernel]` f32. `y`: `[seq, channels]`.
+pub fn depthwise_conv1d_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    x: &wgpu::Buffer, w: &wgpu::Buffer, y: &wgpu::Buffer,
+    seq: usize, channels: usize, kernel: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = DepthwiseConv1dParams {
+        seq: seq as u32, channels: channels as u32, kernel: kernel as u32, _p: 0,
+    };
+    let p_buf = write_uniform(device, queue, "dwconv.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("dwconv.bg"),
+        layout: &p.depthwise_conv1d.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: w.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+        ],
+    });
+    let total = (seq * channels) as u32;
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("dwconv.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.depthwise_conv1d);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
 }
 
 /// Add 2D position embeddings to per-patch hidden states (vision tower).

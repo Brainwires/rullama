@@ -31,6 +31,10 @@ pub struct Pipelines {
     pub f16_matmul_batched: wgpu::ComputePipeline,
     pub pos_embed_add:     wgpu::ComputePipeline,
     pub vision_attention:  wgpu::ComputePipeline,
+    pub half_residual_add: wgpu::ComputePipeline,
+    pub silu:              wgpu::ComputePipeline,
+    pub glu_split:         wgpu::ComputePipeline,
+    pub depthwise_conv1d:  wgpu::ComputePipeline,
 }
 
 impl Pipelines {
@@ -57,6 +61,10 @@ impl Pipelines {
             f16_matmul_batched: build(device, "f16_matmul_batched", kernels::F16_MATMUL_BATCHED),
             pos_embed_add:     build(device, "pos_embed_add",     kernels::POS_EMBED_ADD),
             vision_attention:  build(device, "vision_attention",  kernels::VISION_ATTENTION),
+            half_residual_add: build(device, "half_residual_add", kernels::HALF_RESIDUAL_ADD),
+            silu:              build(device, "silu",              kernels::SILU),
+            glu_split:         build(device, "glu_split",         kernels::GLU_SPLIT),
+            depthwise_conv1d:  build(device, "depthwise_conv1d",  kernels::DEPTHWISE_CONV1D),
         }
     }
 }
