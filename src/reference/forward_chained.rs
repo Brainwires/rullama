@@ -620,6 +620,9 @@ fn run_matmul_into_buf(
 ) -> Result<()> {
     let device = &ctx.device;
     let queue = &ctx.queue;
+    // Naive kernel beats tiled here on Apple GPUs (verified empirically on
+    // M-series). Tiled pipelines stay built in case future hardware / kernel
+    // tuning reverses this — flip these back if perf_bench shows tiled wins.
     let pipeline = match dtype {
         GgmlDtype::Q4_K => &pipes.q4_k_matmul,
         GgmlDtype::Q6_K => &pipes.q6_k_matmul,

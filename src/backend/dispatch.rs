@@ -473,6 +473,16 @@ fn matmul_chained_inner(
     cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
 }
 
+// Tiled-kernel threshold: empirically the naive matvec (one thread per output)
+// beats the tiled kernel on Apple GPUs at every per-layer shape because of L1/L2
+// cache + the cost of workgroup barriers. We only switch to tiled when the
+// matmul is huge enough that the bandwidth savings clearly dominate — currently
+// only the output projection (vocab × d_model) qualifies, and it dispatches
+// directly through forward_chained::run_matmul_into_buf.
+//
+// Keeping the tiled pipelines built so they're available without recompiling
+// when we get round to per-shape benchmarking in M8.4 (perf_bench).
+
 pub fn matmul_q4_k_chained(
     ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
     w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer, k: usize, n: usize,

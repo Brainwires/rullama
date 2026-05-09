@@ -22,7 +22,8 @@ use crate::backend::{Pipelines, WeightCache, WgpuCtx};
 use crate::error::Result;
 use crate::gguf::GgufReader;
 use crate::model::config::Gemma4Config;
-use crate::reference::{KvState, Weights, forward_token_gpu};
+use crate::reference::Weights;
+use crate::reference::forward_chained::Forward;
 use crate::sampling::{Sampler, SamplingOptions};
 use crate::template::gemma4_small;
 use crate::tokenizer::BpeTokenizer;
@@ -44,16 +45,14 @@ pub async fn compute_spike_js(input: Vec<f32>) -> std::result::Result<Vec<f32>, 
 
 /// A loaded Gemma 4 model with all GPU resources allocated. One `Model` corresponds to
 /// one conversation: it owns the KV cache and tracks the current position.
+///
+/// Internally a `Model` is a tokenizer + a [`Forward`] + a [`Sampler`]. `Forward` runs
+/// one wgpu CommandEncoder per token (M7 work) — significantly faster than the original
+/// per-kernel-readback path, which is now retained only as a parity oracle.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct Model {
-    cfg: Gemma4Config,
-    weights: Weights,
-    wcache: WeightCache,
-    ctx: WgpuCtx,
-    pipes: Pipelines,
     tokenizer: BpeTokenizer,
-    kv_state: KvState,
-    pos: u32,
+    forward: Forward,
     sampler: Sampler,
 }
 
@@ -66,11 +65,12 @@ impl Model {
         let r_arc = Arc::new(reader);
         let weights = Weights::new(r_arc.clone());
         let ctx = WgpuCtx::new().await?;
-        let pipes = Pipelines::new(&ctx.device);
-        let wcache = WeightCache::new(r_arc, ctx.device.clone(), ctx.queue.clone());
-        let kv_state = KvState::new(&cfg);
+        let pipes = Arc::new(Pipelines::new(&ctx.device));
+        let wcache = Arc::new(WeightCache::new(r_arc, ctx.device.clone(), ctx.queue.clone()));
+        let forward = Forward::new(cfg, ctx, pipes, weights, wcache).await?;
         Ok(Self {
-            cfg, weights, wcache, ctx, pipes, tokenizer, kv_state, pos: 0,
+            tokenizer,
+            forward,
             sampler: Sampler::new(SamplingOptions::default()),
         })
     }
@@ -105,20 +105,19 @@ impl Model {
     }
 
     /// Number of tokens in the vocab.
-    pub fn vocab_size_native(&self) -> u32 { self.cfg.vocab_size }
+    pub fn vocab_size_native(&self) -> u32 { self.forward.cfg().vocab_size }
 
     /// Current sequence position (number of tokens fed so far).
-    pub fn position_native(&self) -> u32 { self.pos }
+    pub fn position_native(&self) -> u32 { self.forward.pos() }
 
     /// True iff `id` is one of the GGUF's EOS / EOT / end-of-turn tokens.
     pub fn is_eos_native(&self, id: u32) -> bool {
-        self.cfg.eos_ids.iter().any(|&e| e == id)
+        self.forward.cfg().eos_ids.iter().any(|&e| e == id)
     }
 
     /// Reset KV state so the next call starts from an empty conversation.
     pub fn reset_native(&mut self) {
-        self.kv_state = KvState::new(&self.cfg);
-        self.pos = 0;
+        self.forward.reset();
         self.sampler.clear_history();
     }
 
@@ -131,11 +130,7 @@ impl Model {
     /// (using current SamplingOptions). With `temperature=0`, this is the argmax.
     pub async fn step_native(&mut self, token_id: u32) -> Result<u32> {
         self.sampler.observe(token_id);
-        let logits = forward_token_gpu(
-            &self.cfg, &self.weights, &self.wcache, &self.ctx, &self.pipes,
-            &mut self.kv_state, token_id, self.pos,
-        ).await?;
-        self.pos += 1;
+        let logits = self.forward.step(token_id).await?;
         let next = self.sampler.sample(&logits);
         Ok(next)
     }
