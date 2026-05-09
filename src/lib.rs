@@ -8,6 +8,7 @@ pub mod error;
 pub mod gguf;
 pub mod kernels;
 pub mod model;
+pub mod multimodal;
 pub mod reference;
 pub mod sampling;
 pub mod template;

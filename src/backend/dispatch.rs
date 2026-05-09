@@ -91,6 +91,19 @@ struct Rope2dParams { head_dim: u32, n_heads: u32, n_patches: u32, base: f32 }
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct BatchedMatmulParams { k: u32, n: u32, batch: u32, _pad: u32 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct PosEmbedAddParams {
+    n_patches: u32,
+    hidden_size: u32,
+    pos_size: u32,
+    _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct VisionAttnParams { head_dim: u32, n_heads: u32, n_patches: u32, _pad: u32 }
+
 // ---------- helpers ----------
 
 fn write_uniform<T: Pod>(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, data: &T) -> wgpu::Buffer {
@@ -563,6 +576,78 @@ pub fn rmsnorm_chained(
     cp.set_pipeline(&p.rmsnorm);
     cp.set_bind_group(0, &bg, &[]);
     cp.dispatch_workgroups(1, 1, 1);
+}
+
+/// Add 2D position embeddings to per-patch hidden states (vision tower).
+/// hidden[p, d] += pos_embd_X[posX[p], d] + pos_embd_Y[posY[p], d]
+pub fn pos_embed_add_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    hidden: &wgpu::Buffer, pos_embd: &wgpu::Buffer, pos_x: &wgpu::Buffer, pos_y: &wgpu::Buffer,
+    n_patches: usize, hidden_size: usize, pos_size: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = PosEmbedAddParams {
+        n_patches: n_patches as u32,
+        hidden_size: hidden_size as u32,
+        pos_size: pos_size as u32,
+        _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "posembed.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("posembed.bg"),
+        layout: &p.pos_embed_add.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: hidden.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: pos_embd.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: pos_x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: pos_y.as_entire_binding() },
+        ],
+    });
+    let total = (n_patches * hidden_size) as u32;
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("posembed.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.pos_embed_add);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
+}
+
+/// Bidirectional batched self-attention for the vision tower. Reuses the same
+/// q/k/v/out layout as text attention but skips causal masking and adds a
+/// per-batch-query workgroup dimension.
+pub fn vision_attention_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    q: &wgpu::Buffer, k: &wgpu::Buffer, v: &wgpu::Buffer, out: &wgpu::Buffer,
+    head_dim: usize, n_heads: usize, n_patches: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = VisionAttnParams {
+        head_dim: head_dim as u32,
+        n_heads: n_heads as u32,
+        n_patches: n_patches as u32,
+        _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "vattn.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vattn.bg"),
+        layout: &p.vision_attention.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: q.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: k.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: v.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: out.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("vattn.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.vision_attention);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups(n_patches as u32, n_heads as u32, 1);
 }
 
 /// Batched f16-weight matmul: y[b, j] = Σ_i x[b, i] * W[j, i]. Used by the

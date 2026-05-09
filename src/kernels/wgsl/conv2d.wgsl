@@ -4,10 +4,15 @@
 //   * Gemma 4 vision patch embedding (kernel=16, stride=16, padding=0)
 //   * Gemma 4 audio SSCP (kernel=3, stride=2, padding=1)
 //
-// Tensor layout (all channel-first, row-major within each channel):
-//   input:  f32 [in_C, in_H, in_W]
-//   weight: f16 [out_C, in_C, kH, kW] (packed 2× per u32 in little-endian order)
-//   output: f32 [out_C, out_H, out_W]
+// Tensor layouts:
+//   input:  f32 [in_C, in_H, in_W]                  — channel-first
+//   weight: f16 [out_C, in_C, kH, kW]               — packed 2× per u32
+//   output: f32 [out_H, out_W, out_C]               — channel-LAST so the result
+//                                                     can be viewed as
+//                                                     [n_outputs = out_H*out_W, out_C]
+//                                                     by every downstream consumer
+//                                                     (vision: patch-major; audio
+//                                                     SSCP: time-frequency-major).
 //
 // Output shape is fixed by the caller via params.out_H / out_W; we don't recompute.
 // Out-of-bounds input reads (when stride/padding produce them) yield 0 — matches
@@ -50,11 +55,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let out_idx: u32 = gid.x;
     if (out_idx >= total) { return; }
 
-    let plane: u32 = params.out_H * params.out_W;
-    let j:  u32 = out_idx / plane;
-    let yx: u32 = out_idx % plane;
-    let oy: u32 = yx / params.out_W;
-    let ox: u32 = yx % params.out_W;
+    // Output is laid out [out_H, out_W, out_C], so out_idx = (oy * out_W + ox) * out_C + j.
+    let j:    u32 = out_idx % params.out_C;
+    let pidx: u32 = out_idx / params.out_C;
+    let oy:   u32 = pidx / params.out_W;
+    let ox:   u32 = pidx % params.out_W;
 
     var acc: f32 = 0.0;
 
