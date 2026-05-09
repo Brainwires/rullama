@@ -226,6 +226,174 @@ impl AudioForward {
         self.mel.log_mel(samples)
     }
 
+    /// Encode raw 16 kHz mono PCM into a flat `[n_audio_tokens * d_text]` slice
+    /// of soft-token embeddings, ready for `Forward::step_with_embedding`.
+    /// Mirrors `model_audio.go::AudioModel.ForwardAudio`. Pure CPU f32.
+    pub fn encode(&self, samples: &[f32]) -> Result<Vec<f32>> {
+        let cfg = &self.cfg;
+        let hidden = cfg.hidden as usize;
+        let mel_bins = cfg.mel_bins as usize;
+        let eps = cfg.eps;
+        let gc = cfg.grad_clip;
+
+        // ---- 1. Log-mel spectrogram ----
+        let (mel, n_frames) = self.mel.log_mel(samples);
+        if n_frames == 0 {
+            return Ok(Vec::new());
+        }
+
+        // ---- 2. SSCP: 2× Conv2D 3×3 stride=2 pad=1 + LayerNorm + ReLU ----
+        // Treat mel as [1, n_frames, mel_bins] (single-channel image).
+        let mut x = self.sscp_conv_block(
+            &mel, 1, n_frames, mel_bins,
+            self.sscp0_out_c,
+            &self.sscp0_w, &self.sscp0_norm_w, self.sscp0_norm_b.as_deref(),
+        );
+        let t1 = (n_frames + 1) / 2;
+        let f1 = (mel_bins + 1) / 2;
+        x = self.sscp_conv_block(
+            &x, self.sscp0_out_c, t1, f1,
+            self.sscp1_out_c,
+            &self.sscp1_w, &self.sscp1_norm_w, self.sscp1_norm_b.as_deref(),
+        );
+        let t_out = (t1 + 1) / 2;
+        let f_out = (f1 + 1) / 2;
+        // Layout coming out of sscp_conv_block: [t_out, f_out, channels] flat.
+        // Reshape to [t_out, f_out * channels] for the linear projection.
+        // (Ollama's permute (1,2,0,3) puts channels first then F''; we flatten.)
+        // pre_encode.out.weight has dim[0] = sscp_proj_in. Detect what flat dim
+        // matches and reshape accordingly.
+        let flat_per_frame = f_out * self.sscp1_out_c;
+        if flat_per_frame != self.sscp_proj_in {
+            return Err(RullamaError::Inference(format!(
+                "audio SSCP: flat per-frame dim {flat_per_frame} != pre_encode k {}",
+                self.sscp_proj_in
+            )));
+        }
+
+        // ---- 3. Linear projection to hidden ----
+        let mut h = Self::linear_rows(
+            &x, &self.pre_encode_out_w, self.pre_encode_out_b.as_deref(),
+            t_out, self.sscp_proj_in, hidden,
+        );
+        let mut seq = t_out;
+
+        // ---- 4. 12 Conformer blocks ----
+        for b in 0..self.blocks.len() {
+            self.forward_ffw(
+                &mut h, seq,
+                &self.blocks[b].ffw_norm,
+                &self.blocks[b].ffw_up_w, self.blocks[b].ffw_up_b.as_deref(),
+                &self.blocks[b].ffw_down_w, self.blocks[b].ffw_down_b.as_deref(),
+                &self.blocks[b].ffw_post_norm,
+            );
+            self.forward_attention(&mut h, seq, &self.blocks[b]);
+            self.forward_lightconv(&mut h, seq, &self.blocks[b]);
+            self.forward_ffw(
+                &mut h, seq,
+                &self.blocks[b].ffw_norm_1,
+                &self.blocks[b].ffw_up_1_w, self.blocks[b].ffw_up_1_b.as_deref(),
+                &self.blocks[b].ffw_down_1_w, self.blocks[b].ffw_down_1_b.as_deref(),
+                &self.blocks[b].ffw_post_norm_1,
+            );
+            // Final block: clamp + RMSNorm with the block-level pre_norm weight
+            // (Ollama re-uses `Norm` as the BLOCK FINAL norm — see the closing
+            // lines of AudioConformerBlock.Forward).
+            for v in h.iter_mut() { *v = v.clamp(-gc, gc); }
+            Self::rmsnorm_rows(&mut h, seq, hidden, Some(&self.blocks[b].pre_norm), eps);
+        }
+
+        // ---- 5. Output projection ----
+        let mut o = Self::linear_rows(
+            &h, &self.output_proj_w, self.output_proj_b.as_deref(),
+            seq, hidden, hidden,
+        );
+
+        // ---- 6. Audio multimodal projector: FC + bias → unweighted RMSNorm
+        //         → ClippableLinear input_projection ----
+        let d_text = cfg.d_text as usize;
+        let mut p = Self::linear_rows(
+            &o, &self.proj_fc_w, self.proj_fc_b.as_deref(),
+            seq, hidden, d_text,
+        );
+        Self::rmsnorm_rows(&mut p, seq, d_text, None, eps);
+        // input_projection: d_text → d_text (square; clamp behaviour skipped — the
+        // GGUF doesn't ship per-linear clamp scalars for the audio path the way
+        // it does for vision, so AudioClippableLinear's `outMax != 0` check is
+        // false in practice for gemma4:e2b).
+        let q = Self::linear_rows(
+            &p, &self.proj_input_w, self.proj_input_b.as_deref(),
+            seq, d_text, d_text,
+        );
+        // Suppress unused-variable warning if seq drops out.
+        let _ = &mut seq;
+        let _ = &mut o;
+
+        Ok(q)
+    }
+
+    /// One SSCP block: Conv2D (kernel=3, stride=2, padding=1) → LayerNorm → ReLU.
+    /// Input layout: `[T, F, C_in]` channel-LAST flat.
+    /// Output layout: `[T_out, F_out, C_out]` channel-LAST flat.
+    fn sscp_conv_block(
+        &self,
+        x: &[f32], in_c: usize, in_t: usize, in_f: usize,
+        out_c: usize,
+        weight: &[f32], norm_w: &[f32], norm_b: Option<&[f32]>,
+    ) -> Vec<f32> {
+        // Conv2D kernel layout from GGUF: dims = [kW, kH, in_C, out_C]
+        // (kW fastest); element at (oC, iC, kH, kW) = weight[((oC*in_c + iC)*3 + kH)*3 + kW].
+        // Spatial: stride=(2,2), padding=(1,1), dilation=1.
+        let k_h = 3usize;
+        let k_w = 3usize;
+        let s = 2usize;
+        let pad = 1usize;
+        let out_t = (in_t + 2 * pad).saturating_sub(k_h) / s + 1;
+        let out_f = (in_f + 2 * pad).saturating_sub(k_w) / s + 1;
+        let mut y = vec![0f32; out_t * out_f * out_c];
+
+        for ot in 0..out_t {
+            for of in 0..out_f {
+                let in_t_base = (ot * s) as i64 - pad as i64;
+                let in_f_base = (of * s) as i64 - pad as i64;
+                for oc in 0..out_c {
+                    let mut acc = 0f32;
+                    for ic in 0..in_c {
+                        for kh in 0..k_h {
+                            let it = in_t_base + kh as i64;
+                            if it < 0 || it >= in_t as i64 { continue; }
+                            for kw in 0..k_w {
+                                let if_ = in_f_base + kw as i64;
+                                if if_ < 0 || if_ >= in_f as i64 { continue; }
+                                let xi = ((it as usize) * in_f + if_ as usize) * in_c + ic;
+                                let wi = ((oc * in_c + ic) * k_h + kh) * k_w + kw;
+                                acc += x[xi] * weight[wi];
+                            }
+                        }
+                    }
+                    y[(ot * out_f + of) * out_c + oc] = acc;
+                }
+            }
+        }
+
+        // LayerNorm across the channel axis (per spatial position), then ReLU.
+        for ot in 0..out_t {
+            for of in 0..out_f {
+                let off = (ot * out_f + of) * out_c;
+                let row = &mut y[off..off + out_c];
+                let mean: f32 = row.iter().sum::<f32>() / out_c as f32;
+                let var: f32 = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / out_c as f32;
+                let inv = 1.0 / (var + 1e-5).sqrt();
+                for c in 0..out_c {
+                    let normed = (row[c] - mean) * inv * norm_w[c]
+                        + norm_b.map(|b| b[c]).unwrap_or(0.0);
+                    row[c] = normed.max(0.0); // ReLU
+                }
+            }
+        }
+        y
+    }
+
     // ---- CPU primitives (per-frame ops; channel-LAST [seq, channels] layout) ----
 
     /// In-place RMSNorm with optional learned weight.
@@ -301,6 +469,182 @@ impl AudioForward {
         // x = residual + rw * h
         for i in 0..x.len() {
             x[i] = residual[i] + rw * h[i];
+        }
+    }
+
+    /// Block-local self-attention with relative-position bias and softcap.
+    /// Mirrors `model_audio.go::AudioConformerBlock.forwardAttention`.
+    ///
+    /// Runs per chunk of `chunk_size` queries against a `context_size`-wide
+    /// key/value window (max_past zeros on left + max_future+chunk_size-1 on right).
+    /// Each (query, context) score has:
+    ///   * Content-content: scaled q · k
+    ///   * Content-position: q · projPos[p] where p = max_past + r - c
+    ///   * Causal-valid mask
+    ///   * Logit softcap = `cfg.logit_cap` (50.0)
+    ///   * Softmax over context dimension
+    fn forward_attention(&self, x: &mut [f32], seq: usize, block: &AudioBlock) {
+        let cfg = &self.cfg;
+        let hidden = cfg.hidden as usize;
+        let n_heads = cfg.n_heads as usize;
+        let head_dim = cfg.head_dim() as usize;
+        let chunk_size = cfg.chunk_size as usize;
+        let max_past = cfg.max_past as usize;
+        let max_future = cfg.max_future as usize;
+        let context_size = cfg.context_size as usize;
+        let max_span = max_past + max_future + 1;
+        let cap = cfg.logit_cap;
+        let eps = cfg.eps;
+        let gc = cfg.grad_clip;
+
+        let residual: Vec<f32> = x.to_vec();
+        for v in x.iter_mut() { *v = v.clamp(-gc, gc); }
+        Self::rmsnorm_rows(x, seq, hidden, Some(&block.attn_pre_norm), eps);
+
+        // Q, K, V projections.
+        let mut q = Self::linear_rows(x, &block.attn_q_w, block.attn_q_b.as_deref(),
+            seq, hidden, hidden);
+        let mut k = Self::linear_rows(x, &block.attn_k_w, block.attn_k_b.as_deref(),
+            seq, hidden, hidden);
+        let v = Self::linear_rows(x, &block.attn_v_w, block.attn_v_b.as_deref(),
+            seq, hidden, hidden);
+
+        // Per-dim Q scale: (head_dim^-0.5 / ln 2) * per_dim_scale (already softplus'd
+        // by Ollama's converter — model_audio.go::forwardAttention line 305-309).
+        // per_dim_scale is shared across heads; broadcast over the head axis.
+        let q_scale_base = (head_dim as f32).powf(-0.5) / std::f32::consts::LN_2;
+        for s in 0..seq {
+            for h in 0..n_heads {
+                for d in 0..head_dim {
+                    q[s * hidden + h * head_dim + d] *= q_scale_base * block.per_dim_scale[d];
+                }
+            }
+        }
+        // K scale: softplus(1) / ln 2 = ln(1 + e) / ln 2 ≈ 1.886.
+        let k_scale = (1.0f32 + std::f32::consts::E).ln() / std::f32::consts::LN_2;
+        for kv in k.iter_mut() { *kv *= k_scale; }
+
+        // Sinusoidal position embeddings → projection through linear_pos.
+        // Same layout as q/k: [max_span, n_heads * head_dim] flat.
+        let half_dim = hidden / 2;
+        let mut pos_emb = vec![0f32; max_span * hidden];
+        let log_inc = (10000f32).ln() / (half_dim.saturating_sub(1)).max(1) as f32;
+        for p in 0..max_span {
+            let rel_pos = (max_past as f32) - (p as f32);
+            for d in 0..half_dim {
+                let angle = rel_pos * (-(d as f32) * log_inc).exp();
+                pos_emb[p * hidden + d] = angle.sin();
+                pos_emb[p * hidden + half_dim + d] = angle.cos();
+            }
+        }
+        // Project: [max_span, hidden] × [hidden, hidden] (linear_pos) → [max_span, hidden].
+        let pos_proj = Self::linear_rows(&pos_emb, &block.linear_pos, None,
+            max_span, hidden, hidden);
+
+        // Pad q/k/v on the right so seq divides chunk_size.
+        let num_chunks = (seq + chunk_size - 1) / chunk_size;
+        let padded_len = num_chunks * chunk_size;
+        let mut q_pad = q;
+        q_pad.resize(padded_len * hidden, 0.0);
+        let mut k_inner = k;
+        k_inner.resize(padded_len * hidden, 0.0);
+        let mut v_inner = v;
+        v_inner.resize(padded_len * hidden, 0.0);
+
+        // Pad k/v: max_past zeros on left, max_future + chunk_size - 1 on right.
+        let pad_left = max_past;
+        let pad_right = max_future + chunk_size - 1;
+        let k_padded_len = pad_left + padded_len + pad_right;
+        let mut k_padded = vec![0f32; k_padded_len * hidden];
+        let mut v_padded = vec![0f32; k_padded_len * hidden];
+        k_padded[pad_left * hidden..(pad_left + padded_len) * hidden]
+            .copy_from_slice(&k_inner);
+        v_padded[pad_left * hidden..(pad_left + padded_len) * hidden]
+            .copy_from_slice(&v_inner);
+
+        let mut attn_out = vec![0f32; padded_len * hidden];
+
+        for u in 0..num_chunks {
+            for r in 0..chunk_size {
+                for h in 0..n_heads {
+                    let q_off = (u * chunk_size + r) * hidden + h * head_dim;
+
+                    // Compute logits per context position; track max for stable softmax.
+                    let mut logits = vec![f32::NEG_INFINITY; context_size];
+                    let mut max_logit = f32::NEG_INFINITY;
+
+                    for c in 0..context_size {
+                        // Causal-valid mask.
+                        let actual_t = (u * chunk_size) as i64 + c as i64 - pad_left as i64;
+                        let valid = actual_t >= 0 && actual_t < seq as i64;
+                        let causal = c >= r && c <= r + max_past + max_future;
+                        if !valid || !causal { continue; }
+
+                        // Content-content score.
+                        let k_off = (u * chunk_size + c) * hidden + h * head_dim;
+                        let mut ac = 0f32;
+                        for d in 0..head_dim {
+                            ac += q_pad[q_off + d] * k_padded[k_off + d];
+                        }
+
+                        // Content-position score: lookup pos_proj at p = max_past + r - c.
+                        let p_signed = max_past as i64 + r as i64 - c as i64;
+                        let bd = if p_signed >= 0 && (p_signed as usize) < max_span {
+                            let p = p_signed as usize;
+                            let pos_off = p * hidden + h * head_dim;
+                            let mut bd = 0f32;
+                            for d in 0..head_dim {
+                                bd += q_pad[q_off + d] * pos_proj[pos_off + d];
+                            }
+                            bd
+                        } else { 0.0 };
+
+                        let mut score = ac + bd;
+                        // Logit softcap: tanh(score / cap) * cap.
+                        score = (score / cap).tanh() * cap;
+                        logits[c] = score;
+                        if score > max_logit { max_logit = score; }
+                    }
+
+                    // Softmax over the context dim.
+                    let mut sum_exp = 0f32;
+                    for c in 0..context_size {
+                        if logits[c] == f32::NEG_INFINITY {
+                            logits[c] = 0.0;
+                            continue;
+                        }
+                        let e = (logits[c] - max_logit).exp();
+                        logits[c] = e;
+                        sum_exp += e;
+                    }
+                    let inv = if sum_exp > 0.0 { 1.0 / sum_exp } else { 0.0 };
+
+                    // Weighted V sum into attn_out[(u*chunk_size + r), h, :].
+                    let out_off = (u * chunk_size + r) * hidden + h * head_dim;
+                    for d in 0..head_dim {
+                        let mut acc = 0f32;
+                        for c in 0..context_size {
+                            if logits[c] == 0.0 { continue; }
+                            let weight = logits[c] * inv;
+                            let v_off = (u * chunk_size + c) * hidden + h * head_dim;
+                            acc += weight * v_padded[v_off + d];
+                        }
+                        attn_out[out_off + d] = acc;
+                    }
+                }
+            }
+        }
+
+        // Trim back to seq.
+        attn_out.truncate(seq * hidden);
+
+        // Output projection + clamp + post-norm + residual.
+        let mut o = Self::linear_rows(&attn_out, &block.attn_o_w, block.attn_o_b.as_deref(),
+            seq, hidden, hidden);
+        for v in o.iter_mut() { *v = v.clamp(-gc, gc); }
+        Self::rmsnorm_rows(&mut o, seq, hidden, Some(&block.attn_post_norm), eps);
+        for i in 0..x.len() {
+            x[i] = residual[i] + o[i];
         }
     }
 
