@@ -23,6 +23,8 @@ use crate::error::Result;
 use crate::gguf::GgufReader;
 use crate::model::config::Gemma4Config;
 use crate::reference::{KvState, Weights, forward_token_gpu};
+use crate::sampling::{Sampler, SamplingOptions};
+use crate::template::gemma4_small;
 use crate::tokenizer::BpeTokenizer;
 
 #[cfg(target_arch = "wasm32")]
@@ -52,6 +54,7 @@ pub struct Model {
     tokenizer: BpeTokenizer,
     kv_state: KvState,
     pos: u32,
+    sampler: Sampler,
 }
 
 impl Model {
@@ -69,6 +72,7 @@ impl Model {
         let kv_state = KvState::new(&cfg);
         Ok(Self {
             cfg, weights, wcache, ctx, pipes, tokenizer, kv_state, pos: 0,
+            sampler: Sampler::new(SamplingOptions::default()),
         })
     }
 
@@ -98,17 +102,32 @@ impl Model {
     pub fn reset_native(&mut self) {
         self.kv_state = KvState::new(&self.cfg);
         self.pos = 0;
+        self.sampler.clear_history();
     }
 
-    /// Feed one token at the current position. Returns the argmax of next-token logits
-    /// (i.e., the greedy prediction for the *next* token). Internal pos advances by 1.
+    /// Configure sampling. Defaults: temperature=0.7, top_k=40, top_p=0.95, no rep penalty.
+    pub fn set_sampling_native(&mut self, opts: SamplingOptions) {
+        self.sampler.set_options(opts);
+    }
+
+    /// Feed one token at the current position. Returns the *sampled* next token id
+    /// (using current SamplingOptions). With `temperature=0`, this is the argmax.
     pub async fn step_native(&mut self, token_id: u32) -> Result<u32> {
+        self.sampler.observe(token_id);
         let logits = forward_token_gpu(
             &self.cfg, &self.weights, &self.wcache, &self.ctx, &self.pipes,
             &mut self.kv_state, token_id, self.pos,
         ).await?;
         self.pos += 1;
-        Ok(argmax(&logits) as u32)
+        let next = self.sampler.sample(&logits);
+        Ok(next)
+    }
+
+    /// Render a list of chat messages into the Gemma 4 prompt format, ready to feed
+    /// to `encode_tokens` + `step`. Includes the trailing `<|turn>model\n` so the
+    /// next sampled token starts the assistant reply.
+    pub fn render_chat_native(&self, messages: &[ChatMessage], with_bos: bool) -> String {
+        gemma4_small::render_for_completion(messages, with_bos)
     }
 }
 
@@ -140,20 +159,30 @@ impl Model {
     #[wasm_bindgen(js_name = reset)]
     pub fn reset_js(&mut self) { self.reset_native() }
 
-    /// Feed one token, advance pos, return argmax of next-token logits.
+    /// Feed one token, advance pos, return sampled next token id.
     #[wasm_bindgen(js_name = step)]
     pub async fn step_js(&mut self, token_id: u32) -> std::result::Result<u32, JsError> {
         self.step_native(token_id).await.map_err(|e| JsError::new(&format!("{e}")))
     }
-}
 
-fn argmax(v: &[f32]) -> usize {
-    let mut best_i = 0usize;
-    let mut best_v = f32::NEG_INFINITY;
-    for (i, &x) in v.iter().enumerate() {
-        if x > best_v { best_v = x; best_i = i; }
+    /// Configure sampling from a JSON-shape `{temperature, top_k, top_p, repetition_penalty, seed}`.
+    /// JS callers pass an object; serde decodes it.
+    #[wasm_bindgen(js_name = setSampling)]
+    pub fn set_sampling_js(&mut self, opts_json: JsValue) -> std::result::Result<(), JsError> {
+        let opts: SamplingOptions = serde_wasm_bindgen::from_value(opts_json)
+            .map_err(|e| JsError::new(&format!("invalid sampling options: {e}")))?;
+        self.sampler.set_options(opts);
+        Ok(())
     }
-    best_i
+
+    /// Render a single user message (and optional system message) into the Gemma 4
+    /// chat-template prompt. JS callers pass `[{role, content}, ...]` as JSON.
+    #[wasm_bindgen(js_name = renderChat)]
+    pub fn render_chat_js(&self, messages_json: JsValue, with_bos: bool) -> std::result::Result<String, JsError> {
+        let msgs: Vec<ChatMessage> = serde_wasm_bindgen::from_value(messages_json)
+            .map_err(|e| JsError::new(&format!("invalid messages: {e}")))?;
+        Ok(self.render_chat_native(&msgs, with_bos))
+    }
 }
 
 // ---------- (legacy) options shapes — retained from M0 stub for future use ----------
