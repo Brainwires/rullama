@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
-# Tiny static server for the rullama PWA demo.
-# Serves the project root so /pkg/* and /examples/pwa/* are both reachable.
-# Sets the COOP/COEP headers WebGPU needs, plus correct content types for .wasm.
+# Dev server for the rullama PWA demo.
+#
+# Serves:
+#   /                                    static files from the project root
+#   /examples/pwa/                       HTML demo
+#   /pkg/                                wasm-pack output
+#   /api/models                          JSON list of locally-installed Ollama models
+#   /api/blob/<family>:<tag>             streamed download of the model GGUF blob
+#                                        (supports Range requests for resumable fetches)
+#
+# Reads $OLLAMA_MODELS (default ~/.ollama/models). No write access; never modifies.
 #
 # Robust against:
 #   - leftover server from a previous run (auto-kills whatever's on $PORT)
@@ -12,8 +20,8 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 PORT="${PORT:-8088}"
+OLLAMA_MODELS="${OLLAMA_MODELS:-$HOME/.ollama/models}"
 
-# Kill anything already on $PORT so re-running this script "just works".
 if existing=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null); then
     if [ -n "$existing" ]; then
         echo "killing existing listener(s) on :$PORT (pids: $existing)"
@@ -24,38 +32,179 @@ fi
 
 echo "rullama PWA demo:"
 echo "  http://localhost:$PORT/examples/pwa/index.html"
+echo "  Ollama models dir: $OLLAMA_MODELS"
 echo "  (Ctrl-C to stop)"
 echo
 
-# `exec` so Ctrl-C kills Python directly instead of the bash parent.
-exec python3 - "$PORT" <<'PY'
-import http.server, socketserver, sys, mimetypes, signal
+export OLLAMA_MODELS PORT
 
-PORT = int(sys.argv[1])
+exec python3 - <<'PY'
+import http.server, socketserver, os, sys, json, mimetypes, urllib.parse, signal
+from pathlib import Path
+
+PORT          = int(os.environ.get("PORT", "8088"))
+OLLAMA_MODELS = Path(os.environ.get("OLLAMA_MODELS", os.path.expanduser("~/.ollama/models")))
+MANIFESTS     = OLLAMA_MODELS / "manifests"
+BLOBS         = OLLAMA_MODELS / "blobs"
+MODEL_LAYER   = "application/vnd.ollama.image.model"
+
 mimetypes.add_type("application/wasm", ".wasm")
 
-class Handler(http.server.SimpleHTTPRequestHandler):
-    # Quiet down the per-request "GET /…" log lines (kept ERROR/exception output).
-    def log_message(self, fmt, *args): pass
 
+def discover_models():
+    """Yield {name, tag, size, digest} for every locally-installed Ollama model whose
+    manifest references a model layer blob that actually exists on disk.
+
+    Ollama's directory layout (as of v0.x):
+       ~/.ollama/models/manifests/<registry>/<namespace>/<family>/<tag>      JSON manifest
+       ~/.ollama/models/blobs/sha256-<digest>                                raw bytes
+
+    The manifest's `layers[]` includes one entry with mediaType=`vnd.ollama.image.model`
+    whose `digest` is `sha256:<hex>`; we map that to the blob path.
+    """
+    out = []
+    if not MANIFESTS.is_dir():
+        return out
+    for path in MANIFESTS.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            continue
+        if not isinstance(data, dict) or "layers" not in data:
+            continue
+        rel = path.relative_to(MANIFESTS).parts
+        # rel is typically (registry, namespace, family, tag) but tolerate variants:
+        # take the trailing segments as `family/tag`.
+        if len(rel) < 2:
+            continue
+        family, tag = rel[-2], rel[-1]
+        for layer in data.get("layers", []):
+            if layer.get("mediaType") == MODEL_LAYER:
+                digest = layer.get("digest", "")
+                if digest.startswith("sha256:"):
+                    digest = digest[len("sha256:"):]
+                blob_path = BLOBS / f"sha256-{digest}"
+                if blob_path.exists():
+                    out.append({
+                        "name":   f"{family}:{tag}",
+                        "family": family,
+                        "tag":    tag,
+                        "size":   int(layer.get("size", blob_path.stat().st_size)),
+                        "digest": digest,
+                    })
+                break
+    out.sort(key=lambda m: m["name"])
+    return out
+
+
+def find_blob(name_tag: str):
+    """Resolve 'family:tag' (e.g. 'gemma4:e2b') to the absolute model-layer blob path."""
+    for m in discover_models():
+        if m["name"] == name_tag:
+            return BLOBS / f"sha256-{m['digest']}"
+    return None
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
-        # WebGPU + cross-origin-isolated headers.
+        # WebGPU + cross-origin-isolated headers for the static file path. The API
+        # endpoints inherit them too — that's fine, they're same-origin.
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         super().end_headers()
 
+    def log_message(self, fmt, *args):
+        return  # quieter
+
+    def do_GET(self):
+        u = urllib.parse.urlparse(self.path)
+        if u.path == "/api/models":
+            return self._serve_models()
+        if u.path.startswith("/api/blob/"):
+            model = urllib.parse.unquote(u.path[len("/api/blob/"):])
+            return self._serve_blob(model)
+        return super().do_GET()
+
+    def _serve_models(self):
+        body = json.dumps(discover_models()).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_blob(self, name_tag: str):
+        blob = find_blob(name_tag)
+        if blob is None:
+            self.send_error(404, f"model not found: {name_tag}")
+            return
+        size = blob.stat().st_size
+
+        # Range support: a 7 GB blob fetched over a flaky local server should be
+        # resumable, and `fetch()` with a ReadableStream reader benefits from it too.
+        rng = self.headers.get("Range")
+        start, end = 0, size - 1
+        status = 200
+        if rng and rng.startswith("bytes="):
+            try:
+                spec = rng[len("bytes="):]
+                if "-" in spec:
+                    a, b = spec.split("-", 1)
+                    start = int(a) if a else 0
+                    end = int(b) if b else size - 1
+                    end = min(end, size - 1)
+                    if 0 <= start <= end < size:
+                        status = 206
+            except ValueError:
+                pass
+
+        length = end - start + 1
+        self.send_response(status)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("X-Model-Name", name_tag)
+        self.send_header("X-Total-Size", str(size))
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+
+        # Stream in 1 MB chunks so we don't blow up Python's RAM on a 7 GB blob.
+        CHUNK = 1 << 20
+        with open(blob, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(CHUNK, remaining))
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+                remaining -= len(chunk)
+
+
 class ReusableServer(socketserver.ThreadingTCPServer):
-    allow_reuse_address = True   # SO_REUSEADDR — survives quick restarts.
+    allow_reuse_address = True
     daemon_threads = True
+
 
 def shutdown(*_):
     print()
     sys.exit(0)
+
+
 signal.signal(signal.SIGINT,  shutdown)
 signal.signal(signal.SIGTERM, shutdown)
 
 with ReusableServer(("", PORT), Handler) as httpd:
     print(f"serving at http://localhost:{PORT}/")
+    print(f"API:")
+    print(f"  curl http://localhost:{PORT}/api/models")
+    print(f"  curl -o m.gguf http://localhost:{PORT}/api/blob/gemma4:e2b")
     httpd.serve_forever()
 PY

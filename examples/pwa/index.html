@@ -22,13 +22,13 @@
             border: 1px solid #6668; background: #fff1; color: inherit;
         }
         button:disabled { opacity: 0.5; cursor: not-allowed; }
-        input[type=file] { font: inherit; }
-        textarea, input[type=text] {
+        select, input[type=file], input[type=text], input[type=number] {
             font: inherit;
-            width: 100%; box-sizing: border-box;
-            padding: 0.5rem; border-radius: 4px; border: 1px solid #6668;
+            padding: 0.4rem 0.5rem; border-radius: 4px; border: 1px solid #6668;
             background: transparent; color: inherit;
         }
+        select { min-width: 18rem; }
+        input[type=text] { width: 100%; box-sizing: border-box; }
         pre, .log {
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
             font-size: 0.85rem;
@@ -43,13 +43,15 @@
         .ok    { background: #2c3; color: #000; }
         .err   { background: #c33; color: #fff; }
         .warn  { background: #ea2; color: #000; }
+        progress { width: 100%; height: 0.6rem; }
         #reply { white-space: pre-wrap; min-height: 3rem; }
+        small { color: #888; }
     </style>
 </head>
 <body>
 <header>
     <h1>rullama — Gemma 4 in the browser</h1>
-    <p>Pure-Rust → WebAssembly + WebGPU. Loads a Gemma 4 GGUF locally, runs inference on your GPU, never sends anything to a server.</p>
+    <p>Pure-Rust → WebAssembly + WebGPU. Reads a Gemma 4 GGUF directly out of your local <code>~/.ollama/models</code>, runs inference on your GPU, never sends anything to a remote server.</p>
 </header>
 
 <section id="env">
@@ -65,15 +67,19 @@
 <section id="model">
     <h2>Model</h2>
     <p style="font-size:0.9rem;color:#888;margin:0 0 var(--gap) 0;">
-        Pick a Gemma 4 GGUF on disk. Note: a wasm32 module is capped at 4&nbsp;GB linear memory,
-        so the canonical <code>gemma4:e2b</code> Q4_K_M (~7&nbsp;GB) cannot be loaded in this
-        bundle as-is — use a smaller variant or quant for testing. Smaller GGUFs (e.g. a 1B
-        Q4_K_M) load cleanly.
+        The dev server scans <code>$OLLAMA_MODELS</code> (default <code>~/.ollama/models</code>) and lists everything it finds.
+        Only <code>gemma4:*</code> variants will actually run — others fail at config-parse with a clear error.
+        Browser caveat: a wasm32 module is capped at 4&nbsp;GB linear memory, so models larger than ~3&nbsp;GB compressed will OOM the page.
     </p>
     <div class="row">
-        <input type="file" id="gguf-input" accept=".gguf" />
+        <select id="model-select"><option value="">— scanning —</option></select>
+        <button id="refresh-btn">Refresh</button>
         <button id="load-btn" disabled>Load</button>
         <span id="model-status" class="pill">no model</span>
+    </div>
+    <div class="row" style="margin-top:var(--gap)">
+        <progress id="model-progress" value="0" max="100" style="display:none"></progress>
+        <small id="model-progress-label"></small>
     </div>
     <pre class="log" id="model-log"></pre>
 </section>
@@ -102,6 +108,7 @@ import init, { Model, computeSpike } from "/pkg/rullama.js";
 const $ = (id) => document.getElementById(id);
 const setPill = (el, text, cls) => { el.textContent = text; el.className = "pill" + (cls ? " " + cls : ""); };
 const log = (el, s) => { el.textContent += s + "\n"; el.scrollTop = el.scrollHeight; };
+const fmtBytes = (n) => n >= 1e9 ? `${(n/1e9).toFixed(2)} GB` : n >= 1e6 ? `${(n/1e6).toFixed(1)} MB` : `${(n/1e3).toFixed(0)} KB`;
 
 // 1) WebGPU check
 const webgpuOK = (() => {
@@ -128,10 +135,9 @@ try {
 
 if (wasmReady && webgpuOK) {
     $("spike-btn").disabled = false;
-    $("load-btn").disabled = false;
 }
 
-// 3) Compute spike — verifies the WebGPU compute path end-to-end
+// 3) Compute spike
 $("spike-btn").addEventListener("click", async () => {
     $("spike-btn").disabled = true;
     try {
@@ -147,39 +153,118 @@ $("spike-btn").addEventListener("click", async () => {
     }
 });
 
-// 4) Model load
+// 4) Model discovery (server-side scan of ~/.ollama/models)
+let availableModels = [];
+async function refreshModels() {
+    try {
+        $("model-select").innerHTML = `<option value="">— scanning —</option>`;
+        const res = await fetch("/api/models");
+        if (!res.ok) throw new Error(`/api/models -> ${res.status}`);
+        availableModels = await res.json();
+        const sel = $("model-select");
+        if (availableModels.length === 0) {
+            sel.innerHTML = `<option value="">no models found in ~/.ollama/models</option>`;
+            $("load-btn").disabled = true;
+            return;
+        }
+        sel.innerHTML = "";
+        for (const m of availableModels) {
+            const opt = document.createElement("option");
+            opt.value = m.name;
+            const supported = m.family.startsWith("gemma4");
+            const sizeGB = (m.size / 1e9).toFixed(2);
+            opt.textContent = `${supported ? "✓" : "✗"} ${m.name}  —  ${sizeGB} GB`;
+            opt.dataset.size = String(m.size);
+            opt.dataset.supported = String(supported);
+            sel.appendChild(opt);
+        }
+        // Pre-select the smallest gemma4 model if any.
+        const gemma = availableModels.filter(m => m.family.startsWith("gemma4"))
+            .sort((a,b) => a.size - b.size);
+        if (gemma.length > 0) sel.value = gemma[0].name;
+        $("load-btn").disabled = !wasmReady || !webgpuOK || availableModels.length === 0;
+    } catch (e) {
+        $("model-select").innerHTML = `<option value="">error: ${e.message ?? e}</option>`;
+        log($("model-log"), "failed to list models: " + (e?.message ?? String(e)));
+    }
+}
+$("refresh-btn").addEventListener("click", refreshModels);
+await refreshModels();
+
+// 5) Model load — streamed download with progress
 let model = null;
 $("load-btn").addEventListener("click", async () => {
-    const file = $("gguf-input").files[0];
-    if (!file) { log($("model-log"), "pick a .gguf file first."); return; }
-    setPill($("model-status"), "loading...", "warn");
+    const name = $("model-select").value;
+    if (!name) return;
+    const opt = $("model-select").selectedOptions[0];
+    const totalSize = parseInt(opt.dataset.size || "0", 10);
+    if (opt.dataset.supported !== "true") {
+        if (!confirm(`${name} isn't a gemma4 model — load will fail at parse time. Continue anyway?`)) return;
+    }
     $("load-btn").disabled = true;
-    log($("model-log"), `reading ${file.name} (${(file.size/1e9).toFixed(2)} GB)...`);
+    setPill($("model-status"), "downloading...", "warn");
+    log($("model-log"), `fetching ${name} (${fmtBytes(totalSize)}) from /api/blob/...`);
+
+    const prog = $("model-progress");
+    const progLabel = $("model-progress-label");
+    prog.style.display = "";
+    prog.value = 0;
+    prog.max = 100;
+    progLabel.textContent = "";
 
     try {
         const t0 = performance.now();
-        const buf = await file.arrayBuffer();
-        log($("model-log"), `read ${(performance.now()-t0).toFixed(0)}ms — handing to Model.load`);
+        const res = await fetch("/api/blob/" + encodeURIComponent(name));
+        if (!res.ok) throw new Error(`/api/blob/${name} -> ${res.status}`);
+
+        const reader = res.body.getReader();
+        const chunks = [];
+        let received = 0;
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            received += value.byteLength;
+            if (totalSize > 0) {
+                prog.value = (received / totalSize) * 100;
+                progLabel.textContent = `${fmtBytes(received)} / ${fmtBytes(totalSize)}`;
+            } else {
+                progLabel.textContent = `${fmtBytes(received)}`;
+            }
+        }
+        const buf = new Uint8Array(received);
+        let off = 0;
+        for (const c of chunks) { buf.set(c, off); off += c.byteLength; }
+        const dtFetch = performance.now() - t0;
+        log($("model-log"), `download done in ${(dtFetch/1000).toFixed(1)}s — ${fmtBytes(received)}, ${(received/dtFetch*1000/1e6).toFixed(0)} MB/s`);
+        progLabel.textContent = "loading into WASM…";
+
         const t1 = performance.now();
-        model = await Model.load(new Uint8Array(buf));
-        log($("model-log"), `Model.load done in ${(performance.now()-t1).toFixed(0)}ms — vocab=${model.vocabSize}`);
-        setPill($("model-status"), "ready", "ok");
+        setPill($("model-status"), "parsing GGUF...", "warn");
+        model = await Model.load(buf);
+        const dtLoad = performance.now() - t1;
+        log($("model-log"), `Model.load done in ${(dtLoad/1000).toFixed(1)}s — vocab=${model.vocabSize}`);
+        setPill($("model-status"), `ready: ${name}`, "ok");
+        prog.style.display = "none";
+        progLabel.textContent = "";
+
         $("send-btn").disabled = false;
         $("reset-btn").disabled = false;
     } catch (e) {
         setPill($("model-status"), "load failed", "err");
         log($("model-log"), "Model.load error: " + (e?.message ?? String(e)));
+        prog.style.display = "none";
     } finally {
         $("load-btn").disabled = false;
     }
 });
 
-// 5) Reset
+// 6) Reset
 $("reset-btn").addEventListener("click", () => {
     if (model) { model.reset(); $("reply").textContent = ""; log($("chat-log"), "reset."); }
 });
 
-// 6) Send (the actual chat loop)
+// 7) Send
 $("send-btn").addEventListener("click", async () => {
     if (!model) return;
     const text = $("prompt").value.trim();
@@ -188,7 +273,6 @@ $("send-btn").addEventListener("click", async () => {
     $("prompt").value = "";
 
     try {
-        // Configure sampling.
         model.setSampling({
             temperature: parseFloat($("temp").value),
             top_k: parseInt($("topk").value, 10),
@@ -199,12 +283,11 @@ $("send-btn").addEventListener("click", async () => {
 
         const messages = [{ role: "user", content: text }];
         const prompt = model.renderChat(messages, false);
-        log($("chat-log"), `prompt (${prompt.length} chars):\n${prompt}`);
+        log($("chat-log"), `prompt (${prompt.length} chars)`);
 
         const ids = model.encode(prompt);
         log($("chat-log"), `tokenized: ${ids.length} tokens`);
 
-        // Feed prompt; remember last sampled (will be the first generated token).
         const t0 = performance.now();
         let next = 0;
         for (const id of ids) {
@@ -212,7 +295,6 @@ $("send-btn").addEventListener("click", async () => {
         }
         log($("chat-log"), `prompt-eval: ${(performance.now()-t0).toFixed(0)}ms (${ids.length} tokens)`);
 
-        // Generate reply, streaming token-by-token to the UI.
         $("reply").textContent = "";
         const max = parseInt($("maxtok").value, 10);
         const tg0 = performance.now();
@@ -225,7 +307,8 @@ $("send-btn").addEventListener("click", async () => {
             const cur = next;
             next = await model.step(cur);
         }
-        log($("chat-log"), `gen: ${emitted} tokens in ${(performance.now()-tg0).toFixed(0)}ms (${((performance.now()-tg0)/Math.max(emitted,1)).toFixed(0)} ms/tok)`);
+        const dt = performance.now() - tg0;
+        log($("chat-log"), `gen: ${emitted} tokens in ${dt.toFixed(0)}ms (${(dt/Math.max(emitted,1)).toFixed(0)} ms/tok)`);
     } catch (e) {
         log($("chat-log"), "chat error: " + (e?.message ?? String(e)));
     } finally {
