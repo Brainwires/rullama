@@ -22,7 +22,7 @@ use crate::backend::{Pipelines, WeightCache, WgpuCtx};
 use crate::error::Result;
 use crate::gguf::GgufReader;
 use crate::model::config::Gemma4Config;
-use crate::multimodal::{VisionConfig, VisionForward};
+use crate::multimodal::{AudioConfig, AudioForward, VisionConfig, VisionForward, decode_wav};
 use crate::reference::Weights;
 use crate::reference::forward_chained::Forward;
 use crate::sampling::{Sampler, SamplingOptions};
@@ -57,6 +57,9 @@ pub struct Model {
     /// Built only when the GGUF carries vision tensors (e.g. gemma4:e2b/e4b);
     /// `None` for text-only checkpoints.
     vision: Option<VisionForward>,
+    /// Built only when the GGUF carries audio tensors (e.g. gemma4:e2b/e4b);
+    /// `None` for text-only or vision-only checkpoints.
+    audio: Option<AudioForward>,
     sampler: Sampler,
 }
 
@@ -82,11 +85,22 @@ impl Model {
             None
         };
 
+        // Detect audio tower (presence of a.conv1d.0.weight). The CPU oracle is
+        // built lazily but cheaply at construction (just dequantises weights into
+        // pure-Rust Vec<f32>s — no GPU resources).
+        let audio = if r_arc.tensor("a.conv1d.0.weight").is_ok() {
+            let acfg = AudioConfig::from_gguf(&r_arc, d_text)?;
+            Some(AudioForward::new(acfg, wcache.clone()).await?)
+        } else {
+            None
+        };
+
         let forward = Forward::new(cfg, ctx, pipes, weights, wcache).await?;
         Ok(Self {
             tokenizer,
             forward,
             vision,
+            audio,
             sampler: Sampler::new(SamplingOptions::default()),
         })
     }
@@ -120,6 +134,26 @@ impl Model {
         let pooled_h = h / align;
         let pooled_w = w / align;
         Some(pooled_h * pooled_w)
+    }
+
+    /// True iff this checkpoint carries an audio tower.
+    pub fn has_audio_native(&self) -> bool { self.audio.is_some() }
+
+    /// Encode raw 16 kHz mono PCM (`Vec<f32>` in `[-1, 1]`) into a flat sequence
+    /// of soft-token embeddings. Returns `[n_audio_tokens * d_text]` f32.
+    pub fn encode_audio_native(&self, pcm: &[f32]) -> Result<Vec<f32>> {
+        let a = self.audio.as_ref().ok_or_else(|| {
+            crate::error::RullamaError::Inference(
+                "encode_audio: this checkpoint has no audio tower".into()
+            )
+        })?;
+        a.encode(pcm)
+    }
+
+    /// Decode a WAV file (RIFF/WAVE PCM 8/16/24/32 or float32) into 16 kHz
+    /// mono `Vec<f32>`. Helper for callers that want to feed `encode_audio`.
+    pub fn decode_wav_native(bytes: &[u8]) -> Result<Vec<f32>> {
+        decode_wav(bytes)
     }
 
     /// Native-friendly constructor: takes ownership of GGUF bytes, initializes WebGPU,
@@ -305,6 +339,35 @@ impl Model {
     pub fn image_sentinel_ids_js(&self) -> Option<Vec<u32>> {
         let begin = self.tokenizer.str_to_id("<|image>")?;
         let end   = self.tokenizer.str_to_id("<image|>")?;
+        Some(vec![begin, end])
+    }
+
+    /// True iff this checkpoint carries an audio tower.
+    #[wasm_bindgen(js_name = hasAudio, getter)]
+    pub fn has_audio_js(&self) -> bool { self.has_audio_native() }
+
+    /// Encode raw 16 kHz mono PCM (Float32Array in `[-1, 1]`) into a
+    /// Float32Array of soft-token embeddings. Caller is responsible for
+    /// resampling to 16 kHz if the source is at a different rate.
+    #[wasm_bindgen(js_name = encodeAudio)]
+    pub fn encode_audio_js(
+        &self, pcm: Vec<f32>,
+    ) -> std::result::Result<Vec<f32>, JsError> {
+        self.encode_audio_native(&pcm).map_err(|e| JsError::new(&format!("{e}")))
+    }
+
+    /// Decode WAV file bytes into 16 kHz mono Float32Array. Convenience for JS
+    /// callers that have a WAV file but don't want to plumb Web Audio.
+    #[wasm_bindgen(js_name = decodeWav)]
+    pub fn decode_wav_js(bytes: Vec<u8>) -> std::result::Result<Vec<f32>, JsError> {
+        Self::decode_wav_native(&bytes).map_err(|e| JsError::new(&format!("{e}")))
+    }
+
+    /// `[<|audio> token id, <audio|> token id]` if both sentinels exist; else `null`.
+    #[wasm_bindgen(js_name = audioSentinelIds)]
+    pub fn audio_sentinel_ids_js(&self) -> Option<Vec<u32>> {
+        let begin = self.tokenizer.str_to_id("<|audio>")?;
+        let end   = self.tokenizer.str_to_id("<audio|>")?;
         Some(vec![begin, end])
     }
 

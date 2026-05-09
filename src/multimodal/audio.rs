@@ -20,7 +20,7 @@
 //!           → norm → SiLU → conv_pw2 → residual
 //!         · FFW end (half-residual)
 //!         · clamp(±1e10) → final RMSNorm
-//!     → output_proj (linear with bias)
+//!     → optional output_proj (linear with bias; absent in gemma4:e2b — skipped)
 //!     → AudioMultimodalProjector: FC + bias → unweighted RMSNorm →
 //!       ClippableLinear input_projection
 //!   = soft-token embeddings [n_audio_tokens, d_text=1536]
@@ -149,8 +149,9 @@ pub struct AudioForward {
 
     blocks: Vec<AudioBlock>,
 
-    // Output projection + projector.
-    output_proj_w: Vec<f32>,
+    // Output projection (optional — checkpoints without `a.output_proj.*` skip
+    // this stage and feed the last conformer block straight into the projector).
+    output_proj_w: Option<Vec<f32>>,
     output_proj_b: Option<Vec<f32>>,
     proj_fc_w: Vec<f32>,
     proj_fc_b: Option<Vec<f32>>,
@@ -197,8 +198,10 @@ impl AudioForward {
             blocks.push(load_block(r, i).await?);
         }
 
-        // Output projection + audio projector chain.
-        let output_proj_w = dequant_tensor_to_f32_async(r, "a.output_proj.weight").await?;
+        // Output projection + audio projector chain. The `a.output_proj.*`
+        // tensors are absent from gemma4:e2b's GGUF — Ollama's `ForwardAudio`
+        // skips this stage when nil, falling straight through to the projector.
+        let output_proj_w = load_opt_f32(r, "a.output_proj.weight").await?;
         let output_proj_b = load_opt_f32(r, "a.output_proj.bias").await?;
         let proj_fc_w     = dequant_tensor_to_f32_async(r, "mm.a.fc.weight").await?;
         let proj_fc_b     = load_opt_f32(r, "mm.a.fc.bias").await?;
@@ -303,11 +306,12 @@ impl AudioForward {
             Self::rmsnorm_rows(&mut h, seq, hidden, Some(&self.blocks[b].pre_norm), eps);
         }
 
-        // ---- 5. Output projection ----
-        let mut o = Self::linear_rows(
-            &h, &self.output_proj_w, self.output_proj_b.as_deref(),
-            seq, hidden, hidden,
-        );
+        // ---- 5. Optional output projection (skipped when not bundled in GGUF) ----
+        let o = if let Some(opw) = self.output_proj_w.as_deref() {
+            Self::linear_rows(&h, opw, self.output_proj_b.as_deref(), seq, hidden, hidden)
+        } else {
+            h
+        };
 
         // ---- 6. Audio multimodal projector: FC + bias → unweighted RMSNorm
         //         → ClippableLinear input_projection ----
@@ -325,9 +329,7 @@ impl AudioForward {
             &p, &self.proj_input_w, self.proj_input_b.as_deref(),
             seq, d_text, d_text,
         );
-        // Suppress unused-variable warning if seq drops out.
         let _ = &mut seq;
-        let _ = &mut o;
 
         Ok(q)
     }

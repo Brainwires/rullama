@@ -13,3 +13,6 @@ Cargo.lock.bak
 .vscode/
 *.swp
 *~
+
+# Claude Code session-local state
+/.claude/
