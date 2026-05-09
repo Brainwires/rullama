@@ -61,6 +61,32 @@ struct RmsPerRowParams {
     has_weight: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct Conv2dParams {
+    in_c:  u32, in_h: u32, in_w: u32,
+    out_c: u32, out_h: u32, out_w: u32,
+    k_h: u32, k_w: u32,
+    s_h: u32, s_w: u32,
+    p_h: u32, p_w: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct ClampParams { n: u32, lo: f32, hi: f32, _p: u32 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct AvgPool2dParams {
+    in_h: u32, in_w: u32,
+    out_h: u32, out_w: u32,
+    channels: u32, k: u32, _p0: u32, _p1: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct Rope2dParams { head_dim: u32, n_heads: u32, n_patches: u32, base: f32 }
+
 // ---------- helpers ----------
 
 fn write_uniform<T: Pod>(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, data: &T) -> wgpu::Buffer {
@@ -533,6 +559,171 @@ pub fn rmsnorm_chained(
     cp.set_pipeline(&p.rmsnorm);
     cp.set_bind_group(0, &bg, &[]);
     cp.dispatch_workgroups(1, 1, 1);
+}
+
+/// Chained 2D convolution. Generic stride/padding so the same kernel handles
+/// vision patch embed (k=16, s=16, p=0) and audio SSCP (k=3, s=2, p=1).
+///
+/// Layouts:
+/// * `x`: f32 [in_c, in_h, in_w]
+/// * `w`: f16 [out_c, in_c, k_h, k_w] (packed 2× per u32)
+/// * `y`: f32 [out_c, out_h, out_w]
+pub fn conv2d_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer,
+    in_c: usize, in_h: usize, in_w: usize,
+    out_c: usize, out_h: usize, out_w: usize,
+    k_h: usize, k_w: usize, s_h: usize, s_w: usize, pad_h: usize, pad_w: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = Conv2dParams {
+        in_c:  in_c as u32, in_h: in_h as u32, in_w: in_w as u32,
+        out_c: out_c as u32, out_h: out_h as u32, out_w: out_w as u32,
+        k_h: k_h as u32, k_w: k_w as u32,
+        s_h: s_h as u32, s_w: s_w as u32,
+        p_h: pad_h as u32, p_w: pad_w as u32,
+    };
+    let p_buf = write_uniform(device, queue, "conv2d.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("conv2d.bg"),
+        layout: &p.conv2d.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+        ],
+    });
+    let total = (out_c * out_h * out_w) as u32;
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("conv2d.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.conv2d);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
+}
+
+/// Chained in-place clamp: x[i] = clamp(x[i], lo, hi).
+pub fn clamp_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    x: &wgpu::Buffer, n: usize, lo: f32, hi: f32,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = ClampParams { n: n as u32, lo, hi, _p: 0 };
+    let p_buf = write_uniform(device, queue, "clamp.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("clamp.bg"),
+        layout: &p.clamp.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: x.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("clamp.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.clamp);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+}
+
+/// Chained QuickGELU split: y[i] = quick_gelu(gate[i]) * up[i].
+pub fn quick_geglu_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    gate: &wgpu::Buffer, up: &wgpu::Buffer, y: &wgpu::Buffer, n: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = GegluParams { n: n as u32, _p0: 0, _p1: 0, _p2: 0 };
+    let p_buf = write_uniform(device, queue, "qgeglu.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("qgeglu.bg"),
+        layout: &p.quick_geglu.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: gate.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: up.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("qgeglu.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.quick_geglu);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+}
+
+/// Chained 2D average pool with kernel = stride (vision token merge).
+/// Layout: x = [in_h, in_w, channels], y = [out_h, out_w, channels]; out = in / k.
+pub fn avg_pool2d_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    x: &wgpu::Buffer, y: &wgpu::Buffer,
+    in_h: usize, in_w: usize, channels: usize, k: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let out_h = in_h / k;
+    let out_w = in_w / k;
+    let params = AvgPool2dParams {
+        in_h: in_h as u32, in_w: in_w as u32,
+        out_h: out_h as u32, out_w: out_w as u32,
+        channels: channels as u32, k: k as u32, _p0: 0, _p1: 0,
+    };
+    let p_buf = write_uniform(device, queue, "pool2d.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("pool2d.bg"),
+        layout: &p.avg_pool2d.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: y.as_entire_binding() },
+        ],
+    });
+    let total = (out_h * out_w * channels) as u32;
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("pool2d.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.avg_pool2d);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
+}
+
+/// Chained 2D NeoX RoPE for the vision tower: head_dim split — first half rotates
+/// by `pos_x`, second half by `pos_y`. In-place into `x`. `pos_x`/`pos_y` are
+/// `array<u32>` buffers of length n_patches.
+pub fn rope_2d_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    x: &wgpu::Buffer, pos_x: &wgpu::Buffer, pos_y: &wgpu::Buffer,
+    head_dim: usize, n_heads: usize, n_patches: usize, base: f32,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = Rope2dParams {
+        head_dim: head_dim as u32, n_heads: n_heads as u32,
+        n_patches: n_patches as u32, base,
+    };
+    let p_buf = write_uniform(device, queue, "rope2d.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("rope2d.bg"),
+        layout: &p.rope_2d.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: pos_x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: pos_y.as_entire_binding() },
+        ],
+    });
+    // Total threads: n_patches * n_heads * (head_dim/2) where each handles both halves.
+    let total = (n_patches * n_heads * (head_dim / 2)) as u32;
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("rope2d.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.rope_2d);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
 }
 
 /// Chained per-row RMSNorm: dispatches one workgroup per row, each computing

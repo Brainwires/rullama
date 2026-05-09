@@ -23,6 +23,11 @@ pub struct Pipelines {
     pub rmsnorm_per_row:   wgpu::ComputePipeline,
     pub q4_k_matmul_tiled: wgpu::ComputePipeline,
     pub q6_k_matmul_tiled: wgpu::ComputePipeline,
+    pub conv2d:            wgpu::ComputePipeline,
+    pub avg_pool2d:        wgpu::ComputePipeline,
+    pub clamp:             wgpu::ComputePipeline,
+    pub quick_geglu:       wgpu::ComputePipeline,
+    pub rope_2d:           wgpu::ComputePipeline,
 }
 
 impl Pipelines {
@@ -41,6 +46,11 @@ impl Pipelines {
             rmsnorm_per_row:   build(device, "rmsnorm_per_row",   kernels::RMSNORM_PER_ROW),
             q4_k_matmul_tiled: build(device, "q4_k_matmul_tiled", kernels::Q4_K_DEQUANT_MATMUL_TILED),
             q6_k_matmul_tiled: build(device, "q6_k_matmul_tiled", kernels::Q6_K_DEQUANT_MATMUL_TILED),
+            conv2d:            build(device, "conv2d",            kernels::CONV2D),
+            avg_pool2d:        build(device, "avg_pool2d",        kernels::AVG_POOL2D),
+            clamp:             build(device, "clamp",             kernels::CLAMP),
+            quick_geglu:       build(device, "quick_geglu",       kernels::QUICK_GEGLU),
+            rope_2d:           build(device, "rope_2d",           kernels::ROPE_2D),
         }
     }
 }
