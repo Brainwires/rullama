@@ -87,6 +87,10 @@ struct AvgPool2dParams {
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct Rope2dParams { head_dim: u32, n_heads: u32, n_patches: u32, base: f32 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct BatchedMatmulParams { k: u32, n: u32, batch: u32, _pad: u32 }
+
 // ---------- helpers ----------
 
 fn write_uniform<T: Pod>(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, data: &T) -> wgpu::Buffer {
@@ -559,6 +563,38 @@ pub fn rmsnorm_chained(
     cp.set_pipeline(&p.rmsnorm);
     cp.set_bind_group(0, &bg, &[]);
     cp.dispatch_workgroups(1, 1, 1);
+}
+
+/// Batched f16-weight matmul: y[b, j] = Σ_i x[b, i] * W[j, i]. Used by the
+/// vision tower so each linear processes all `batch` patches in a single dispatch.
+pub fn matmul_f16_batched_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer,
+    k: usize, n: usize, batch: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = BatchedMatmulParams {
+        k: k as u32, n: n as u32, batch: batch as u32, _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "f16bmm.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("f16bmm.bg"),
+        layout: &p.f16_matmul_batched.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+        ],
+    });
+    let total = (batch * n) as u32;
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("f16bmm.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.f16_matmul_batched);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
 }
 
 /// Chained 2D convolution. Generic stride/padding so the same kernel handles

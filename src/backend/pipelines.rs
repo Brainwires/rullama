@@ -28,6 +28,7 @@ pub struct Pipelines {
     pub clamp:             wgpu::ComputePipeline,
     pub quick_geglu:       wgpu::ComputePipeline,
     pub rope_2d:           wgpu::ComputePipeline,
+    pub f16_matmul_batched: wgpu::ComputePipeline,
 }
 
 impl Pipelines {
@@ -51,6 +52,7 @@ impl Pipelines {
             clamp:             build(device, "clamp",             kernels::CLAMP),
             quick_geglu:       build(device, "quick_geglu",       kernels::QUICK_GEGLU),
             rope_2d:           build(device, "rope_2d",           kernels::ROPE_2D),
+            f16_matmul_batched: build(device, "f16_matmul_batched", kernels::F16_MATMUL_BATCHED),
         }
     }
 }

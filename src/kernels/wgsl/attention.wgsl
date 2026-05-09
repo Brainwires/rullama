@@ -29,7 +29,10 @@ struct Params {
 @group(0) @binding(4) var<storage, read_write> out:     array<f32>;
 
 const WG: u32 = 64u;
-const MAX_HISTORY: u32 = 1024u;
+// 4096 covers the text path (max ctx 4096) + the vision tower's pre-pool patch
+// counts (≈ 2304 for a 768×768 image). Stays under Apple's 32 KB workgroup-mem
+// limit (4096 f32 = 16 KB).
+const MAX_HISTORY: u32 = 4096u;
 const NEG_INF: f32 = -1.0e30;
 
 var<workgroup> scores: array<f32, MAX_HISTORY>;
