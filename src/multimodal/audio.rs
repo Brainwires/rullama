@@ -222,10 +222,144 @@ impl AudioForward {
 
     /// Compute a log-mel spectrogram from `samples` (16 kHz mono f32, [-1, 1]).
     /// Returns the flat `[n_frames * mel_bins]` tensor and the frame count.
-    /// This is the only piece currently wired end-to-end; the Conformer body
-    /// is the next chunk of work (see `project_m13_status.md`).
     pub fn mel_spectrogram(&self, samples: &[f32]) -> (Vec<f32>, usize) {
         self.mel.log_mel(samples)
+    }
+
+    // ---- CPU primitives (per-frame ops; channel-LAST [seq, channels] layout) ----
+
+    /// In-place RMSNorm with optional learned weight.
+    /// `x` is `[seq, dim]`; norms each row of `dim` independently.
+    pub fn rmsnorm_rows(x: &mut [f32], seq: usize, dim: usize, weight: Option<&[f32]>, eps: f32) {
+        for r in 0..seq {
+            let row = &mut x[r * dim..(r + 1) * dim];
+            let mut sum_sq = 0f32;
+            for &v in row.iter() { sum_sq += v * v; }
+            let inv_rms = 1.0 / (sum_sq / dim as f32 + eps).sqrt();
+            if let Some(w) = weight {
+                for i in 0..dim { row[i] = row[i] * inv_rms * w[i]; }
+            } else {
+                for v in row.iter_mut() { *v = *v * inv_rms; }
+            }
+        }
+    }
+
+    /// `y[s, n] = Σ_k x[s, k] * w[n, k]` (+ optional `b[n]`).
+    /// `w` shape `[k_dim, n_dim]` (GGUF dim[0] = k = fast axis).
+    pub fn linear_rows(
+        x: &[f32], w: &[f32], b: Option<&[f32]>,
+        seq: usize, k_dim: usize, n_dim: usize,
+    ) -> Vec<f32> {
+        let mut y = vec![0f32; seq * n_dim];
+        for s in 0..seq {
+            for n in 0..n_dim {
+                let mut acc = 0f32;
+                for k in 0..k_dim {
+                    acc += x[s * k_dim + k] * w[n * k_dim + k];
+                }
+                if let Some(bias) = b { acc += bias[n]; }
+                y[s * n_dim + n] = acc;
+            }
+        }
+        y
+    }
+
+    /// FFW with half-residual: `x = residual + 0.5 * (x → clamp → norm → up
+    /// → SiLU → down → clamp → post_norm)`. In-place.
+    fn forward_ffw(
+        &self,
+        x: &mut [f32],
+        seq: usize,
+        norm_w: &[f32],
+        up_w: &[f32], up_b: Option<&[f32]>,
+        down_w: &[f32], down_b: Option<&[f32]>,
+        post_norm_w: &[f32],
+    ) {
+        let cfg = &self.cfg;
+        let hidden = cfg.hidden as usize;
+        let ffn = cfg.ffn_inter as usize;
+        let eps = cfg.eps;
+        let gc = cfg.grad_clip;
+        let rw = cfg.residual_w;
+
+        // Save residual.
+        let residual: Vec<f32> = x.to_vec();
+        // Clamp.
+        for v in x.iter_mut() { *v = v.clamp(-gc, gc); }
+        // RMSNorm.
+        Self::rmsnorm_rows(x, seq, hidden, Some(norm_w), eps);
+        // Up.
+        let mut h = Self::linear_rows(x, up_w, up_b, seq, hidden, ffn);
+        // SiLU.
+        for v in h.iter_mut() { *v = *v * (1.0 / (1.0 + (-*v).exp())); }
+        // Down.
+        let mut h = Self::linear_rows(&h, down_w, down_b, seq, ffn, hidden);
+        // Clamp.
+        for v in h.iter_mut() { *v = v.clamp(-gc, gc); }
+        // Post-norm.
+        Self::rmsnorm_rows(&mut h, seq, hidden, Some(post_norm_w), eps);
+        // x = residual + rw * h
+        for i in 0..x.len() {
+            x[i] = residual[i] + rw * h[i];
+        }
+    }
+
+    /// LightConv: `x = residual + (x → norm → pw1 → GLU → depthwise → clamp →
+    /// norm_conv → SiLU → pw2)`. In-place into `x`.
+    fn forward_lightconv(
+        &self,
+        x: &mut [f32],
+        seq: usize,
+        block: &AudioBlock,
+    ) {
+        let cfg = &self.cfg;
+        let hidden = cfg.hidden as usize;
+        let kernel = cfg.conv_kernel as usize;
+        let eps = cfg.eps;
+        let gc = cfg.grad_clip;
+
+        // Save residual.
+        let residual: Vec<f32> = x.to_vec();
+        // norm.
+        Self::rmsnorm_rows(x, seq, hidden, Some(&block.conv_norm), eps);
+        // conv_pw1: hidden -> 2*hidden
+        let h = Self::linear_rows(x, &block.conv_pw1_w, block.conv_pw1_b.as_deref(),
+            seq, hidden, hidden * 2);
+        // GLU split: data half * sigmoid(gate half)
+        let mut g = vec![0f32; seq * hidden];
+        for s in 0..seq {
+            for d in 0..hidden {
+                let data = h[s * hidden * 2 + d];
+                let gate = h[s * hidden * 2 + hidden + d];
+                let sig = 1.0 / (1.0 + (-gate).exp());
+                g[s * hidden + d] = data * sig;
+            }
+        }
+        // Depthwise conv1d (kernel=5, left zero-pad). conv_dw is [hidden, kernel].
+        let mut conv_out = vec![0f32; seq * hidden];
+        for t in 0..seq {
+            for c in 0..hidden {
+                let mut acc = 0f32;
+                for k in 0..kernel {
+                    let shift = kernel - 1 - k;
+                    if t < shift { continue; }
+                    let src_t = t - shift;
+                    acc += g[src_t * hidden + c] * block.conv_dw[c * kernel + k];
+                }
+                conv_out[t * hidden + c] = acc;
+            }
+        }
+        // Clamp + norm_conv + SiLU.
+        for v in conv_out.iter_mut() { *v = v.clamp(-gc, gc); }
+        Self::rmsnorm_rows(&mut conv_out, seq, hidden, Some(&block.norm_conv), eps);
+        for v in conv_out.iter_mut() { *v = *v * (1.0 / (1.0 + (-*v).exp())); }
+        // conv_pw2.
+        let pw2_out = Self::linear_rows(&conv_out, &block.conv_pw2_w,
+            block.conv_pw2_b.as_deref(), seq, hidden, hidden);
+        // Residual.
+        for i in 0..x.len() {
+            x[i] = residual[i] + pw2_out[i];
+        }
     }
 }
 
