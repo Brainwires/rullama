@@ -8,22 +8,26 @@
 use std::env;
 use std::fs;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Instant;
 
 use rullama::api::{ChatMessage, ChatRole, Model};
+use rullama::gguf::{InMemoryFetcher, TensorFetcher};
 use rullama::sampling::SamplingOptions;
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let path = match args.next() {
         Some(p) => p,
-        None => { eprintln!("usage: model_api <gguf> [user_message] [--greedy] [--max=N]"); return ExitCode::from(2); }
+        None => { eprintln!("usage: model_api <gguf> [user_message] [--greedy] [--max=N] [--streaming]"); return ExitCode::from(2); }
     };
     let mut user_msg = String::from("Hi");
     let mut greedy = false;
     let mut max_tokens: usize = 64;
+    let mut streaming = false;
     for a in args {
         if a == "--greedy" { greedy = true; }
+        else if a == "--streaming" { streaming = true; }
         else if let Some(rest) = a.strip_prefix("--max=") {
             max_tokens = rest.parse().unwrap_or(64);
         } else {
@@ -31,10 +35,17 @@ fn main() -> ExitCode {
         }
     }
 
-    println!("loading model ...");
+    println!("loading model ({}) ...", if streaming { "streaming" } else { "in-memory" });
     let t0 = Instant::now();
     let bytes = fs::read(&path).expect("read");
-    let mut model = pollster::block_on(Model::load_native(bytes)).expect("load");
+    let mut model = if streaming {
+        // Wrap the same bytes in an InMemoryFetcher so we exercise the M6 streaming
+        // code path on native (HttpRangeFetcher is wasm32-only).
+        let fetcher: Arc<dyn TensorFetcher> = Arc::new(InMemoryFetcher::new(bytes));
+        pollster::block_on(Model::load_streaming(fetcher)).expect("load_streaming")
+    } else {
+        pollster::block_on(Model::load_native(bytes)).expect("load_native")
+    };
     println!("  loaded in {:?}", t0.elapsed());
 
     let opts = if greedy {
