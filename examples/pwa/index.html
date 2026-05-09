@@ -46,6 +46,19 @@
         progress { width: 100%; height: 0.6rem; }
         #reply { white-space: pre-wrap; min-height: 3rem; }
         small { color: #888; }
+        #chat-history { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: var(--gap); max-height: 28rem; overflow-y: auto; }
+        .msg { padding: 0.5rem 0.75rem; border-radius: 6px; white-space: pre-wrap; word-wrap: break-word; line-height: 1.45; }
+        .msg-user { background: #4f93ff22; border-left: 3px solid #4f93ff; }
+        .msg-model { background: #6661; border-left: 3px solid #888; }
+        .msg-role { font-size: 0.7rem; color: #888; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.15rem; }
+        details { margin: 0.4rem 0; }
+        details summary { cursor: pointer; font-size: 0.85rem; color: #888; }
+        details summary:hover { color: inherit; }
+        textarea { font: inherit; width: 100%; box-sizing: border-box; padding: 0.4rem 0.5rem; border-radius: 4px; border: 1px solid #6668; background: transparent; color: inherit; resize: vertical; min-height: 4rem; }
+        .cache-list { font-size: 0.85rem; }
+        .cache-list .row { padding: 0.2rem 0; }
+        .danger { color: #c33; cursor: pointer; background: none; border: none; font: inherit; padding: 0.1rem 0.4rem; }
+        .danger:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
@@ -82,28 +95,39 @@
         <small id="model-progress-label"></small>
     </div>
     <pre class="log" id="model-log"></pre>
+    <details style="margin-top:var(--gap)">
+        <summary>Cached models (IndexedDB)</summary>
+        <div id="cached-panel" class="cache-list" style="margin-top:var(--gap)"></div>
+    </details>
 </section>
 
 <section id="chat">
     <h2>Chat</h2>
+    <details>
+        <summary>System prompt &amp; sampling</summary>
+        <div style="margin-top:var(--gap)">
+            <textarea id="sys-prompt" placeholder='Optional. e.g. "You are a helpful assistant who answers in pirate speak."'></textarea>
+        </div>
+        <div class="row" style="margin-top:var(--gap);font-size:0.85rem;color:#888;">
+            <label>temp <input type="number" id="temp" value="0.7" step="0.1" min="0" max="2" style="width:5rem"></label>
+            <label>top_k <input type="number" id="topk" value="40" step="1" min="0" style="width:5rem"></label>
+            <label>top_p <input type="number" id="topp" value="0.95" step="0.05" min="0" max="1" style="width:5rem"></label>
+            <label>max_tokens <input type="number" id="maxtok" value="256" step="8" min="1" style="width:6rem"></label>
+        </div>
+    </details>
+    <div id="chat-history"></div>
     <div class="row">
         <input type="text" id="prompt" placeholder='e.g. "What is the capital of France?"' class="grow" />
         <button id="send-btn" disabled>Send</button>
-        <button id="reset-btn" disabled>Reset</button>
+        <button id="stop-btn" disabled>Stop</button>
+        <button id="reset-btn" disabled>New chat</button>
     </div>
-    <div class="row" style="margin-top:var(--gap);font-size:0.85rem;color:#888;">
-        <label>temp <input type="number" id="temp" value="0.7" step="0.1" min="0" max="2" style="width:5rem"></label>
-        <label>top_k <input type="number" id="topk" value="40" step="1" min="0" style="width:5rem"></label>
-        <label>top_p <input type="number" id="topp" value="0.95" step="0.05" min="0" max="1" style="width:5rem"></label>
-        <label>max_tokens <input type="number" id="maxtok" value="64" step="8" min="1" style="width:6rem"></label>
-    </div>
-    <h3 style="font-size:0.95rem; margin: 0.8rem 0 0.3rem 0;">Reply</h3>
-    <div id="reply" class="log"></div>
     <pre class="log" id="chat-log" style="margin-top:var(--gap)"></pre>
 </section>
 
 <script type="module">
 import init, { Model, computeSpike } from "/pkg/rullama.js";
+import { fetchAndCache, listCached, deleteCached } from "./cache.js";
 
 const $ = (id) => document.getElementById(id);
 const setPill = (el, text, cls) => { el.textContent = text; el.className = "pill" + (cls ? " " + cls : ""); };
@@ -176,6 +200,7 @@ async function refreshModels() {
             opt.textContent = `${supported ? "✓" : "✗"} ${m.name}  —  ${sizeGB} GB`;
             opt.dataset.size = String(m.size);
             opt.dataset.supported = String(supported);
+            opt.dataset.digest = m.digest;
             sel.appendChild(opt);
         }
         // Pre-select the smallest gemma4 model if any.
@@ -191,43 +216,95 @@ async function refreshModels() {
 $("refresh-btn").addEventListener("click", refreshModels);
 await refreshModels();
 
-// 5) Model load — streamed download with progress
+// 5) Model load — IndexedDB cache + Range-streamed wasm load
+//
+// Two paths:
+//   * Cache hit → wrap the on-disk Blob in a blob: URL and hand that to
+//     Model.loadFromUrl. Modern Chrome/Firefox honor Range requests against
+//     blob: URLs, so the wasm32 4 GB cap stays respected.
+//   * Cache miss → fetchAndCache streams the model into IndexedDB, then we
+//     use the same blob: URL path so subsequent reloads are instant.
 let model = null;
+let modelMeta = null;     // { name, digest } of the currently-loaded model
+let blobUrlInUse = null;  // revoked when a new model loads or page unloads
+
+window.addEventListener("beforeunload", () => {
+    if (blobUrlInUse) URL.revokeObjectURL(blobUrlInUse);
+});
+
 $("load-btn").addEventListener("click", async () => {
     const name = $("model-select").value;
     if (!name) return;
     const opt = $("model-select").selectedOptions[0];
     const totalSize = parseInt(opt.dataset.size || "0", 10);
+    const digest = opt.dataset.digest || "";
     if (opt.dataset.supported !== "true") {
         if (!confirm(`${name} isn't a gemma4 model — load will fail at parse time. Continue anyway?`)) return;
     }
+    if (!digest) {
+        log($("model-log"), "no digest in model entry — refresh the picker?");
+        return;
+    }
     $("load-btn").disabled = true;
     setPill($("model-status"), "loading...", "warn");
-    log($("model-log"),
-        `streaming ${name} (${fmtBytes(totalSize)}) via Range requests — bytes never enter wasm memory in bulk`);
 
     const prog = $("model-progress");
     const progLabel = $("model-progress-label");
     prog.style.display = "";
     prog.value = 0;
     prog.max = 100;
-    progLabel.textContent = "header read…";
+    progLabel.textContent = "checking cache…";
 
     try {
+        // Free any prior blob URL.
+        if (blobUrlInUse) { URL.revokeObjectURL(blobUrlInUse); blobUrlInUse = null; }
+        if (model) { model.free?.(); model = null; }
+
         const url = "/api/blob/" + encodeURIComponent(name);
+        const dlT0 = performance.now();
+        const { blob, fromCache } = await fetchAndCache(url, digest, name, (received, total) => {
+            const t = total || totalSize;
+            if (t > 0) {
+                prog.value = (received / t) * 100;
+                const elapsed = (performance.now() - dlT0) / 1000;
+                const rate = received / Math.max(elapsed, 0.001);
+                progLabel.textContent =
+                    `${fmtBytes(received)} / ${fmtBytes(t)} — ${fmtBytes(rate)}/s`;
+            } else {
+                progLabel.textContent = fmtBytes(received);
+            }
+        });
+        if (fromCache) {
+            log($("model-log"), `cache hit (${fmtBytes(blob.size)}) — skipping network fetch`);
+        } else {
+            const dt = (performance.now() - dlT0) / 1000;
+            log($("model-log"),
+                `downloaded ${fmtBytes(blob.size)} in ${dt.toFixed(1)}s — saved to IndexedDB`);
+        }
+
+        // Wrap the cached/just-fetched Blob in a URL the Rust side can hit with
+        // Range requests via fetch().
+        blobUrlInUse = URL.createObjectURL(blob);
+        progLabel.textContent = "loading into wasm…";
+
         const t1 = performance.now();
-        // Tensor bytes are pulled inside Rust via fetch+Range as the GPU upload runs.
-        // From JS we just hand over the URL.
-        model = await Model.loadFromUrl(url);
-        const dtLoad = performance.now() - t1;
+        model = await Model.loadFromUrl(blobUrlInUse);
+        const dtLoad = (performance.now() - t1) / 1000;
         log($("model-log"),
-            `Model.loadFromUrl done in ${(dtLoad/1000).toFixed(1)}s — vocab=${model.vocabSize}`);
-        setPill($("model-status"), `ready: ${name}`, "ok");
+            `Model.loadFromUrl done in ${dtLoad.toFixed(1)}s — vocab=${model.vocabSize}`);
+
+        modelMeta = { name, digest };
+        setPill($("model-status"), `ready: ${name}${fromCache ? " (cached)" : ""}`, "ok");
         prog.style.display = "none";
         progLabel.textContent = "";
 
+        // Reset chat state on new model load.
+        chatMessages = [];
+        renderChat();
         $("send-btn").disabled = false;
         $("reset-btn").disabled = false;
+        $("stop-btn").disabled = true;
+        await refreshCachedPanel();
     } catch (e) {
         setPill($("model-status"), "load failed", "err");
         log($("model-log"), "Model.load error: " + (e?.message ?? String(e)));
@@ -237,19 +314,106 @@ $("load-btn").addEventListener("click", async () => {
     }
 });
 
-// 6) Reset
-$("reset-btn").addEventListener("click", () => {
-    if (model) { model.reset(); $("reply").textContent = ""; log($("chat-log"), "reset."); }
+// 6) Cached-models panel — refreshes after every load + provides per-entry delete.
+async function refreshCachedPanel() {
+    const panel = $("cached-panel");
+    if (!panel) return;
+    let entries = [];
+    try { entries = await listCached(); } catch (_) { /* ignore */ }
+    if (entries.length === 0) {
+        panel.innerHTML = `<small>no cached models yet</small>`;
+        return;
+    }
+    let total = 0;
+    panel.innerHTML = "";
+    for (const e of entries) {
+        total += e.size || 0;
+        const row = document.createElement("div");
+        row.className = "row";
+        row.innerHTML =
+            `<span class="grow">${e.name}</span>` +
+            `<small>${fmtBytes(e.size)}</small>` +
+            `<button class="danger" data-digest="${e.digest}">remove</button>`;
+        row.querySelector("button").addEventListener("click", async (ev) => {
+            const d = ev.currentTarget.dataset.digest;
+            await deleteCached(d);
+            await refreshCachedPanel();
+            log($("model-log"), `removed cached model (digest ${d.slice(0,12)}…)`);
+        });
+        panel.appendChild(row);
+    }
+    const totalLine = document.createElement("small");
+    totalLine.textContent = `total cached: ${fmtBytes(total)}`;
+    panel.appendChild(totalLine);
+}
+await refreshCachedPanel();
+
+// 7) Multi-turn chat — `chatMessages` is the persistent history; renderChat()
+// draws bubbles. Each Send appends a user turn, runs prompt-eval over the full
+// rendered template, then streams the assistant reply token-by-token into the
+// last bubble. KV cache is *not* reset between turns (a "New chat" button does
+// that explicitly).
+let chatMessages = [];
+let cancelGen = false;
+
+const SYS_KEY = "rullama.systemPrompt";
+$("sys-prompt").value = localStorage.getItem(SYS_KEY) || "";
+$("sys-prompt").addEventListener("input", () => {
+    localStorage.setItem(SYS_KEY, $("sys-prompt").value);
 });
 
-// 7) Send
+function renderChat() {
+    const host = $("chat-history");
+    host.innerHTML = "";
+    for (const m of chatMessages) {
+        const div = document.createElement("div");
+        div.className = "msg msg-" + (m.role === "user" ? "user" : "model");
+        div.innerHTML =
+            `<div class="msg-role">${m.role}</div>` +
+            `<div class="msg-body"></div>`;
+        div.querySelector(".msg-body").textContent = m.content;
+        host.appendChild(div);
+    }
+    host.scrollTop = host.scrollHeight;
+}
+
+$("reset-btn").addEventListener("click", () => {
+    if (!model) return;
+    model.reset();
+    chatMessages = [];
+    renderChat();
+    log($("chat-log"), "new chat — KV cache cleared.");
+});
+
+$("stop-btn").addEventListener("click", () => {
+    cancelGen = true;
+});
+
 $("send-btn").addEventListener("click", async () => {
     if (!model) return;
     const text = $("prompt").value.trim();
     if (!text) return;
     $("send-btn").disabled = true;
+    $("stop-btn").disabled = false;
     $("prompt").value = "";
 
+    // Build the messages array including any system prompt.
+    const sys = $("sys-prompt").value.trim();
+    const userMsg = { role: "user", content: text };
+    chatMessages.push(userMsg);
+    const messages = sys
+        ? [{ role: "system", content: sys }, ...chatMessages]
+        : [...chatMessages];
+
+    // Append a placeholder assistant bubble that we stream into.
+    const assistantMsg = { role: "model", content: "" };
+    chatMessages.push(assistantMsg);
+    renderChat();
+    const lastBody = $("chat-history").lastElementChild.querySelector(".msg-body");
+
+    cancelGen = false;
+    let emitted = 0;
+    let sawError = null;
     try {
         model.setSampling({
             temperature: parseFloat($("temp").value),
@@ -259,38 +423,52 @@ $("send-btn").addEventListener("click", async () => {
             seed: 0,
         });
 
-        const messages = [{ role: "user", content: text }];
-        const prompt = model.renderChat(messages, false);
-        log($("chat-log"), `prompt (${prompt.length} chars)`);
+        // KV cache persists across turns, so each Send only needs to feed the
+        // *new* portion of the rendered prompt. For now we always reset before
+        // each Send and re-feed the whole history — simpler and correct,
+        // accepting the prompt-eval cost.
+        model.reset();
 
+        const prompt = model.renderChat(messages, false);
         const ids = model.encode(prompt);
-        log($("chat-log"), `tokenized: ${ids.length} tokens`);
+        log($("chat-log"), `prompt-eval starting: ${ids.length} tokens`);
 
         const t0 = performance.now();
         let next = 0;
         for (const id of ids) {
+            if (cancelGen) throw new Error("cancelled");
             next = await model.step(id);
         }
-        log($("chat-log"), `prompt-eval: ${(performance.now()-t0).toFixed(0)}ms (${ids.length} tokens)`);
+        log($("chat-log"),
+            `prompt-eval: ${(performance.now()-t0).toFixed(0)}ms (${ids.length} tokens)`);
 
-        $("reply").textContent = "";
         const max = parseInt($("maxtok").value, 10);
         const tg0 = performance.now();
-        let emitted = 0;
         for (let i = 0; i < max; i++) {
+            if (cancelGen) break;
             if (model.isEos(next)) break;
-            const piece = model.tokenStr(next) ?? "";
-            $("reply").textContent += piece.replaceAll("▁", " ");
+            const piece = (model.tokenStr(next) ?? "").replaceAll("▁", " ");
+            assistantMsg.content += piece;
+            lastBody.textContent = assistantMsg.content;
+            $("chat-history").scrollTop = $("chat-history").scrollHeight;
             emitted++;
-            const cur = next;
-            next = await model.step(cur);
+            next = await model.step(next);
         }
         const dt = performance.now() - tg0;
-        log($("chat-log"), `gen: ${emitted} tokens in ${dt.toFixed(0)}ms (${(dt/Math.max(emitted,1)).toFixed(0)} ms/tok)`);
+        log($("chat-log"),
+            `gen: ${emitted} tokens in ${dt.toFixed(0)}ms (${(dt/Math.max(emitted,1)).toFixed(0)} ms/tok = ${(emitted*1000/Math.max(dt,1)).toFixed(2)} tok/s)`);
     } catch (e) {
+        sawError = e;
         log($("chat-log"), "chat error: " + (e?.message ?? String(e)));
     } finally {
         $("send-btn").disabled = false;
+        $("stop-btn").disabled = true;
+        cancelGen = false;
+        if (sawError && emitted === 0) {
+            // Nothing came back — drop the empty assistant bubble.
+            chatMessages.pop();
+            renderChat();
+        }
     }
 });
 </script>
