@@ -253,7 +253,8 @@ impl Forward {
         for l in self.kv_lens.iter_mut() { *l = 0; }
     }
 
-    /// Run one forward step. Returns logits over the full vocab (post-softcap).
+    /// Run one forward step from a token id. Looks up the token's embedding row,
+    /// uploads it to the hidden buffer, then runs the rest of the forward.
     pub async fn step(&mut self, token_id: u32) -> Result<Vec<f32>> {
         if (token_id as u64) >= self.cfg.vocab_size as u64 {
             return Err(RullamaError::Inference(format!(
@@ -266,10 +267,7 @@ impl Forward {
             )));
         }
         let d_model = self.cfg.d_model as usize;
-        let n_layers = self.cfg.n_layers as usize;
         let ple_dim = self.cfg.ple_dim as usize;
-        let eps = self.cfg.rms_norm_eps;
-        let pos = self.pos;
 
         // ---- CPU-side per-token preamble: token embed + PLE input dequant + upload ----
         let mut hidden_cpu = self.weights.load_row_async("token_embd.weight", token_id as usize).await?;
@@ -287,6 +285,54 @@ impl Forward {
             self.ctx.queue.write_buffer(&self.per_layer_residual, 0, bytemuck::cast_slice(&ple_in));
             drop(ple_in);
         }
+
+        self.run_forward_from_hidden().await
+    }
+
+    /// Run one forward step from a pre-computed `[d_model]` embedding (vision soft
+    /// token, audio soft token, etc.). Skips the `token_embd` lookup; the caller is
+    /// responsible for the embedding scale (vision/audio projectors already produce
+    /// rmsnorm-normalised outputs).
+    ///
+    /// PLE prep is run with a zeroed per-layer-residual — there is no
+    /// `per_layer_token_embd` lookup possible without a token id; the per-layer
+    /// projection from the residual stream still contributes. This matches
+    /// Ollama's behaviour: multimodal soft tokens flow through the LM as frozen
+    /// inputs and don't get PLE injection.
+    pub async fn step_with_embedding(&mut self, embedding: &[f32]) -> Result<Vec<f32>> {
+        let d_model = self.cfg.d_model as usize;
+        if embedding.len() != d_model {
+            return Err(RullamaError::Inference(format!(
+                "step_with_embedding: got {} f32s, expected d_model = {d_model}",
+                embedding.len(),
+            )));
+        }
+        if self.pos >= MAX_CONTEXT {
+            return Err(RullamaError::Inference(format!(
+                "context length exceeded MAX_CONTEXT={}", MAX_CONTEXT
+            )));
+        }
+        // Direct upload — caller's embedding is the new hidden state.
+        self.ctx.queue.write_buffer(&self.hidden, 0, bytemuck::cast_slice(embedding));
+
+        // Zero out per_layer_residual for this step (no token id → no PLE lookup).
+        if self.cfg.has_ple() {
+            let n_layers = self.cfg.n_layers as usize;
+            let zeros = vec![0f32; n_layers * self.cfg.ple_dim as usize];
+            self.ctx.queue.write_buffer(&self.per_layer_residual, 0, bytemuck::cast_slice(&zeros));
+        }
+
+        self.run_forward_from_hidden().await
+    }
+
+    /// Forward pass starting from `self.hidden` already populated. Shared by
+    /// `step` (token-id path) and `step_with_embedding` (multimodal soft tokens).
+    async fn run_forward_from_hidden(&mut self) -> Result<Vec<f32>> {
+        let d_model = self.cfg.d_model as usize;
+        let n_layers = self.cfg.n_layers as usize;
+        let ple_dim = self.cfg.ple_dim as usize;
+        let eps = self.cfg.rms_norm_eps;
+        let pos = self.pos;
 
         // ---- weights we need on GPU before encoder construction ----
         // (WeightCache.buffer_async fetches + uploads on first touch; cached afterwards.)

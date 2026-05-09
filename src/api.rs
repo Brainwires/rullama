@@ -182,6 +182,17 @@ impl Model {
         Ok(next)
     }
 
+    /// Feed one position with a pre-computed `[d_model]` embedding instead of a
+    /// token id — the path multimodal soft tokens take (each row of the
+    /// `encode_image` / `encode_audio` output is one such embedding). Returns the
+    /// sampled next token id, just like `step_native`. The sampler is *not* given
+    /// an "observed token" — soft tokens have no id to penalise.
+    pub async fn step_with_embedding_native(&mut self, embedding: &[f32]) -> Result<u32> {
+        let logits = self.forward.step_with_embedding(embedding).await?;
+        let next = self.sampler.sample(&logits);
+        Ok(next)
+    }
+
     /// Render a list of chat messages into the Gemma 4 prompt format, ready to feed
     /// to `encode_tokens` + `step`. Includes the trailing `<|turn>model\n` so the
     /// next sampled token starts the assistant reply.
@@ -239,6 +250,18 @@ impl Model {
     #[wasm_bindgen(js_name = step)]
     pub async fn step_js(&mut self, token_id: u32) -> std::result::Result<u32, JsError> {
         self.step_native(token_id).await.map_err(|e| JsError::new(&format!("{e}")))
+    }
+
+    /// Feed one pre-computed embedding (e.g. one soft-token row from
+    /// `encodeImage`), advance pos, return sampled next token id. JS pass-in is a
+    /// `Float32Array` of length `d_model` (1536 for gemma4:e2b).
+    #[wasm_bindgen(js_name = stepWithEmbedding)]
+    pub async fn step_with_embedding_js(
+        &mut self, embedding: Vec<f32>,
+    ) -> std::result::Result<u32, JsError> {
+        self.step_with_embedding_native(&embedding)
+            .await
+            .map_err(|e| JsError::new(&format!("{e}")))
     }
 
     /// Configure sampling from a JSON-shape `{temperature, top_k, top_p, repetition_penalty, seed}`.
