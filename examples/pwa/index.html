@@ -202,48 +202,26 @@ $("load-btn").addEventListener("click", async () => {
         if (!confirm(`${name} isn't a gemma4 model — load will fail at parse time. Continue anyway?`)) return;
     }
     $("load-btn").disabled = true;
-    setPill($("model-status"), "downloading...", "warn");
-    log($("model-log"), `fetching ${name} (${fmtBytes(totalSize)}) from /api/blob/...`);
+    setPill($("model-status"), "loading...", "warn");
+    log($("model-log"),
+        `streaming ${name} (${fmtBytes(totalSize)}) via Range requests — bytes never enter wasm memory in bulk`);
 
     const prog = $("model-progress");
     const progLabel = $("model-progress-label");
     prog.style.display = "";
     prog.value = 0;
     prog.max = 100;
-    progLabel.textContent = "";
+    progLabel.textContent = "header read…";
 
     try {
-        const t0 = performance.now();
-        const res = await fetch("/api/blob/" + encodeURIComponent(name));
-        if (!res.ok) throw new Error(`/api/blob/${name} -> ${res.status}`);
-
-        const reader = res.body.getReader();
-        const chunks = [];
-        let received = 0;
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            chunks.push(value);
-            received += value.byteLength;
-            if (totalSize > 0) {
-                prog.value = (received / totalSize) * 100;
-                progLabel.textContent = `${fmtBytes(received)} / ${fmtBytes(totalSize)}`;
-            } else {
-                progLabel.textContent = `${fmtBytes(received)}`;
-            }
-        }
-        const buf = new Uint8Array(received);
-        let off = 0;
-        for (const c of chunks) { buf.set(c, off); off += c.byteLength; }
-        const dtFetch = performance.now() - t0;
-        log($("model-log"), `download done in ${(dtFetch/1000).toFixed(1)}s — ${fmtBytes(received)}, ${(received/dtFetch*1000/1e6).toFixed(0)} MB/s`);
-        progLabel.textContent = "loading into WASM…";
-
+        const url = "/api/blob/" + encodeURIComponent(name);
         const t1 = performance.now();
-        setPill($("model-status"), "parsing GGUF...", "warn");
-        model = await Model.load(buf);
+        // Tensor bytes are pulled inside Rust via fetch+Range as the GPU upload runs.
+        // From JS we just hand over the URL.
+        model = await Model.loadFromUrl(url);
         const dtLoad = performance.now() - t1;
-        log($("model-log"), `Model.load done in ${(dtLoad/1000).toFixed(1)}s — vocab=${model.vocabSize}`);
+        log($("model-log"),
+            `Model.loadFromUrl done in ${(dtLoad/1000).toFixed(1)}s — vocab=${model.vocabSize}`);
         setPill($("model-status"), `ready: ${name}`, "ok");
         prog.style.display = "none";
         progLabel.textContent = "";

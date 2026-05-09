@@ -58,10 +58,9 @@ pub struct Model {
 }
 
 impl Model {
-    /// Native-friendly constructor: takes ownership of GGUF bytes, initializes WebGPU,
-    /// and prepares all the on-GPU resources (compute pipelines, weight cache).
-    pub async fn load_native(bytes: Vec<u8>) -> Result<Self> {
-        let reader = GgufReader::new(bytes)?;
+    /// Build a Model from an already-constructed GGUF reader. Shared by both
+    /// the in-memory and streaming entry points so they can't drift.
+    async fn from_reader(reader: GgufReader) -> Result<Self> {
         let cfg = Gemma4Config::from_gguf(&reader)?;
         let tokenizer = BpeTokenizer::from_gguf(&reader)?;
         let r_arc = Arc::new(reader);
@@ -74,6 +73,24 @@ impl Model {
             cfg, weights, wcache, ctx, pipes, tokenizer, kv_state, pos: 0,
             sampler: Sampler::new(SamplingOptions::default()),
         })
+    }
+
+    /// Native-friendly constructor: takes ownership of GGUF bytes, initializes WebGPU,
+    /// and prepares all the on-GPU resources (compute pipelines, weight cache).
+    pub async fn load_native(bytes: Vec<u8>) -> Result<Self> {
+        let reader = GgufReader::new(bytes)?;
+        Self::from_reader(reader).await
+    }
+
+    /// Streaming constructor: takes any [`crate::gguf::TensorFetcher`] (in-memory or
+    /// HTTP) and reads only the header up front. Tensor bytes are pulled lazily
+    /// through the fetcher and dropped after each GPU upload — this is what keeps
+    /// peak CPU memory bounded for the wasm32 4 GB linear-memory cap.
+    pub async fn load_streaming(
+        fetcher: std::sync::Arc<dyn crate::gguf::TensorFetcher>,
+    ) -> Result<Self> {
+        let reader = GgufReader::new_streaming(fetcher).await?;
+        Self::from_reader(reader).await
     }
 
     /// Encode text → token IDs (Ollama-matching BPE).
@@ -135,10 +152,27 @@ impl Model {
 #[wasm_bindgen]
 impl Model {
     /// JS entry point: build a Model from raw GGUF bytes (e.g. a `Uint8Array` from
-    /// `fetch().then(r => r.arrayBuffer())`).
+    /// `fetch().then(r => r.arrayBuffer())`). Holds the entire GGUF in wasm linear
+    /// memory; only suitable for files that fit under the 4 GB wasm32 cap.
     #[wasm_bindgen(js_name = load)]
     pub async fn load_js(bytes: Vec<u8>) -> std::result::Result<Model, JsError> {
         Self::load_native(bytes).await.map_err(|e| JsError::new(&format!("{e}")))
+    }
+
+    /// JS entry point: stream the GGUF over HTTP via byte-range requests. The full
+    /// file never lands in wasm memory — tensors are fetched on demand and dropped
+    /// after each GPU upload. This is the path that lets `gemma4:e2b` (~7 GB) load
+    /// in the browser despite wasm32's 4 GB linear-memory cap.
+    ///
+    /// Requires the server to support `Range: bytes=N-M` and to expose either
+    /// `Content-Range` or `X-Total-Size` so the client can discover the file length.
+    #[wasm_bindgen(js_name = loadFromUrl)]
+    pub async fn load_from_url_js(url: String) -> std::result::Result<Model, JsError> {
+        let fetcher = crate::gguf::HttpRangeFetcher::new(url)
+            .await
+            .map_err(|e| JsError::new(&format!("{e}")))?;
+        let arc: std::sync::Arc<dyn crate::gguf::TensorFetcher> = std::sync::Arc::new(fetcher);
+        Self::load_streaming(arc).await.map_err(|e| JsError::new(&format!("{e}")))
     }
 
     #[wasm_bindgen(js_name = encode)]

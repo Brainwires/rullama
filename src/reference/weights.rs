@@ -7,7 +7,10 @@
 use std::sync::Arc;
 
 use crate::error::Result;
-use crate::gguf::{GgufReader, dequant_row_to_f32, dequant_tensor_to_f32};
+use crate::gguf::{
+    GgufReader, dequant_row_to_f32, dequant_row_to_f32_async,
+    dequant_tensor_to_f32, dequant_tensor_to_f32_async,
+};
 
 /// Wrapper that owns/shares an `Arc<GgufReader>` and serves f32 dequant on demand.
 #[derive(Clone)]
@@ -37,6 +40,25 @@ impl Weights {
     pub fn load_opt(&self, name: &str) -> Result<Option<Vec<f32>>> {
         match self.reader.tensor(name) {
             Ok(_) => self.load(name).map(Some),
+            Err(_) => Ok(None),
+        }
+    }
+
+    // ---------- async (streaming-safe) variants ----------
+
+    /// Async load: works for both in-memory and streaming readers. Used by the GPU
+    /// forward path so it can run on browser-streamed GGUFs.
+    pub async fn load_async(&self, name: &str) -> Result<Vec<f32>> {
+        dequant_tensor_to_f32_async(&self.reader, name).await
+    }
+
+    pub async fn load_row_async(&self, name: &str, row_idx: usize) -> Result<Vec<f32>> {
+        dequant_row_to_f32_async(&self.reader, name, row_idx).await
+    }
+
+    pub async fn load_opt_async(&self, name: &str) -> Result<Option<Vec<f32>>> {
+        match self.reader.tensor(name) {
+            Ok(_) => self.load_async(name).await.map(Some),
             Err(_) => Ok(None),
         }
     }
