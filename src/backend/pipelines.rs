@@ -18,19 +18,23 @@ pub struct Pipelines {
     pub geglu:         wgpu::ComputePipeline,
     pub rope_neox:     wgpu::ComputePipeline,
     pub attention:     wgpu::ComputePipeline,
+    pub residual_add:  wgpu::ComputePipeline,
+    pub scale:         wgpu::ComputePipeline,
 }
 
 impl Pipelines {
     pub fn new(device: &wgpu::Device) -> Self {
         Self {
-            f16_matmul:  build(device, "f16_matmul",  kernels::F16_MATMUL),
-            q4_k_matmul: build(device, "q4_k_matmul", kernels::Q4_K_DEQUANT_MATMUL),
-            q6_k_matmul: build(device, "q6_k_matmul", kernels::Q6_K_DEQUANT_MATMUL),
-            rmsnorm:     build(device, "rmsnorm",     kernels::RMSNORM),
-            softcap:     build(device, "softcap",     kernels::SOFTCAP),
-            geglu:       build(device, "geglu",       kernels::GEGLU),
-            rope_neox:   build(device, "rope_neox",   kernels::ROPE_NEOX),
-            attention:   build(device, "attention",   kernels::ATTENTION),
+            f16_matmul:   build(device, "f16_matmul",   kernels::F16_MATMUL),
+            q4_k_matmul:  build(device, "q4_k_matmul",  kernels::Q4_K_DEQUANT_MATMUL),
+            q6_k_matmul:  build(device, "q6_k_matmul",  kernels::Q6_K_DEQUANT_MATMUL),
+            rmsnorm:      build(device, "rmsnorm",      kernels::RMSNORM),
+            softcap:      build(device, "softcap",      kernels::SOFTCAP),
+            geglu:        build(device, "geglu",        kernels::GEGLU),
+            rope_neox:    build(device, "rope_neox",    kernels::ROPE_NEOX),
+            attention:    build(device, "attention",    kernels::ATTENTION),
+            residual_add: build(device, "residual_add", kernels::RESIDUAL_ADD),
+            scale:        build(device, "scale",        kernels::SCALE),
         }
     }
 }
