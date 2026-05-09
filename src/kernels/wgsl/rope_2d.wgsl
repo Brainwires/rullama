@@ -41,9 +41,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let slot: u32 = i % half_dim;
     let ph: u32 = i / half_dim;
     let head: u32 = ph % params.n_heads;
-    let patch: u32 = ph / params.n_heads;
+    let pidx: u32 = ph / params.n_heads;
 
-    let row_base: u32 = (patch * params.n_heads + head) * params.head_dim;
+    let row_base: u32 = (pidx * params.n_heads + head) * params.head_dim;
 
     // Are we in the X half (first 32 dims) or the Y half (last 32 dims)?
     // We dispatch one thread per slot in 0..half_dim, but we need to do two rotations
@@ -51,8 +51,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // for its slot.
     if (slot >= quarter) { return; }
 
-    let pos_xv: f32 = f32(pos_x[patch]);
-    let pos_yv: f32 = f32(pos_y[patch]);
+    let pos_xv: f32 = f32(pos_x[pidx]);
+    let pos_yv: f32 = f32(pos_y[pidx]);
 
     // theta_i = base ^ (-2i / half_dim), i in 0..quarter
     let exponent: f32 = -2.0 * f32(slot) / f32(half_dim);

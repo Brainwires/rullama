@@ -3,6 +3,11 @@
 use crate::error::{Result, RullamaError};
 
 /// Holds the wgpu device and queue for the lifetime of a [`crate::api::Model`].
+///
+/// All inner handles are Arc-internal in wgpu, so `clone()` is cheap and lets us
+/// hand the same ctx to both `Forward` (text) and `VisionForward` (multimodal)
+/// without juggling Arc/Rc wrappers.
+#[derive(Clone)]
 pub struct WgpuCtx {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,

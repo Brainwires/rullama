@@ -154,6 +154,9 @@ pub struct VisionForward {
     ffn_out:       wgpu::Buffer,
     pool_buf:      wgpu::Buffer,   // [MAX_POOLED, hidden]
     soft_tokens:   wgpu::Buffer,   // [MAX_POOLED, d_text]
+    /// Out-of-place scratch for the final unweighted RMSNorm — wgpu disallows
+    /// binding the same buffer as both read-only and read-write inside a dispatch.
+    soft_tmp:      wgpu::Buffer,
     soft_tokens_read: wgpu::Buffer,
 
     dummy: wgpu::Buffer,
@@ -205,6 +208,7 @@ impl VisionForward {
         let ffn_out    = alloc("vfwd.ffn_out",  max_patches * hidden);
         let pool_buf   = alloc("vfwd.pool",     max_pooled  * hidden);
         let soft_tokens = alloc("vfwd.soft",    max_pooled * d_text);
+        let soft_tmp    = alloc("vfwd.soft_tmp", max_pooled * d_text);
 
         let soft_tokens_read = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vfwd.soft_read"),
@@ -279,7 +283,7 @@ impl VisionForward {
             q, k, v, q_norm, k_norm, v_norm,
             attn_out_buf, attn_proj,
             ffn_gate, ffn_up, ffn_act, ffn_out,
-            pool_buf, soft_tokens, soft_tokens_read,
+            pool_buf, soft_tokens, soft_tmp, soft_tokens_read,
             dummy,
         })
     }
@@ -424,16 +428,16 @@ impl VisionForward {
             );
         }
 
-        // ---- 8. Final RMSNorm without weight ----
+        // ---- 8. Final RMSNorm without weight (out-of-place into soft_tmp) ----
         rmsnorm_per_row_chained(
             &self.ctx, &self.pipes, &mut enc,
-            &self.soft_tokens, None, &self.dummy, &self.soft_tokens,
+            &self.soft_tokens, None, &self.dummy, &self.soft_tmp,
             n_pooled, d_text, eps,
         );
 
-        // ---- 9. Submit + readback ----
+        // ---- 9. Submit + readback (read from soft_tmp) ----
         let out_bytes = (n_pooled * d_text * 4) as u64;
-        enc.copy_buffer_to_buffer(&self.soft_tokens, 0, &self.soft_tokens_read, 0, out_bytes);
+        enc.copy_buffer_to_buffer(&self.soft_tmp, 0, &self.soft_tokens_read, 0, out_bytes);
         self.ctx.queue.submit(Some(enc.finish()));
 
         let result = read_back_f32(&self.ctx.device, &self.soft_tokens_read, out_bytes).await?;

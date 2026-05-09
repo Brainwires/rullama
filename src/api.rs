@@ -22,6 +22,7 @@ use crate::backend::{Pipelines, WeightCache, WgpuCtx};
 use crate::error::Result;
 use crate::gguf::GgufReader;
 use crate::model::config::Gemma4Config;
+use crate::multimodal::{VisionConfig, VisionForward};
 use crate::reference::Weights;
 use crate::reference::forward_chained::Forward;
 use crate::sampling::{Sampler, SamplingOptions};
@@ -53,6 +54,9 @@ pub async fn compute_spike_js(input: Vec<f32>) -> std::result::Result<Vec<f32>, 
 pub struct Model {
     tokenizer: BpeTokenizer,
     forward: Forward,
+    /// Built only when the GGUF carries vision tensors (e.g. gemma4:e2b/e4b);
+    /// `None` for text-only checkpoints.
+    vision: Option<VisionForward>,
     sampler: Sampler,
 }
 
@@ -62,17 +66,60 @@ impl Model {
     async fn from_reader(reader: GgufReader) -> Result<Self> {
         let cfg = Gemma4Config::from_gguf(&reader)?;
         let tokenizer = BpeTokenizer::from_gguf(&reader)?;
+        let d_text = cfg.d_model;
         let r_arc = Arc::new(reader);
         let weights = Weights::new(r_arc.clone());
         let ctx = WgpuCtx::new().await?;
         let pipes = Arc::new(Pipelines::new(&ctx.device));
-        let wcache = Arc::new(WeightCache::new(r_arc, ctx.device.clone(), ctx.queue.clone()));
+        let wcache = Arc::new(WeightCache::new(r_arc.clone(), ctx.device.clone(), ctx.queue.clone()));
+
+        // Detect vision tower (presence of v.patch_embd.weight). Build VisionForward
+        // before consuming `ctx`/`pipes`/`wcache` into the text Forward.
+        let vision = if r_arc.tensor("v.patch_embd.weight").is_ok() {
+            let vcfg = VisionConfig::from_gguf(&r_arc, d_text)?;
+            Some(VisionForward::new(vcfg, ctx.clone(), pipes.clone(), wcache.clone()).await?)
+        } else {
+            None
+        };
+
         let forward = Forward::new(cfg, ctx, pipes, weights, wcache).await?;
         Ok(Self {
             tokenizer,
             forward,
+            vision,
             sampler: Sampler::new(SamplingOptions::default()),
         })
+    }
+
+    /// True iff this checkpoint carries a vision tower (gemma4:e2b/e4b).
+    pub fn has_vision_native(&self) -> bool { self.vision.is_some() }
+
+    /// Encode an RGB image into a flat sequence of soft-token embeddings.
+    ///
+    /// `pixels`: `[3 * h * w]` f32, channel-first `[R..., G..., B...]`, normalised
+    /// to `[-1, 1]`. `h` and `w` must be multiples of `patch_size * n_merge` (= 48).
+    /// Returns `[n_pooled_patches * d_text]` f32 — one row of d_text per soft token.
+    pub async fn encode_image_native(
+        &self, pixels: &[f32], h: usize, w: usize,
+    ) -> Result<Vec<f32>> {
+        let v = self.vision.as_ref().ok_or_else(|| {
+            crate::error::RullamaError::Inference(
+                "encode_image: this checkpoint has no vision tower".into()
+            )
+        })?;
+        v.encode(pixels, h, w).await
+    }
+
+    /// Number of soft tokens an image of `h × w` pixels produces (after AvgPool 3×3
+    /// of patch grid). Useful for sizing prompt buffers without running the encoder.
+    pub fn image_soft_token_count_native(&self, h: usize, w: usize) -> Option<usize> {
+        let v = self.vision.as_ref()?;
+        let cfg = v.cfg();
+        let align = (cfg.patch_size * cfg.n_merge) as usize;
+        if h % align != 0 || w % align != 0 { return None; }
+        let pooled_h = h / align;
+        let pooled_w = w / align;
+        Some(pooled_h * pooled_w)
     }
 
     /// Native-friendly constructor: takes ownership of GGUF bytes, initializes WebGPU,
@@ -202,6 +249,30 @@ impl Model {
             .map_err(|e| JsError::new(&format!("invalid sampling options: {e}")))?;
         self.sampler.set_options(opts);
         Ok(())
+    }
+
+    /// True iff this checkpoint carries a vision tower (gemma4:e2b/e4b).
+    #[wasm_bindgen(js_name = hasVision, getter)]
+    pub fn has_vision_js(&self) -> bool { self.has_vision_native() }
+
+    /// Encode an RGB image into a `Float32Array` of soft-token embeddings, flat
+    /// `[n_pooled_patches × d_text]`. JS pass-in: `pixels` is the image in
+    /// channel-first `[R..., G..., B...]` order normalised to `[-1, 1]`; `h`,
+    /// `w` are integer pixel dims aligned to `patch_size * n_merge` (= 48).
+    #[wasm_bindgen(js_name = encodeImage)]
+    pub async fn encode_image_js(
+        &self, pixels: Vec<f32>, h: u32, w: u32,
+    ) -> std::result::Result<Vec<f32>, JsError> {
+        self.encode_image_native(&pixels, h as usize, w as usize)
+            .await
+            .map_err(|e| JsError::new(&format!("{e}")))
+    }
+
+    /// Number of soft tokens an `h × w` image will produce, or `null` if either
+    /// dimension is misaligned.
+    #[wasm_bindgen(js_name = imageSoftTokenCount)]
+    pub fn image_soft_token_count_js(&self, h: u32, w: u32) -> Option<u32> {
+        self.image_soft_token_count_native(h as usize, w as usize).map(|n| n as u32)
     }
 
     /// Render a single user message (and optional system message) into the Gemma 4
