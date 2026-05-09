@@ -73,6 +73,12 @@ pub struct Forward {
     ple_act: wgpu::Buffer,      // ple_dim
     ple_proj: wgpu::Buffer,     // d_model
 
+    // Output projection per-tile scratch (sized to max tile rows). Each output tile
+    // matmul writes into this; we then copy_buffer_to_buffer into `logits` at the
+    // correct vocab-offset (storage-buffer offset alignment is 256, but
+    // copy_buffer_to_buffer alignment is just 4).
+    logits_tile: wgpu::Buffer,
+
     // Output.
     logits: wgpu::Buffer,
     logits_read: wgpu::Buffer,
@@ -83,6 +89,10 @@ pub struct Forward {
     kv_v: Vec<Arc<wgpu::Buffer>>,
     kv_lens: Vec<u32>,
     donor_map: Vec<Option<u32>>,
+
+    // Per-layer output scalar (typically only on global layers; one f32 each).
+    // Loaded once at construction so the encoder doesn't have to read from CPU.
+    layer_scalars: Vec<Option<f32>>,
 
     // Bound dummy zero buffer for "no weight" / "no factors" slots.
     dummy: wgpu::Buffer,
@@ -145,6 +155,15 @@ impl Forward {
         let ple_act   = alloc_storage("fwd.ple_act",   ple_dim.max(1));
         let ple_proj  = alloc_storage("fwd.ple_proj",  d_model);
 
+        // Output projection tile scratch: large enough to hold the worst-case tile
+        // (MAX_TILE_BYTES / row_bytes rows × 4 bytes per row of f32 logits). 80 MiB
+        // tile / 1 byte-per-row-of-Q6_K... actually the tile size is in *weight*
+        // bytes, not output bytes. The output is n_rows f32, where n_rows is at
+        // most ceil(MAX_TILE_BYTES / row_bytes_of_token_embd). For Gemma 4 e2b
+        // that's roughly 80 MiB / 1228 bytes/row ≈ 68 K rows × 4 = 272 KB. We
+        // overprovision to vocab_size to keep things simple.
+        let logits_tile = alloc_storage("fwd.logits_tile", vocab);
+
         let logits = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fwd.logits"),
             size: (vocab * 4) as u64,
@@ -199,6 +218,17 @@ impl Forward {
 
         let dummy = make_dummy_storage(device, "fwd.dummy");
 
+        // Load per-layer output scalars once. The CPU oracle does
+        // `weights.load_opt(layer_output_scale.weight)?.first()` per layer per
+        // token; we cache the f32 here so the encoder can hand it to scale_chained
+        // without an extra GPU↔CPU bounce.
+        let mut layer_scalars: Vec<Option<f32>> = Vec::with_capacity(n_layers);
+        for i in 0..cfg.n_layers {
+            let name = format!("blk.{i}.layer_output_scale.weight");
+            let v = weights.load_opt_async(&name).await?;
+            layer_scalars.push(v.and_then(|vec| vec.first().copied()));
+        }
+
         Ok(Self {
             cfg, ctx, pipes, wcache, weights,
             hidden, norm_x, norm_y,
@@ -207,8 +237,9 @@ impl Forward {
             ffn_gate, ffn_up, ffn_act, ffn_out,
             per_layer_residual, per_layer_proj, per_layer,
             ple_state, ple_act, ple_proj,
-            logits, logits_read,
+            logits_tile, logits, logits_read,
             kv_k, kv_v, kv_lens, donor_map,
+            layer_scalars,
             dummy,
             pos: 0,
         })
@@ -315,29 +346,42 @@ impl Forward {
         rmsnorm_chained(&self.ctx, &self.pipes, &mut enc,
             &self.hidden, Some(&final_norm), &self.dummy, &self.norm_x, d_model, eps);
 
-        // ---- output projection (tiled): tile k along vocab axis ----
+        // ---- output projection (tiled): tile along vocab axis ----
+        // Each tile matmul writes its rows into `logits_tile` starting at offset 0
+        // (so it always satisfies the storage-binding alignment), then we copy
+        // those bytes into `logits` at offset `row_start * 4` (copy_buffer_to_buffer
+        // only needs 4-byte alignment).
         const MAX_TILE_BYTES: usize = 80 * 1024 * 1024;
         let tiles = wc.buffer_tiles_async("token_embd.weight", MAX_TILE_BYTES).await?;
         for tile in &tiles {
-            // Each tile output writes to logits[row_start..row_start+n_rows].
-            // Use a BufferBinding slice for the output binding with the right offset.
-            let tile_label = "fwd.output_tile";
-            run_matmul_into_slice(
+            run_matmul_into_buf(
                 &self.ctx, &self.pipes, &mut enc,
                 token_embd_dtype, &tile.buffer, &self.norm_x,
-                &self.logits, tile.row_start, tile.n_rows, d_model,
-                tile_label,
+                &self.logits_tile, tile.n_rows, d_model,
+                "fwd.output_tile",
             )?;
+            enc.copy_buffer_to_buffer(
+                &self.logits_tile, 0,
+                &self.logits, (tile.row_start as u64) * 4,
+                (tile.n_rows as u64) * 4,
+            );
         }
 
         // ---- softcap ----
-        if self.cfg.final_logit_softcap > 0.0 {
+        // Out-of-place: read from `logits`, write into `logits_tile`. wgpu
+        // disallows binding the same buffer as both read-only and read-write
+        // within one dispatch, so we can't softcap in-place.
+        let final_src: &wgpu::Buffer = if self.cfg.final_logit_softcap > 0.0 {
             softcap_chained(&self.ctx, &self.pipes, &mut enc,
-                &self.logits, &self.logits, self.cfg.vocab_size as usize, self.cfg.final_logit_softcap);
-        }
+                &self.logits, &self.logits_tile,
+                self.cfg.vocab_size as usize, self.cfg.final_logit_softcap);
+            &self.logits_tile
+        } else {
+            &self.logits
+        };
 
         // ---- copy logits → readback buffer ----
-        enc.copy_buffer_to_buffer(&self.logits, 0, &self.logits_read, 0,
+        enc.copy_buffer_to_buffer(final_src, 0, &self.logits_read, 0,
             (self.cfg.vocab_size as u64) * 4);
 
         // ---- submit + readback ----
@@ -398,8 +442,6 @@ impl Forward {
             let c = self.wcache.buffer_async(&format!("{prefix}post_norm.weight")).await?;
             (Some(a), Some(b), Some(c))
         } else { (None, None, None) };
-
-        let layer_scalar_w = self.wcache.buffer_opt_async(&format!("{prefix}layer_output_scale.weight")).await?;
 
         let factors_w = if matches!(kind, LayerKind::Global) {
             // Same RoPE factors tensor across global layers — would benefit from caching;
@@ -546,15 +588,9 @@ impl Forward {
                 &self.hidden, &self.norm_y, d_model);
         }
 
-        // Per-layer scalar (only on global layers when present)
-        if let Some(_scalar_buf) = layer_scalar_w {
-            // The CPU path reads scalar[0] and applies it as a scalar. Reading a single
-            // f32 from a GPU buffer back to CPU mid-encoder isn't possible; instead,
-            // dequantize the (tiny) tensor on CPU once at construction. Defer until we
-            // see whether parity diverges — for the e2b model the layer_output_scale
-            // tensor exists per layer but contains a single f32. Cache it lazily.
-            // For now: skip; CPU forward used `weights.load_opt`, this Forward path
-            // currently leaves it un-applied. TODO before claiming bit-exact parity.
+        // Per-layer output scalar (loaded at construction; applied as scale_chained).
+        if let Some(s) = self.layer_scalars[i as usize] {
+            scale_chained(&self.ctx, &self.pipes, enc, &self.hidden, d_model, s);
         }
 
         Ok(())
@@ -567,10 +603,10 @@ impl Forward {
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct MatmulParams { k: u32, n: u32, _p0: u32, _p1: u32 }
 
-/// Run a matmul kernel writing into `dst` at row offset `row_start` (in n-major
-/// rows of size 4 bytes each). Used for the tiled output projection where each
-/// tile contributes a contiguous slice of the logits buffer.
-fn run_matmul_into_slice(
+/// Run a matmul kernel that writes its output rows starting at offset 0 of `dst`.
+/// Used for the tiled output projection: caller copies the rows from `dst` into
+/// the per-tile slice of the global logits buffer.
+fn run_matmul_into_buf(
     ctx: &WgpuCtx,
     pipes: &Pipelines,
     enc: &mut wgpu::CommandEncoder,
@@ -578,7 +614,6 @@ fn run_matmul_into_slice(
     w: &wgpu::Buffer,
     x: &wgpu::Buffer,
     dst: &wgpu::Buffer,
-    row_start: usize,
     n_rows: usize,
     k: usize,
     label: &str,
@@ -598,11 +633,6 @@ fn run_matmul_into_slice(
         mapped_at_creation: false,
     });
     queue.write_buffer(&p_buf, 0, bytemuck::bytes_of(&params));
-
-    let dst_offset = (row_start as u64) * 4;
-    let dst_len = (n_rows as u64) * 4;
-    let dst_size = std::num::NonZeroU64::new(dst_len)
-        .ok_or_else(|| RullamaError::Inference("output proj: zero-row tile".into()))?;
     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some(&format!("{label}.bg")),
         layout: &pipeline.get_bind_group_layout(0),
@@ -610,14 +640,7 @@ fn run_matmul_into_slice(
             wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: dst,
-                    offset: dst_offset,
-                    size: Some(dst_size),
-                }),
-            },
+            wgpu::BindGroupEntry { binding: 3, resource: dst.as_entire_binding() },
         ],
     });
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
