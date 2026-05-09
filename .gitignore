@@ -2,9 +2,10 @@
 **/*.rs.bk
 Cargo.lock.bak
 
-# wasm-pack / trunk output
+# wasm-pack / trunk output (regenerate with `wasm-pack build --target web --release`)
 /pkg
 /dist
+/examples/pwa/.served
 
 # editors / OS
 .DS_Store

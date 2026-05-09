@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>rullama — Gemma 4 in the browser</title>
+    <style>
+        :root { color-scheme: light dark; --gap: 0.6rem; }
+        body {
+            font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+            margin: 0; padding: 1.2rem 1.4rem;
+            max-width: 56rem;
+            line-height: 1.4;
+        }
+        header h1 { margin: 0 0 0.2rem 0; font-size: 1.4rem; }
+        header p  { margin: 0 0 1rem 0; color: #888; font-size: 0.9rem; }
+        section { border: 1px solid #4445; border-radius: 6px; padding: 0.8rem 1rem; margin-bottom: 1rem; }
+        section h2 { margin: 0 0 var(--gap) 0; font-size: 1rem; font-weight: 600; }
+        button {
+            font: inherit; cursor: pointer;
+            padding: 0.4rem 0.9rem; border-radius: 4px;
+            border: 1px solid #6668; background: #fff1; color: inherit;
+        }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        input[type=file] { font: inherit; }
+        textarea, input[type=text] {
+            font: inherit;
+            width: 100%; box-sizing: border-box;
+            padding: 0.5rem; border-radius: 4px; border: 1px solid #6668;
+            background: transparent; color: inherit;
+        }
+        pre, .log {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.85rem;
+            background: #6661; padding: 0.6rem; border-radius: 4px;
+            white-space: pre-wrap; word-wrap: break-word;
+            max-height: 22rem; overflow-y: auto;
+            margin: 0;
+        }
+        .row { display: flex; gap: var(--gap); align-items: center; flex-wrap: wrap; }
+        .grow { flex: 1 1 auto; }
+        .pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; background: #4444; font-size: 0.8rem; }
+        .ok    { background: #2c3; color: #000; }
+        .err   { background: #c33; color: #fff; }
+        .warn  { background: #ea2; color: #000; }
+        #reply { white-space: pre-wrap; min-height: 3rem; }
+    </style>
+</head>
+<body>
+<header>
+    <h1>rullama — Gemma 4 in the browser</h1>
+    <p>Pure-Rust → WebAssembly + WebGPU. Loads a Gemma 4 GGUF locally, runs inference on your GPU, never sends anything to a server.</p>
+</header>
+
+<section id="env">
+    <h2>Environment</h2>
+    <div class="row">
+        <span id="webgpu-status" class="pill">WebGPU: checking…</span>
+        <span id="wasm-status" class="pill">WASM: not loaded</span>
+        <button id="spike-btn" disabled>Run compute spike</button>
+    </div>
+    <pre class="log" id="env-log"></pre>
+</section>
+
+<section id="model">
+    <h2>Model</h2>
+    <p style="font-size:0.9rem;color:#888;margin:0 0 var(--gap) 0;">
+        Pick a Gemma 4 GGUF on disk. Note: a wasm32 module is capped at 4&nbsp;GB linear memory,
+        so the canonical <code>gemma4:e2b</code> Q4_K_M (~7&nbsp;GB) cannot be loaded in this
+        bundle as-is — use a smaller variant or quant for testing. Smaller GGUFs (e.g. a 1B
+        Q4_K_M) load cleanly.
+    </p>
+    <div class="row">
+        <input type="file" id="gguf-input" accept=".gguf" />
+        <button id="load-btn" disabled>Load</button>
+        <span id="model-status" class="pill">no model</span>
+    </div>
+    <pre class="log" id="model-log"></pre>
+</section>
+
+<section id="chat">
+    <h2>Chat</h2>
+    <div class="row">
+        <input type="text" id="prompt" placeholder='e.g. "What is the capital of France?"' class="grow" />
+        <button id="send-btn" disabled>Send</button>
+        <button id="reset-btn" disabled>Reset</button>
+    </div>
+    <div class="row" style="margin-top:var(--gap);font-size:0.85rem;color:#888;">
+        <label>temp <input type="number" id="temp" value="0.7" step="0.1" min="0" max="2" style="width:5rem"></label>
+        <label>top_k <input type="number" id="topk" value="40" step="1" min="0" style="width:5rem"></label>
+        <label>top_p <input type="number" id="topp" value="0.95" step="0.05" min="0" max="1" style="width:5rem"></label>
+        <label>max_tokens <input type="number" id="maxtok" value="64" step="8" min="1" style="width:6rem"></label>
+    </div>
+    <h3 style="font-size:0.95rem; margin: 0.8rem 0 0.3rem 0;">Reply</h3>
+    <div id="reply" class="log"></div>
+    <pre class="log" id="chat-log" style="margin-top:var(--gap)"></pre>
+</section>
+
+<script type="module">
+import init, { Model, computeSpike } from "/pkg/rullama.js";
+
+const $ = (id) => document.getElementById(id);
+const setPill = (el, text, cls) => { el.textContent = text; el.className = "pill" + (cls ? " " + cls : ""); };
+const log = (el, s) => { el.textContent += s + "\n"; el.scrollTop = el.scrollHeight; };
+
+// 1) WebGPU check
+const webgpuOK = (() => {
+    if (!('gpu' in navigator)) {
+        setPill($("webgpu-status"), "WebGPU: not available", "err");
+        return false;
+    }
+    setPill($("webgpu-status"), "WebGPU: ready", "ok");
+    return true;
+})();
+
+// 2) WASM load
+let wasmReady = false;
+try {
+    log($("env-log"), "loading rullama WASM bundle...");
+    await init();
+    setPill($("wasm-status"), "WASM: loaded", "ok");
+    log($("env-log"), "rullama wasm bundle loaded.");
+    wasmReady = true;
+} catch (e) {
+    setPill($("wasm-status"), "WASM: failed", "err");
+    log($("env-log"), "WASM load error: " + (e?.message ?? String(e)));
+}
+
+if (wasmReady && webgpuOK) {
+    $("spike-btn").disabled = false;
+    $("load-btn").disabled = false;
+}
+
+// 3) Compute spike — verifies the WebGPU compute path end-to-end
+$("spike-btn").addEventListener("click", async () => {
+    $("spike-btn").disabled = true;
+    try {
+        const input = new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]);
+        const t0 = performance.now();
+        const out = await computeSpike(input);
+        const dt = (performance.now() - t0).toFixed(1);
+        log($("env-log"), `compute spike OK (${dt}ms): in=[${[...input]}] out=[${[...out]}]`);
+    } catch (e) {
+        log($("env-log"), "compute spike error: " + (e?.message ?? String(e)));
+    } finally {
+        $("spike-btn").disabled = false;
+    }
+});
+
+// 4) Model load
+let model = null;
+$("load-btn").addEventListener("click", async () => {
+    const file = $("gguf-input").files[0];
+    if (!file) { log($("model-log"), "pick a .gguf file first."); return; }
+    setPill($("model-status"), "loading...", "warn");
+    $("load-btn").disabled = true;
+    log($("model-log"), `reading ${file.name} (${(file.size/1e9).toFixed(2)} GB)...`);
+
+    try {
+        const t0 = performance.now();
+        const buf = await file.arrayBuffer();
+        log($("model-log"), `read ${(performance.now()-t0).toFixed(0)}ms — handing to Model.load`);
+        const t1 = performance.now();
+        model = await Model.load(new Uint8Array(buf));
+        log($("model-log"), `Model.load done in ${(performance.now()-t1).toFixed(0)}ms — vocab=${model.vocabSize}`);
+        setPill($("model-status"), "ready", "ok");
+        $("send-btn").disabled = false;
+        $("reset-btn").disabled = false;
+    } catch (e) {
+        setPill($("model-status"), "load failed", "err");
+        log($("model-log"), "Model.load error: " + (e?.message ?? String(e)));
+    } finally {
+        $("load-btn").disabled = false;
+    }
+});
+
+// 5) Reset
+$("reset-btn").addEventListener("click", () => {
+    if (model) { model.reset(); $("reply").textContent = ""; log($("chat-log"), "reset."); }
+});
+
+// 6) Send (the actual chat loop)
+$("send-btn").addEventListener("click", async () => {
+    if (!model) return;
+    const text = $("prompt").value.trim();
+    if (!text) return;
+    $("send-btn").disabled = true;
+    $("prompt").value = "";
+
+    try {
+        // Configure sampling.
+        model.setSampling({
+            temperature: parseFloat($("temp").value),
+            top_k: parseInt($("topk").value, 10),
+            top_p: parseFloat($("topp").value),
+            repetition_penalty: 1.1,
+            seed: 0,
+        });
+
+        const messages = [{ role: "user", content: text }];
+        const prompt = model.renderChat(messages, false);
+        log($("chat-log"), `prompt (${prompt.length} chars):\n${prompt}`);
+
+        const ids = model.encode(prompt);
+        log($("chat-log"), `tokenized: ${ids.length} tokens`);
+
+        // Feed prompt; remember last sampled (will be the first generated token).
+        const t0 = performance.now();
+        let next = 0;
+        for (const id of ids) {
+            next = await model.step(id);
+        }
+        log($("chat-log"), `prompt-eval: ${(performance.now()-t0).toFixed(0)}ms (${ids.length} tokens)`);
+
+        // Generate reply, streaming token-by-token to the UI.
+        $("reply").textContent = "";
+        const max = parseInt($("maxtok").value, 10);
+        const tg0 = performance.now();
+        let emitted = 0;
+        for (let i = 0; i < max; i++) {
+            if (model.isEos(next)) break;
+            const piece = model.tokenStr(next) ?? "";
+            $("reply").textContent += piece.replaceAll("▁", " ");
+            emitted++;
+            const cur = next;
+            next = await model.step(cur);
+        }
+        log($("chat-log"), `gen: ${emitted} tokens in ${(performance.now()-tg0).toFixed(0)}ms (${((performance.now()-tg0)/Math.max(emitted,1)).toFixed(0)} ms/tok)`);
+    } catch (e) {
+        log($("chat-log"), "chat error: " + (e?.message ?? String(e)));
+    } finally {
+        $("send-btn").disabled = false;
+    }
+});
+</script>
+</body>
+</html>
