@@ -109,6 +109,12 @@ impl BpeTokenizer {
         self.rev_vocab.get(id as usize).map(|s| s.as_str())
     }
 
+    /// Reverse lookup: token string → id. Linear scan over the vocab; intended
+    /// for one-shot lookups at construction (e.g. resolving `<|image>` etc.).
+    pub fn str_to_id(&self, s: &str) -> Option<u32> {
+        self.rev_vocab.iter().position(|t| t == s).map(|i| i as u32)
+    }
+
     /// Encode a UTF-8 string into token ids.
     pub fn encode(&self, s: &str) -> Vec<u32> {
         // ----- 1) split around special tokens -----

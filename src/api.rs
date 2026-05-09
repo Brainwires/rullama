@@ -298,6 +298,16 @@ impl Model {
         self.image_soft_token_count_native(h as usize, w as usize).map(|n| n as u32)
     }
 
+    /// `[<|image> token id, <image|> token id]` if both sentinels exist in the
+    /// vocab, else `null`. Used by the JS chat handler to splice soft-token
+    /// embeddings between the markers in the encoded prompt.
+    #[wasm_bindgen(js_name = imageSentinelIds)]
+    pub fn image_sentinel_ids_js(&self) -> Option<Vec<u32>> {
+        let begin = self.tokenizer.str_to_id("<|image>")?;
+        let end   = self.tokenizer.str_to_id("<image|>")?;
+        Some(vec![begin, end])
+    }
+
     /// Render a single user message (and optional system message) into the Gemma 4
     /// chat-template prompt. JS callers pass `[{role, content}, ...]` as JSON.
     #[wasm_bindgen(js_name = renderChat)]
