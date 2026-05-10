@@ -15,6 +15,7 @@ pub const QUICK_GEGLU: &str = include_str!("wgsl/quick_geglu.wgsl");
 pub const POS_EMBED_ADD: &str = include_str!("wgsl/pos_embed_add.wgsl");
 pub const ROPE_2D: &str = include_str!("wgsl/rope_2d.wgsl");
 pub const VISION_ATTENTION: &str = include_str!("wgsl/vision_attention.wgsl");
+pub const VISION_ATTENTION_FLASH: &str = include_str!("wgsl/vision_attention_flash.wgsl");
 pub const HALF_RESIDUAL_ADD: &str = include_str!("wgsl/half_residual_add.wgsl");
 pub const SILU: &str = include_str!("wgsl/silu.wgsl");
 pub const GLU_SPLIT: &str = include_str!("wgsl/glu_split.wgsl");

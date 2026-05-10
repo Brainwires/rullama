@@ -789,6 +789,14 @@ pub fn vision_attention_chained(
     q: &wgpu::Buffer, k: &wgpu::Buffer, v: &wgpu::Buffer, out: &wgpu::Buffer,
     head_dim: usize, n_heads: usize, n_patches: usize,
 ) {
+    // The flash kernel (workgroup-shared tiled K/V + online softmax) wins by
+    // an order of magnitude over the original sequential per-thread inner
+    // loop, provided head_dim fits in the shared q/kv layout. Gemma 4 vision
+    // uses head_dim=64, which is the maximum the flash kernel supports.
+    if head_dim <= 64 {
+        vision_attention_flash_chained(ctx, p, enc, q, k, v, out, head_dim, n_heads, n_patches);
+        return;
+    }
     let device = &ctx.device;
     let queue = &ctx.queue;
     let params = VisionAttnParams {
@@ -813,6 +821,42 @@ pub fn vision_attention_chained(
         label: Some("vattn.pass"), timestamp_writes: None,
     });
     cp.set_pipeline(&p.vision_attention);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups(n_patches as u32, n_heads as u32, 1);
+}
+
+/// Flash-attention-style bidirectional self-attention for vision.
+/// Tiles K, V in chunks of 32 patches into workgroup-shared memory and runs
+/// online softmax. Same I/O as `vision_attention_chained`.
+pub fn vision_attention_flash_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    q: &wgpu::Buffer, k: &wgpu::Buffer, v: &wgpu::Buffer, out: &wgpu::Buffer,
+    head_dim: usize, n_heads: usize, n_patches: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = VisionAttnParams {
+        head_dim: head_dim as u32,
+        n_heads: n_heads as u32,
+        n_patches: n_patches as u32,
+        _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "vattnf.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vattnf.bg"),
+        layout: &p.vision_attention_flash.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: q.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: k.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: v.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: out.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("vattnf.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.vision_attention_flash);
     cp.set_bind_group(0, &bg, &[]);
     cp.dispatch_workgroups(n_patches as u32, n_heads as u32, 1);
 }
