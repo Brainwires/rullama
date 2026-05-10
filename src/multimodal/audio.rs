@@ -127,6 +127,51 @@ struct AudioBlock {
     conv_pw2_w: Vec<f32>,    // hidden -> hidden
     conv_pw2_b: Option<Vec<f32>>,
     conv_dw: Vec<f32>,       // [hidden, kernel] depthwise conv weights
+
+    // ClippableLinear clamps. Each `Clamp` is `{in_min, in_max, out_min, out_max}`
+    // — defaults to all-zeros when the GGUF doesn't ship the scalar. Ollama's
+    // `AudioClippableLinear.Forward` applies the input clamp iff `inMax != 0`
+    // and the output clamp iff `outMax != 0` (default zero behaves as "skip").
+    cl_attn_q: Clamp,
+    cl_attn_k: Clamp,
+    cl_attn_v: Clamp,
+    cl_attn_o: Clamp,
+    cl_ffw_up: Clamp,
+    cl_ffw_down: Clamp,
+    cl_ffw_up_1: Clamp,
+    cl_ffw_down_1: Clamp,
+    cl_conv_pw1: Clamp,
+    cl_conv_pw2: Clamp,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Clamp { in_min: f32, in_max: f32, out_min: f32, out_max: f32 }
+
+impl Clamp {
+    fn apply_in(&self, x: &mut [f32]) {
+        if self.in_max != 0.0 {
+            for v in x { *v = v.clamp(self.in_min, self.in_max); }
+        }
+    }
+    fn apply_out(&self, y: &mut [f32]) {
+        if self.out_max != 0.0 {
+            for v in y { *v = v.clamp(self.out_min, self.out_max); }
+        }
+    }
+}
+
+async fn load_clamp(r: &GgufReader, prefix: &str) -> Result<Clamp> {
+    async fn one(r: &GgufReader, name: &str) -> Result<f32> {
+        Ok(load_opt_f32(r, name).await?
+            .and_then(|x| x.first().copied())
+            .unwrap_or(0.0))
+    }
+    Ok(Clamp {
+        in_min:  one(r, &format!("{prefix}.input_min")).await?,
+        in_max:  one(r, &format!("{prefix}.input_max")).await?,
+        out_min: one(r, &format!("{prefix}.output_min")).await?,
+        out_max: one(r, &format!("{prefix}.output_max")).await?,
+    })
 }
 
 /// CPU-resident audio tower. Construct once, reuse for every `encode` call.
@@ -286,8 +331,8 @@ impl AudioForward {
             self.forward_ffw(
                 &mut h, seq,
                 &self.blocks[b].ffw_norm,
-                &self.blocks[b].ffw_up_w, self.blocks[b].ffw_up_b.as_deref(),
-                &self.blocks[b].ffw_down_w, self.blocks[b].ffw_down_b.as_deref(),
+                &self.blocks[b].ffw_up_w,   self.blocks[b].ffw_up_b.as_deref(),   &self.blocks[b].cl_ffw_up,
+                &self.blocks[b].ffw_down_w, self.blocks[b].ffw_down_b.as_deref(), &self.blocks[b].cl_ffw_down,
                 &self.blocks[b].ffw_post_norm,
             );
             self.forward_attention(&mut h, seq, &self.blocks[b]);
@@ -295,8 +340,8 @@ impl AudioForward {
             self.forward_ffw(
                 &mut h, seq,
                 &self.blocks[b].ffw_norm_1,
-                &self.blocks[b].ffw_up_1_w, self.blocks[b].ffw_up_1_b.as_deref(),
-                &self.blocks[b].ffw_down_1_w, self.blocks[b].ffw_down_1_b.as_deref(),
+                &self.blocks[b].ffw_up_1_w,   self.blocks[b].ffw_up_1_b.as_deref(),   &self.blocks[b].cl_ffw_up_1,
+                &self.blocks[b].ffw_down_1_w, self.blocks[b].ffw_down_1_b.as_deref(), &self.blocks[b].cl_ffw_down_1,
                 &self.blocks[b].ffw_post_norm_1,
             );
             // Final block: clamp + RMSNorm with the block-level pre_norm weight
@@ -434,6 +479,26 @@ impl AudioForward {
         y
     }
 
+    /// `linear_rows` with the `AudioClippableLinear` semantics around it:
+    /// optional input clamp before the matmul, optional output clamp after.
+    /// Each clamp activates iff its max scalar is non-zero (matches Ollama's
+    /// `if l.inMax != 0 { ... }`).
+    fn clipped_linear_rows(
+        x: &[f32], w: &[f32], b: Option<&[f32]>,
+        rows: usize, in_dim: usize, out_dim: usize,
+        clamp: &Clamp,
+    ) -> Vec<f32> {
+        let mut y = if clamp.in_max != 0.0 {
+            let mut xc = x.to_vec();
+            clamp.apply_in(&mut xc);
+            Self::linear_rows(&xc, w, b, rows, in_dim, out_dim)
+        } else {
+            Self::linear_rows(x, w, b, rows, in_dim, out_dim)
+        };
+        clamp.apply_out(&mut y);
+        y
+    }
+
     /// FFW with half-residual: `x = residual + 0.5 * (x → clamp → norm → up
     /// → SiLU → down → clamp → post_norm)`. In-place.
     fn forward_ffw(
@@ -441,8 +506,8 @@ impl AudioForward {
         x: &mut [f32],
         seq: usize,
         norm_w: &[f32],
-        up_w: &[f32], up_b: Option<&[f32]>,
-        down_w: &[f32], down_b: Option<&[f32]>,
+        up_w: &[f32], up_b: Option<&[f32]>, up_clamp: &Clamp,
+        down_w: &[f32], down_b: Option<&[f32]>, down_clamp: &Clamp,
         post_norm_w: &[f32],
     ) {
         let cfg = &self.cfg;
@@ -452,23 +517,17 @@ impl AudioForward {
         let gc = cfg.grad_clip;
         let rw = cfg.residual_w;
 
-        // Save residual.
         let residual: Vec<f32> = x.to_vec();
-        // Clamp.
         for v in x.iter_mut() { *v = v.clamp(-gc, gc); }
-        // RMSNorm.
         Self::rmsnorm_rows(x, seq, hidden, Some(norm_w), eps);
-        // Up.
-        let mut h = Self::linear_rows(x, up_w, up_b, seq, hidden, ffn);
+        // Up linear (clipped).
+        let mut h = Self::clipped_linear_rows(x, up_w, up_b, seq, hidden, ffn, up_clamp);
         // SiLU.
         for v in h.iter_mut() { *v = *v * (1.0 / (1.0 + (-*v).exp())); }
-        // Down.
-        let mut h = Self::linear_rows(&h, down_w, down_b, seq, ffn, hidden);
-        // Clamp.
+        // Down linear (clipped).
+        let mut h = Self::clipped_linear_rows(&h, down_w, down_b, seq, ffn, hidden, down_clamp);
         for v in h.iter_mut() { *v = v.clamp(-gc, gc); }
-        // Post-norm.
         Self::rmsnorm_rows(&mut h, seq, hidden, Some(post_norm_w), eps);
-        // x = residual + rw * h
         for i in 0..x.len() {
             x[i] = residual[i] + rw * h[i];
         }
@@ -503,13 +562,13 @@ impl AudioForward {
         for v in x.iter_mut() { *v = v.clamp(-gc, gc); }
         Self::rmsnorm_rows(x, seq, hidden, Some(&block.attn_pre_norm), eps);
 
-        // Q, K, V projections.
-        let mut q = Self::linear_rows(x, &block.attn_q_w, block.attn_q_b.as_deref(),
-            seq, hidden, hidden);
-        let mut k = Self::linear_rows(x, &block.attn_k_w, block.attn_k_b.as_deref(),
-            seq, hidden, hidden);
-        let v = Self::linear_rows(x, &block.attn_v_w, block.attn_v_b.as_deref(),
-            seq, hidden, hidden);
+        // Q, K, V projections (each is a ClippableLinear).
+        let mut q = Self::clipped_linear_rows(x, &block.attn_q_w, block.attn_q_b.as_deref(),
+            seq, hidden, hidden, &block.cl_attn_q);
+        let mut k = Self::clipped_linear_rows(x, &block.attn_k_w, block.attn_k_b.as_deref(),
+            seq, hidden, hidden, &block.cl_attn_k);
+        let v = Self::clipped_linear_rows(x, &block.attn_v_w, block.attn_v_b.as_deref(),
+            seq, hidden, hidden, &block.cl_attn_v);
 
         // Per-dim Q scale: (head_dim^-0.5 / ln 2) * per_dim_scale (already softplus'd
         // by Ollama's converter — model_audio.go::forwardAttention line 305-309).
@@ -640,9 +699,9 @@ impl AudioForward {
         // Trim back to seq.
         attn_out.truncate(seq * hidden);
 
-        // Output projection + clamp + post-norm + residual.
-        let mut o = Self::linear_rows(&attn_out, &block.attn_o_w, block.attn_o_b.as_deref(),
-            seq, hidden, hidden);
+        // Output projection (ClippableLinear) + grad clamp + post-norm + residual.
+        let mut o = Self::clipped_linear_rows(&attn_out, &block.attn_o_w, block.attn_o_b.as_deref(),
+            seq, hidden, hidden, &block.cl_attn_o);
         for v in o.iter_mut() { *v = v.clamp(-gc, gc); }
         Self::rmsnorm_rows(&mut o, seq, hidden, Some(&block.attn_post_norm), eps);
         for i in 0..x.len() {
@@ -668,9 +727,9 @@ impl AudioForward {
         let residual: Vec<f32> = x.to_vec();
         // norm.
         Self::rmsnorm_rows(x, seq, hidden, Some(&block.conv_norm), eps);
-        // conv_pw1: hidden -> 2*hidden
-        let h = Self::linear_rows(x, &block.conv_pw1_w, block.conv_pw1_b.as_deref(),
-            seq, hidden, hidden * 2);
+        // conv_pw1 (ClippableLinear): hidden -> 2*hidden
+        let h = Self::clipped_linear_rows(x, &block.conv_pw1_w, block.conv_pw1_b.as_deref(),
+            seq, hidden, hidden * 2, &block.cl_conv_pw1);
         // GLU split: data half * sigmoid(gate half)
         let mut g = vec![0f32; seq * hidden];
         for s in 0..seq {
@@ -699,9 +758,9 @@ impl AudioForward {
         for v in conv_out.iter_mut() { *v = v.clamp(-gc, gc); }
         Self::rmsnorm_rows(&mut conv_out, seq, hidden, Some(&block.norm_conv), eps);
         for v in conv_out.iter_mut() { *v = *v * (1.0 / (1.0 + (-*v).exp())); }
-        // conv_pw2.
-        let pw2_out = Self::linear_rows(&conv_out, &block.conv_pw2_w,
-            block.conv_pw2_b.as_deref(), seq, hidden, hidden);
+        // conv_pw2 (ClippableLinear).
+        let pw2_out = Self::clipped_linear_rows(&conv_out, &block.conv_pw2_w,
+            block.conv_pw2_b.as_deref(), seq, hidden, hidden, &block.cl_conv_pw2);
         // Residual.
         for i in 0..x.len() {
             x[i] = residual[i] + pw2_out[i];
@@ -752,5 +811,16 @@ async fn load_block(r: &GgufReader, i: u32) -> Result<AudioBlock> {
         conv_pw2_w:      dequant_tensor_to_f32_async(r, &load("conv_pw2.weight")?).await?,
         conv_pw2_b:      load_opt_f32(r, &load("conv_pw2.bias")?).await?,
         conv_dw:         dequant_tensor_to_f32_async(r, &load("conv_dw.weight")?).await?,
+
+        cl_attn_q:    load_clamp(r, &format!("{p}attn_q")).await?,
+        cl_attn_k:    load_clamp(r, &format!("{p}attn_k")).await?,
+        cl_attn_v:    load_clamp(r, &format!("{p}attn_v")).await?,
+        cl_attn_o:    load_clamp(r, &format!("{p}attn_out")).await?,
+        cl_ffw_up:    load_clamp(r, &format!("{p}ffn_up")).await?,
+        cl_ffw_down:  load_clamp(r, &format!("{p}ffn_down")).await?,
+        cl_ffw_up_1:  load_clamp(r, &format!("{p}ffn_up_1")).await?,
+        cl_ffw_down_1:load_clamp(r, &format!("{p}ffn_down_1")).await?,
+        cl_conv_pw1:  load_clamp(r, &format!("{p}conv_pw1")).await?,
+        cl_conv_pw2:  load_clamp(r, &format!("{p}conv_pw2")).await?,
     })
 }
