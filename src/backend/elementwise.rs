@@ -817,6 +817,171 @@ mod tests {
         check(&cpu_x, &gpu_x, 1e-4);
     }
 
+    /// CPU port of `audio.rs::AudioForward::forward_attention`'s inner loop:
+    /// takes already-prepared (Q per-dim-scaled, K k-scaled) Q/K/V/pos_proj
+    /// and computes `attn_out` exactly as the GPU kernel should.
+    #[allow(clippy::too_many_arguments)]
+    fn cpu_block_local_attention(
+        q_pad: &[f32], k_padded: &[f32], v_padded: &[f32], pos_proj: &[f32],
+        seq: usize, padded_len: usize, hidden: usize, n_heads: usize, head_dim: usize,
+        chunk_size: usize, context_size: usize, max_span: usize,
+        max_past: usize, max_future: usize, pad_left: usize, logit_cap: f32,
+    ) -> Vec<f32> {
+        let mut out = vec![0f32; padded_len * hidden];
+        let num_chunks = padded_len / chunk_size;
+        for u in 0..num_chunks {
+            for r in 0..chunk_size {
+                for h in 0..n_heads {
+                    let q_off = (u * chunk_size + r) * hidden + h * head_dim;
+                    let mut logits = vec![f32::NEG_INFINITY; context_size];
+                    let mut max_logit = f32::NEG_INFINITY;
+                    for c in 0..context_size {
+                        let actual_t = (u * chunk_size) as i64 + c as i64 - pad_left as i64;
+                        let valid = actual_t >= 0 && actual_t < seq as i64;
+                        let causal = c >= r && c <= r + max_past + max_future;
+                        if !valid || !causal { continue; }
+                        let k_off = (u * chunk_size + c) * hidden + h * head_dim;
+                        let mut ac = 0f32;
+                        for d in 0..head_dim {
+                            ac += q_pad[q_off + d] * k_padded[k_off + d];
+                        }
+                        let p_signed = max_past as i64 + r as i64 - c as i64;
+                        let bd = if p_signed >= 0 && (p_signed as usize) < max_span {
+                            let pos_off = p_signed as usize * hidden + h * head_dim;
+                            let mut bd = 0f32;
+                            for d in 0..head_dim {
+                                bd += q_pad[q_off + d] * pos_proj[pos_off + d];
+                            }
+                            bd
+                        } else { 0.0 };
+                        let mut score = ac + bd;
+                        score = (score / logit_cap).tanh() * logit_cap;
+                        logits[c] = score;
+                        if score > max_logit { max_logit = score; }
+                    }
+                    let mut sum_exp = 0f32;
+                    for c in 0..context_size {
+                        if logits[c] == f32::NEG_INFINITY { logits[c] = 0.0; continue; }
+                        let e = (logits[c] - max_logit).exp();
+                        logits[c] = e;
+                        sum_exp += e;
+                    }
+                    let inv = if sum_exp > 0.0 { 1.0 / sum_exp } else { 0.0 };
+                    let out_off = (u * chunk_size + r) * hidden + h * head_dim;
+                    for d in 0..head_dim {
+                        let mut acc = 0f32;
+                        for c in 0..context_size {
+                            if logits[c] == 0.0 { continue; }
+                            let weight = logits[c] * inv;
+                            let v_off = (u * chunk_size + c) * hidden + h * head_dim;
+                            acc += weight * v_padded[v_off + d];
+                        }
+                        out[out_off + d] = acc;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn block_local_attention_matches_cpu_oracle() {
+        // Realistic Gemma 4 audio config: hidden=1024, 8 heads × 128 dim.
+        let hidden = 1024;
+        let n_heads = 8;
+        let head_dim = 128;
+        let chunk_size = 12;
+        let max_past = 12;
+        let max_future = 0;
+        let context_size = max_past + chunk_size + max_future;       // 24
+        let max_span = max_past + max_future + 1;                    // 13
+        let pad_left = max_past;                                     // 12
+        let pad_right = max_future + chunk_size - 1;                 // 11
+        let seq: usize = 25;                                          // ~1 s of audio
+        let num_chunks = seq.div_ceil(chunk_size);
+        let padded_len = num_chunks * chunk_size;                    // 36
+        let k_padded_len = pad_left + padded_len + pad_right;        // 59
+        let logit_cap = 50.0f32;
+
+        let q_pad   = rand_vec(padded_len * hidden,   0xC0DE_F00D);
+        let k_inner = rand_vec(padded_len * hidden,   0xDEAD_BEEF);
+        let v_inner = rand_vec(padded_len * hidden,   0xFEED_FACE);
+        let pos_proj = rand_vec(max_span * hidden,    0xCAFE_BABE);
+
+        // Pad K/V to k_padded_len with zeros on left/right.
+        let mut k_padded = vec![0f32; k_padded_len * hidden];
+        let mut v_padded = vec![0f32; k_padded_len * hidden];
+        k_padded[pad_left * hidden..(pad_left + padded_len) * hidden]
+            .copy_from_slice(&k_inner);
+        v_padded[pad_left * hidden..(pad_left + padded_len) * hidden]
+            .copy_from_slice(&v_inner);
+
+        // CPU reference.
+        let cpu = cpu_block_local_attention(
+            &q_pad, &k_padded, &v_padded, &pos_proj,
+            seq, padded_len, hidden, n_heads, head_dim,
+            chunk_size, context_size, max_span,
+            max_past, max_future, pad_left, logit_cap,
+        );
+
+        // GPU dispatch via the chained pipeline.
+        let ctx = pollster::block_on(crate::backend::WgpuCtx::new()).unwrap();
+        let pipes = crate::backend::Pipelines::new(&ctx.device);
+
+        let q_buf  = upload_storage(&ctx, "test.q",   &q_pad);
+        let k_buf  = upload_storage(&ctx, "test.k",   &k_padded);
+        let v_buf  = upload_storage(&ctx, "test.v",   &v_padded);
+        let pp_buf = upload_storage(&ctx, "test.pp",  &pos_proj);
+        let out_size = (padded_len * hidden * 4) as u64;
+        let out_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test.out"),
+            size: out_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let read_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test.read"),
+            size: out_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("test.enc"),
+        });
+        crate::backend::dispatch::block_local_attention_chained(
+            &ctx, &pipes, &mut enc,
+            &q_buf, &k_buf, &v_buf, &pp_buf, &out_buf,
+            seq, padded_len, hidden, n_heads, head_dim,
+            chunk_size, context_size, max_span,
+            max_past, max_future, pad_left, logit_cap,
+        );
+        enc.copy_buffer_to_buffer(&out_buf, 0, &read_buf, 0, out_size);
+        ctx.queue.submit(Some(enc.finish()));
+        let slice = read_buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        rx.recv().unwrap().unwrap();
+        let data = slice.get_mapped_range();
+        let gpu: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data); read_buf.unmap();
+
+        // Compare. Block-local attention with softcap accumulates lots of
+        // f32 ops; allow a generous tolerance but it should be well within.
+        check(&cpu, &gpu, 1e-3);
+    }
+
+    fn upload_storage(ctx: &crate::backend::WgpuCtx, label: &str, data: &[f32]) -> wgpu::Buffer {
+        let buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: (data.len() * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ctx.queue.write_buffer(&buf, 0, bytemuck::cast_slice(data));
+        buf
+    }
+
     #[test]
     fn rmsnorm_real_attn_norm_layer0() {
         let path = "/Users/nightness/.ollama/models/blobs/sha256-4e30e2665218745ef463f722c0bf86be0cab6ee676320f1cfadf91e989107448";

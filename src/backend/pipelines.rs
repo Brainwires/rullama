@@ -35,6 +35,7 @@ pub struct Pipelines {
     pub silu:              wgpu::ComputePipeline,
     pub glu_split:         wgpu::ComputePipeline,
     pub depthwise_conv1d:  wgpu::ComputePipeline,
+    pub block_local_attention: wgpu::ComputePipeline,
 }
 
 impl Pipelines {
@@ -65,6 +66,7 @@ impl Pipelines {
             silu:              build(device, "silu",              kernels::SILU),
             glu_split:         build(device, "glu_split",         kernels::GLU_SPLIT),
             depthwise_conv1d:  build(device, "depthwise_conv1d",  kernels::DEPTHWISE_CONV1D),
+            block_local_attention: build(device, "block_local_attention", kernels::BLOCK_LOCAL_ATTENTION),
         }
     }
 }

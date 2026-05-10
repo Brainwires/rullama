@@ -38,7 +38,15 @@ impl WgpuCtx {
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("rullama device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits: {
+                    // WebGPU spec mandates max_storage_buffers_per_shader_stage >= 8;
+                    // downlevel_defaults caps it at 4 (legacy OpenGL ES targets).
+                    // The Conformer block-local attention kernel needs 5 storage
+                    // buffers (Q, K, V, pos_proj, out) so we bump just that field.
+                    let mut l = wgpu::Limits::downlevel_defaults();
+                    l.max_storage_buffers_per_shader_stage = 8;
+                    l
+                },
                 experimental_features: wgpu::ExperimentalFeatures::default(),
                 memory_hints: wgpu::MemoryHints::Performance,
                 trace: wgpu::Trace::Off,

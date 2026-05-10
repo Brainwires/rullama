@@ -116,6 +116,23 @@ struct DepthwiseConv1dParams { seq: u32, channels: u32, kernel: u32, _p: u32 }
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct ScalarNParams { n: u32, _p0: u32, _p1: u32, _p2: u32 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct BlockLocalAttnParams {
+    seq:          u32,
+    padded_len:   u32,
+    hidden:       u32,
+    n_heads:      u32,
+    head_dim:     u32,
+    chunk_size:   u32,
+    context_size: u32,
+    max_span:     u32,
+    max_past:     u32,
+    max_future:   u32,
+    pad_left:     u32,
+    logit_cap:    f32,
+}
+
 // ---------- helpers ----------
 
 fn write_uniform<T: Pod>(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, data: &T) -> wgpu::Buffer {
@@ -771,6 +788,66 @@ pub fn vision_attention_chained(
     cp.set_pipeline(&p.vision_attention);
     cp.set_bind_group(0, &bg, &[]);
     cp.dispatch_workgroups(n_patches as u32, n_heads as u32, 1);
+}
+
+/// Conformer block-local attention (Gemma 4 audio). Mirrors the CPU oracle
+/// in `multimodal::audio::AudioForward::forward_attention`'s inner loop.
+///
+/// Inputs are already-prepared:
+///   * `q_pad`     [padded_len, hidden] — Q projected and per-dim scaled
+///   * `k_padded`  [(pad_left + padded_len + pad_right), hidden] — K projected,
+///                                       k-scale applied, zero-padded
+///   * `v_padded`  same shape as `k_padded` — V projected, zero-padded
+///   * `pos_proj`  [max_span, hidden] — sinusoidal positions through linear_pos
+///
+/// Output: `attn_out` [padded_len, hidden]. Caller trims to `seq * hidden`.
+///
+/// The kernel hard-codes `head_dim = 128` (Gemma 4 audio).
+pub fn block_local_attention_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    q_pad: &wgpu::Buffer, k_padded: &wgpu::Buffer, v_padded: &wgpu::Buffer,
+    pos_proj: &wgpu::Buffer, attn_out: &wgpu::Buffer,
+    seq: usize, padded_len: usize, hidden: usize, n_heads: usize, head_dim: usize,
+    chunk_size: usize, context_size: usize, max_span: usize,
+    max_past: usize, max_future: usize, pad_left: usize, logit_cap: f32,
+) {
+    debug_assert_eq!(head_dim, 128, "block_local_attention.wgsl is hard-coded to head_dim=128");
+    let device = &ctx.device;
+    let queue  = &ctx.queue;
+    let params = BlockLocalAttnParams {
+        seq:          seq as u32,
+        padded_len:   padded_len as u32,
+        hidden:       hidden as u32,
+        n_heads:      n_heads as u32,
+        head_dim:     head_dim as u32,
+        chunk_size:   chunk_size as u32,
+        context_size: context_size as u32,
+        max_span:     max_span as u32,
+        max_past:     max_past as u32,
+        max_future:   max_future as u32,
+        pad_left:     pad_left as u32,
+        logit_cap,
+    };
+    let p_buf = write_uniform(device, queue, "blattn.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("blattn.bg"),
+        layout: &p.block_local_attention.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: q_pad.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: k_padded.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: v_padded.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: pos_proj.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 5, resource: attn_out.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("blattn.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.block_local_attention);
+    cp.set_bind_group(0, &bg, &[]);
+    // One workgroup per (padded query position, head).
+    cp.dispatch_workgroups(padded_len as u32, n_heads as u32, 1);
 }
 
 /// Batched f16-weight matmul: y[b, j] = Σ_i x[b, i] * W[j, i]. Used by the
