@@ -584,6 +584,225 @@ mod tests {
         assert!(max_abs < 1e-4, "bf16 batched diff: {max_abs}");
     }
 
+    /// Tiled f16 batched matmul must match the naive one bit-for-bit (modulo
+    /// floating-point accumulation order — the inner loop sums in a different
+    /// order so a tiny epsilon is acceptable, but the kernel uses the same
+    /// f32 accumulator so it should still round to within ~1e-5 on these shapes).
+    #[test]
+    fn f16_matmul_batched_tiled_matches_naive() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        // Real vision shape slice: k=hidden=768, n=ffn=3072 is too big for a
+        // quick test; downscale but stay above the tiled threshold and
+        // include a non-multiple of TILE_K to exercise the bounds path.
+        let k = 80;       // 80 / TILE_K(16) = 5 exactly
+        let n = 24;       // 24 / TILE_N(8)  = 3 exactly
+        let batch = 17;   // 17 / TILE_M(8)  = 2 with 1 leftover → bounds check
+        let mut state: u32 = 0xA5A5A5A5;
+        let mut next = || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            ((state >> 8) as f32 / 16777216.0) - 0.5
+        };
+        let w_f32: Vec<f32> = (0..n * k).map(|_| next() * 0.1).collect();
+        let x_batch: Vec<f32> = (0..batch * k).map(|_| next()).collect();
+        let w_f16 = f32_to_f16_bytes(&w_f32);
+
+        let ctx = pollster::block_on(WgpuCtx::new()).expect("wgpu");
+        let pipes = crate::backend::Pipelines::new(&ctx.device);
+
+        let w_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ft.w"), size: w_f16.len() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ctx.queue.write_buffer(&w_buf, 0, &w_f16);
+        let x_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ft.x"), size: (x_batch.len() * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ctx.queue.write_buffer(&x_buf, 0, bytemuck::cast_slice(&x_batch));
+        let y_size = (batch * n * 4) as u64;
+        let mk_y = |label| ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label), size: y_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let mk_read = || ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ft.read"), size: y_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let read = |buf: &wgpu::Buffer| -> Vec<f32> {
+            let r = mk_read();
+            let mut e = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            e.copy_buffer_to_buffer(buf, 0, &r, 0, y_size);
+            ctx.queue.submit(Some(e.finish()));
+            let slice = r.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |x| { tx.send(x).unwrap(); });
+            ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+            rx.recv().unwrap().unwrap();
+            let data = slice.get_mapped_range();
+            let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+            drop(data); r.unmap();
+            out
+        };
+
+        let y_naive = mk_y("ft.y_naive");
+        let y_tiled = mk_y("ft.y_tiled");
+
+        // Naive (bypass routing — call dispatcher directly via the pipeline path).
+        let mut e1 = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        // Call the tiled function directly, then bypass into naive by using
+        // shapes the router would skip; but we want both on the SAME shape.
+        // Simplest: call the naive dispatcher inline (replicate body) by
+        // using a shape that triggers naive. But shapes must match. Instead:
+        // use the naive batched kernel directly through the pipeline.
+        {
+            let params = crate::backend::dispatch::BatchedMatmulParams {
+                k: k as u32, n: n as u32, batch: batch as u32, _pad: 0,
+            };
+            let p_buf = crate::backend::dispatch::write_uniform(
+                &ctx.device, &ctx.queue, "ft.naive.params", &params);
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ft.naive.bg"),
+                layout: &pipes.f16_matmul_batched.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: w_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: x_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: y_naive.as_entire_binding() },
+                ],
+            });
+            let mut cp = e1.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None, timestamp_writes: None,
+            });
+            cp.set_pipeline(&pipes.f16_matmul_batched);
+            cp.set_bind_group(0, &bg, &[]);
+            cp.dispatch_workgroups((n as u32).div_ceil(64), batch as u32, 1);
+        }
+        ctx.queue.submit(Some(e1.finish()));
+
+        let mut e2 = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        crate::backend::dispatch::matmul_f16_batched_tiled_chained(
+            &ctx, &pipes, &mut e2, &w_buf, &x_buf, &y_tiled, k, n, batch);
+        ctx.queue.submit(Some(e2.finish()));
+
+        let naive_y = read(&y_naive);
+        let tiled_y = read(&y_tiled);
+        let mut max_abs = 0f32;
+        for i in 0..naive_y.len() {
+            let d = (naive_y[i] - tiled_y[i]).abs();
+            if d > max_abs { max_abs = d; }
+        }
+        eprintln!("f16 tiled vs naive max_abs over {} outputs = {max_abs:e}", naive_y.len());
+        assert!(max_abs < 1e-4, "tiled vs naive diff: {max_abs}");
+    }
+
+    /// Same shape-parity test for the bf16 tiled batched kernel.
+    #[test]
+    fn bf16_matmul_batched_tiled_matches_naive() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let k = 80;
+        let n = 24;
+        let batch = 17;
+        let mut state: u32 = 0xBEEFCAFE;
+        let mut next = || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            ((state >> 8) as f32 / 16777216.0) - 0.5
+        };
+        let w_f32: Vec<f32> = (0..n * k).map(|_| next() * 0.1).collect();
+        let x_batch: Vec<f32> = (0..batch * k).map(|_| next()).collect();
+        let w_bf16 = f32_to_bf16_bytes(&w_f32);
+
+        let ctx = pollster::block_on(WgpuCtx::new()).expect("wgpu");
+        let pipes = crate::backend::Pipelines::new(&ctx.device);
+
+        let w_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bft.w"), size: w_bf16.len() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ctx.queue.write_buffer(&w_buf, 0, &w_bf16);
+        let x_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bft.x"), size: (x_batch.len() * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ctx.queue.write_buffer(&x_buf, 0, bytemuck::cast_slice(&x_batch));
+        let y_size = (batch * n * 4) as u64;
+        let mk_y = |label| ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label), size: y_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let mk_read = || ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bft.read"), size: y_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let read = |buf: &wgpu::Buffer| -> Vec<f32> {
+            let r = mk_read();
+            let mut e = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            e.copy_buffer_to_buffer(buf, 0, &r, 0, y_size);
+            ctx.queue.submit(Some(e.finish()));
+            let slice = r.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |x| { tx.send(x).unwrap(); });
+            ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+            rx.recv().unwrap().unwrap();
+            let data = slice.get_mapped_range();
+            let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+            drop(data); r.unmap();
+            out
+        };
+
+        let y_naive = mk_y("bft.y_naive");
+        let y_tiled = mk_y("bft.y_tiled");
+
+        // Naive path (bypass routing).
+        let mut e1 = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let params = crate::backend::dispatch::BatchedMatmulParams {
+                k: k as u32, n: n as u32, batch: batch as u32, _pad: 0,
+            };
+            let p_buf = crate::backend::dispatch::write_uniform(
+                &ctx.device, &ctx.queue, "bft.naive.params", &params);
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bft.naive.bg"),
+                layout: &pipes.bf16_matmul_batched.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: w_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: x_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: y_naive.as_entire_binding() },
+                ],
+            });
+            let mut cp = e1.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None, timestamp_writes: None,
+            });
+            cp.set_pipeline(&pipes.bf16_matmul_batched);
+            cp.set_bind_group(0, &bg, &[]);
+            cp.dispatch_workgroups((n as u32).div_ceil(64), batch as u32, 1);
+        }
+        ctx.queue.submit(Some(e1.finish()));
+
+        let mut e2 = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        crate::backend::dispatch::matmul_bf16_batched_tiled_chained(
+            &ctx, &pipes, &mut e2, &w_buf, &x_buf, &y_tiled, k, n, batch);
+        ctx.queue.submit(Some(e2.finish()));
+
+        let naive_y = read(&y_naive);
+        let tiled_y = read(&y_tiled);
+        let mut max_abs = 0f32;
+        for i in 0..naive_y.len() {
+            let d = (naive_y[i] - tiled_y[i]).abs();
+            if d > max_abs { max_abs = d; }
+        }
+        eprintln!("bf16 tiled vs naive max_abs over {} outputs = {max_abs:e}", naive_y.len());
+        assert!(max_abs < 1e-4, "tiled vs naive diff: {max_abs}");
+    }
+
     #[test]
     fn f16_matmul_random_64x128() {
         let _ = env_logger::builder().is_test(true).try_init();

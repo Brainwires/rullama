@@ -89,7 +89,7 @@ struct Rope2dParams { head_dim: u32, n_heads: u32, n_patches: u32, base: f32 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
-struct BatchedMatmulParams { k: u32, n: u32, batch: u32, _pad: u32 }
+pub(crate) struct BatchedMatmulParams { pub k: u32, pub n: u32, pub batch: u32, pub _pad: u32 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
@@ -152,7 +152,7 @@ fn dispatch_dims_1d(n_elements: u32, wg_size: u32) -> (u32, u32, u32) {
     }
 }
 
-fn write_uniform<T: Pod>(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, data: &T) -> wgpu::Buffer {
+pub(crate) fn write_uniform<T: Pod>(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, data: &T) -> wgpu::Buffer {
     let buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size: std::mem::size_of::<T>() as u64,
@@ -944,14 +944,29 @@ pub fn add_bias_batched_chained(
     cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
 }
 
+/// Threshold above which the tiled batched matmul (workgroup-shared 8×8×16
+/// tiling) beats the naive one-thread-per-output kernel. Empirically the
+/// naive kernel is memory-bound for k ≥ 16, so we route any non-trivial
+/// shape through the tiled path.
+fn use_tiled_batched(k: usize, n: usize, batch: usize) -> bool {
+    k >= 16 && n >= 8 && batch >= 8
+}
+
 /// Batched BF16-weight matmul: y[b, j] = Σ_i x[b, i] * W[j, i]. Used by the
 /// audio Conformer tower so each block linear processes all `seq` frames
 /// in a single dispatch instead of `seq` separate ones.
+///
+/// Routes to the tiled variant when the shape is large enough for it to win;
+/// falls back to the naive one-thread-per-output kernel for tiny shapes.
 pub fn matmul_bf16_batched_chained(
     ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
     w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer,
     k: usize, n: usize, batch: usize,
 ) {
+    if use_tiled_batched(k, n, batch) {
+        matmul_bf16_batched_tiled_chained(ctx, p, enc, w, x, y, k, n, batch);
+        return;
+    }
     let device = &ctx.device;
     let queue = &ctx.queue;
     let params = BatchedMatmulParams {
@@ -979,11 +994,17 @@ pub fn matmul_bf16_batched_chained(
 
 /// Batched f16-weight matmul: y[b, j] = Σ_i x[b, i] * W[j, i]. Used by the
 /// vision tower so each linear processes all `batch` patches in a single dispatch.
+///
+/// Routes to the tiled variant when the shape is large enough for it to win.
 pub fn matmul_f16_batched_chained(
     ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
     w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer,
     k: usize, n: usize, batch: usize,
 ) {
+    if use_tiled_batched(k, n, batch) {
+        matmul_f16_batched_tiled_chained(ctx, p, enc, w, x, y, k, n, batch);
+        return;
+    }
     let device = &ctx.device;
     let queue = &ctx.queue;
     let params = BatchedMatmulParams {
@@ -1007,6 +1028,70 @@ pub fn matmul_f16_batched_chained(
     cp.set_bind_group(0, &bg, &[]);
     // 2D dispatch: x = output cols (n / 64), y = batch.
     cp.dispatch_workgroups((n as u32).div_ceil(64), batch as u32, 1);
+}
+
+/// Tiled batched f16-weight matmul. Same I/O as `matmul_f16_batched_chained`
+/// but uses workgroup-shared tiling (TILE_M × TILE_N × TILE_K = 8 × 8 × 16).
+/// Reduces memory bandwidth by ~8× on the vision shapes where the naive
+/// kernel is memory-bound.
+pub fn matmul_f16_batched_tiled_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer,
+    k: usize, n: usize, batch: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = BatchedMatmulParams {
+        k: k as u32, n: n as u32, batch: batch as u32, _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "f16bmmt.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("f16bmmt.bg"),
+        layout: &p.f16_matmul_batched_tiled.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("f16bmmt.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.f16_matmul_batched_tiled);
+    cp.set_bind_group(0, &bg, &[]);
+    // Tile = 8×8 outputs per workgroup.
+    cp.dispatch_workgroups((n as u32).div_ceil(8), (batch as u32).div_ceil(8), 1);
+}
+
+/// Tiled batched bf16-weight matmul. Audio analogue of the f16 tiled variant.
+pub fn matmul_bf16_batched_tiled_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer,
+    k: usize, n: usize, batch: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = BatchedMatmulParams {
+        k: k as u32, n: n as u32, batch: batch as u32, _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "bf16bmmt.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("bf16bmmt.bg"),
+        layout: &p.bf16_matmul_batched_tiled.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("bf16bmmt.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.bf16_matmul_batched_tiled);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups((n as u32).div_ceil(8), (batch as u32).div_ceil(8), 1);
 }
 
 /// Chained 2D convolution. Generic stride/padding so the same kernel handles
