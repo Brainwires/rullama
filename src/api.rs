@@ -156,6 +156,22 @@ impl Model {
         decode_wav(bytes)
     }
 
+    /// `(begin_id, end_id)` for the `<|audio>` / `<audio|>` sentinels if both
+    /// exist in the tokenizer vocab; else `None`. Native equivalent of the JS
+    /// `audioSentinelIds` shim.
+    pub fn audio_sentinel_ids_native(&self) -> Option<(u32, u32)> {
+        let begin = self.tokenizer.str_to_id("<|audio>")?;
+        let end   = self.tokenizer.str_to_id("<audio|>")?;
+        Some((begin, end))
+    }
+
+    /// `(begin_id, end_id)` for the `<|image>` / `<image|>` sentinels.
+    pub fn image_sentinel_ids_native(&self) -> Option<(u32, u32)> {
+        let begin = self.tokenizer.str_to_id("<|image>")?;
+        let end   = self.tokenizer.str_to_id("<image|>")?;
+        Some((begin, end))
+    }
+
     /// Native-friendly constructor: takes ownership of GGUF bytes, initializes WebGPU,
     /// and prepares all the on-GPU resources (compute pipelines, weight cache).
     pub async fn load_native(bytes: Vec<u8>) -> Result<Self> {
