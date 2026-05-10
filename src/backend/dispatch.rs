@@ -860,6 +860,39 @@ pub fn block_local_attention_chained(
     cp.dispatch_workgroups(padded_len as u32, n_heads as u32, 1);
 }
 
+/// Batched BF16-weight matmul: y[b, j] = Σ_i x[b, i] * W[j, i]. Used by the
+/// audio Conformer tower so each block linear processes all `seq` frames
+/// in a single dispatch instead of `seq` separate ones.
+pub fn matmul_bf16_batched_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer,
+    k: usize, n: usize, batch: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = BatchedMatmulParams {
+        k: k as u32, n: n as u32, batch: batch as u32, _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "bf16bmm.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("bf16bmm.bg"),
+        layout: &p.bf16_matmul_batched.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+        ],
+    });
+    let total = (batch * n) as u32;
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("bf16bmm.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.bf16_matmul_batched);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
+}
+
 /// Batched f16-weight matmul: y[b, j] = Σ_i x[b, i] * W[j, i]. Used by the
 /// vision tower so each linear processes all `batch` patches in a single dispatch.
 pub fn matmul_f16_batched_chained(

@@ -37,6 +37,7 @@ pub struct Pipelines {
     pub depthwise_conv1d:  wgpu::ComputePipeline,
     pub block_local_attention: wgpu::ComputePipeline,
     pub bf16_matmul:       wgpu::ComputePipeline,
+    pub bf16_matmul_batched: wgpu::ComputePipeline,
 }
 
 impl Pipelines {
@@ -69,6 +70,7 @@ impl Pipelines {
             depthwise_conv1d:  build(device, "depthwise_conv1d",  kernels::DEPTHWISE_CONV1D),
             block_local_attention: build(device, "block_local_attention", kernels::BLOCK_LOCAL_ATTENTION),
             bf16_matmul:       build(device, "bf16_matmul",       kernels::BF16_MATMUL),
+            bf16_matmul_batched: build(device, "bf16_matmul_batched", kernels::BF16_MATMUL_BATCHED),
         }
     }
 }

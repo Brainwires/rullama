@@ -499,6 +499,92 @@ mod tests {
     }
 
     #[test]
+    fn bf16_matmul_batched_matches_cpu() {
+        // Same numerics as the single-row test, but processed as a batch in
+        // one dispatch — mirrors how the audio block FFW will use it
+        // (seq frames, hidden→ffn projection).
+        let _ = env_logger::builder().is_test(true).try_init();
+        let k = 64;
+        let n = 32;
+        let batch = 6;
+        let mut state: u32 = 0xCAFEFACE;
+        let mut next = || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            ((state >> 8) as f32 / 16777216.0) - 0.5
+        };
+        let w_f32: Vec<f32> = (0..n * k).map(|_| next() * 0.1).collect();
+        let x_batch: Vec<f32> = (0..batch * k).map(|_| next()).collect();
+
+        let w_bf16_bytes = f32_to_bf16_bytes(&w_f32);
+        let w_round_tripped: Vec<f32> = w_f32.iter().map(|&v| {
+            f32::from_bits(v.to_bits() & 0xFFFF0000)
+        }).collect();
+
+        // CPU reference: per-row matmul with the rounded weights.
+        let mut cpu_y = vec![0f32; batch * n];
+        for b in 0..batch {
+            let row = cpu_matmul_f32(&w_round_tripped,
+                &x_batch[b*k..(b+1)*k], k, n);
+            cpu_y[b*n..(b+1)*n].copy_from_slice(&row);
+        }
+
+        // GPU: one batched dispatch.
+        let ctx = pollster::block_on(WgpuCtx::new()).expect("wgpu");
+        let pipes = crate::backend::Pipelines::new(&ctx.device);
+
+        let w_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test.w"),
+            size: w_bf16_bytes.len() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ctx.queue.write_buffer(&w_buf, 0, &w_bf16_bytes);
+        let x_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test.x"),
+            size: (x_batch.len() * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ctx.queue.write_buffer(&x_buf, 0, bytemuck::cast_slice(&x_batch));
+        let y_size = (batch * n * 4) as u64;
+        let y_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test.y"),
+            size: y_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let read_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test.read"),
+            size: y_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("test.enc"),
+        });
+        crate::backend::dispatch::matmul_bf16_batched_chained(
+            &ctx, &pipes, &mut enc, &w_buf, &x_buf, &y_buf, k, n, batch);
+        enc.copy_buffer_to_buffer(&y_buf, 0, &read_buf, 0, y_size);
+        ctx.queue.submit(Some(enc.finish()));
+        let slice = read_buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        rx.recv().unwrap().unwrap();
+        let data = slice.get_mapped_range();
+        let gpu_y: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data); read_buf.unmap();
+
+        let mut max_abs = 0f32;
+        for i in 0..gpu_y.len() {
+            let d = (gpu_y[i] - cpu_y[i]).abs();
+            if d > max_abs { max_abs = d; }
+        }
+        eprintln!("bf16_matmul_batched max_abs over {} outputs = {max_abs:e}", gpu_y.len());
+        assert!(max_abs < 1e-4, "bf16 batched diff: {max_abs}");
+    }
+
+    #[test]
     fn f16_matmul_random_64x128() {
         let _ = env_logger::builder().is_test(true).try_init();
         let k = 64;
