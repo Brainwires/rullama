@@ -793,6 +793,14 @@ pub fn vision_attention_chained(
     // an order of magnitude over the original sequential per-thread inner
     // loop, provided head_dim fits in the shared q/kv layout. Gemma 4 vision
     // uses head_dim=64, which is the maximum the flash kernel supports.
+    // Q=4 multi-query flash is the fastest variant when n_patches ≥ 4 — it
+    // shares K/V loads across 4 queries per workgroup, cutting both global
+    // memory bandwidth and dispatch count 4×. For tiny inputs (n_patches < 4,
+    // possible on the smallest 48×48 image) fall back to the Q=1 flash.
+    if head_dim <= 64 && n_patches >= 4 {
+        vision_attention_flash_q4_chained(ctx, p, enc, q, k, v, out, head_dim, n_heads, n_patches);
+        return;
+    }
     if head_dim <= 64 {
         vision_attention_flash_chained(ctx, p, enc, q, k, v, out, head_dim, n_heads, n_patches);
         return;
@@ -859,6 +867,44 @@ pub fn vision_attention_flash_chained(
     cp.set_pipeline(&p.vision_attention_flash);
     cp.set_bind_group(0, &bg, &[]);
     cp.dispatch_workgroups(n_patches as u32, n_heads as u32, 1);
+}
+
+/// Multi-query flash vision attention: Q=4 queries per workgroup share one
+/// K/V load. Cuts K/V global-memory bandwidth and workgroup launch count 4×
+/// over `vision_attention_flash_chained`.
+pub fn vision_attention_flash_q4_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    q: &wgpu::Buffer, k: &wgpu::Buffer, v: &wgpu::Buffer, out: &wgpu::Buffer,
+    head_dim: usize, n_heads: usize, n_patches: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = VisionAttnParams {
+        head_dim: head_dim as u32,
+        n_heads: n_heads as u32,
+        n_patches: n_patches as u32,
+        _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "vattnq4.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vattnq4.bg"),
+        layout: &p.vision_attention_flash_q4.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: q.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: k.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: v.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: out.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("vattnq4.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.vision_attention_flash_q4);
+    cp.set_bind_group(0, &bg, &[]);
+    // Each workgroup processes Q_PER_WG=4 queries.
+    let n_query_groups = (n_patches as u32).div_ceil(4);
+    cp.dispatch_workgroups(n_query_groups, n_heads as u32, 1);
 }
 
 /// Conformer block-local attention (Gemma 4 audio). Mirrors the CPU oracle

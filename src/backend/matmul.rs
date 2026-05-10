@@ -1163,4 +1163,113 @@ mod tests {
         eprintln!("vision_attention flash vs original: max_abs={max_abs:e} max_rel={max_rel:e}");
         assert!(max_abs < 1e-4, "flash diverges: max_abs={max_abs}");
     }
+
+    /// Q4 multi-query flash vision attention must match the original within
+    /// fp tolerance. Uses a non-multiple of Q_PER_WG=4 in n_patches to exercise
+    /// the per-workgroup query-count clamp.
+    #[test]
+    fn vision_attention_flash_q4_matches_original() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let n_patches = 102;  // 102 / 4 = 25.5 → tail workgroup with 2 queries
+        let n_heads = 3;
+        let head_dim = 64;
+        let total = n_patches * n_heads * head_dim;
+
+        let mut state: u32 = 0xC0FFEE13;
+        let mut next = || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            ((state >> 8) as f32 / 16777216.0) - 0.5
+        };
+        let q: Vec<f32> = (0..total).map(|_| next() * 0.1).collect();
+        let k: Vec<f32> = (0..total).map(|_| next() * 0.1).collect();
+        let v: Vec<f32> = (0..total).map(|_| next() * 0.1).collect();
+
+        let ctx = pollster::block_on(WgpuCtx::new()).expect("wgpu");
+        let pipes = crate::backend::Pipelines::new(&ctx.device);
+
+        let mkbuf = |label: &'static str, data: &[f32]| {
+            let buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label), size: (data.len() * 4) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            ctx.queue.write_buffer(&buf, 0, bytemuck::cast_slice(data));
+            buf
+        };
+        let q_buf = mkbuf("vatq.q", &q);
+        let k_buf = mkbuf("vatq.k", &k);
+        let v_buf = mkbuf("vatq.v", &v);
+        let mk_out = |label: &'static str| ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label), size: (total * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let out_orig = mk_out("vatq.out_orig");
+        let out_q4   = mk_out("vatq.out_q4");
+
+        // Run ORIGINAL kernel (Q=1).
+        let mut e1 = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            #[repr(C)]
+            #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+            struct P { head_dim: u32, n_heads: u32, n_patches: u32, _pad: u32 }
+            let params = P { head_dim: head_dim as u32, n_heads: n_heads as u32, n_patches: n_patches as u32, _pad: 0 };
+            let p_buf = crate::backend::dispatch::write_uniform(
+                &ctx.device, &ctx.queue, "vatq.orig.params", &params);
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("vatq.orig.bg"),
+                layout: &pipes.vision_attention.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: q_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: k_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: v_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: out_orig.as_entire_binding() },
+                ],
+            });
+            let mut cp = e1.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None, timestamp_writes: None,
+            });
+            cp.set_pipeline(&pipes.vision_attention);
+            cp.set_bind_group(0, &bg, &[]);
+            cp.dispatch_workgroups(n_patches as u32, n_heads as u32, 1);
+        }
+        ctx.queue.submit(Some(e1.finish()));
+
+        let mut e2 = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        crate::backend::dispatch::vision_attention_flash_q4_chained(
+            &ctx, &pipes, &mut e2, &q_buf, &k_buf, &v_buf, &out_q4,
+            head_dim, n_heads, n_patches);
+        ctx.queue.submit(Some(e2.finish()));
+
+        let read = |buf: &wgpu::Buffer| -> Vec<f32> {
+            let r = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("vatq.read"), size: (total * 4) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut e = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            e.copy_buffer_to_buffer(buf, 0, &r, 0, (total * 4) as u64);
+            ctx.queue.submit(Some(e.finish()));
+            let slice = r.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |x| { tx.send(x).unwrap(); });
+            ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+            rx.recv().unwrap().unwrap();
+            let data = slice.get_mapped_range();
+            let out: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+            drop(data); r.unmap();
+            out
+        };
+        let o_orig = read(&out_orig);
+        let o_q4 = read(&out_q4);
+
+        let mut max_abs = 0f32;
+        for i in 0..total {
+            let d = (o_orig[i] - o_q4[i]).abs();
+            if d > max_abs { max_abs = d; }
+        }
+        eprintln!("vision_attention Q4 vs original: max_abs={max_abs:e}");
+        assert!(max_abs < 1e-4, "Q4 diverges: max_abs={max_abs}");
+    }
 }
