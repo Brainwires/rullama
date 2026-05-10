@@ -22,7 +22,7 @@ use crate::backend::{Pipelines, WeightCache, WgpuCtx};
 use crate::error::Result;
 use crate::gguf::GgufReader;
 use crate::model::config::Gemma4Config;
-use crate::multimodal::{AudioConfig, AudioForward, VisionConfig, VisionForward, decode_wav};
+use crate::multimodal::{AudioConfig, GpuAudioForward, VisionConfig, VisionForward, decode_wav};
 use crate::reference::Weights;
 use crate::reference::forward_chained::Forward;
 use crate::sampling::{Sampler, SamplingOptions};
@@ -59,7 +59,7 @@ pub struct Model {
     vision: Option<VisionForward>,
     /// Built only when the GGUF carries audio tensors (e.g. gemma4:e2b/e4b);
     /// `None` for text-only or vision-only checkpoints.
-    audio: Option<AudioForward>,
+    audio: Option<GpuAudioForward>,
     sampler: Sampler,
 }
 
@@ -85,12 +85,13 @@ impl Model {
             None
         };
 
-        // Detect audio tower (presence of a.conv1d.0.weight). The CPU oracle is
-        // built lazily but cheaply at construction (just dequantises weights into
-        // pure-Rust Vec<f32>s — no GPU resources).
+        // Detect audio tower (presence of a.conv1d.0.weight). The GPU
+        // encoder runs the 12 Conformer blocks + projector on the GPU; mel
+        // features + SSCP convs + pre-encode linear stay on CPU (small, and
+        // their data layouts don't pay off vs the bulk of the work).
         let audio = if r_arc.tensor("a.conv1d.0.weight").is_ok() {
             let acfg = AudioConfig::from_gguf(&r_arc, d_text)?;
-            Some(AudioForward::new(acfg, wcache.clone()).await?)
+            Some(GpuAudioForward::new(acfg, ctx.clone(), pipes.clone(), wcache.clone()).await?)
         } else {
             None
         };

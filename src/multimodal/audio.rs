@@ -274,6 +274,48 @@ impl AudioForward {
         self.mel.log_mel(samples)
     }
 
+    /// Run sections 1-3 of the encoder (mel features + SSCP convs + pre_encode
+    /// linear projection) and return the post-pre-encode hidden state plus the
+    /// post-SSCP frame count. Used by `GpuAudioForward` to handle the
+    /// CPU-friendly prefix while the heavy block loop runs on GPU.
+    pub fn prefix_to_hidden(&self, samples: &[f32]) -> Result<(Vec<f32>, usize)> {
+        let cfg = &self.cfg;
+        let hidden = cfg.hidden as usize;
+        let mel_bins = cfg.mel_bins as usize;
+
+        let (mel, n_frames) = self.mel.log_mel(samples);
+        if n_frames == 0 {
+            return Ok((Vec::new(), 0));
+        }
+
+        let mut x = self.sscp_conv_block(
+            &mel, 1, n_frames, mel_bins,
+            self.sscp0_out_c,
+            &self.sscp0_w, &self.sscp0_norm_w, self.sscp0_norm_b.as_deref(),
+        );
+        let t1 = (n_frames + 1) / 2;
+        let f1 = (mel_bins + 1) / 2;
+        x = self.sscp_conv_block(
+            &x, self.sscp0_out_c, t1, f1,
+            self.sscp1_out_c,
+            &self.sscp1_w, &self.sscp1_norm_w, self.sscp1_norm_b.as_deref(),
+        );
+        let t_out = (t1 + 1) / 2;
+        let f_out = (f1 + 1) / 2;
+        let flat_per_frame = f_out * self.sscp1_out_c;
+        if flat_per_frame != self.sscp_proj_in {
+            return Err(RullamaError::Inference(format!(
+                "audio SSCP: flat per-frame dim {flat_per_frame} != pre_encode k {}",
+                self.sscp_proj_in
+            )));
+        }
+        let h = Self::linear_rows(
+            &x, &self.pre_encode_out_w, self.pre_encode_out_b.as_deref(),
+            t_out, self.sscp_proj_in, hidden,
+        );
+        Ok((h, t_out))
+    }
+
     /// Encode raw 16 kHz mono PCM into a flat `[n_audio_tokens * d_text]` slice
     /// of soft-token embeddings, ready for `Forward::step_with_embedding`.
     /// Mirrors `model_audio.go::AudioModel.ForwardAudio`. Pure CPU f32.

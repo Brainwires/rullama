@@ -860,6 +860,73 @@ pub fn block_local_attention_chained(
     cp.dispatch_workgroups(padded_len as u32, n_heads as u32, 1);
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct ScalePerInnerDimParams { n: u32, inner_dim: u32, _p0: u32, _p1: u32 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct AddBiasBatchedParams { n: u32, batch: u32, _p0: u32, _p1: u32 }
+
+/// In-place per-inner-dim scale: x[i] *= s[i % inner_dim]. Used by the
+/// audio Conformer attention to apply per-dim Q scaling across all heads.
+pub fn scale_per_inner_dim_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    x: &wgpu::Buffer, s: &wgpu::Buffer, n: usize, inner_dim: usize,
+) {
+    let device = &ctx.device;
+    let queue  = &ctx.queue;
+    let params = ScalePerInnerDimParams {
+        n: n as u32, inner_dim: inner_dim as u32, _p0: 0, _p1: 0,
+    };
+    let p_buf = write_uniform(device, queue, "scale_pd.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("scale_pd.bg"),
+        layout: &p.scale_per_inner_dim.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: s.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("scale_pd.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.scale_per_inner_dim);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+}
+
+/// In-place per-output-dim bias add: y[b, j] += bias[j]. Used by the audio
+/// projector's FC linear which has a learned bias.
+pub fn add_bias_batched_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    y: &wgpu::Buffer, bias: &wgpu::Buffer, n: usize, batch: usize,
+) {
+    let device = &ctx.device;
+    let queue  = &ctx.queue;
+    let params = AddBiasBatchedParams {
+        n: n as u32, batch: batch as u32, _p0: 0, _p1: 0,
+    };
+    let p_buf = write_uniform(device, queue, "addbias.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("addbias.bg"),
+        layout: &p.add_bias_batched.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: y.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: bias.as_entire_binding() },
+        ],
+    });
+    let total = (n * batch) as u32;
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("addbias.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.add_bias_batched);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
+}
+
 /// Batched BF16-weight matmul: y[b, j] = Σ_i x[b, i] * W[j, i]. Used by the
 /// audio Conformer tower so each block linear processes all `seq` frames
 /// in a single dispatch instead of `seq` separate ones.
