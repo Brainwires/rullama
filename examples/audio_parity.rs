@@ -19,22 +19,32 @@ use rullama::api::{ChatMessage, ChatRole, Model};
 use rullama::sampling::SamplingOptions;
 use rullama::template::gemma4_small;
 
-const N_PREDICT: usize = 12;
+const N_PREDICT: usize = 24;
 
 fn main() -> ExitCode {
-    let path = match env::args().nth(1) {
+    let mut args = env::args().skip(1);
+    let path = match args.next() {
         Some(p) => p,
-        None => { eprintln!("usage: audio_parity <gguf>"); return ExitCode::from(2); }
+        None => { eprintln!("usage: audio_parity <gguf> [wav-path]"); return ExitCode::from(2); }
     };
+    let wav_path_arg = args.next();
 
-    // ---- Synthesise 1 s of 440 Hz mono @ 16 kHz, write to a fixture WAV. ----
+    // If a WAV path is provided, decode it; otherwise synthesise 1 s of 440 Hz tone.
     let sr = 16_000usize;
-    let n  = sr;
-    let omega = 2.0 * std::f32::consts::PI * 440.0 / sr as f32;
-    let pcm: Vec<f32> = (0..n).map(|i| 0.3 * (omega * i as f32).sin()).collect();
-    let wav_path = "/tmp/test_440hz.wav";
-    write_pcm16_wav(wav_path, &pcm, sr);
-    println!("wrote {wav_path} ({} samples @ {sr} Hz)", pcm.len());
+    let (pcm, wav_path): (Vec<f32>, String) = if let Some(wp) = wav_path_arg {
+        let bytes = fs::read(&wp).expect("read wav");
+        let pcm = rullama::api::Model::decode_wav_native(&bytes).expect("decode wav");
+        println!("loaded {wp}: {} samples ({:.2} s @ 16 kHz)", pcm.len(), pcm.len() as f32 / sr as f32);
+        (pcm, wp)
+    } else {
+        let n = sr;
+        let omega = 2.0 * std::f32::consts::PI * 440.0 / sr as f32;
+        let pcm: Vec<f32> = (0..n).map(|i| 0.3 * (omega * i as f32).sin()).collect();
+        let wav_path = "/tmp/test_440hz.wav".to_string();
+        write_pcm16_wav(&wav_path, &pcm, sr);
+        println!("wrote {wav_path} ({} samples @ {sr} Hz)", pcm.len());
+        (pcm, wav_path)
+    };
 
     // ---- rullama side ----
     println!("\n== rullama side ==");
