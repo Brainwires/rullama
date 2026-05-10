@@ -30,6 +30,7 @@ pub struct Pipelines {
     pub rope_2d:           wgpu::ComputePipeline,
     pub f16_matmul_batched: wgpu::ComputePipeline,
     pub f16_matmul_batched_tiled: wgpu::ComputePipeline,
+    pub f16_matmul_batched_tiled_v2: wgpu::ComputePipeline,
     pub pos_embed_add:     wgpu::ComputePipeline,
     pub vision_attention:  wgpu::ComputePipeline,
     pub half_residual_add: wgpu::ComputePipeline,
@@ -40,6 +41,7 @@ pub struct Pipelines {
     pub bf16_matmul:       wgpu::ComputePipeline,
     pub bf16_matmul_batched: wgpu::ComputePipeline,
     pub bf16_matmul_batched_tiled: wgpu::ComputePipeline,
+    pub bf16_matmul_batched_tiled_v2: wgpu::ComputePipeline,
     pub scale_per_inner_dim: wgpu::ComputePipeline,
     pub add_bias_batched: wgpu::ComputePipeline,
 }
@@ -67,6 +69,7 @@ impl Pipelines {
             rope_2d:           build(device, "rope_2d",           kernels::ROPE_2D),
             f16_matmul_batched: build(device, "f16_matmul_batched", kernels::F16_MATMUL_BATCHED),
             f16_matmul_batched_tiled: build(device, "f16_matmul_batched_tiled", kernels::F16_MATMUL_BATCHED_TILED),
+            f16_matmul_batched_tiled_v2: build(device, "f16_matmul_batched_tiled_v2", kernels::F16_MATMUL_BATCHED_TILED_V2),
             pos_embed_add:     build(device, "pos_embed_add",     kernels::POS_EMBED_ADD),
             vision_attention:  build(device, "vision_attention",  kernels::VISION_ATTENTION),
             half_residual_add: build(device, "half_residual_add", kernels::HALF_RESIDUAL_ADD),
@@ -77,6 +80,7 @@ impl Pipelines {
             bf16_matmul:       build(device, "bf16_matmul",       kernels::BF16_MATMUL),
             bf16_matmul_batched: build(device, "bf16_matmul_batched", kernels::BF16_MATMUL_BATCHED),
             bf16_matmul_batched_tiled: build(device, "bf16_matmul_batched_tiled", kernels::BF16_MATMUL_BATCHED_TILED),
+            bf16_matmul_batched_tiled_v2: build(device, "bf16_matmul_batched_tiled_v2", kernels::BF16_MATMUL_BATCHED_TILED_V2),
             scale_per_inner_dim: build(device, "scale_per_inner_dim", kernels::SCALE_PER_INNER_DIM),
             add_bias_batched: build(device, "add_bias_batched", kernels::ADD_BIAS_BATCHED),
         }
