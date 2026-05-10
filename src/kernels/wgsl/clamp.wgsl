@@ -17,7 +17,10 @@ struct Params {
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    // 2D dispatch: gid.y * (65535 * 64) + gid.x. The constant covers a full
+    // x-row so callers can dispatch (min(wg_x, 65535), wg_y, 1) without
+    // passing the actual stride. WebGPU mandates max_compute_workgroups_per_dimension >= 65535.
+    let i = gid.y * 4194240u + gid.x;
     if (i >= params.n) { return; }
     x[i] = clamp(x[i], params.lo, params.hi);
 }

@@ -135,6 +135,23 @@ struct BlockLocalAttnParams {
 
 // ---------- helpers ----------
 
+/// Compute 2D dispatch dimensions for a 1D-elementwise kernel processing
+/// `n_elements` items at `wg_size`. WebGPU mandates max workgroups per
+/// dimension ≥ 65535; for very large `n_elements` (vision FFW is ~7M scalars
+/// = 110K workgroups at wg_size=64) we wrap into the y-axis.
+///
+/// The corresponding kernel must compute its index as
+/// `i = gid.y * 4194240u + gid.x` (where 4194240 = 65535 × 64).
+fn dispatch_dims_1d(n_elements: u32, wg_size: u32) -> (u32, u32, u32) {
+    const MAX_WG_PER_DIM: u32 = 65535;
+    let total = n_elements.div_ceil(wg_size);
+    if total <= MAX_WG_PER_DIM {
+        (total, 1, 1)
+    } else {
+        (MAX_WG_PER_DIM, total.div_ceil(MAX_WG_PER_DIM), 1)
+    }
+}
+
 fn write_uniform<T: Pod>(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, data: &T) -> wgpu::Buffer {
     let buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
@@ -1057,7 +1074,8 @@ pub fn clamp_chained(
     });
     cp.set_pipeline(&p.clamp);
     cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+    let (dx, dy, dz) = dispatch_dims_1d(n as u32, 64);
+    cp.dispatch_workgroups(dx, dy, dz);
 }
 
 /// Chained QuickGELU split: y[i] = quick_gelu(gate[i]) * up[i].
@@ -1084,7 +1102,8 @@ pub fn quick_geglu_chained(
     });
     cp.set_pipeline(&p.quick_geglu);
     cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+    let (dx, dy, dz) = dispatch_dims_1d(n as u32, 64);
+    cp.dispatch_workgroups(dx, dy, dz);
 }
 
 /// Chained 2D average pool with kernel = stride (vision token merge).

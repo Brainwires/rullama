@@ -19,7 +19,7 @@ struct Params {
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = gid.y * 4194240u + gid.x;
     if (i >= params.n) { return; }
     let g = gate[i];
     let s = 1.0 / (1.0 + exp(-1.702 * g));
