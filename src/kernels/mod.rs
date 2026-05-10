@@ -19,6 +19,7 @@ pub const VISION_ATTENTION: &str = include_str!("wgsl/vision_attention.wgsl");
 pub const VISION_ATTENTION_FLASH: &str = include_str!("wgsl/vision_attention_flash.wgsl");
 pub const VISION_ATTENTION_FLASH_Q4: &str = include_str!("wgsl/vision_attention_flash_q4.wgsl");
 pub const VISION_ATTENTION_FLASH_Q8: &str = include_str!("wgsl/vision_attention_flash_q8.wgsl");
+pub const VISION_ATTENTION_FLASH_Q16: &str = include_str!("wgsl/vision_attention_flash_q16.wgsl");
 pub const HALF_RESIDUAL_ADD: &str = include_str!("wgsl/half_residual_add.wgsl");
 pub const SILU: &str = include_str!("wgsl/silu.wgsl");
 pub const GLU_SPLIT: &str = include_str!("wgsl/glu_split.wgsl");

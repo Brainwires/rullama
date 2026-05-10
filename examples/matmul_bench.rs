@@ -248,7 +248,7 @@ fn main() {
     ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
     let elapsed = t.elapsed();
     let per_iter = elapsed / n_iters as u32;
-    println!("vision_attention (router → Q4): {per_iter:?}/iter  (×16 blocks ≈ {:?} total)", per_iter * 16);
+    println!("vision_attention (router → Q8): {per_iter:?}/iter  (×16 blocks ≈ {:?} total)", per_iter * 16);
 
     // Bench the original (Q=1) for comparison.
     for _ in 0..2 {
@@ -287,6 +287,25 @@ fn main() {
     ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
     let per_iter3 = t3.elapsed() / n_iters as u32;
     println!("vision_attention_flash (Q=8)   : {per_iter3:?}/iter  (×16 blocks ≈ {:?} total)", per_iter3 * 16);
+
+    // Bench Q=16 directly.
+    for _ in 0..2 {
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        dispatch::vision_attention_flash_q16_chained(&ctx, &pipes, &mut enc, &q_buf, &k_buf, &v_buf, &out_buf,
+            head_dim, n_heads, n_patches);
+        ctx.queue.submit(Some(enc.finish()));
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    }
+    let t4 = Instant::now();
+    for _ in 0..n_iters {
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        dispatch::vision_attention_flash_q16_chained(&ctx, &pipes, &mut enc, &q_buf, &k_buf, &v_buf, &out_buf,
+            head_dim, n_heads, n_patches);
+        ctx.queue.submit(Some(enc.finish()));
+    }
+    ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    let per_iter4 = t4.elapsed() / n_iters as u32;
+    println!("vision_attention_flash (Q=16)  : {per_iter4:?}/iter  (×16 blocks ≈ {:?} total)", per_iter4 * 16);
 
     // ---- Small-op benches at vision shapes ----
     // Vision encode for 768×528 has n_patches=2304, hidden=768, ffn=3072.
