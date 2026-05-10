@@ -60,33 +60,11 @@ var<workgroup> kv_tile:     array<f32, 2048>;          // TILE_T × HEAD_DIM_MAX
 // into their slot without OOB. Only the first TILE_T slots ever feed into
 // the weighted sum.
 var<workgroup> tile_scores: array<f32, WG>;
+// `rbuf` and `sum_buf` are parallel reduction buffers — used together to do
+// a fused max-and-sum (online-softmax-style) pair reduction in a single tree
+// pass, saving ~6 barriers per tile over separate max + sum reductions.
 var<workgroup> rbuf:        array<f32, WG>;
-
-fn block_max_reduce(tid: u32) -> f32 {
-    var stride: u32 = WG / 2u;
-    loop {
-        if (stride == 0u) { break; }
-        if (tid < stride) {
-            rbuf[tid] = max(rbuf[tid], rbuf[tid + stride]);
-        }
-        workgroupBarrier();
-        stride = stride / 2u;
-    }
-    return rbuf[0];
-}
-
-fn block_sum_reduce(tid: u32) -> f32 {
-    var stride: u32 = WG / 2u;
-    loop {
-        if (stride == 0u) { break; }
-        if (tid < stride) {
-            rbuf[tid] = rbuf[tid] + rbuf[tid + stride];
-        }
-        workgroupBarrier();
-        stride = stride / 2u;
-    }
-    return rbuf[0];
-}
+var<workgroup> sum_buf:     array<f32, WG>;
 
 @compute @workgroup_size(64)
 fn main(
@@ -141,29 +119,51 @@ fn main(
             }
             s_t = sum;
         }
-        tile_scores[tid] = s_t;
+
+        // --- Fused max-and-sum reduction (combines what would otherwise be
+        // two separate ~6-barrier tree reductions into one). Invariant: each
+        // pair (rbuf[i], sum_buf[i]) represents the running max and the
+        // associated sum-of-exp(s - max) over the values folded into slot i.
+        // For a leaf (singleton valid entry): (s_t, 1.0). For an invalid
+        // entry: (-inf, 0). Combine: m_n = max(m_a, m_b); l_n = l_a*exp(m_a-m_n)
+        // + l_b*exp(m_b-m_n). ---
+        rbuf[tid] = s_t;
+        sum_buf[tid] = select(0.0, 1.0, tid < tile_size);
         workgroupBarrier();
 
-        // --- Tile-wide max. ---
-        rbuf[tid] = s_t;
-        workgroupBarrier();
-        let tile_m = block_max_reduce(tid);
+        var stride: u32 = WG / 2u;
+        loop {
+            if (stride == 0u) { break; }
+            if (tid < stride) {
+                let m_a = rbuf[tid];
+                let m_b = rbuf[tid + stride];
+                let l_a = sum_buf[tid];
+                let l_b = sum_buf[tid + stride];
+                let m_n = max(m_a, m_b);
+                rbuf[tid] = m_n;
+                sum_buf[tid] = l_a * exp(m_a - m_n) + l_b * exp(m_b - m_n);
+            }
+            workgroupBarrier();
+            stride = stride / 2u;
+        }
+        let tile_m = rbuf[0];
+        let tile_l = sum_buf[0];   // = Σ_t exp(s_t - tile_m)
 
         // --- Online softmax merge. ---
         let m_new = max(m, tile_m);
         let alpha = exp(m - m_new);
 
+        // Compute this thread's normalized p_t (used in the V-weighted sum below).
         var p_t: f32 = 0.0;
         if (tid < tile_size) {
             p_t = exp(s_t - m_new);
         }
         tile_scores[tid] = p_t;
-
-        rbuf[tid] = p_t;
         workgroupBarrier();
-        let tile_sum = block_sum_reduce(tid);
 
-        l = l * alpha + tile_sum;
+        // Tile's contribution to the running normaliser, expressed in the new
+        // max basis: tile_l × exp(tile_m - m_new).
+        l = l * alpha + tile_l * exp(tile_m - m_new);
         m = m_new;
 
         // Rescale the running output accumulator BEFORE summing the new tile's
