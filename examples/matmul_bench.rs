@@ -266,6 +266,25 @@ fn main() {
     let per_iter2 = t2.elapsed() / n_iters as u32;
     println!("vision_attention_flash (Q=1)   : {per_iter2:?}/iter  (×16 blocks ≈ {:?} total)", per_iter2 * 16);
 
+    // Bench Q=8 directly.
+    for _ in 0..2 {
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        dispatch::vision_attention_flash_q8_chained(&ctx, &pipes, &mut enc, &q_buf, &k_buf, &v_buf, &out_buf,
+            head_dim, n_heads, n_patches);
+        ctx.queue.submit(Some(enc.finish()));
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    }
+    let t3 = Instant::now();
+    for _ in 0..n_iters {
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        dispatch::vision_attention_flash_q8_chained(&ctx, &pipes, &mut enc, &q_buf, &k_buf, &v_buf, &out_buf,
+            head_dim, n_heads, n_patches);
+        ctx.queue.submit(Some(enc.finish()));
+    }
+    ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    let per_iter3 = t3.elapsed() / n_iters as u32;
+    println!("vision_attention_flash (Q=8)   : {per_iter3:?}/iter  (×16 blocks ≈ {:?} total)", per_iter3 * 16);
+
     // ---- Small-op benches at vision shapes ----
     // Vision encode for 768×528 has n_patches=2304, hidden=768, ffn=3072.
     // Per-layer call counts (counted by reading vision.rs):
