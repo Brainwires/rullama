@@ -20,7 +20,7 @@ use rullama::api::{ChatMessage, ChatRole, Model};
 use rullama::sampling::SamplingOptions;
 use rullama::template::gemma4_small;
 
-const N_PREDICT: usize = 32;
+const N_PREDICT: usize = 16;
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
@@ -44,6 +44,7 @@ ALIGN = 48
 PATCH_AREA = 16*16*3*3
 MAX_TOKENS = 280
 MAX_PIXELS = MAX_TOKENS * PATCH_AREA
+MAX_DIM = 768   # rullama VisionForward's per-dim cap
 def smart_resize(w, h):
     total = w * h
     if MAX_PIXELS > 0 and total > 0:
@@ -53,6 +54,9 @@ def smart_resize(w, h):
     else:
         th = max(ALIGN, (h // ALIGN) * ALIGN)
         tw = max(ALIGN, (w // ALIGN) * ALIGN)
+    # Clamp each dim to MAX_DIM (768 is already a multiple of ALIGN).
+    th = min(th, MAX_DIM)
+    tw = min(tw, MAX_DIM)
     return tw, th
 img = Image.open(src).convert("RGB")
 ow, oh = img.size
@@ -147,12 +151,20 @@ print(f"preprocess: {{ow}}x{{oh}} -> {{tw}}x{{th}}", file=sys.stderr)
     let body = format!(
         r#"{{"model":"gemma4:e2b","messages":[{{"role":"user","content":"What is in this image?","images":["{b64}"]}}],"stream":false,"options":{{"temperature":0,"num_predict":{N_PREDICT},"seed":0}},"think":false}}"#,
     );
-    let out = Command::new("curl")
+    // Pipe body via stdin (large base64 in -d is fine but stdin avoids any
+    // argv length corner cases). Generous timeout because Ollama may not
+    // have GPU offload enabled (Intel Mac with no Metal).
+    use std::io::Write;
+    let mut child = std::process::Command::new("curl")
         .args(["-s", "-X", "POST", "http://localhost:11434/api/chat",
-               "--max-time", "180",
+               "--max-time", "600",
                "-H", "Content-Type: application/json",
-               "-d", &body])
-        .output().expect("curl ollama");
+               "-d", "@-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn().expect("curl ollama");
+    child.stdin.as_mut().expect("stdin").write_all(body.as_bytes()).expect("write");
+    let out = child.wait_with_output().expect("wait curl");
     let stdout = String::from_utf8_lossy(&out.stdout);
     println!("ollama raw: {stdout}");
     ExitCode::SUCCESS
