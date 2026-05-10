@@ -47,7 +47,7 @@ fn main() -> ExitCode {
 
     println!("encoding {} samples (~1 s @ 16 kHz) ...", pcm.len());
     let t0 = Instant::now();
-    let soft = model.encode_audio_native(&pcm).expect("encode_audio");
+    let soft = pollster::block_on(model.encode_audio_native(&pcm)).expect("encode_audio");
     let dt = t0.elapsed();
 
     let d_text = 1536usize;

@@ -72,7 +72,7 @@ fn main() -> ExitCode {
         .expect("audio sentinels missing from vocab");
 
     let t = Instant::now();
-    let soft = model.encode_audio_native(&pcm).expect("encode_audio");
+    let soft = pollster::block_on(model.encode_audio_native(&pcm)).expect("encode_audio");
     let n_soft = soft.len() / 1536;
     println!("encoded {n_soft} audio soft tokens in {:?}", t.elapsed());
 

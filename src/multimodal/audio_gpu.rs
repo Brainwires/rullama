@@ -236,7 +236,7 @@ impl GpuAudioForward {
     pub fn cfg(&self) -> &AudioConfig { &self.cfg }
 
     /// Encode 16 kHz mono PCM into `[n_audio_tokens × d_text]` soft tokens.
-    pub fn encode(&self, pcm: &[f32]) -> Result<Vec<f32>> {
+    pub async fn encode(&self, pcm: &[f32]) -> Result<Vec<f32>> {
         // 1. CPU prefix: mel + SSCP + pre_encode → [seq, hidden] f32.
         let (h_cpu, seq) = self.cpu_prefix.prefix_to_hidden(pcm)?;
         if seq == 0 { return Ok(Vec::new()); }
@@ -295,13 +295,13 @@ impl GpuAudioForward {
         enc.copy_buffer_to_buffer(&self.scratch.soft, 0, &self.scratch.soft_read, 0, read_bytes);
         self.ctx.queue.submit(Some(enc.finish()));
 
-        // Map + read.
+        // Map + read (async — works on wasm32 too).
         let slice = self.scratch.soft_read.slice(..read_bytes);
         let (tx, rx) = oneshot::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
         self.ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
             .map_err(|e| RullamaError::Inference(format!("device.poll: {e}")))?;
-        pollster::block_on(rx)
+        rx.await
             .map_err(|_| RullamaError::Inference("readback channel".into()))?
             .map_err(|e| RullamaError::Inference(format!("map_async: {e:?}")))?;
         let data = slice.get_mapped_range();
@@ -851,7 +851,7 @@ mod tests {
         let pcm: Vec<f32> = (0..n).map(|i| 0.3 * (omega * i as f32).sin()).collect();
 
         let cpu_out = cpu.encode(&pcm).unwrap();
-        let gpu_out = gpu.encode(&pcm).unwrap();
+        let gpu_out = pollster::block_on(gpu.encode(&pcm)).unwrap();
         assert_eq!(cpu_out.len(), gpu_out.len(), "output length mismatch");
         let mut max_abs = 0f32;
         for i in 0..cpu_out.len() {

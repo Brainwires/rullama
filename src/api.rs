@@ -142,13 +142,13 @@ impl Model {
 
     /// Encode raw 16 kHz mono PCM (`Vec<f32>` in `[-1, 1]`) into a flat sequence
     /// of soft-token embeddings. Returns `[n_audio_tokens * d_text]` f32.
-    pub fn encode_audio_native(&self, pcm: &[f32]) -> Result<Vec<f32>> {
+    pub async fn encode_audio_native(&self, pcm: &[f32]) -> Result<Vec<f32>> {
         let a = self.audio.as_ref().ok_or_else(|| {
             crate::error::RullamaError::Inference(
                 "encode_audio: this checkpoint has no audio tower".into()
             )
         })?;
-        a.encode(pcm)
+        a.encode(pcm).await
     }
 
     /// Decode a WAV file (RIFF/WAVE PCM 8/16/24/32 or float32) into 16 kHz
@@ -367,10 +367,10 @@ impl Model {
     /// Float32Array of soft-token embeddings. Caller is responsible for
     /// resampling to 16 kHz if the source is at a different rate.
     #[wasm_bindgen(js_name = encodeAudio)]
-    pub fn encode_audio_js(
+    pub async fn encode_audio_js(
         &self, pcm: Vec<f32>,
     ) -> std::result::Result<Vec<f32>, JsError> {
-        self.encode_audio_native(&pcm).map_err(|e| JsError::new(&format!("{e}")))
+        self.encode_audio_native(&pcm).await.map_err(|e| JsError::new(&format!("{e}")))
     }
 
     /// Decode WAV file bytes into 16 kHz mono Float32Array. Convenience for JS
