@@ -1090,6 +1090,13 @@ fn use_tiled_batched_v2(k: usize, n: usize, batch: usize) -> bool {
     k >= 16 && n >= 16 && batch >= 16
 }
 
+/// V3 tiled batched matmul: 32×32 output tile, 4×4 register sub-blocks per
+/// thread. Microbenched 1.6× faster than v2 (129 vs 80 GFLOPS on Pro 555).
+/// Needs both dims ≥ 32 for the tile to be fully populated.
+fn use_tiled_batched_v3(k: usize, n: usize, batch: usize) -> bool {
+    k >= 16 && n >= 32 && batch >= 32
+}
+
 /// Batched BF16-weight matmul: y[b, j] = Σ_i x[b, i] * W[j, i]. Used by the
 /// audio Conformer tower so each block linear processes all `seq` frames
 /// in a single dispatch instead of `seq` separate ones.
@@ -1101,6 +1108,10 @@ pub fn matmul_bf16_batched_chained(
     w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer,
     k: usize, n: usize, batch: usize,
 ) {
+    if use_tiled_batched_v3(k, n, batch) {
+        matmul_bf16_batched_tiled_v3_chained(ctx, p, enc, w, x, y, k, n, batch);
+        return;
+    }
     if use_tiled_batched_v2(k, n, batch) {
         matmul_bf16_batched_tiled_v2_chained(ctx, p, enc, w, x, y, k, n, batch);
         return;
@@ -1143,6 +1154,10 @@ pub fn matmul_f16_batched_chained(
     w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer,
     k: usize, n: usize, batch: usize,
 ) {
+    if use_tiled_batched_v3(k, n, batch) {
+        matmul_f16_batched_tiled_v3_chained(ctx, p, enc, w, x, y, k, n, batch);
+        return;
+    }
     if use_tiled_batched_v2(k, n, batch) {
         matmul_f16_batched_tiled_v2_chained(ctx, p, enc, w, x, y, k, n, batch);
         return;
@@ -1271,6 +1286,69 @@ pub fn matmul_f16_batched_tiled_v2_chained(
     cp.set_bind_group(0, &bg, &[]);
     // Tile = 16×16 outputs per workgroup.
     cp.dispatch_workgroups((n as u32).div_ceil(16), (batch as u32).div_ceil(16), 1);
+}
+
+/// V3 tiled batched f16-weight matmul: 32×32 output tile, 4×4 register
+/// sub-blocks per thread. ~2× arithmetic intensity over v2 on shapes where
+/// both n and batch are ≥ 32.
+pub fn matmul_f16_batched_tiled_v3_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer,
+    k: usize, n: usize, batch: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = BatchedMatmulParams {
+        k: k as u32, n: n as u32, batch: batch as u32, _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "f16bmmt3.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("f16bmmt3.bg"),
+        layout: &p.f16_matmul_batched_tiled_v3.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("f16bmmt3.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.f16_matmul_batched_tiled_v3);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups((n as u32).div_ceil(32), (batch as u32).div_ceil(32), 1);
+}
+
+/// V3 tiled batched bf16-weight matmul: 32×32 output tile, 4×4 register
+/// sub-blocks per thread. Audio analogue of the f16 v3 variant.
+pub fn matmul_bf16_batched_tiled_v3_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer,
+    k: usize, n: usize, batch: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = BatchedMatmulParams {
+        k: k as u32, n: n as u32, batch: batch as u32, _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "bf16bmmt3.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("bf16bmmt3.bg"),
+        layout: &p.bf16_matmul_batched_tiled_v3.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("bf16bmmt3.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.bf16_matmul_batched_tiled_v3);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups((n as u32).div_ceil(32), (batch as u32).div_ceil(32), 1);
 }
 
 /// V2 tiled batched bf16-weight matmul. Audio analogue of the f16 v2 variant.
