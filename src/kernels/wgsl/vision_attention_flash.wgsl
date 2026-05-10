@@ -111,11 +111,30 @@ fn main(
         workgroupBarrier();
 
         // --- Score per t_local. Thread tid handles t_local = tid (or none if past). ---
+        // Inner dot product is vectorized to 4-wide vec4 dot products — most
+        // GPU back-ends issue these as single fused MAC instructions, halving
+        // loop overhead and improving register reuse.
         var s_t: f32 = -1.0e30;
         if (tid < tile_size) {
             var sum: f32 = 0.0;
-            for (var d: u32 = 0u; d < head_dim; d = d + 1u) {
-                sum = sum + q_shared[d] * kv_tile[tid * head_dim + d];
+            let row_off = tid * head_dim;
+            let n_vec = head_dim / 4u;
+            for (var dv: u32 = 0u; dv < n_vec; dv = dv + 1u) {
+                let dv4 = dv * 4u;
+                let qv = vec4<f32>(
+                    q_shared[dv4],     q_shared[dv4 + 1u],
+                    q_shared[dv4 + 2u], q_shared[dv4 + 3u],
+                );
+                let kv = vec4<f32>(
+                    kv_tile[row_off + dv4],     kv_tile[row_off + dv4 + 1u],
+                    kv_tile[row_off + dv4 + 2u], kv_tile[row_off + dv4 + 3u],
+                );
+                sum = sum + dot(qv, kv);
+            }
+            // Tail for non-multiples of 4 (head_dim=64 is exact, so this is dead
+            // code for the Gemma 4 vision shape but kept for safety).
+            for (var d: u32 = n_vec * 4u; d < head_dim; d = d + 1u) {
+                sum = sum + q_shared[d] * kv_tile[row_off + d];
             }
             s_t = sum;
         }
@@ -183,10 +202,29 @@ fn main(
         }
         workgroupBarrier();
 
-        // --- Weighted sum: each thread adds its column of V scaled by scores. ---
+        // --- Weighted sum: each thread adds its column of V scaled by scores.
+        // Unroll by 4 in the t_local loop so the back-end can issue 4 strided
+        // V reads ahead of the FMAs (memory parallelism) and fold the work
+        // into one fused vec4 dot. tile_size is TILE_T=32 in the common case
+        // so we take the fast path; tail handles non-multiples of 4. ---
         if (tid < head_dim) {
             var contrib: f32 = 0.0;
-            for (var t_local: u32 = 0u; t_local < tile_size; t_local = t_local + 1u) {
+            let n_vec = tile_size / 4u;
+            for (var tv: u32 = 0u; tv < n_vec; tv = tv + 1u) {
+                let t0_l = tv * 4u;
+                let sv = vec4<f32>(
+                    tile_scores[t0_l],      tile_scores[t0_l + 1u],
+                    tile_scores[t0_l + 2u], tile_scores[t0_l + 3u],
+                );
+                let vv = vec4<f32>(
+                    kv_tile[t0_l * head_dim + tid],
+                    kv_tile[(t0_l + 1u) * head_dim + tid],
+                    kv_tile[(t0_l + 2u) * head_dim + tid],
+                    kv_tile[(t0_l + 3u) * head_dim + tid],
+                );
+                contrib = contrib + dot(sv, vv);
+            }
+            for (var t_local: u32 = n_vec * 4u; t_local < tile_size; t_local = t_local + 1u) {
                 contrib = contrib + tile_scores[t_local] * kv_tile[t_local * head_dim + tid];
             }
             o = o + contrib;
