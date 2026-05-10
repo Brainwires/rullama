@@ -18,6 +18,7 @@ pub const SILU: &str = include_str!("wgsl/silu.wgsl");
 pub const GLU_SPLIT: &str = include_str!("wgsl/glu_split.wgsl");
 pub const DEPTHWISE_CONV1D: &str = include_str!("wgsl/depthwise_conv1d.wgsl");
 pub const BLOCK_LOCAL_ATTENTION: &str = include_str!("wgsl/block_local_attention.wgsl");
+pub const BF16_MATMUL: &str = include_str!("wgsl/bf16_matmul.wgsl");
 pub const GEGLU: &str = include_str!("wgsl/geglu.wgsl");
 pub const Q4_K_DEQUANT_MATMUL: &str = include_str!("wgsl/q4_k_dequant_matmul.wgsl");
 pub const Q4_K_DEQUANT_MATMUL_TILED: &str = include_str!("wgsl/q4_k_dequant_matmul_tiled.wgsl");

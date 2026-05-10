@@ -22,6 +22,24 @@ struct MatmulParams {
     _pad1: u32,
 }
 
+/// Run `y = x @ W` on the GPU where `W` is stored as BF16 row-major bytes
+/// (length `k * n * 2`). BF16 = the upper 16 bits of an F32; the kernel
+/// reconstructs each element as `bitcast<f32>(u32(bf16) << 16)`.
+pub async fn matmul_bf16(ctx: &WgpuCtx, w_bytes: &[u8], x: &[f32], k: usize, n: usize) -> Result<Vec<f32>> {
+    if w_bytes.len() != k * n * 2 {
+        return Err(RullamaError::Inference(format!(
+            "bf16 W bytes {} != k*n*2 = {}", w_bytes.len(), k * n * 2
+        )));
+    }
+    if x.len() != k {
+        return Err(RullamaError::Inference(format!("x.len() {} != k {}", x.len(), k)));
+    }
+    if k % 2 != 0 {
+        return Err(RullamaError::Inference(format!("k {k} must be even for bf16 matmul")));
+    }
+    dispatch_matmul(ctx, kernels::BF16_MATMUL, w_bytes, x, k, n).await
+}
+
 /// Run `y = x @ W` on the GPU where `W` is stored as F16 row-major bytes (length
 /// `k * n * 2`).
 pub async fn matmul_f16(ctx: &WgpuCtx, w_bytes: &[u8], x: &[f32], k: usize, n: usize) -> Result<Vec<f32>> {
@@ -432,6 +450,52 @@ mod tests {
         // for the order-of-operations difference between row-major CPU dequant + matvec
         // and the kernel's interleaved dequant-then-multiply.
         assert!(max_abs < 1e-3, "Q6_K matmul GPU/CPU disagreement: max_abs={max_abs}");
+    }
+
+    /// Convert F32 values to packed BF16 bytes (truncate to high 16 bits, pack
+    /// two per u32 little-endian).
+    fn f32_to_bf16_bytes(values: &[f32]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(values.len() * 2);
+        for &v in values {
+            let bits = v.to_bits();
+            let bf = (bits >> 16) as u16;
+            out.extend_from_slice(&bf.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn bf16_matmul_random_64x128() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let k = 64;
+        let n = 128;
+        let mut state: u32 = 0xDEAD_F00D;
+        let mut next = || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            ((state >> 8) as f32 / 16777216.0) - 0.5
+        };
+        let w_f32: Vec<f32> = (0..n * k).map(|_| next() * 0.1).collect();
+        let x: Vec<f32> = (0..k).map(|_| next()).collect();
+
+        // Round-trip CPU reference: BF16 has only 8 bits of mantissa, so
+        // reproduce the truncation in the CPU side too.
+        let w_bf16_bytes = f32_to_bf16_bytes(&w_f32);
+        let w_round_tripped: Vec<f32> = w_f32.iter().map(|&v| {
+            let bits = v.to_bits();
+            f32::from_bits(bits & 0xFFFF0000)
+        }).collect();
+        let cpu_y = cpu_matmul_f32(&w_round_tripped, &x, k, n);
+
+        let ctx = pollster::block_on(WgpuCtx::new()).expect("wgpu");
+        let gpu_y = pollster::block_on(matmul_bf16(&ctx, &w_bf16_bytes, &x, k, n)).expect("matmul");
+
+        let mut max_abs = 0f32;
+        for i in 0..n {
+            let diff = (gpu_y[i] - cpu_y[i]).abs();
+            if diff > max_abs { max_abs = diff; }
+            assert!(diff < 1e-4, "bf16 y[{i}] cpu={} gpu={} diff={}", cpu_y[i], gpu_y[i], diff);
+        }
+        eprintln!("bf16_matmul max_abs_diff over {n} outputs = {max_abs:e}");
     }
 
     #[test]

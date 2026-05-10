@@ -36,6 +36,7 @@ pub struct Pipelines {
     pub glu_split:         wgpu::ComputePipeline,
     pub depthwise_conv1d:  wgpu::ComputePipeline,
     pub block_local_attention: wgpu::ComputePipeline,
+    pub bf16_matmul:       wgpu::ComputePipeline,
 }
 
 impl Pipelines {
@@ -67,6 +68,7 @@ impl Pipelines {
             glu_split:         build(device, "glu_split",         kernels::GLU_SPLIT),
             depthwise_conv1d:  build(device, "depthwise_conv1d",  kernels::DEPTHWISE_CONV1D),
             block_local_attention: build(device, "block_local_attention", kernels::BLOCK_LOCAL_ATTENTION),
+            bf16_matmul:       build(device, "bf16_matmul",       kernels::BF16_MATMUL),
         }
     }
 }

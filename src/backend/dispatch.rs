@@ -577,6 +577,16 @@ pub fn matmul_f16_chained(
     matmul_chained_inner(&ctx.device, &ctx.queue, enc, &p.f16_matmul, "f16_chain", w, x, y, k, n);
 }
 
+/// BF16 weight matmul. Used by the audio Conformer tower (every block
+/// linear in `gemma4:e2b`'s audio path is BF16).
+#[allow(dead_code)]
+pub fn matmul_bf16_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer, k: usize, n: usize,
+) {
+    matmul_chained_inner(&ctx.device, &ctx.queue, enc, &p.bf16_matmul, "bf16_chain", w, x, y, k, n);
+}
+
 /// Chained RMSNorm. `weight` of None binds a dummy zero buffer + sets `has_weight=0`,
 /// matching the WGSL layout's optional-weight contract.
 pub fn rmsnorm_chained(
