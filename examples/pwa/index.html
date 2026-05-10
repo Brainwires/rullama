@@ -121,10 +121,17 @@
         <small id="img-info" class="grow"></small>
         <button id="img-remove" class="danger">remove</button>
     </div>
+    <div id="aud-attach" class="row" style="display:none">
+        <span style="font-size:1.5rem">🔊</span>
+        <small id="aud-info" class="grow"></small>
+        <button id="aud-remove" class="danger">remove</button>
+    </div>
     <div class="row">
         <input type="text" id="prompt" placeholder='e.g. "What is the capital of France?"' class="grow" />
         <button id="img-btn" title="Attach an image (vision-capable models only)">📎</button>
         <input type="file" id="img-input" accept="image/*" style="display:none" />
+        <button id="aud-btn" title="Attach a WAV file (audio-capable models only)">🎤</button>
+        <input type="file" id="aud-input" accept=".wav,audio/wav,audio/x-wav" style="display:none" />
         <button id="send-btn" disabled>Send</button>
         <button id="stop-btn" disabled>Stop</button>
         <button id="reset-btn" disabled>New chat</button>
@@ -381,6 +388,9 @@ function renderChat() {
             (m.imageDataUrl
                 ? `<img src="${m.imageDataUrl}" style="max-height:120px;border-radius:4px;margin-bottom:0.3rem;display:block" />`
                 : "") +
+            (m.audioName
+                ? `<div style="font-size:.85em;color:#888;margin-bottom:.3rem">🔊 ${m.audioName} (${m.audioDurSec?.toFixed(2)} s)</div>`
+                : "") +
             `<div class="msg-body"></div>`;
         div.querySelector(".msg-body").textContent = m.content;
         host.appendChild(div);
@@ -419,6 +429,41 @@ $("img-remove").addEventListener("click", () => {
     $("img-attach").style.display = "none";
 });
 
+// ---- audio attachment state (M14) ------------------------------------------
+let pendingAudio = null;       // {pcm, durSec, name}
+$("aud-btn").addEventListener("click", () => $("aud-input").click());
+$("aud-input").addEventListener("change", async (ev) => {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    if (!model) {
+        log($("chat-log"), "load a model before attaching audio");
+        return;
+    }
+    if (!model.hasAudio) {
+        log($("chat-log"), "this model has no audio tower — audio attachment ignored");
+        return;
+    }
+    try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const pcm = model.decodeWav(bytes);     // → Float32Array @ 16 kHz mono
+        const durSec = pcm.length / 16000;
+        if (durSec > 30) {
+            log($("chat-log"), `warning: ${durSec.toFixed(1)} s — Gemma's audio max is 30 s; will truncate`);
+        }
+        pendingAudio = { pcm, durSec, name: file.name };
+        $("aud-info").textContent = `${file.name} — ${durSec.toFixed(2)} s @ 16 kHz mono`;
+        $("aud-attach").style.display = "";
+    } catch (e) {
+        log($("chat-log"), "audio decode error: " + (e?.message ?? String(e)));
+    } finally {
+        ev.target.value = "";
+    }
+});
+$("aud-remove").addEventListener("click", () => {
+    pendingAudio = null;
+    $("aud-attach").style.display = "none";
+});
+
 $("reset-btn").addEventListener("click", () => {
     if (!model) return;
     model.reset();
@@ -434,28 +479,35 @@ $("stop-btn").addEventListener("click", () => {
 $("send-btn").addEventListener("click", async () => {
     if (!model) return;
     const text = $("prompt").value.trim();
-    if (!text && !pendingImage) return;
+    if (!text && !pendingImage && !pendingAudio) return;
     $("send-btn").disabled = true;
     $("stop-btn").disabled = false;
     $("prompt").value = "";
 
-    // Snapshot the image attachment for this turn, then clear it from the UI.
+    // Snapshot attachments for this turn, then clear them from the UI.
     const turnImage = pendingImage;
+    const turnAudio = pendingAudio;
     pendingImage = null;
+    pendingAudio = null;
     $("img-attach").style.display = "none";
+    $("aud-attach").style.display = "none";
 
-    // Build user message. When there's an image, prepend the model's image
-    // sentinels around an empty placeholder — JS will splice the soft tokens
-    // between them during the feed loop. For chat history rendering, we strip
-    // the sentinels and just show the typed text + thumbnail.
+    // Build user message. Sentinel pairs (`<|image>...<image|>`, `<|audio>...<audio|>`)
+    // wrap empty placeholders in the prompt; JS splices soft tokens between
+    // them during the feed loop. The chat-history bubble shows just the typed
+    // text + thumbnail/filename — sentinels are stripped from the display.
     const sys = $("sys-prompt").value.trim();
     const visibleContent = text;
-    const promptContent = turnImage ? `<|image><image|>${text}` : text;
+    let promptContent = text;
+    if (turnImage) promptContent = `<|image><image|>${promptContent}`;
+    if (turnAudio) promptContent = `<|audio><audio|>${promptContent}`;
     const userMsg = {
         role: "user",
         content: visibleContent,
         imageDataUrl: turnImage?.dataUrl,
-        _promptContent: promptContent,   // used by the feed loop only
+        audioName: turnAudio?.name,
+        audioDurSec: turnAudio?.durSec,
+        _promptContent: promptContent,
     };
     chatMessages.push(userMsg);
     const messages = sys
@@ -495,26 +547,45 @@ $("send-btn").addEventListener("click", async () => {
         const prompt = model.renderChat(messages, false);
         const ids = model.encode(prompt);
 
-        // Image soft tokens (encoded once per send if attached).
-        let softTokens = null;       // Float32Array, n_soft × d_text
-        let nSoft = 0;
-        let dText = 0;
-        let beginId = -1, endId = -1;
+        // Soft tokens for image / audio (encoded once per send if attached).
+        // Each modality contributes its own `(begin_id, end_id, soft_tokens)`
+        // triple; the feed loop splices when it sees a begin marker.
+        const softMap = new Map();   // beginId → {nSoft, dText, softTokens}
         if (turnImage) {
             const sent = model.imageSentinelIds();
             if (sent) {
-                beginId = sent[0]; endId = sent[1];
+                log($("chat-log"), `encoding image ${turnImage.w}×${turnImage.h} ...`);
+                const t = performance.now();
+                const softTokens = await model.encodeImage(turnImage.pixels, turnImage.h, turnImage.w);
+                const nSoft = model.imageSoftTokenCount(turnImage.h, turnImage.w);
+                const dText = softTokens.length / nSoft;
+                softMap.set(sent[0], { nSoft, dText, softTokens });
+                log($("chat-log"),
+                    `encoded ${nSoft} image soft tokens × ${dText} dim in ${(performance.now()-t).toFixed(0)}ms`);
             }
-            log($("chat-log"), `encoding image ${turnImage.w}×${turnImage.h} ...`);
-            const tImg = performance.now();
-            softTokens = await model.encodeImage(turnImage.pixels, turnImage.h, turnImage.w);
-            nSoft = model.imageSoftTokenCount(turnImage.h, turnImage.w);
-            dText = softTokens.length / nSoft;
-            log($("chat-log"),
-                `encoded ${nSoft} soft tokens × ${dText} dim in ${(performance.now()-tImg).toFixed(0)}ms`);
+        }
+        if (turnAudio) {
+            const sent = model.audioSentinelIds();
+            if (sent) {
+                // Truncate to 30 s to match Gemma's per-encode cap.
+                const maxSamples = 30 * 16000;
+                const pcm = turnAudio.pcm.length > maxSamples
+                    ? turnAudio.pcm.subarray(0, maxSamples)
+                    : turnAudio.pcm;
+                log($("chat-log"), `encoding audio ${(pcm.length/16000).toFixed(2)} s ...`);
+                const t = performance.now();
+                const softTokens = await model.encodeAudio(pcm);
+                // dText comes from the model — same as image's d_text.
+                const dText = 1536;   // gemma4 d_model
+                const nSoft = softTokens.length / dText;
+                softMap.set(sent[0], { nSoft, dText, softTokens });
+                log($("chat-log"),
+                    `encoded ${nSoft} audio soft tokens × ${dText} dim in ${(performance.now()-t).toFixed(0)}ms`);
+            }
         }
 
-        log($("chat-log"), `prompt-eval starting: ${ids.length} tokens` + (turnImage ? ` + ${nSoft} soft` : ""));
+        const totalSoft = [...softMap.values()].reduce((s, v) => s + v.nSoft, 0);
+        log($("chat-log"), `prompt-eval starting: ${ids.length} tokens${totalSoft ? ` + ${totalSoft} soft` : ""}`);
 
         const t0 = performance.now();
         let next = 0;
@@ -524,18 +595,19 @@ $("send-btn").addEventListener("click", async () => {
             const id = ids[i];
             next = await model.step(id);
             i++;
-            // After feeding the begin marker, splice in soft tokens until the next
-            // ids[i] is the end marker.
-            if (turnImage && id === beginId && softTokens) {
-                for (let r = 0; r < nSoft; r++) {
+            // After feeding a begin marker, splice in soft tokens before the
+            // matching end marker.
+            const ent = softMap.get(id);
+            if (ent) {
+                for (let r = 0; r < ent.nSoft; r++) {
                     if (cancelGen) throw new Error("cancelled");
-                    const row = softTokens.subarray(r * dText, (r + 1) * dText);
+                    const row = ent.softTokens.subarray(r * ent.dText, (r + 1) * ent.dText);
                     next = await model.stepWithEmbedding(row);
                 }
             }
         }
         log($("chat-log"),
-            `prompt-eval: ${(performance.now()-t0).toFixed(0)}ms (${ids.length}${turnImage ? `+${nSoft}` : ""} positions)`);
+            `prompt-eval: ${(performance.now()-t0).toFixed(0)}ms (${ids.length}${totalSoft ? `+${totalSoft}` : ""} positions)`);
 
         const max = parseInt($("maxtok").value, 10);
         const tg0 = performance.now();
