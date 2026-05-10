@@ -117,8 +117,28 @@ impl BpeTokenizer {
 
     /// Encode a UTF-8 string into token ids.
     pub fn encode(&self, s: &str) -> Vec<u32> {
+        // ----- 0) SentencePiece "add_dummy_prefix": prepend '▁' once at the
+        //         very start of the input. llama.cpp's SPM tokenizer (which
+        //         gemma4 uses, per `tokenizer.ggml.model = "llama"`) does
+        //         this regardless of whether the input begins with a special.
+        //         Mismatch here costs you the first KV slot — divergence at
+        //         position 0 vs Ollama on any prompt that doesn't start with
+        //         a special token or whitespace.
+        let s_owned: String;
+        let s_ref: &str = if s.is_empty()
+            || s.starts_with(' ') || s.starts_with(SPM_SPACE)
+            // Don't prepend if input begins with a known special token —
+            // specials are matched as whole strings and we'd insert ▁ inside.
+            || self.specials.iter().any(|(sp, _)| s.starts_with(sp.as_str()))
+        {
+            s
+        } else {
+            s_owned = format!("{SPM_SPACE}{s}");
+            &s_owned
+        };
+
         // ----- 1) split around special tokens -----
-        let mut frags: Vec<Frag> = vec![Frag::Text(s.to_string())];
+        let mut frags: Vec<Frag> = vec![Frag::Text(s_ref.to_string())];
         for (special, sid) in &self.specials {
             let mut next: Vec<Frag> = Vec::new();
             for f in frags.into_iter() {
@@ -144,8 +164,12 @@ impl BpeTokenizer {
     fn encode_text(&self, raw: &str, out: &mut Vec<u32>) {
         if raw.is_empty() { return; }
 
-        // SP normalize: ' ' → '▁'
-        let normalized: String = raw.chars().map(|c| if c == ' ' { SPM_SPACE } else { c }).collect();
+        // SP normalize: ' ' → '▁'. SentencePiece's `add_dummy_prefix=true`
+        // is applied once at the very start of the input by `encode()` —
+        // not here per fragment, since llama.cpp's SPM tokenizer doesn't
+        // re-apply the dummy prefix to fragments that follow special tokens.
+        let normalized: String = raw.chars()
+            .map(|c| if c == ' ' { SPM_SPACE } else { c }).collect();
 
         // short-circuit on full match
         if let Some(&id) = self.vocab.get(&normalized) {
