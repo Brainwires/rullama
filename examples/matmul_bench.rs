@@ -245,5 +245,107 @@ fn main() {
     ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
     let elapsed = t.elapsed();
     let per_iter = elapsed / n_iters as u32;
-    println!("vision_attention            : {per_iter:?}/iter  (×16 blocks ≈ {:?} total)", per_iter * 16);
+    println!("vision_attention (router → Q4): {per_iter:?}/iter  (×16 blocks ≈ {:?} total)", per_iter * 16);
+
+    // Bench the original (Q=1) for comparison.
+    for _ in 0..2 {
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        dispatch::vision_attention_flash_chained(&ctx, &pipes, &mut enc, &q_buf, &k_buf, &v_buf, &out_buf,
+            head_dim, n_heads, n_patches);
+        ctx.queue.submit(Some(enc.finish()));
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    }
+    let t2 = Instant::now();
+    for _ in 0..n_iters {
+        let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        dispatch::vision_attention_flash_chained(&ctx, &pipes, &mut enc, &q_buf, &k_buf, &v_buf, &out_buf,
+            head_dim, n_heads, n_patches);
+        ctx.queue.submit(Some(enc.finish()));
+    }
+    ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    let per_iter2 = t2.elapsed() / n_iters as u32;
+    println!("vision_attention_flash (Q=1)   : {per_iter2:?}/iter  (×16 blocks ≈ {:?} total)", per_iter2 * 16);
+
+    // ---- Small-op benches at vision shapes ----
+    // Vision encode for 768×528 has n_patches=2304, hidden=768, ffn=3072.
+    // Per-layer call counts (counted by reading vision.rs):
+    //   rmsnorm:        4 calls @ 2304×768
+    //   rmsnorm_per_row 2 calls (Q,K) @ 27648×64
+    //   clamp:          ~6 calls @ 2304×3072 (worst case ffn)
+    //   quick_geglu:    1 call  @ 2304×3072 → 7M elements
+    //   residual_add:   2 calls @ 2304×768
+    //   rope_2d:        1 call  @ 27648 elements
+    //   pos_embed_add:  1 call  total (not per-layer)
+    println!("\n=== small-op benches at vision shapes ===");
+    let hidden = 768usize;
+    let ffn = 3072usize;
+    let n_patches_v = 2304usize;
+    let n_heads_v = 12usize;
+    let head_dim_v = 64usize;
+
+    let bench_n = 5;
+    let bench = |label: &str, f: &dyn Fn(&mut wgpu::CommandEncoder)| {
+        // Warmup.
+        for _ in 0..2 {
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            f(&mut enc);
+            ctx.queue.submit(Some(enc.finish()));
+            ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        }
+        let t = Instant::now();
+        for _ in 0..bench_n {
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            f(&mut enc);
+            ctx.queue.submit(Some(enc.finish()));
+        }
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        let per_iter = t.elapsed() / bench_n as u32;
+        println!("{label:36}: {per_iter:?}/iter");
+    };
+
+    // Allocate buffers for the small ops.
+    let mk_buf = |label: &'static str, n: usize| ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label), size: (n * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let scratch_hidden = mk_buf("sc.hidden", n_patches_v * hidden);
+    let scratch_hidden2 = mk_buf("sc.hidden2", n_patches_v * hidden);
+    let scratch_ffn = mk_buf("sc.ffn", n_patches_v * ffn);
+    let scratch_ffn2 = mk_buf("sc.ffn2", n_patches_v * ffn);
+    let scratch_ffn3 = mk_buf("sc.ffn3", n_patches_v * ffn);
+    let scratch_norm = mk_buf("sc.norm", hidden);
+    let scratch_qk = mk_buf("sc.qk", n_patches_v * n_heads_v * head_dim_v);
+    let scratch_qk2 = mk_buf("sc.qk2", n_patches_v * n_heads_v * head_dim_v);
+    let _scratch_freq = mk_buf("sc.freq", head_dim_v / 2);
+    let scratch_pos_x = mk_buf("sc.pos_x", n_patches_v);
+    let scratch_pos_y = mk_buf("sc.pos_y", n_patches_v);
+
+    bench("rmsnorm_per_row hidden", &|enc| {
+        dispatch::rmsnorm_per_row_chained(&ctx, &pipes, enc, &scratch_hidden, None, &scratch_norm, &scratch_hidden2,
+            n_patches_v, hidden, 1e-6);
+    });
+    bench("rmsnorm_per_row Q/K (per-head)", &|enc| {
+        dispatch::rmsnorm_per_row_chained(&ctx, &pipes, enc, &scratch_qk, None, &scratch_norm, &scratch_qk2,
+            n_patches_v * n_heads_v, head_dim_v, 1e-6);
+    });
+    bench("clamp on ffn buf (7M)", &|enc| {
+        dispatch::clamp_chained(&ctx, &pipes, enc, &scratch_ffn, n_patches_v * ffn, -10.0, 10.0);
+    });
+    bench("clamp on hidden buf (1.7M)", &|enc| {
+        dispatch::clamp_chained(&ctx, &pipes, enc, &scratch_hidden, n_patches_v * hidden, -10.0, 10.0);
+    });
+    bench("quick_geglu (7M)", &|enc| {
+        dispatch::quick_geglu_chained(&ctx, &pipes, enc, &scratch_ffn, &scratch_ffn2, &scratch_ffn3, n_patches_v * ffn);
+    });
+    bench("residual_add hidden", &|enc| {
+        dispatch::residual_add_chained(&ctx, &pipes, enc, &scratch_hidden, &scratch_hidden2,
+            n_patches_v * hidden);
+    });
+    bench("rope_2d Q", &|enc| {
+        dispatch::rope_2d_chained(&ctx, &pipes, enc, &scratch_qk, &scratch_pos_x, &scratch_pos_y,
+            head_dim_v, n_heads_v, n_patches_v, 100.0);
+    });
+
+    println!("\n(rough per-encode totals: ×16 for per-layer ops, ×1 for one-shot ops)");
 }
