@@ -26,13 +26,16 @@
 //
 // Workgroup storage:
 //   q_shared    (64 f32)      256 B
-//   kv_tile     (32×64 f32)  8192 B   (re-used for K then V per tile)
-//   tile_scores (32 f32)      128 B
+//   kv_tile     (32×64 f32)  8192 B  (re-used for K then V per tile)
+//   tile_scores (64 f32)      256 B
 //   rbuf        (64 f32)      256 B
 //   --------------------------------
-//   total                    8832 B   (fits in WebGPU's 16 KB minimum)
+//   total                    8960 B  (fits in WebGPU's 16 KB minimum)
 //
-// Assumes head_dim ≤ 64 and TILE_T ≤ 32.
+// Assumes head_dim ≤ 64. TILE_T = 32 chosen for high CU occupancy on
+// AMD Radeon Pro 555 (64 KB LDS / CU). Bumping to TILE_T=64 cuts barrier
+// count in half but doubles workgroup-shared size, dropping occupancy
+// from ~7 to ~3 workgroups per CU — measured 2× regression on the Pro 555.
 
 struct Params {
     head_dim:  u32,
