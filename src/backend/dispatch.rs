@@ -951,13 +951,13 @@ pub fn matmul_bf16_batched_chained(
             wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
         ],
     });
-    let total = (batch * n) as u32;
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("bf16bmm.pass"), timestamp_writes: None,
     });
     cp.set_pipeline(&p.bf16_matmul_batched);
     cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
+    // 2D dispatch: x = output cols (n / 64), y = batch.
+    cp.dispatch_workgroups((n as u32).div_ceil(64), batch as u32, 1);
 }
 
 /// Batched f16-weight matmul: y[b, j] = Σ_i x[b, i] * W[j, i]. Used by the
@@ -983,13 +983,13 @@ pub fn matmul_f16_batched_chained(
             wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
         ],
     });
-    let total = (batch * n) as u32;
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("f16bmm.pass"), timestamp_writes: None,
     });
     cp.set_pipeline(&p.f16_matmul_batched);
     cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
+    // 2D dispatch: x = output cols (n / 64), y = batch.
+    cp.dispatch_workgroups((n as u32).div_ceil(64), batch as u32, 1);
 }
 
 /// Chained 2D convolution. Generic stride/padding so the same kernel handles

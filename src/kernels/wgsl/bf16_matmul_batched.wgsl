@@ -25,12 +25,12 @@ fn bf16_to_f32(bits: u32) -> f32 {
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let total: u32 = params.batch * params.n;
-    let idx: u32 = gid.x;
-    if (idx >= total) { return; }
-
-    let b: u32 = idx / params.n;
-    let j: u32 = idx - b * params.n;
+    // 2D dispatch: gid.x = output column (j), gid.y = batch index (b).
+    // Caller dispatches (n.div_ceil(64), batch, 1) to stay under the
+    // 65535 wgpu workgroup-per-dim cap even at large vision shapes.
+    let j: u32 = gid.x;
+    let b: u32 = gid.y;
+    if (j >= params.n || b >= params.batch) { return; }
 
     let half_k: u32 = params.k / 2u;
     let row_start: u32 = j * half_k;
@@ -43,5 +43,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let hi: f32 = bf16_to_f32(packed >> 16u);
         acc = acc + x[x_off + p * 2u] * lo + x[x_off + p * 2u + 1u] * hi;
     }
-    y[idx] = acc;
+    y[b * params.n + j] = acc;
 }

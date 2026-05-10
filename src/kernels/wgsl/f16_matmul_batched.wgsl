@@ -1,11 +1,9 @@
 // Batched f16-weight matmul: y[b, j] = Σ_i x[b, i] * W[j, i].
 //
-// Same W layout as f16_matmul.wgsl (n rows of length k, f16 packed two per u32),
-// but x is now [batch, k] and y is [batch, n]. Used by the vision tower where
-// each call processes all `num_patches` rows simultaneously — a single dispatch
-// per linear instead of `num_patches` separate dispatches.
-//
-// One thread per output element, indexed by gid.x = batch * n + j.
+// 2D dispatch: gid.x indexes the output column (j), gid.y indexes the batch
+// (b). Caller dispatches `(n.div_ceil(64), batch, 1)`. This keeps each
+// dimension under the 65535 wgpu workgroup-per-dim limit even at the larger
+// vision shapes (batch up to ~2560 patches, n up to 3072 ffn).
 
 struct Params {
     k:     u32,
@@ -21,12 +19,9 @@ struct Params {
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let total: u32 = params.batch * params.n;
-    let idx: u32 = gid.x;
-    if (idx >= total) { return; }
-
-    let b: u32 = idx / params.n;
-    let j: u32 = idx - b * params.n;
+    let j: u32 = gid.x;
+    let b: u32 = gid.y;
+    if (j >= params.n || b >= params.batch) { return; }
 
     let half_k: u32 = params.k / 2u;
     let row_start: u32 = j * half_k;
@@ -38,5 +33,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let pair: vec2<f32> = unpack2x16float(packed);
         acc = acc + x[x_off + p * 2u] * pair.x + x[x_off + p * 2u + 1u] * pair.y;
     }
-    y[idx] = acc;
+    y[b * params.n + j] = acc;
 }
