@@ -566,6 +566,41 @@ fn matmul_chained_inner(
     cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
 }
 
+/// Same as `matmul_chained_inner` but dispatches with WG-size-256 stride so
+/// the WG count uses ceil(n/256) instead of ceil(n/64). The kernel must
+/// declare `@workgroup_size(256)`.
+fn matmul_chained_inner_wg256(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    enc: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::ComputePipeline,
+    label: &str,
+    w: &wgpu::Buffer,
+    x: &wgpu::Buffer,
+    y: &wgpu::Buffer,
+    k: usize,
+    n: usize,
+) {
+    let params = MatmulParams { k: k as u32, n: n as u32, _p0: 0, _p1: 0 };
+    let p_buf = write_uniform(device, queue, &format!("{label}.params"), &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(&format!("{label}.bg")),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some(label), timestamp_writes: None,
+    });
+    cp.set_pipeline(pipeline);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups((n as u32).div_ceil(256), 1, 1);
+}
+
 // Tiled-kernel threshold: empirically the naive matvec (one thread per output)
 // beats the tiled kernel on Apple GPUs at every per-layer shape because of L1/L2
 // cache + the cost of workgroup barriers. We only switch to tiled when the
@@ -580,12 +615,12 @@ pub fn matmul_q4_k_chained(
     ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
     w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer, k: usize, n: usize,
 ) {
-    // Non-tiled (1 thread per output, no shared LDS) wins on AMD GCN / Metal
-    // for single-token text inference — the path is weight-bandwidth bound, so
-    // the LDS-tiling overhead doesn't pay off.
-    // A/B (Pro 555, e2b): non-tiled 939 ms/tok, tiled 996, f16-LDS 975.
-    // Tiled and f16-LDS variants are built (when SHADER_F16) but unrouted —
-    // try them on Apple Silicon where packed-FP16 throughput is higher.
+    // A/B on AMD Pro 555 / Metal, single-token gemma4:e2b "Hi":
+    //   non-tiled WG=64  (default): 937 ms/tok
+    //   non-tiled WG=256          : 939 ms/tok  (neutral — text is weight-bw bound)
+    //   tiled    WG=64            : 996 ms/tok  (-6%)
+    //   tiled    WG=64 + f16 LDS  : 975 ms/tok  (-4%)
+    // The 3 alternatives are built (when relevant features) but unrouted.
     matmul_chained_inner(&ctx.device, &ctx.queue, enc, &p.q4_k_matmul, "q4k_chain", w, x, y, k, n);
 }
 

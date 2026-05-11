@@ -29,6 +29,8 @@ pub struct Pipelines {
     /// is available; routed first by `matmul_q[46]_k_chained`.
     pub q4_k_matmul_f16lds: Option<wgpu::ComputePipeline>,
     pub q6_k_matmul_f16lds: Option<wgpu::ComputePipeline>,
+    /// WG=256 non-tiled Q4_K — 4 waves per WG for better latency hiding.
+    pub q4_k_matmul_wg256: wgpu::ComputePipeline,
     pub conv2d:            wgpu::ComputePipeline,
     pub avg_pool2d:        wgpu::ComputePipeline,
     pub clamp:             wgpu::ComputePipeline,
@@ -182,6 +184,7 @@ impl Pipelines {
             bf16_matmul_batched_tiled_v3_f16lds: None,
             q4_k_matmul_f16lds: None,
             q6_k_matmul_f16lds: None,
+            q4_k_matmul_wg256: build(device, "q4_k_matmul_wg256", kernels::Q4_K_DEQUANT_MATMUL_WG256),
             pos_embed_add:     build(device, "pos_embed_add",     kernels::POS_EMBED_ADD),
             vision_attention:  build(device, "vision_attention",  kernels::VISION_ATTENTION),
             vision_attention_flash: build(device, "vision_attention_flash", kernels::VISION_ATTENTION_FLASH),

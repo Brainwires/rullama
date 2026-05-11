@@ -46,6 +46,7 @@ pub const GEGLU: &str = include_str!("wgsl/geglu.wgsl");
 pub const Q4_K_DEQUANT_MATMUL: &str = include_str!("wgsl/q4_k_dequant_matmul.wgsl");
 pub const Q4_K_DEQUANT_MATMUL_TILED: &str = include_str!("wgsl/q4_k_dequant_matmul_tiled.wgsl");
 pub const Q4_K_DEQUANT_MATMUL_F16LDS: &str = include_str!("wgsl/q4_k_dequant_matmul_f16lds.wgsl");
+pub const Q4_K_DEQUANT_MATMUL_WG256: &str = include_str!("wgsl/q4_k_dequant_matmul_wg256.wgsl");
 pub const Q6_K_DEQUANT_MATMUL: &str = include_str!("wgsl/q6_k_dequant_matmul.wgsl");
 pub const Q6_K_DEQUANT_MATMUL_TILED: &str = include_str!("wgsl/q6_k_dequant_matmul_tiled.wgsl");
 pub const Q6_K_DEQUANT_MATMUL_F16LDS: &str = include_str!("wgsl/q6_k_dequant_matmul_f16lds.wgsl");
