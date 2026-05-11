@@ -4,19 +4,19 @@ import { Input } from "@/components/ui/input";
 import { type ChatMessage } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
 import { cn } from "@/lib/utils";
-import { Send, Square, RotateCcw } from "lucide-react";
+import { Send, Square, Plus } from "lucide-react";
 
 interface Props {
     messages:    ChatMessage[];
     canType:     boolean;   // input enabled (model ready, not busy)
     canSend:     boolean;   // Send button enabled (canType AND prompt non-empty)
     canStop:     boolean;
-    canReset:    boolean;
+    canNewChat:  boolean;
     prompt:      string;
     onPromptChange: (s: string) => void;
     onSend:      () => void;
     onStop:      () => void;
-    onReset:     () => void;
+    onNewChat:   () => void;
     statusLine?: string;
     className?:  string;
 }
@@ -128,9 +128,9 @@ export function ChatPanel(props: Props) {
                     disabled={!props.canType}
                     className="flex-1 min-w-0"
                 />
-                <Button onClick={props.onSend}  disabled={!props.canSend}><Send /></Button>
-                <Button onClick={props.onStop}  disabled={!props.canStop}  variant="destructive"><Square /></Button>
-                <Button onClick={props.onReset} disabled={!props.canReset} variant="outline"><RotateCcw /></Button>
+                <Button onClick={props.onSend}    disabled={!props.canSend}><Send /></Button>
+                <Button onClick={props.onStop}    disabled={!props.canStop}    variant="destructive"><Square /></Button>
+                <Button onClick={props.onNewChat} disabled={!props.canNewChat} variant="outline" title="New chat"><Plus /></Button>
             </div>
         </div>
     );

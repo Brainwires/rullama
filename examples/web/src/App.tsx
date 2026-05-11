@@ -149,6 +149,10 @@ export function App() {
         setMessages([]);
         setActiveConvId(null);
         setStatusLine(undefined);
+        // Clear the worker's KV cache up front. onSend would do this on
+        // the next send anyway, but releasing the memory immediately is
+        // friendlier when the user is intentionally starting fresh.
+        void getClient().reset();
     }, [busy]);
 
     const onDeleteConversation = useCallback(async (id: string) => {
@@ -365,14 +369,6 @@ export function App() {
         }
     }, [busy, modelStatus, statusText, showToast]);
 
-    const onReset = useCallback(() => {
-        if (busy) return;
-        setMessages([]);
-        setActiveConvId(null);
-        setStatusLine(undefined);
-        void getClient().reset();
-    }, [busy]);
-
     // Active conversation title for the header.
     const activeTitle = activeConvId
         ? conversations.find((c) => c.id === activeConvId)?.title
@@ -473,12 +469,12 @@ export function App() {
                     canType={modelStatus === "ready"}
                     canSend={modelStatus === "ready" && !busy && prompt.trim().length > 0}
                     canStop={busy}
-                    canReset={modelStatus === "ready" && messages.length > 0 && !busy}
+                    canNewChat={modelStatus === "ready" && messages.length > 0 && !busy}
                     prompt={prompt}
                     onPromptChange={setPrompt}
                     onSend={onSend}
                     onStop={() => { cancelRef.current = true; }}
-                    onReset={onReset}
+                    onNewChat={onCreateConversation}
                     statusLine={statusLine}
                 />
             </DualSidebarLayout>
