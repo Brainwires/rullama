@@ -71,6 +71,8 @@ pub struct Pipelines {
     pub bf16_matmul_batched: wgpu::ComputePipeline,
     pub bf16_matmul_batched_tiled: wgpu::ComputePipeline,
     pub bf16_matmul_batched_tiled_v3: wgpu::ComputePipeline,
+    /// f16-LDS bf16-matmul. Built only when SHADER_F16 is available.
+    pub bf16_matmul_batched_tiled_v3_f16lds: Option<wgpu::ComputePipeline>,
     pub bf16_matmul_batched_tiled_v2: wgpu::ComputePipeline,
     pub scale_per_inner_dim: wgpu::ComputePipeline,
     pub add_bias_batched: wgpu::ComputePipeline,
@@ -126,6 +128,11 @@ impl Pipelines {
                 "f16_matmul_batched_tiled_v3_f16lds",
                 kernels::F16_MATMUL_BATCHED_TILED_V3_F16LDS,
             ));
+            me.bf16_matmul_batched_tiled_v3_f16lds = Some(build(
+                device,
+                "bf16_matmul_batched_tiled_v3_f16lds",
+                kernels::BF16_MATMUL_BATCHED_TILED_V3_F16LDS,
+            ));
         }
         me
     }
@@ -156,6 +163,7 @@ impl Pipelines {
             f16_matmul_batched_tiled_v3: build(device, "f16_matmul_batched_tiled_v3", kernels::F16_MATMUL_BATCHED_TILED_V3),
             f16_matmul_batched_tiled_v4: build(device, "f16_matmul_batched_tiled_v4", kernels::F16_MATMUL_BATCHED_TILED_V4),
             f16_matmul_batched_tiled_v3_f16lds: None,
+            bf16_matmul_batched_tiled_v3_f16lds: None,
             pos_embed_add:     build(device, "pos_embed_add",     kernels::POS_EMBED_ADD),
             vision_attention:  build(device, "vision_attention",  kernels::VISION_ATTENTION),
             vision_attention_flash: build(device, "vision_attention_flash", kernels::VISION_ATTENTION_FLASH),

@@ -38,6 +38,7 @@ pub const BF16_MATMUL: &str = include_str!("wgsl/bf16_matmul.wgsl");
 pub const BF16_MATMUL_BATCHED: &str = include_str!("wgsl/bf16_matmul_batched.wgsl");
 pub const BF16_MATMUL_BATCHED_TILED: &str = include_str!("wgsl/bf16_matmul_batched_tiled.wgsl");
 pub const BF16_MATMUL_BATCHED_TILED_V3: &str = include_str!("wgsl/bf16_matmul_batched_tiled_v3.wgsl");
+pub const BF16_MATMUL_BATCHED_TILED_V3_F16LDS: &str = include_str!("wgsl/bf16_matmul_batched_tiled_v3_f16lds.wgsl");
 pub const BF16_MATMUL_BATCHED_TILED_V2: &str = include_str!("wgsl/bf16_matmul_batched_tiled_v2.wgsl");
 pub const SCALE_PER_INNER_DIM: &str = include_str!("wgsl/scale_per_inner_dim.wgsl");
 pub const ADD_BIAS_BATCHED: &str = include_str!("wgsl/add_bias_batched.wgsl");
