@@ -121,7 +121,10 @@ async function main() {
     return;
   }
   const wantF16 = adapter.features.has("shader-f16");
-  const features = wantF16 ? ["shader-f16"] : [];
+  const wantTs  = adapter.features.has("timestamp-query");
+  const features = [];
+  if (wantF16) features.push("shader-f16");
+  if (wantTs)  features.push("timestamp-query");
   const device = await adapter.requestDevice({
     requiredFeatures: features,
     requiredLimits: {
@@ -240,9 +243,87 @@ async function main() {
       (p) => { p.setPipeline(attnPipe); p.setBindGroup(0, bg); },
       (p) => { p.dispatchWorkgroups(dispatchX, dispatchY, 1); },
       3);
-    log(`  vision_attention (HPD f16): ${perMs.toFixed(2)} ms/iter  (×16 layers ≈ ${(perMs * 16).toFixed(0)} ms)`, "ok");
-    await postResult({ event: "attn", variant: "hpd_f16",
+    log(`  vision_attention (HPD f16 Q=8): ${perMs.toFixed(2)} ms/iter  (×16 layers ≈ ${(perMs * 16).toFixed(0)} ms)`, "ok");
+    await postResult({ event: "attn", variant: "hpd_f16_q8",
       n_patches, n_heads, head_dim, ms_per_iter: perMs, total_16_layers_ms: perMs * 16 });
+
+    // ---- WG=128 variant — 4 waves per WG, more in-flight scheduling ----
+    try {
+      const attnWg128Src = await fetchKernel("/src/kernels/wgsl/vision_attention_flash_hpd_f16_wg128.wgsl");
+      const attnWg128Pipe = await buildPipeline(device, attnWg128Src, "attn-hpd-f16-wg128");
+      const bgWg128 = device.createBindGroup({
+        layout: attnWg128Pipe.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: pBuf } },
+          { binding: 1, resource: { buffer: qBuf } },
+          { binding: 2, resource: { buffer: kBuf } },
+          { binding: 3, resource: { buffer: vBuf } },
+          { binding: 4, resource: { buffer: oBuf } },
+        ],
+      });
+      const dxWg128 = Math.ceil(n_patches / 8);
+      const perMsWg128 = await timedDispatch(device, "attn-wg128",
+        (p) => { p.setPipeline(attnWg128Pipe); p.setBindGroup(0, bgWg128); },
+        (p) => { p.dispatchWorkgroups(dxWg128, n_heads, 1); },
+        3);
+      log(`  vision_attention (HPD f16 WG=128): ${perMsWg128.toFixed(2)} ms/iter  (×16 layers ≈ ${(perMsWg128 * 16).toFixed(0)} ms)`, "ok");
+      await postResult({ event: "attn", variant: "hpd_f16_wg128",
+        n_patches, n_heads, head_dim, ms_per_iter: perMsWg128, total_16_layers_ms: perMsWg128 * 16 });
+    } catch (e) {
+      log(`WG=128 variant failed: ${e}`, "err");
+    }
+
+    // ---- WG=32 variant — one wave per WG on Apple, intra-wave barriers ----
+    try {
+      const attnWg32Src = await fetchKernel("/src/kernels/wgsl/vision_attention_flash_hpd_f16_wg32.wgsl");
+      const attnWg32Pipe = await buildPipeline(device, attnWg32Src, "attn-hpd-f16-wg32");
+      const bgWg32 = device.createBindGroup({
+        layout: attnWg32Pipe.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: pBuf } },
+          { binding: 1, resource: { buffer: qBuf } },
+          { binding: 2, resource: { buffer: kBuf } },
+          { binding: 3, resource: { buffer: vBuf } },
+          { binding: 4, resource: { buffer: oBuf } },
+        ],
+      });
+      const dxWg32 = Math.ceil(n_patches / 8);
+      const perMsWg32 = await timedDispatch(device, "attn-wg32",
+        (p) => { p.setPipeline(attnWg32Pipe); p.setBindGroup(0, bgWg32); },
+        (p) => { p.dispatchWorkgroups(dxWg32, n_heads, 1); },
+        3);
+      log(`  vision_attention (HPD f16 WG=32): ${perMsWg32.toFixed(2)} ms/iter  (×16 layers ≈ ${(perMsWg32 * 16).toFixed(0)} ms)`, "ok");
+      await postResult({ event: "attn", variant: "hpd_f16_wg32",
+        n_patches, n_heads, head_dim, ms_per_iter: perMsWg32, total_16_layers_ms: perMsWg32 * 16 });
+    } catch (e) {
+      log(`WG=32 variant failed: ${e}`, "err");
+    }
+
+    // ---- Q=4 variant on same Q/K/V buffers (per-thread state halved) ----
+    try {
+      const attnQ4Src = await fetchKernel("/src/kernels/wgsl/vision_attention_flash_hpd_f16_q4.wgsl");
+      const attnQ4Pipe = await buildPipeline(device, attnQ4Src, "attn-hpd-f16-q4");
+      const bgQ4 = device.createBindGroup({
+        layout: attnQ4Pipe.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: pBuf } },
+          { binding: 1, resource: { buffer: qBuf } },
+          { binding: 2, resource: { buffer: kBuf } },
+          { binding: 3, resource: { buffer: vBuf } },
+          { binding: 4, resource: { buffer: oBuf } },
+        ],
+      });
+      const dxQ4 = Math.ceil(n_patches / 4);
+      const perMsQ4 = await timedDispatch(device, "attn-q4",
+        (p) => { p.setPipeline(attnQ4Pipe); p.setBindGroup(0, bgQ4); },
+        (p) => { p.dispatchWorkgroups(dxQ4, n_heads, 1); },
+        3);
+      log(`  vision_attention (HPD f16 Q=4): ${perMsQ4.toFixed(2)} ms/iter  (×16 layers ≈ ${(perMsQ4 * 16).toFixed(0)} ms)`, "ok");
+      await postResult({ event: "attn", variant: "hpd_f16_q4",
+        n_patches, n_heads, head_dim, ms_per_iter: perMsQ4, total_16_layers_ms: perMsQ4 * 16 });
+    } catch (e) {
+      log(`Q=4 variant failed: ${e}`, "err");
+    }
 
     qBuf.destroy(); kBuf.destroy(); vBuf.destroy(); oBuf.destroy(); pBuf.destroy();
   } else {
