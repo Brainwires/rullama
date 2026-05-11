@@ -215,7 +215,9 @@ export function App() {
 
             <ChatPanel
                 messages={messages}
-                canType={modelStatus === "ready" && !busy}
+                // Typing stays enabled during generation so the user can
+                // queue up the next message. Send is still gated by `!busy`.
+                canType={modelStatus === "ready"}
                 canSend={modelStatus === "ready" && !busy && prompt.trim().length > 0}
                 canStop={busy}
                 canReset={modelStatus === "ready" && messages.length > 0 && !busy}
