@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ThinkingBlock } from "@/components/ThinkingBlock";
 import { type ChatMessage } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
+import { parseModelContent } from "@/lib/parseModel";
 import { cn } from "@/lib/utils";
 import { Send, Square, Plus } from "lucide-react";
+
+// The think-token slips into the chat history when the user enables
+// thinking mode. It's a control signal for the model, not user content,
+// and must not be rendered.
+const THINK_TOKEN = "<|think|>";
 
 interface Props {
     messages:    ChatMessage[];
@@ -24,33 +31,70 @@ interface Props {
     className?:  string;
 }
 
-function MessageBubble({ msg }: { msg: ChatMessage }) {
-    // Memoize the rendered HTML so partial streaming doesn't pay the parse
-    // cost more than once per token batch — marked is fast but DOMPurify
-    // can be the slow part on long replies.
-    const html = useMemo(
-        () => msg.content ? renderMarkdown(msg.content) : "",
-        [msg.content],
-    );
+function RoleLabel({ role }: { role: ChatMessage["role"] }) {
     return (
-        <div
-            className={cn(
-                "rounded-md border-l-2 p-3 text-sm break-words animate-fade-in",
-                msg.role === "user"   && "border-primary bg-primary/10",
-                msg.role === "model"  && "border-muted-foreground bg-muted/50",
-                msg.role === "system" && "border-yellow-500 bg-yellow-500/10",
-            )}
-        >
-            <div className="mb-1 text-[0.65rem] uppercase tracking-wider text-muted-foreground">
-                {msg.role}
-            </div>
-            {msg.content ? (
+        <div className="mb-1 text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+            {role}
+        </div>
+    );
+}
+
+function UserBubble({ content }: { content: string }) {
+    const html = useMemo(() => content ? renderMarkdown(content) : "", [content]);
+    return (
+        <div className="rounded-md border-l-2 border-primary bg-primary/10 p-3 text-sm break-words animate-fade-in">
+            <RoleLabel role="user" />
+            {content ? (
                 <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />
             ) : (
                 <span className="inline-block animate-pulse text-muted-foreground">▍</span>
             )}
         </div>
     );
+}
+
+function ModelBubble({ content }: { content: string }) {
+    const parsed = useMemo(() => parseModelContent(content), [content]);
+    const html   = useMemo(
+        () => parsed.response ? renderMarkdown(parsed.response) : "",
+        [parsed.response],
+    );
+    return (
+        <div className="rounded-md border-l-2 border-muted-foreground bg-muted/50 p-3 text-sm break-words animate-fade-in">
+            <RoleLabel role="model" />
+            {parsed.thinking !== null && (
+                <ThinkingBlock
+                    text={parsed.thinking}
+                    isThinking={parsed.isThinking}
+                    isComplete={parsed.isComplete}
+                />
+            )}
+            {parsed.response ? (
+                <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />
+            ) : parsed.thinking === null ? (
+                <span className="inline-block animate-pulse text-muted-foreground">▍</span>
+            ) : null}
+        </div>
+    );
+}
+
+function SystemBubble({ content }: { content: string }) {
+    // Strip the bare `<|think|>` control token. Bubble disappears if
+    // nothing else remains — caller usually filters first but stay safe.
+    const stripped = content.replaceAll(THINK_TOKEN, "").trim();
+    if (!stripped) return null;
+    return (
+        <div className="rounded-md border-l-2 border-yellow-500 bg-yellow-500/10 p-3 text-sm whitespace-pre-wrap break-words animate-fade-in">
+            <RoleLabel role="system" />
+            {stripped}
+        </div>
+    );
+}
+
+function MessageBubble({ msg }: { msg: ChatMessage }) {
+    if (msg.role === "system") return <SystemBubble content={msg.content} />;
+    if (msg.role === "model")  return <ModelBubble  content={msg.content} />;
+    return <UserBubble content={msg.content} />;
 }
 
 /**

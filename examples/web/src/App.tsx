@@ -246,14 +246,19 @@ export function App() {
             ? (systemPrompt.trim() ? `${THINK_TOKEN}${systemPrompt.trim()}` : THINK_TOKEN)
             : systemPrompt.trim();
 
+        // Two parallel histories: `displayHistory` for the chat UI (no
+        // system message — it's a control signal, not user content) and
+        // `renderHistory` for tokenization (with system at the front).
         const userTurns = messages.filter((m) => m.role !== "system");
-        const history: ChatMessage[] = [
-            ...(sysContent ? [{ role: "system" as const, content: sysContent }] : []),
+        const displayHistory: ChatMessage[] = [
             ...userTurns,
             { role: "user", content: text },
             { role: "model", content: "" },
         ];
-        setMessages(history);
+        setMessages(displayHistory);
+        const renderHistory: ChatMessage[] = sysContent
+            ? [{ role: "system", content: sysContent }, ...displayHistory.slice(0, -1)]
+            : displayHistory.slice(0, -1);
 
         let convId = activeConvId;
         let modelMsgId: string | null = null;
@@ -276,7 +281,7 @@ export function App() {
         try {
             await client.setSampling(sampling);
             await client.reset();
-            const rendered = await client.renderChat(history.slice(0, -1), false);
+            const rendered = await client.renderChat(renderHistory, false);
             const ids = await client.encode(rendered);
 
             const t0 = performance.now();
@@ -304,9 +309,9 @@ export function App() {
                 if (cancelRef.current) break;
                 if (curIsEos) break;
                 const piece = curStr.replaceAll("▁", " ");
-                history[history.length - 1].content += piece;
+                displayHistory[displayHistory.length - 1].content += piece;
                 pendingDelta += piece;
-                setMessages([...history]);
+                setMessages([...displayHistory]);
                 emitted++;
                 if ((emitted % 16 === 0) || (performance.now() - lastFlushAt > 750)) {
                     await flushPending();
