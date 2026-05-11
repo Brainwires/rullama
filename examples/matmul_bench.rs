@@ -140,9 +140,9 @@ fn make_buffers(ctx: &WgpuCtx, k: usize, n: usize, batch: usize) -> (wgpu::Buffe
 
 fn main() {
     let ctx = pollster::block_on(WgpuCtx::new()).expect("wgpu init failed");
-    let pipes = Pipelines::new(&ctx.device);
+    let pipes = Pipelines::new_with_features(&ctx.device, ctx.has_subgroups, ctx.has_f16);
     let info = ctx.adapter.get_info();
-    println!("Adapter: {} / {:?}", info.name, info.backend);
+    println!("Adapter: {} / {:?}  (subgroups: {})", info.name, info.backend, ctx.has_subgroups);
 
     // Real vision shapes.
     let shapes = [
@@ -306,6 +306,121 @@ fn main() {
     ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
     let per_iter4 = t4.elapsed() / n_iters as u32;
     println!("vision_attention_flash (Q=16)  : {per_iter4:?}/iter  (×16 blocks ≈ {:?} total)", per_iter4 * 16);
+
+    // Bench head-major (HPD) subgroup variant: transpose Q/K/V, run attn, transpose back.
+    // Measures end-to-end (3 transposes-in + attention + 1 transpose-out).
+    if let Some(sub_hpd) = pipes.vision_attention_flash_sub_hpd.as_ref() {
+        let q_t = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("q_t"), size: (n_patches * n_heads * head_dim * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+        let k_t = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("k_t"), size: (n_patches * n_heads * head_dim * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+        let v_t = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("v_t"), size: (n_patches * n_heads * head_dim * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+        let out_t = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("out_t"), size: (n_patches * n_heads * head_dim * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false });
+        for _ in 0..2 {
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            dispatch::transpose_phd_to_hpd_chained(&ctx, &pipes, &mut enc, &q_buf, &q_t, n_patches, n_heads, head_dim);
+            dispatch::transpose_phd_to_hpd_chained(&ctx, &pipes, &mut enc, &k_buf, &k_t, n_patches, n_heads, head_dim);
+            dispatch::transpose_phd_to_hpd_chained(&ctx, &pipes, &mut enc, &v_buf, &v_t, n_patches, n_heads, head_dim);
+            dispatch::vision_attention_flash_sub_hpd_chained(&ctx, &pipes, sub_hpd, &mut enc, &q_t, &k_t, &v_t, &out_t,
+                head_dim, n_heads, n_patches);
+            dispatch::transpose_hpd_to_phd_chained(&ctx, &pipes, &mut enc, &out_t, &out_buf, n_patches, n_heads, head_dim);
+            ctx.queue.submit(Some(enc.finish()));
+            ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        }
+        let th = Instant::now();
+        for _ in 0..n_iters {
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            dispatch::transpose_phd_to_hpd_chained(&ctx, &pipes, &mut enc, &q_buf, &q_t, n_patches, n_heads, head_dim);
+            dispatch::transpose_phd_to_hpd_chained(&ctx, &pipes, &mut enc, &k_buf, &k_t, n_patches, n_heads, head_dim);
+            dispatch::transpose_phd_to_hpd_chained(&ctx, &pipes, &mut enc, &v_buf, &v_t, n_patches, n_heads, head_dim);
+            dispatch::vision_attention_flash_sub_hpd_chained(&ctx, &pipes, sub_hpd, &mut enc, &q_t, &k_t, &v_t, &out_t,
+                head_dim, n_heads, n_patches);
+            dispatch::transpose_hpd_to_phd_chained(&ctx, &pipes, &mut enc, &out_t, &out_buf, n_patches, n_heads, head_dim);
+            ctx.queue.submit(Some(enc.finish()));
+        }
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        let per_iterh = th.elapsed() / n_iters as u32;
+        // Also bench attention-only (cost without the wrap transposes), with same warmup.
+        let ta = Instant::now();
+        for _ in 0..n_iters {
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            dispatch::vision_attention_flash_sub_hpd_chained(&ctx, &pipes, sub_hpd, &mut enc, &q_t, &k_t, &v_t, &out_t,
+                head_dim, n_heads, n_patches);
+            ctx.queue.submit(Some(enc.finish()));
+        }
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        let per_itera = ta.elapsed() / n_iters as u32;
+        println!("vision_attention_flash (sub+HPD): {per_iterh:?}/iter  (with 3+1 transposes; ×16 ≈ {:?})", per_iterh * 16);
+        println!("vision_attention_flash (HPD only): {per_itera:?}/iter  (attn-only; ×16 ≈ {:?})", per_itera * 16);
+
+        if let Some(sub_hpd_f16) = pipes.vision_attention_flash_sub_hpd_f16.as_ref() {
+            for _ in 0..2 {
+                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                dispatch::vision_attention_flash_sub_hpd_chained(&ctx, &pipes, sub_hpd_f16, &mut enc, &q_t, &k_t, &v_t, &out_t,
+                    head_dim, n_heads, n_patches);
+                ctx.queue.submit(Some(enc.finish()));
+                ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+            }
+            let taf = Instant::now();
+            for _ in 0..n_iters {
+                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                dispatch::vision_attention_flash_sub_hpd_chained(&ctx, &pipes, sub_hpd_f16, &mut enc, &q_t, &k_t, &v_t, &out_t,
+                    head_dim, n_heads, n_patches);
+                ctx.queue.submit(Some(enc.finish()));
+            }
+            ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+            let per_iteraf = taf.elapsed() / n_iters as u32;
+            println!("vision_attention_flash (HPD f16): {per_iteraf:?}/iter  (attn-only; ×16 ≈ {:?})", per_iteraf * 16);
+        }
+    }
+
+    // Bench TILE_T=64 / Q=12 subgroup variant if available.
+    if let Some(sub64) = pipes.vision_attention_flash_sub_t64.as_ref() {
+        for _ in 0..2 {
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            dispatch::vision_attention_flash_sub_t64_chained(&ctx, &pipes, sub64, &mut enc, &q_buf, &k_buf, &v_buf, &out_buf,
+                head_dim, n_heads, n_patches);
+            ctx.queue.submit(Some(enc.finish()));
+            ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        }
+        let t6 = Instant::now();
+        for _ in 0..n_iters {
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            dispatch::vision_attention_flash_sub_t64_chained(&ctx, &pipes, sub64, &mut enc, &q_buf, &k_buf, &v_buf, &out_buf,
+                head_dim, n_heads, n_patches);
+            ctx.queue.submit(Some(enc.finish()));
+        }
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        let per_iter6 = t6.elapsed() / n_iters as u32;
+        println!("vision_attention_flash (T64/Q12): {per_iter6:?}/iter  (×16 blocks ≈ {:?} total)", per_iter6 * 16);
+    }
+
+    // Bench subgroup-collapsed flash attention, if available.
+    if let Some(sub) = pipes.vision_attention_flash_subgroup.as_ref() {
+        for _ in 0..2 {
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            dispatch::vision_attention_flash_subgroup_chained(&ctx, &pipes, sub, &mut enc, &q_buf, &k_buf, &v_buf, &out_buf,
+                head_dim, n_heads, n_patches);
+            ctx.queue.submit(Some(enc.finish()));
+            ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        }
+        let t5 = Instant::now();
+        for _ in 0..n_iters {
+            let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            dispatch::vision_attention_flash_subgroup_chained(&ctx, &pipes, sub, &mut enc, &q_buf, &k_buf, &v_buf, &out_buf,
+                head_dim, n_heads, n_patches);
+            ctx.queue.submit(Some(enc.finish()));
+        }
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+        let per_iter5 = t5.elapsed() / n_iters as u32;
+        println!("vision_attention_flash (sub)   : {per_iter5:?}/iter  (×16 blocks ≈ {:?} total)", per_iter5 * 16);
+    }
 
     // ---- Small-op benches at vision shapes ----
     // Vision encode for 768×528 has n_patches=2304, hidden=768, ffn=3072.

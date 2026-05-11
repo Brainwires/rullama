@@ -93,6 +93,10 @@ pub(crate) struct BatchedMatmulParams { pub k: u32, pub n: u32, pub batch: u32, 
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct TransposeParams { n_patches: u32, n_heads: u32, head_dim: u32, _pad: u32 }
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct PosEmbedAddParams {
     n_patches: u32,
     hidden_size: u32,
@@ -796,7 +800,19 @@ pub fn vision_attention_chained(
     // Pick the largest multi-query variant the shape will fill. Q=8 wins
     // marginally over Q=4 in the AMD Pro 555 microbench (1.26 vs 1.34 s on
     // the full 2304-patch shape), Q=4 wins handily over Q=1.
+    //
+    // When the device exposes `Features::SUBGROUP`, prefer the subgroup-collapsed
+    // variant which replaces the per-tile barrier-tree reductions with
+    // `subgroupMax` / `subgroupAdd` intrinsics. Numerics match Q=8 within
+    // f32-reordering tolerance.
+    // TILE_T=64 / Q=8 subgroup variant exists in tree but **NOT ROUTED** —
+    // its 16 KB kv_tile drops occupancy below TILE_T=32's break-even point on
+    // Radeon Pro 555 (1.67s vs 1.12s). Kept as a reference variant; the next
+    // reader should expect the same outcome on similar GCN hardware.
     if head_dim <= 64 && n_patches >= 8 {
+        if let Some(sub) = p.vision_attention_flash_subgroup.as_ref() {
+            return vision_attention_flash_subgroup_chained(ctx, p, sub, enc, q, k, v, out, head_dim, n_heads, n_patches);
+        }
         vision_attention_flash_q8_chained(ctx, p, enc, q, k, v, out, head_dim, n_heads, n_patches);
         return;
     }
@@ -941,6 +957,186 @@ pub fn vision_attention_flash_q8_chained(
         label: Some("vattnq8.pass"), timestamp_writes: None,
     });
     cp.set_pipeline(&p.vision_attention_flash_q8);
+    cp.set_bind_group(0, &bg, &[]);
+    let n_query_groups = (n_patches as u32).div_ceil(8);
+    cp.dispatch_workgroups(n_query_groups, n_heads as u32, 1);
+}
+
+/// Subgroup-collapsed flash vision attention. Replaces the per-tile barrier
+/// tree reductions in the Q=8 variant with `subgroupMax` / `subgroupAdd`.
+/// Caller passes the resolved pipeline ref (matched on `WgpuCtx::has_subgroups`).
+pub fn vision_attention_flash_subgroup_chained(
+    ctx: &WgpuCtx, p: &Pipelines, sub: &wgpu::ComputePipeline,
+    enc: &mut wgpu::CommandEncoder,
+    q: &wgpu::Buffer, k: &wgpu::Buffer, v: &wgpu::Buffer, out: &wgpu::Buffer,
+    head_dim: usize, n_heads: usize, n_patches: usize,
+) {
+    let _ = p; // reserved for future routing decisions on the kernel set
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = VisionAttnParams {
+        head_dim: head_dim as u32,
+        n_heads: n_heads as u32,
+        n_patches: n_patches as u32,
+        _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "vattnSub.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vattnSub.bg"),
+        layout: &sub.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: q.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: k.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: v.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: out.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("vattnSub.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(sub);
+    cp.set_bind_group(0, &bg, &[]);
+    let n_query_groups = (n_patches as u32).div_ceil(8);
+    cp.dispatch_workgroups(n_query_groups, n_heads as u32, 1);
+}
+
+/// Transpose [n_patches, n_heads, head_dim] → [n_heads, n_patches, head_dim].
+pub fn transpose_phd_to_hpd_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    src: &wgpu::Buffer, dst: &wgpu::Buffer,
+    n_patches: usize, n_heads: usize, head_dim: usize,
+) {
+    transpose_chained(ctx, &p.transpose_phd_to_hpd, "tposePHDtoHPD", enc, src, dst, n_patches, n_heads, head_dim);
+}
+
+/// Inverse: head-major → patch-major.
+pub fn transpose_hpd_to_phd_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    src: &wgpu::Buffer, dst: &wgpu::Buffer,
+    n_patches: usize, n_heads: usize, head_dim: usize,
+) {
+    transpose_chained(ctx, &p.transpose_hpd_to_phd, "tposeHPDtoPHD", enc, src, dst, n_patches, n_heads, head_dim);
+}
+
+fn transpose_chained(
+    ctx: &WgpuCtx, pipe: &wgpu::ComputePipeline, label: &str,
+    enc: &mut wgpu::CommandEncoder,
+    src: &wgpu::Buffer, dst: &wgpu::Buffer,
+    n_patches: usize, n_heads: usize, head_dim: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = TransposeParams {
+        n_patches: n_patches as u32,
+        n_heads: n_heads as u32,
+        head_dim: head_dim as u32,
+        _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, &format!("{label}.params"), &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(&format!("{label}.bg")),
+        layout: &pipe.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: src.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: dst.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some(&format!("{label}.pass")), timestamp_writes: None,
+    });
+    cp.set_pipeline(pipe);
+    cp.set_bind_group(0, &bg, &[]);
+    let total = (n_patches * n_heads * head_dim) as u32;
+    cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
+}
+
+/// f16-LDS HPD subgroup flash attention. Same I/O as the f32-LDS variant; the
+/// only differences are workgroup-storage type (halves LDS) and the inner
+/// product runs through `f32(f16 × f16)` to keep the running sum stable.
+pub fn vision_attention_flash_sub_hpd_f16_chained(
+    ctx: &WgpuCtx, p: &Pipelines, pipe: &wgpu::ComputePipeline,
+    enc: &mut wgpu::CommandEncoder,
+    q: &wgpu::Buffer, k: &wgpu::Buffer, v: &wgpu::Buffer, out: &wgpu::Buffer,
+    head_dim: usize, n_heads: usize, n_patches: usize,
+) {
+    vision_attention_flash_sub_hpd_chained(ctx, p, pipe, enc, q, k, v, out, head_dim, n_heads, n_patches);
+}
+
+/// Head-major (HPD) subgroup flash attention. Caller must pre-transpose Q/K/V
+/// to [n_heads, n_patches, head_dim]; output is written in the same layout.
+pub fn vision_attention_flash_sub_hpd_chained(
+    ctx: &WgpuCtx, p: &Pipelines, pipe: &wgpu::ComputePipeline,
+    enc: &mut wgpu::CommandEncoder,
+    q: &wgpu::Buffer, k: &wgpu::Buffer, v: &wgpu::Buffer, out: &wgpu::Buffer,
+    head_dim: usize, n_heads: usize, n_patches: usize,
+) {
+    let _ = p;
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = VisionAttnParams {
+        head_dim: head_dim as u32,
+        n_heads: n_heads as u32,
+        n_patches: n_patches as u32,
+        _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "vattnSubHPD.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vattnSubHPD.bg"),
+        layout: &pipe.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: q.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: k.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: v.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: out.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("vattnSubHPD.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(pipe);
+    cp.set_bind_group(0, &bg, &[]);
+    let n_query_groups = (n_patches as u32).div_ceil(8);
+    cp.dispatch_workgroups(n_query_groups, n_heads as u32, 1);
+}
+
+/// TILE_T=64, Q=12 subgroup-collapsed flash attention. K/V tile spans 64
+/// patches (all 64 lanes do scoring work, no `tid < tile_size` masking) and
+/// each WG handles 12 queries. Needs ≥ 22 KB LDS — pipeline built only when
+/// the device exposes that.
+pub fn vision_attention_flash_sub_t64_chained(
+    ctx: &WgpuCtx, p: &Pipelines, pipe: &wgpu::ComputePipeline,
+    enc: &mut wgpu::CommandEncoder,
+    q: &wgpu::Buffer, k: &wgpu::Buffer, v: &wgpu::Buffer, out: &wgpu::Buffer,
+    head_dim: usize, n_heads: usize, n_patches: usize,
+) {
+    let _ = p;
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = VisionAttnParams {
+        head_dim: head_dim as u32,
+        n_heads: n_heads as u32,
+        n_patches: n_patches as u32,
+        _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "vattnSubT64.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vattnSubT64.bg"),
+        layout: &pipe.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: q.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: k.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: v.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: out.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("vattnSubT64.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(pipe);
     cp.set_bind_group(0, &bg, &[]);
     let n_query_groups = (n_patches as u32).div_ceil(8);
     cp.dispatch_workgroups(n_query_groups, n_heads as u32, 1);

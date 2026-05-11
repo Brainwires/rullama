@@ -38,6 +38,23 @@ pub struct Pipelines {
     pub vision_attention_flash_q4: wgpu::ComputePipeline,
     pub vision_attention_flash_q8: wgpu::ComputePipeline,
     pub vision_attention_flash_q16: wgpu::ComputePipeline,
+    /// Subgroup-collapsed flash attention. Only built when the device was created
+    /// with `Features::SUBGROUP` (see [`crate::backend::WgpuCtx::has_subgroups`]).
+    /// Routed automatically by [`crate::backend::dispatch::vision_attention_chained`].
+    pub vision_attention_flash_subgroup: Option<wgpu::ComputePipeline>,
+    /// TILE_T=64, Q=12 subgroup variant. Needs LDS ≥ 22 KB; built only when the
+    /// device exceeds that ceiling.
+    pub vision_attention_flash_sub_t64: Option<wgpu::ComputePipeline>,
+    /// Head-major subgroup variant. Reads Q/K/V as [n_heads, n_patches, head_dim]
+    /// so per-WG tile loads coalesce. Caller pre-transposes inputs and post-
+    /// transposes the output via `transpose_phd_to_hpd` / `transpose_hpd_to_phd`.
+    pub vision_attention_flash_sub_hpd: Option<wgpu::ComputePipeline>,
+    /// f16-LDS variant of `vision_attention_flash_sub_hpd`. Halves workgroup
+    /// memory footprint → ~2× higher per-CU wave occupancy. Requires
+    /// `Features::SHADER_F16` and SUBGROUP.
+    pub vision_attention_flash_sub_hpd_f16: Option<wgpu::ComputePipeline>,
+    pub transpose_phd_to_hpd: wgpu::ComputePipeline,
+    pub transpose_hpd_to_phd: wgpu::ComputePipeline,
     pub half_residual_add: wgpu::ComputePipeline,
     pub silu:              wgpu::ComputePipeline,
     pub glu_split:         wgpu::ComputePipeline,
@@ -53,6 +70,47 @@ pub struct Pipelines {
 }
 
 impl Pipelines {
+    /// Build all pipelines for the given device. `has_subgroups` controls
+    /// whether the subgroup-only kernels get compiled — they fail to validate
+    /// when `Features::SUBGROUP` is absent. The TILE_T=64 variant is gated
+    /// additionally on the device's actual LDS limit being ≥ 22 KB.
+    pub fn new_with(device: &wgpu::Device, has_subgroups: bool) -> Self {
+        Self::new_with_features(device, has_subgroups, false)
+    }
+
+    /// Full constructor: builds the f16-LDS variants when `has_f16` is set
+    /// (caller must have requested `Features::SHADER_F16`).
+    pub fn new_with_features(device: &wgpu::Device, has_subgroups: bool, has_f16: bool) -> Self {
+        let mut me = Self::new(device);
+        if has_subgroups {
+            me.vision_attention_flash_subgroup = Some(build(
+                device,
+                "vision_attention_flash_subgroup",
+                kernels::VISION_ATTENTION_FLASH_SUBGROUP,
+            ));
+            if device.limits().max_compute_workgroup_storage_size >= 23_000 {
+                me.vision_attention_flash_sub_t64 = Some(build(
+                    device,
+                    "vision_attention_flash_sub_t64",
+                    kernels::VISION_ATTENTION_FLASH_SUB_T64,
+                ));
+            }
+            me.vision_attention_flash_sub_hpd = Some(build(
+                device,
+                "vision_attention_flash_sub_hpd",
+                kernels::VISION_ATTENTION_FLASH_SUB_HPD,
+            ));
+            if has_f16 {
+                me.vision_attention_flash_sub_hpd_f16 = Some(build(
+                    device,
+                    "vision_attention_flash_sub_hpd_f16",
+                    kernels::VISION_ATTENTION_FLASH_SUB_HPD_F16,
+                ));
+            }
+        }
+        me
+    }
+
     pub fn new(device: &wgpu::Device) -> Self {
         Self {
             f16_matmul:        build(device, "f16_matmul",        kernels::F16_MATMUL),
@@ -83,6 +141,12 @@ impl Pipelines {
             vision_attention_flash_q4: build(device, "vision_attention_flash_q4", kernels::VISION_ATTENTION_FLASH_Q4),
             vision_attention_flash_q8: build(device, "vision_attention_flash_q8", kernels::VISION_ATTENTION_FLASH_Q8),
             vision_attention_flash_q16: build(device, "vision_attention_flash_q16", kernels::VISION_ATTENTION_FLASH_Q16),
+            vision_attention_flash_subgroup: None,
+            vision_attention_flash_sub_t64: None,
+            vision_attention_flash_sub_hpd: None,
+            vision_attention_flash_sub_hpd_f16: None,
+            transpose_phd_to_hpd: build(device, "transpose_phd_to_hpd", kernels::TRANSPOSE_PHD_TO_HPD),
+            transpose_hpd_to_phd: build(device, "transpose_hpd_to_phd", kernels::TRANSPOSE_HPD_TO_PHD),
             half_residual_add: build(device, "half_residual_add", kernels::HALF_RESIDUAL_ADD),
             silu:              build(device, "silu",              kernels::SILU),
             glu_split:         build(device, "glu_split",         kernels::GLU_SPLIT),

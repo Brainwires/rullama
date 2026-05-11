@@ -146,6 +146,13 @@ pub struct VisionForward {
     q_norm:        wgpu::Buffer,
     k_norm:        wgpu::Buffer,
     v_norm:        wgpu::Buffer,
+    /// Head-major staging for HPD attention (only allocated when the device
+    /// supports subgroups). Each holds `[n_heads, n_patches, head_dim]` f32.
+    q_hpd:         wgpu::Buffer,
+    k_hpd:         wgpu::Buffer,
+    v_hpd:         wgpu::Buffer,
+    /// Head-major output of HPD attention; transposed back into `attn_out_buf`.
+    attn_hpd:      wgpu::Buffer,
     attn_out_buf:  wgpu::Buffer,
     attn_proj:     wgpu::Buffer,
     ffn_gate:      wgpu::Buffer,   // [MAX_PATCHES, ffn] f32
@@ -200,6 +207,10 @@ impl VisionForward {
         let q_norm     = alloc("vfwd.q_norm",   max_patches * hidden);
         let k_norm     = alloc("vfwd.k_norm",   max_patches * hidden);
         let v_norm     = alloc("vfwd.v_norm",   max_patches * hidden);
+        let q_hpd      = alloc("vfwd.q_hpd",    max_patches * hidden);
+        let k_hpd      = alloc("vfwd.k_hpd",    max_patches * hidden);
+        let v_hpd      = alloc("vfwd.v_hpd",    max_patches * hidden);
+        let attn_hpd   = alloc("vfwd.attn_hpd", max_patches * hidden);
         let attn_out_buf = alloc("vfwd.attn_out", max_patches * hidden);
         let attn_proj  = alloc("vfwd.attn_proj", max_patches * hidden);
         let ffn_gate   = alloc("vfwd.ffn_gate", max_patches * ffn_inter);
@@ -281,6 +292,7 @@ impl VisionForward {
             pixel_buf, pos_x_buf, pos_y_buf,
             hidden_a, hidden_b,
             q, k, v, q_norm, k_norm, v_norm,
+            q_hpd, k_hpd, v_hpd, attn_hpd,
             attn_out_buf, attn_proj,
             ffn_gate, ffn_up, ffn_act, ffn_out,
             pool_buf, soft_tokens, soft_tmp, soft_tokens_read,
@@ -537,9 +549,32 @@ impl VisionForward {
             head_dim, n_heads, n_patches, 100.0);
 
         // ---- Attention (bidirectional batched) ----
-        vision_attention_chained(&self.ctx, &self.pipes, enc,
-            &self.q_norm, &self.k_norm, &self.v_norm, &self.attn_out_buf,
-            head_dim, n_heads, n_patches);
+        // When the head-major (HPD) subgroup kernel is available, pre-transpose
+        // Q/K/V to [n_heads, n_patches, head_dim] so per-WG K/V tile loads
+        // coalesce across the head's contiguous slab. Microbench: ~10% over
+        // patch-major even with the 4 wrapping transposes counted in.
+        // Prefer the f16-LDS HPD variant when SHADER_F16 is available — same
+        // numerics within f16-rounding tolerance, half the workgroup storage.
+        let hpd_pipe = self.pipes.vision_attention_flash_sub_hpd_f16.as_ref()
+            .or(self.pipes.vision_attention_flash_sub_hpd.as_ref());
+        if let Some(hpd) = hpd_pipe {
+            crate::backend::dispatch::transpose_phd_to_hpd_chained(&self.ctx, &self.pipes, enc,
+                &self.q_norm, &self.q_hpd, n_patches, n_heads, head_dim);
+            crate::backend::dispatch::transpose_phd_to_hpd_chained(&self.ctx, &self.pipes, enc,
+                &self.k_norm, &self.k_hpd, n_patches, n_heads, head_dim);
+            crate::backend::dispatch::transpose_phd_to_hpd_chained(&self.ctx, &self.pipes, enc,
+                &self.v_norm, &self.v_hpd, n_patches, n_heads, head_dim);
+            crate::backend::dispatch::vision_attention_flash_sub_hpd_chained(
+                &self.ctx, &self.pipes, hpd, enc,
+                &self.q_hpd, &self.k_hpd, &self.v_hpd, &self.attn_hpd,
+                head_dim, n_heads, n_patches);
+            crate::backend::dispatch::transpose_hpd_to_phd_chained(&self.ctx, &self.pipes, enc,
+                &self.attn_hpd, &self.attn_out_buf, n_patches, n_heads, head_dim);
+        } else {
+            vision_attention_chained(&self.ctx, &self.pipes, enc,
+                &self.q_norm, &self.k_norm, &self.v_norm, &self.attn_out_buf,
+                head_dim, n_heads, n_patches);
+        }
 
         // ---- Output projection (clamp → matmul → clamp) ----
         if clamps[CLAMP_O].has_in_clamp() {

@@ -13,6 +13,12 @@ pub struct WgpuCtx {
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    /// True iff the device was created with `Features::SUBGROUP`. Kernels that
+    /// require `enable subgroups;` only get registered/dispatched when this is set.
+    pub has_subgroups: bool,
+    /// True iff `Features::SHADER_F16` was granted. Kernels that declare
+    /// `enable f16;` only get registered when this is set.
+    pub has_f16: bool,
 }
 
 impl WgpuCtx {
@@ -34,10 +40,36 @@ impl WgpuCtx {
             .await
             .map_err(|_| RullamaError::NoAdapter)?;
 
+        // Opportunistically opt into perf-relevant features. Each test runs:
+        //   * SUBGROUP: subgroup intrinsics (subgroupAdd/Max) collapse the
+        //     barrier-tree reductions in vision attention; on AMD GCN a
+        //     64-thread WG == 1 subgroup so a whole-WG reduction becomes a
+        //     single op.
+        //   * SUBGROUP_BARRIER: cross-subgroup ordering required by the kernel
+        //     when WGs span >1 subgroup.
+        //   * SHADER_F16: lets us keep tile data in workgroup memory as f16,
+        //     halving LDS bandwidth and (with v3-style register tiles) doubling
+        //     the in-flight tile size for the same LDS budget.
+        // If an adapter lacks any of these, fall back to the f32-only path; the
+        // f32 kernels stay as the correctness oracle either way.
+        let adapter_feats = adapter.features();
+        let mut requested = wgpu::Features::empty();
+        let has_subgroups = adapter_feats.contains(wgpu::Features::SUBGROUP)
+            && adapter_feats.contains(wgpu::Features::SUBGROUP_BARRIER);
+        if has_subgroups {
+            requested |= wgpu::Features::SUBGROUP;
+            requested |= wgpu::Features::SUBGROUP_BARRIER;
+        }
+        let has_f16 = adapter_feats.contains(wgpu::Features::SHADER_F16);
+        if has_f16 {
+            requested |= wgpu::Features::SHADER_F16;
+        }
+
+        let adapter_limits = adapter.limits();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("rullama device"),
-                required_features: wgpu::Features::empty(),
+                required_features: requested,
                 required_limits: {
                     // WebGPU spec mandates max_storage_buffers_per_shader_stage >= 8;
                     // downlevel_defaults caps it at 4 (legacy OpenGL ES targets).
@@ -45,6 +77,18 @@ impl WgpuCtx {
                     // buffers (Q, K, V, pos_proj, out) so we bump just that field.
                     let mut l = wgpu::Limits::downlevel_defaults();
                     l.max_storage_buffers_per_shader_stage = 8;
+                    // Raise LDS to whatever the adapter actually supports (Pro 555
+                    // exposes 32 KB vs the WebGPU minimum 16 KB). Kernels that need
+                    // >16 KB are gated; everyone else just gets more headroom.
+                    l.max_compute_workgroup_storage_size = adapter_limits
+                        .max_compute_workgroup_storage_size
+                        .max(l.max_compute_workgroup_storage_size);
+                    l.max_compute_invocations_per_workgroup = adapter_limits
+                        .max_compute_invocations_per_workgroup
+                        .max(l.max_compute_invocations_per_workgroup);
+                    l.max_compute_workgroup_size_x = adapter_limits
+                        .max_compute_workgroup_size_x
+                        .max(l.max_compute_workgroup_size_x);
                     l
                 },
                 experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -59,6 +103,8 @@ impl WgpuCtx {
             adapter,
             device,
             queue,
+            has_subgroups,
+            has_f16,
         })
     }
 }

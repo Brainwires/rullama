@@ -73,7 +73,7 @@ impl Model {
         let r_arc = Arc::new(reader);
         let weights = Weights::new(r_arc.clone());
         let ctx = WgpuCtx::new().await?;
-        let pipes = Arc::new(Pipelines::new(&ctx.device));
+        let pipes = Arc::new(Pipelines::new_with_features(&ctx.device, ctx.has_subgroups, ctx.has_f16));
         let wcache = Arc::new(WeightCache::new(r_arc.clone(), ctx.device.clone(), ctx.queue.clone()));
 
         // Detect vision tower (presence of v.patch_embd.weight). Build VisionForward
