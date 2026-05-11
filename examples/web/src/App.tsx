@@ -11,7 +11,7 @@ import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
 import { usePersistedState } from "@/lib/persisted";
 import { fmtBytes } from "@/lib/utils";
-import { Settings2, History } from "lucide-react";
+import { Settings, History } from "lucide-react";
 
 const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
@@ -419,7 +419,7 @@ export function App() {
                         title="Toggle settings"
                         aria-pressed={settingsOpen}
                     >
-                        <Settings2 />
+                        <Settings />
                     </Button>
                 </div>
             </header>
