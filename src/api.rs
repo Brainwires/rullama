@@ -67,6 +67,19 @@ impl Model {
     /// Build a Model from an already-constructed GGUF reader. Shared by both
     /// the in-memory and streaming entry points so they can't drift.
     async fn from_reader(reader: GgufReader) -> Result<Self> {
+        Self::from_reader_with_modes(reader, true, true).await
+    }
+
+    /// Like [`from_reader`] but lets the caller skip the vision and/or audio
+    /// tower construction. Useful on memory-constrained targets (e.g. iPhone
+    /// 16e shared 8 GB RAM) where eagerly building `VisionForward` /
+    /// `GpuAudioForward` would push the WebContent process over Jetsam and
+    /// the page crashes during wasm-load.
+    async fn from_reader_with_modes(
+        reader: GgufReader,
+        with_vision: bool,
+        with_audio: bool,
+    ) -> Result<Self> {
         let cfg = Gemma4Config::from_gguf(&reader)?;
         let tokenizer = BpeTokenizer::from_gguf(&reader)?;
         let d_text = cfg.d_model;
@@ -78,7 +91,7 @@ impl Model {
 
         // Detect vision tower (presence of v.patch_embd.weight). Build VisionForward
         // before consuming `ctx`/`pipes`/`wcache` into the text Forward.
-        let vision = if r_arc.tensor("v.patch_embd.weight").is_ok() {
+        let vision = if with_vision && r_arc.tensor("v.patch_embd.weight").is_ok() {
             let vcfg = VisionConfig::from_gguf(&r_arc, d_text)?;
             Some(VisionForward::new(vcfg, ctx.clone(), pipes.clone(), wcache.clone()).await?)
         } else {
@@ -89,7 +102,7 @@ impl Model {
         // encoder runs the 12 Conformer blocks + projector on the GPU; mel
         // features + SSCP convs + pre-encode linear stay on CPU (small, and
         // their data layouts don't pay off vs the bulk of the work).
-        let audio = if r_arc.tensor("a.conv1d.0.weight").is_ok() {
+        let audio = if with_audio && r_arc.tensor("a.conv1d.0.weight").is_ok() {
             let acfg = AudioConfig::from_gguf(&r_arc, d_text)?;
             Some(GpuAudioForward::new(acfg, ctx.clone(), pipes.clone(), wcache.clone()).await?)
         } else {
@@ -189,6 +202,19 @@ impl Model {
     ) -> Result<Self> {
         let reader = GgufReader::new_streaming(fetcher).await?;
         Self::from_reader(reader).await
+    }
+
+    /// Text-only streaming load. Skips the vision and audio towers even if the
+    /// GGUF contains them. Saves ~5 GB of GPU buffer allocation up front on
+    /// `gemma4:e2b`, which is what makes the difference between "iPhone Safari
+    /// WebContent process gets killed mid-load" and "model loads in 4 s and
+    /// generates tokens." Equivalent to `load_streaming` on hardware that has
+    /// the RAM for everything.
+    pub async fn load_streaming_text_only(
+        fetcher: std::sync::Arc<dyn crate::gguf::TensorFetcher>,
+    ) -> Result<Self> {
+        let reader = GgufReader::new_streaming(fetcher).await?;
+        Self::from_reader_with_modes(reader, false, false).await
     }
 
     /// Encode text → token IDs (Ollama-matching BPE).
@@ -299,6 +325,25 @@ impl Model {
         let fetcher = crate::gguf::OpfsFetcher::new(read_fn, total);
         let arc: std::sync::Arc<dyn crate::gguf::TensorFetcher> = std::sync::Arc::new(fetcher);
         Self::load_streaming(arc).await.map_err(|e| JsError::new(&format!("{e}")))
+    }
+
+    /// JS entry point: text-only variant of [`loadFromOpfs`]. Skips vision and
+    /// audio tower construction so the wasm-load footprint stays small enough
+    /// to fit a Q4_K_M `gemma4:e2b` in iPhone-class shared RAM (8 GB).
+    /// `encode_image` / `encode_audio` will fail with "this checkpoint has no
+    /// vision/audio tower" — text inference and chat work as normal.
+    #[wasm_bindgen(js_name = loadFromOpfsTextOnly)]
+    pub async fn load_from_opfs_text_only_js(
+        read_fn: js_sys::Function,
+        total_bytes: f64,
+    ) -> std::result::Result<Model, JsError> {
+        if !total_bytes.is_finite() || total_bytes < 0.0 {
+            return Err(JsError::new("loadFromOpfsTextOnly: total_bytes must be a non-negative finite number"));
+        }
+        let total = total_bytes as u64;
+        let fetcher = crate::gguf::OpfsFetcher::new(read_fn, total);
+        let arc: std::sync::Arc<dyn crate::gguf::TensorFetcher> = std::sync::Arc::new(fetcher);
+        Self::load_streaming_text_only(arc).await.map_err(|e| JsError::new(&format!("{e}")))
     }
 
     #[wasm_bindgen(js_name = encode)]

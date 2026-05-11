@@ -331,11 +331,21 @@ $("load-btn").addEventListener("click", async () => {
         const { readFn, totalBytes: actualTotal } = await getReadFn(modelKey, filename);
         readFnInUse = readFn;
 
+        // Mobile/iOS Safari: text-only load skips eager construction of the
+        // vision + audio towers (~5 GB of GPU buffer allocs on gemma4:e2b)
+        // so the WebContent process doesn't get Jetsam'd during loadFromOpfs.
+        // Desktop loads the full multimodal model. Toggle by user agent for
+        // now — explicit setting can come later.
+        const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+        const loader = isMobile ? Model.loadFromOpfsTextOnly : Model.loadFromOpfs;
+        const loaderName = isMobile ? "loadFromOpfsTextOnly" : "loadFromOpfs";
+        log($("model-log"), `using ${loaderName} (mobile=${isMobile})`);
+
         const t1 = performance.now();
-        model = await Model.loadFromOpfs(readFn, actualTotal);
+        model = await loader(readFn, actualTotal);
         const dtLoad = (performance.now() - t1) / 1000;
         log($("model-log"),
-            `Model.loadFromOpfs done in ${dtLoad.toFixed(1)}s — vocab=${model.vocabSize}`);
+            `${loaderName} done in ${dtLoad.toFixed(1)}s — vocab=${model.vocabSize}`);
 
         modelMeta = { name, digest };
         setPill($("model-status"), `ready: ${name}${fromCache ? " (cached)" : ""}`, "ok");
