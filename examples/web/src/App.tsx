@@ -246,7 +246,14 @@ export function App() {
 
             setLoadingLabel("loading into wasm…");
             const mobile = isMobileUA();
-            const mobileMaxCtx = 512;
+            // Bumped 512 → 2048. The 512 was a conservative crash-avoidance
+            // number from the iPhone-load-path debugging phase; once the
+            // worker + sync-OPFS + per-tile range-fetch combination
+            // stabilised, we've never come close to the actual GPU memory
+            // budget. A18 exposes max_buffer_size = 1 GiB, KV-per-token is
+            // ~70 KB across all layers, so 2048 ctx ≈ 144 MB of GPU
+            // memory — comfortable headroom on a phone.
+            const mobileMaxCtx = 2048;
             // textOnly is forced when:
             //   - mobile (no headroom for vision/audio towers), OR
             //   - the remote URL points at a text-only blob (HF-style:
