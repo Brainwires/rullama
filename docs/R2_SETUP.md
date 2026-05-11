@@ -37,11 +37,44 @@ wrangler r2 bucket cors put rullama-models --file=docker/r2-cors.json
 Update `AllowedOrigins` in that file before applying if your demo
 lives on a different hostname.
 
-### 4. Upload the models
+### 4. Install + configure rclone (for the upload)
 
-`scripts/upload-models-r2.sh` walks your local `~/.ollama/models`
-manifest layout, resolves each `family:tag` to its on-disk blob, and
-pushes it to R2:
+Wrangler's `r2 object put` caps at 300 MiB. For the 7–10 GB blobs we
+use `rclone` instead — handles multipart automatically.
+
+```sh
+brew install rclone         # macOS
+sudo apt install rclone     # Linux
+curl https://rclone.org/install.sh | sudo bash   # anywhere
+```
+
+Create R2 API credentials (separate from your CF account token):
+- Dashboard → R2 → **Manage R2 API tokens** → Create API token
+- Permission: **Object Read & Write**
+- Specify bucket: `rullama-models`
+- Copy the **Access Key ID**, **Secret Access Key**, and the **S3 API endpoint**
+  (looks like `https://<account-id>.r2.cloudflarestorage.com`).
+
+Configure an rclone remote:
+
+```sh
+rclone config
+#   n                  (new remote)
+#   name: r2
+#   storage: 4         (Amazon S3)
+#   provider: 6        (Cloudflare R2)
+#   access_key_id: …   (from above)
+#   secret_access_key: …
+#   region: auto
+#   endpoint: https://<account-id>.r2.cloudflarestorage.com
+#   (accept defaults for the rest)
+```
+
+### 5. Upload the models
+
+`scripts/upload-models-r2.sh` walks your local Ollama manifest layout
+(auto-probes the install path), resolves each `family:tag` to its
+on-disk blob, and pushes it to R2 via rclone:
 
 ```sh
 ./scripts/upload-models-r2.sh                 # e2b + e4b
