@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ModelLoadProgress, type ModelStatus } from "@/components/ModelLoader";
 import { ChatPanel } from "@/components/ChatPanel";
-import { SettingsDialog } from "@/components/SettingsDialog";
+import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
 import { ConversationList } from "@/components/ConversationList";
 import { Button } from "@/components/ui/button";
 import { type ChatMessage, type SamplingOptions, DEFAULT_SAMPLING } from "@/lib/types";
@@ -10,7 +10,7 @@ import { ensureModel, opfsSupported, requestPersistent, wipeModel } from "@/lib/
 import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
 import { usePersistedState } from "@/lib/persisted";
-import { fmtBytes } from "@/lib/utils";
+import { fmtBytes, clampInt, clampNum } from "@/lib/utils";
 import { Settings, History } from "lucide-react";
 
 const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -54,6 +54,31 @@ export function App() {
 
     const cancelRef = useRef(false);
     const { showToast, dismissToast } = useToast();
+
+    // One-time sanitization of persisted values. Catches localStorage
+    // entries from older versions (or hand-edited values) that fall
+    // outside current bounds — the slider clamps cover fresh edits.
+    useEffect(() => {
+        const B = SETTINGS_BOUNDS;
+        const next: SamplingOptions = {
+            temperature:        clampNum(sampling.temperature, B.temperature.min, B.temperature.max, B.temperature.fallback),
+            top_k:              clampInt(sampling.top_k,       B.top_k.min,       B.top_k.max,       B.top_k.fallback),
+            top_p:              clampNum(sampling.top_p,       B.top_p.min,       B.top_p.max,       B.top_p.fallback),
+            repetition_penalty: clampNum(sampling.repetition_penalty, B.repetition_penalty.min, B.repetition_penalty.max, B.repetition_penalty.fallback),
+            seed:               Number.isFinite(sampling.seed) ? sampling.seed : 0,
+        };
+        if (next.temperature !== sampling.temperature
+            || next.top_k !== sampling.top_k
+            || next.top_p !== sampling.top_p
+            || next.repetition_penalty !== sampling.repetition_penalty
+            || next.seed !== sampling.seed) {
+            setSampling(next);
+        }
+        const mt = clampInt(maxTokens, B.maxTokens.min, B.maxTokens.max, B.maxTokens.fallback);
+        if (mt !== maxTokens) setMaxTokens(mt);
+        // Run once on mount with the hydrated values.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     // Probe environment once on mount. Failures become sticky toasts the
     // user must dismiss (vs the prior compact pill row that was always

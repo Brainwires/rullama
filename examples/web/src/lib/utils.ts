@@ -14,3 +14,30 @@ export function fmtBytes(n: number | undefined | null): string {
     if (n >= 1e3) return `${(n / 1e3).toFixed(0)} KB`;
     return `${n} B`;
 }
+
+/** Clamp a number to [min, max]. NaN, ±Infinity, and non-numeric inputs
+ *  fall back to `fallback` (so a blank or pasted-garbage input becomes a
+ *  predictable value rather than silently breaking sampling). */
+export function clampNum(
+    value: unknown,
+    min: number,
+    max: number,
+    fallback: number,
+): number {
+    const n = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    if (n < min) return min;
+    if (n > max) return max;
+    return n;
+}
+
+/** Clamp an integer; same fallbacks as `clampNum`. */
+export function clampInt(
+    value: unknown,
+    min: number,
+    max: number,
+    fallback: number,
+): number {
+    const n = Math.trunc(clampNum(value, min, max, fallback));
+    return n;
+}
