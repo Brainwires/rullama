@@ -128,7 +128,7 @@ export const DualSidebarLayout: FC<Props> = ({
                             <div style={{ width: leftWidth }}>{leftSidebar}</div>
                         </aside>
                     )}
-                    <div className="relative flex-1 overflow-hidden">
+                    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
                         {children}
                         {leftSidebar && !hideToggles && (
                             <ToggleTab side="left"  open={isLeftOpen}  onClick={toggleLeft} />
@@ -206,7 +206,7 @@ export const DualSidebarLayout: FC<Props> = ({
                     )}
 
                     {/* Main content */}
-                    <div className="relative size-full overflow-hidden">
+                    <div className="relative flex size-full min-h-0 flex-col overflow-hidden">
                         {children}
                         {leftSidebar && !hideToggles && (
                             <ToggleTab side="left"  open={isLeftOpen}  onClick={toggleLeft} />
