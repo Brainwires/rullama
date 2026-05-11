@@ -12,6 +12,7 @@ Cargo.lock.bak
 /examples/web/dist
 /examples/web/dev-dist
 /examples/web/.vite
+/examples/web/tsconfig.tsbuildinfo
 /examples/web/server/dist
 
 # editors / OS
