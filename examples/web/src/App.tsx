@@ -378,9 +378,9 @@ export function App() {
         if (busy) return;
         const sizeLabel = fmtBytes(m.size);
         const ok = window.confirm(
-            `Delete cached "${m.name}" from this browser's OPFS?\n\n` +
-            `This frees ${sizeLabel} of storage. The model itself stays in ~/.ollama/models — ` +
-            `re-loading will download it again.`,
+            `Delete cached "${m.name}" (${sizeLabel})?\n\n` +
+            `This only removes the local copy in this browser. ` +
+            `Loading again will re-download it.`,
         );
         if (!ok) return;
 
