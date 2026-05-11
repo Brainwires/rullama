@@ -6,7 +6,7 @@ import { SettingsDialog } from "@/components/SettingsDialog";
 import { Button } from "@/components/ui/button";
 import { type ChatMessage, type SamplingOptions, DEFAULT_SAMPLING } from "@/lib/types";
 import { type ModelEntry, blobUrl, beacon } from "@/lib/api";
-import { ensureModel, opfsSupported, requestPersistent } from "@/lib/opfs";
+import { ensureModel, opfsSupported, requestPersistent, wipeModel } from "@/lib/opfs";
 import { getClient } from "@/lib/inference";
 import { fmtBytes } from "@/lib/utils";
 import { Settings2 } from "lucide-react";
@@ -162,6 +162,38 @@ export function App() {
         }
     }, [busy, maxTokens, messages, modelStatus, prompt, sampling, systemPrompt, thinking]);
 
+    const onDelete = useCallback(async (m: ModelEntry) => {
+        if (busy) return;
+        const sizeLabel = fmtBytes(m.size);
+        const ok = window.confirm(
+            `Delete cached "${m.name}" from this browser's OPFS?\n\n` +
+            `This frees ${sizeLabel} of storage. The model itself stays in ~/.ollama/models — ` +
+            `re-loading will download it again.`,
+        );
+        if (!ok) return;
+
+        const modelKey = m.digest.replace(/[^A-Za-z0-9_.-]/g, "_");
+        const filename = m.name.replace(/[^A-Za-z0-9_.-]/g, "_") + ".gguf";
+
+        // If we're deleting the currently-loaded model, tear it down first.
+        // The worker holds an open OPFS SyncAccessHandle on it; removeEntry
+        // would otherwise fail with a lock error.
+        const wasLoaded = modelStatus === "ready" && statusText.startsWith(m.name);
+        if (wasLoaded) {
+            try { await getClient().free(); } catch { /* */ }
+            setModelStatus("idle");
+            setStatusText("no model");
+            setMessages([]);
+            setStatusLine(undefined);
+        }
+
+        const removed = await wipeModel(modelKey, filename);
+        beacon("chat", removed ? `deleted ${m.name} (${sizeLabel})` : `delete ${m.name} no-op (not cached)`);
+        if (!removed) {
+            window.alert(`No cached copy of "${m.name}" found in OPFS.`);
+        }
+    }, [busy, modelStatus, statusText]);
+
     const onReset = useCallback(() => {
         if (busy) return;
         setMessages([]);
@@ -182,6 +214,7 @@ export function App() {
                         loadingLabel={loadingLabel}
                         statusText={statusText}
                         onLoad={onLoad}
+                        onDelete={onDelete}
                     />
                     <Button
                         variant="ghost"

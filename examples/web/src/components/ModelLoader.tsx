@@ -4,7 +4,7 @@ import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { fmtBytes } from "@/lib/utils";
 import { type ModelEntry, isSupported, listModels } from "@/lib/api";
-import { RefreshCw, Download } from "lucide-react";
+import { RefreshCw, Download, Trash2 } from "lucide-react";
 
 export type ModelStatus = "idle" | "loading" | "ready" | "error";
 
@@ -14,6 +14,7 @@ interface Props {
     loadingLabel: string;       // e.g. "5.4 GB / 7.16 GB — 81.2 MB/s"
     statusText: string;         // e.g. "ready: gemma4:e2b"
     onLoad: (model: ModelEntry) => void;
+    onDelete?: (model: ModelEntry) => void;
     onCancel?: () => void;
 }
 
@@ -81,6 +82,18 @@ export function ModelLoader(props: Props) {
                 <Download />
                 Load
             </Button>
+            {props.onDelete && (
+                <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                    onClick={() => selectedModel && props.onDelete?.(selectedModel)}
+                    disabled={!selectedModel || props.status === "loading"}
+                    title="Delete cached model from OPFS"
+                >
+                    <Trash2 />
+                </Button>
+            )}
             {props.status === "ready"   && (
                 <Badge tone="ok"   className="truncate max-w-[14rem]" title={props.statusText}>
                     {props.statusText}

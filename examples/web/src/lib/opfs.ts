@@ -165,3 +165,18 @@ export async function wipeAllOpfs(): Promise<boolean> {
         return true;
     } catch { return false; }
 }
+
+/**
+ * Remove a single cached model. Best-effort — also prunes the model
+ * directory if empty. Returns true if a file was actually removed.
+ */
+export async function wipeModel(modelKey: string, filename: string): Promise<boolean> {
+    try {
+        const root  = await navigator.storage.getDirectory();
+        const dlDir = await root.getDirectoryHandle(OPFS_DIR, { create: false });
+        const md    = await dlDir.getDirectoryHandle(modelKey, { create: false });
+        await md.removeEntry(filename);
+        try { await dlDir.removeEntry(modelKey, { recursive: true }); } catch { /* dir not empty / locked */ }
+        return true;
+    } catch { return false; }
+}
