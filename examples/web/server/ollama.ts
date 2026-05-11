@@ -37,13 +37,14 @@ export function huggingfaceModels(): ModelEntry[] {
             name:   "gemma4:e2b",
             family: "gemma4",
             tag:    "e2b",
-            // Reported by HF in `x-linked-size`. ~3.1 GB Q4_K_M, text layers
-            // only — the mmproj weights (vision/audio) ship as a separate
-            // file in this repo and rullama's loadFromOpfsTextOnly path
-            // ignores them anyway.
-            size:   3106736256,
-            digest: "9378bc471710229ef165709b62e34bfb62231420ddaf6d729e727305b5b8672d",
-            url:    "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf",
+            // Q4_K_S, not Q4_K_M. Our v1 dequant scope is
+            // F32/F16/BF16/Q4_K/Q6_K; Unsloth's "Q4_K_M" actually uses
+            // Q5_K for the boost tensors (V / ffn_down) instead of the
+            // standard ggml Q6_K, which our kernel rejects. Q4_K_S is
+            // pure Q4_K + F16/F32 — ~60 MB smaller and fully supported.
+            size:   3043932288,
+            digest: "0a2fac16f388b4839f075dedb681357aec3e73a96bd66b413e462b6853550c99",
+            url:    "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_S.gguf",
         },
     ];
 }
