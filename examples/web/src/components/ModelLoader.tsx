@@ -101,7 +101,11 @@ export function ModelLoader(props: Props) {
             )}
             {props.status === "error"   && <Badge tone="err">error</Badge>}
             {props.status === "loading" && (
-                <Badge tone="warn" className="truncate max-w-[14rem]" title={props.loadingLabel}>
+                <Badge
+                    tone="warn"
+                    className="truncate max-w-[14rem] font-mono tabular-nums"
+                    title={props.loadingLabel}
+                >
                     {props.loadingLabel || "loading…"}
                 </Badge>
             )}
@@ -115,7 +119,9 @@ export function ModelLoadProgress(props: { percent: number; label: string }) {
     return (
         <div className="space-y-0.5 border-b border-border bg-background/50 px-3 py-1">
             <Progress value={props.percent} />
-            <p className="text-[0.65rem] text-muted-foreground">{props.label}</p>
+            <p className="font-mono tabular-nums text-[0.65rem] text-muted-foreground">
+                {props.label}
+            </p>
         </div>
     );
 }

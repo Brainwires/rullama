@@ -214,14 +214,28 @@ export function App() {
             const url = blobUrl(m);
 
             const t0 = performance.now();
+            // The writer worker emits a progress event per stream chunk
+            // (~hundreds per second on a fast link). Updating React state
+            // that often makes the label flicker; throttle to ~4 Hz, but
+            // always emit the final tick so 100 % shows the real number.
+            let lastLabelAt = 0;
             const { totalBytes, fromCache } = await ensureModel(url, modelKey, filename, ({ bytesWritten, totalBytes }) => {
                 if (totalBytes > 0) {
                     setLoadingPercent((bytesWritten / totalBytes) * 100);
-                    const elapsed = (performance.now() - t0) / 1000;
-                    const rate = bytesWritten / Math.max(elapsed, 0.001);
-                    setLoadingLabel(`${fmtBytes(bytesWritten)} / ${fmtBytes(totalBytes)} — ${fmtBytes(rate)}/s`);
+                    const now     = performance.now();
+                    const done    = bytesWritten >= totalBytes;
+                    if (done || now - lastLabelAt > 250) {
+                        lastLabelAt = now;
+                        const elapsed = (now - t0) / 1000;
+                        const rate    = bytesWritten / Math.max(elapsed, 0.001);
+                        setLoadingLabel(`${fmtBytes(bytesWritten)} / ${fmtBytes(totalBytes)} — ${fmtBytes(rate)}/s`);
+                    }
                 } else {
-                    setLoadingLabel(fmtBytes(bytesWritten));
+                    const now = performance.now();
+                    if (now - lastLabelAt > 250) {
+                        lastLabelAt = now;
+                        setLoadingLabel(fmtBytes(bytesWritten));
+                    }
                 }
             });
             if (fromCache) {
