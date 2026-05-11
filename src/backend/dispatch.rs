@@ -1105,6 +1105,17 @@ pub fn vision_attention_flash_sub_hpd_f16_chained(
     vision_attention_flash_sub_hpd_chained(ctx, p, pipe, enc, q, k, v, out, head_dim, n_heads, n_patches);
 }
 
+/// HPD + f16-LDS attention WITHOUT subgroups. Bind-group + dispatch shape
+/// identical to the subgroup variant — they differ only in WGSL.
+pub fn vision_attention_flash_hpd_f16_chained(
+    ctx: &WgpuCtx, p: &Pipelines, pipe: &wgpu::ComputePipeline,
+    enc: &mut wgpu::CommandEncoder,
+    q: &wgpu::Buffer, k: &wgpu::Buffer, v: &wgpu::Buffer, out: &wgpu::Buffer,
+    head_dim: usize, n_heads: usize, n_patches: usize,
+) {
+    vision_attention_flash_sub_hpd_chained(ctx, p, pipe, enc, q, k, v, out, head_dim, n_heads, n_patches);
+}
+
 /// Q=16 variant of `vision_attention_flash_sub_hpd_f16_chained`. Dispatches
 /// half as many WGs (`ceil(n_patches/16)` per head). Uses the same uniform
 /// layout so the dispatcher just wraps the same bind-group construction.

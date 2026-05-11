@@ -27,6 +27,7 @@ pub const VISION_ATTENTION_FLASH_SUB_T64: &str = include_str!("wgsl/vision_atten
 pub const VISION_ATTENTION_FLASH_SUB_HPD: &str = include_str!("wgsl/vision_attention_flash_sub_hpd.wgsl");
 pub const VISION_ATTENTION_FLASH_SUB_HPD_F16: &str = include_str!("wgsl/vision_attention_flash_sub_hpd_f16.wgsl");
 pub const VISION_ATTENTION_FLASH_SUB_HPD_F16_Q16: &str = include_str!("wgsl/vision_attention_flash_sub_hpd_f16_q16.wgsl");
+pub const VISION_ATTENTION_FLASH_HPD_F16: &str = include_str!("wgsl/vision_attention_flash_hpd_f16.wgsl");
 pub const TRANSPOSE_PHD_TO_HPD: &str = include_str!("wgsl/transpose_phd_to_hpd.wgsl");
 pub const TRANSPOSE_HPD_TO_PHD: &str = include_str!("wgsl/transpose_hpd_to_phd.wgsl");
 pub const HALF_RESIDUAL_ADD: &str = include_str!("wgsl/half_residual_add.wgsl");

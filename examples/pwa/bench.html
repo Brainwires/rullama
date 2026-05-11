@@ -11,7 +11,6 @@
   #out { white-space: pre-wrap; padding: 14px; padding-bottom: 80px; }
   .status { padding: 14px; border-bottom: 1px solid #233; position: sticky; top: 0; background: #0c0f12; }
   .ok  { color: #6cc; } .err { color: #f88; } .warn { color: #fc6; }
-  button { background: #1d242b; color: #d9e0e6; border: 1px solid #3a4753; padding: 8px 14px; border-radius: 6px; font: inherit; }
 </style>
 </head>
 <body>
@@ -27,14 +26,9 @@ function log(msg, cls) {
   out.appendChild(line);
   console.log(msg);
 }
-function setStatus(t, cls) {
-  status.textContent = t;
-  status.className = "status " + (cls || "");
-}
+function setStatus(t, cls) { status.textContent = t; status.className = "status " + (cls || ""); }
 
-// --- Mac-side result posting -------------------------------------------------
-// Bench page lives on the Mac dev server; results POST back to /api/bench-result
-// so the bench-on-iphone.sh script (running on the Mac) can collate output.
+// Results POST back to Mac via the dev server's /api/bench-result endpoint.
 const RUN_ID = (Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8));
 async function postResult(payload) {
   try {
@@ -43,262 +37,142 @@ async function postResult(payload) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ run_id: RUN_ID, ...payload }),
     });
-  } catch (e) {
-    log("postResult failed: " + e, "err");
-  }
+  } catch (e) { log("postResult failed: " + e, "err"); }
 }
 
-// --- WGSL: minimal subset of the kernels we actually care about benching -----
-// f16-LDS batched matmul (the routed default on AMD GCN + has_f16). We embed
-// it inline so the bench page is self-contained — no wasm-pack build needed.
-const F16_MATMUL_BATCHED_TILED_V3_F16LDS = `
-enable f16;
-struct Params { k: u32, n: u32, batch: u32, _pad: u32 }
-@group(0) @binding(0) var<uniform>             params: Params;
-@group(0) @binding(1) var<storage, read>       weight: array<u32>;
-@group(0) @binding(2) var<storage, read>       x:      array<f32>;
-@group(0) @binding(3) var<storage, read_write> y:      array<f32>;
-const TILE_M: u32 = 32u; const TILE_N: u32 = 32u; const TILE_K: u32 = 16u;
-const THREADS_M: u32 = 8u; const THREADS_N: u32 = 8u;
-var<workgroup> x_tile: array<f16, 512>;
-var<workgroup> w_tile: array<f16, 512>;
-@compute @workgroup_size(64)
-fn main(@builtin(workgroup_id) wg_id: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let tid = lid.x; let wg_n = wg_id.x; let wg_m = wg_id.y;
-  let tm = tid / THREADS_N; let tn = tid % THREADS_N;
-  let half_k = params.k / 2u;
-  var acc: array<f32, 16>;
-  for (var i: u32 = 0u; i < 16u; i = i + 1u) { acc[i] = 0.0; }
-  let n_k_iters = (params.k + TILE_K - 1u) / TILE_K;
-  for (var iter: u32 = 0u; iter < n_k_iters; iter = iter + 1u) {
-    let k_offset = iter * TILE_K;
-    for (var s: u32 = 0u; s < 8u; s = s + 1u) {
-      let i = tid * 8u + s; let mx = i / TILE_K; let kx = i % TILE_K;
-      let xr = wg_m * TILE_M + mx; let xk = k_offset + kx;
-      if (xr < params.batch && xk < params.k) { x_tile[i] = f16(x[xr * params.k + xk]); }
-      else { x_tile[i] = f16(0.0); }
-    }
-    for (var s: u32 = 0u; s < 4u; s = s + 1u) {
-      let pid = tid * 4u + s; let nw = pid / 8u; let kp = pid % 8u;
-      let wcol = wg_n * TILE_N + nw; let pi = (k_offset / 2u) + kp;
-      if (wcol < params.n && pi < half_k) {
-        let packed = weight[wcol * half_k + pi];
-        let pair = unpack2x16float(packed);
-        w_tile[nw * TILE_K + 2u * kp]      = f16(pair.x);
-        w_tile[nw * TILE_K + 2u * kp + 1u] = f16(pair.y);
-      } else {
-        w_tile[nw * TILE_K + 2u * kp]      = f16(0.0);
-        w_tile[nw * TILE_K + 2u * kp + 1u] = f16(0.0);
-      }
-    }
-    workgroupBarrier();
-    let m0 = tm * 4u; let n0 = tn * 4u;
-    for (var kk: u32 = 0u; kk < TILE_K; kk = kk + 1u) {
-      let x0 = x_tile[(m0) * TILE_K + kk]; let x1 = x_tile[(m0+1u) * TILE_K + kk];
-      let x2 = x_tile[(m0+2u) * TILE_K + kk]; let x3 = x_tile[(m0+3u) * TILE_K + kk];
-      let w0 = w_tile[(n0) * TILE_K + kk]; let w1 = w_tile[(n0+1u) * TILE_K + kk];
-      let w2 = w_tile[(n0+2u) * TILE_K + kk]; let w3 = w_tile[(n0+3u) * TILE_K + kk];
-      acc[ 0] += f32(x0*w0); acc[ 1] += f32(x0*w1); acc[ 2] += f32(x0*w2); acc[ 3] += f32(x0*w3);
-      acc[ 4] += f32(x1*w0); acc[ 5] += f32(x1*w1); acc[ 6] += f32(x1*w2); acc[ 7] += f32(x1*w3);
-      acc[ 8] += f32(x2*w0); acc[ 9] += f32(x2*w1); acc[10] += f32(x2*w2); acc[11] += f32(x2*w3);
-      acc[12] += f32(x3*w0); acc[13] += f32(x3*w1); acc[14] += f32(x3*w2); acc[15] += f32(x3*w3);
-    }
-    workgroupBarrier();
-  }
-  let m_base = wg_m * TILE_M + tm * 4u; let n_base = wg_n * TILE_N + tn * 4u;
-  for (var dm: u32 = 0u; dm < 4u; dm = dm + 1u) {
-    for (var dn: u32 = 0u; dn < 4u; dn = dn + 1u) {
-      let m = m_base + dm; let n = n_base + dn;
-      if (m < params.batch && n < params.n) { y[m * params.n + n] = acc[dm * 4u + dn]; }
-    }
-  }
-}`;
+// Kernel WGSL pulled from the dev server — single source of truth shared
+// with the Rust pipeline, no risk of drift.
+async function fetchKernel(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  if (!r.ok) throw new Error(`fetch ${path}: HTTP ${r.status}`);
+  return await r.text();
+}
 
-// f32-LDS variant for adapters without SHADER_F16.
-const F16_MATMUL_BATCHED_TILED_V3 = `
-struct Params { k: u32, n: u32, batch: u32, _pad: u32 }
-@group(0) @binding(0) var<uniform>             params: Params;
-@group(0) @binding(1) var<storage, read>       weight: array<u32>;
-@group(0) @binding(2) var<storage, read>       x:      array<f32>;
-@group(0) @binding(3) var<storage, read_write> y:      array<f32>;
-const TILE_M: u32 = 32u; const TILE_N: u32 = 32u; const TILE_K: u32 = 16u;
-const THREADS_M: u32 = 8u; const THREADS_N: u32 = 8u;
-var<workgroup> x_tile: array<f32, 512>;
-var<workgroup> w_tile: array<f32, 512>;
-@compute @workgroup_size(64)
-fn main(@builtin(workgroup_id) wg_id: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let tid = lid.x; let wg_n = wg_id.x; let wg_m = wg_id.y;
-  let tm = tid / THREADS_N; let tn = tid % THREADS_N;
-  let half_k = params.k / 2u;
-  var acc: array<f32, 16>;
-  for (var i: u32 = 0u; i < 16u; i = i + 1u) { acc[i] = 0.0; }
-  let n_k_iters = (params.k + TILE_K - 1u) / TILE_K;
-  for (var iter: u32 = 0u; iter < n_k_iters; iter = iter + 1u) {
-    let k_offset = iter * TILE_K;
-    for (var s: u32 = 0u; s < 8u; s = s + 1u) {
-      let i = tid * 8u + s; let mx = i / TILE_K; let kx = i % TILE_K;
-      let xr = wg_m * TILE_M + mx; let xk = k_offset + kx;
-      if (xr < params.batch && xk < params.k) { x_tile[i] = x[xr * params.k + xk]; }
-      else { x_tile[i] = 0.0; }
-    }
-    for (var s: u32 = 0u; s < 4u; s = s + 1u) {
-      let pid = tid * 4u + s; let nw = pid / 8u; let kp = pid % 8u;
-      let wcol = wg_n * TILE_N + nw; let pi = (k_offset / 2u) + kp;
-      if (wcol < params.n && pi < half_k) {
-        let packed = weight[wcol * half_k + pi];
-        let pair = unpack2x16float(packed);
-        w_tile[nw * TILE_K + 2u * kp]      = pair.x;
-        w_tile[nw * TILE_K + 2u * kp + 1u] = pair.y;
-      } else {
-        w_tile[nw * TILE_K + 2u * kp]      = 0.0;
-        w_tile[nw * TILE_K + 2u * kp + 1u] = 0.0;
-      }
-    }
-    workgroupBarrier();
-    let m0 = tm * 4u; let n0 = tn * 4u;
-    for (var kk: u32 = 0u; kk < TILE_K; kk = kk + 1u) {
-      let x0 = x_tile[(m0) * TILE_K + kk]; let x1 = x_tile[(m0+1u) * TILE_K + kk];
-      let x2 = x_tile[(m0+2u) * TILE_K + kk]; let x3 = x_tile[(m0+3u) * TILE_K + kk];
-      let w0 = w_tile[(n0) * TILE_K + kk]; let w1 = w_tile[(n0+1u) * TILE_K + kk];
-      let w2 = w_tile[(n0+2u) * TILE_K + kk]; let w3 = w_tile[(n0+3u) * TILE_K + kk];
-      acc[ 0] += x0*w0; acc[ 1] += x0*w1; acc[ 2] += x0*w2; acc[ 3] += x0*w3;
-      acc[ 4] += x1*w0; acc[ 5] += x1*w1; acc[ 6] += x1*w2; acc[ 7] += x1*w3;
-      acc[ 8] += x2*w0; acc[ 9] += x2*w1; acc[10] += x2*w2; acc[11] += x2*w3;
-      acc[12] += x3*w0; acc[13] += x3*w1; acc[14] += x3*w2; acc[15] += x3*w3;
-    }
-    workgroupBarrier();
+async function buildPipeline(device, src, label) {
+  const module = device.createShaderModule({ code: src });
+  const info = await module.getCompilationInfo();
+  for (const m of info.messages) {
+    log(`[${label} ${m.type}] ${m.message}`, m.type === "error" ? "err" : "warn");
   }
-  let m_base = wg_m * TILE_M + tm * 4u; let n_base = wg_n * TILE_N + tn * 4u;
-  for (var dm: u32 = 0u; dm < 4u; dm = dm + 1u) {
-    for (var dn: u32 = 0u; dn < 4u; dn = dn + 1u) {
-      let m = m_base + dm; let n = n_base + dn;
-      if (m < params.batch && n < params.n) { y[m * params.n + n] = acc[dm * 4u + dn]; }
-    }
-  }
-}`;
+  return device.createComputePipeline({
+    layout: "auto",
+    compute: { module, entryPoint: "main" },
+  });
+}
 
-// ---------------------------------------------------------------------------
+function makeUniform(device, data) {
+  const buf = device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(buf, 0, data);
+  return buf;
+}
+function makeStorage(device, byteLen, init) {
+  const buf = device.createBuffer({ size: byteLen, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  if (init) device.queue.writeBuffer(buf, 0, init);
+  return buf;
+}
+
+async function timedDispatch(device, label, setup, dispatchFn, iters = 5) {
+  // Warmup.
+  for (let i = 0; i < 3; i++) {
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    setup(pass); dispatchFn(pass);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+  }
+  await device.queue.onSubmittedWorkDone();
+  // Time.
+  const t0 = performance.now();
+  for (let i = 0; i < iters; i++) {
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    setup(pass); dispatchFn(pass);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+  }
+  await device.queue.onSubmittedWorkDone();
+  return (performance.now() - t0) / iters;
+}
+
 async function main() {
   setStatus("checking environment…", "warn");
-  // Report environment state up front so a quick log-only POST lets the
-  // Mac-side script diagnose what's wrong without needing the device in hand.
   const env = {
-    ua:                  navigator.userAgent,
-    href:                location.href,
-    origin:              location.origin,
-    protocol:            location.protocol,
-    isSecureContext:     window.isSecureContext,
+    ua: navigator.userAgent, href: location.href, origin: location.origin,
+    protocol: location.protocol, isSecureContext: window.isSecureContext,
     crossOriginIsolated: window.crossOriginIsolated,
-    has_navigator_gpu:   typeof navigator.gpu !== "undefined",
-    has_GPUAdapter:      typeof GPUAdapter !== "undefined",
-    has_GPU:             typeof GPU !== "undefined",
+    has_navigator_gpu: typeof navigator.gpu !== "undefined",
   };
   log("env: " + JSON.stringify(env, null, 2));
   await postResult({ event: "env", env });
 
-  setStatus("requesting WebGPU adapter…", "warn");
   if (!navigator.gpu) {
     setStatus("ERROR: navigator.gpu is undefined", "err");
-    if (!window.isSecureContext) {
-      log("Page is NOT a secure context — WebGPU is gated on HTTPS/localhost.", "err");
-      log("Fix: switch the Mac dev server to HTTPS (self-signed cert) or use localhost.", "err");
-    } else {
-      log("Safari → Apps → Safari → Advanced → Feature Flags → WebGPU?", "err");
-    }
+    if (!window.isSecureContext) log("Page is NOT a secure context — WebGPU is gated on HTTPS/localhost.", "err");
+    else log("Safari → Apps → Safari → Advanced → Feature Flags → WebGPU?", "err");
     await postResult({ event: "no_webgpu", env });
     return;
   }
 
+  setStatus("requesting adapter…", "warn");
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) {
     setStatus("ERROR: no GPU adapter", "err");
-    await postResult({ event: "no_adapter", ua: navigator.userAgent });
+    await postResult({ event: "no_adapter", env });
     return;
   }
-
-  // Feature negotiation — try to get shader-f16, fall back if not available.
   const wantF16 = adapter.features.has("shader-f16");
   const features = wantF16 ? ["shader-f16"] : [];
-  const limits = {
-    maxStorageBufferBindingSize: Math.min(adapter.limits.maxStorageBufferBindingSize, 1 << 30),
-    maxBufferSize:                Math.min(adapter.limits.maxBufferSize,                1 << 30),
-    maxComputeWorkgroupStorageSize: adapter.limits.maxComputeWorkgroupStorageSize,
-    maxComputeInvocationsPerWorkgroup: adapter.limits.maxComputeInvocationsPerWorkgroup,
-  };
   const device = await adapter.requestDevice({
     requiredFeatures: features,
     requiredLimits: {
-      maxStorageBufferBindingSize: limits.maxStorageBufferBindingSize,
-      maxBufferSize: limits.maxBufferSize,
+      maxStorageBufferBindingSize: Math.min(adapter.limits.maxStorageBufferBindingSize, 1 << 30),
+      maxBufferSize: Math.min(adapter.limits.maxBufferSize, 1 << 30),
     },
   });
 
   const info = {
-    vendor:        adapter.info?.vendor || "",
-    architecture:  adapter.info?.architecture || "",
-    device:        adapter.info?.device || "",
-    description:   adapter.info?.description || "",
-    has_f16:       wantF16,
-    limits,
-    features: Array.from(adapter.features).sort(),
-    ua: navigator.userAgent,
+    vendor: adapter.info?.vendor || "", architecture: adapter.info?.architecture || "",
+    device: adapter.info?.device || "", description: adapter.info?.description || "",
+    has_f16: wantF16,
+    limits: {
+      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+      maxComputeWorkgroupStorageSize: adapter.limits.maxComputeWorkgroupStorageSize,
+      maxComputeInvocationsPerWorkgroup: adapter.limits.maxComputeInvocationsPerWorkgroup,
+    },
+    features: Array.from(adapter.features).sort(), ua: navigator.userAgent,
   };
-  log("adapter: " + JSON.stringify(info.vendor || "(no vendor)") + " / " +
-      JSON.stringify(info.architecture || info.device || info.description || ""));
+  log("adapter: " + (info.vendor || "?") + " / " + (info.architecture || info.description || info.device || "?"));
   log("features: " + info.features.join(", "));
-  log("limits.maxStorageBufferBindingSize = " + limits.maxStorageBufferBindingSize);
-  log("limits.maxComputeWorkgroupStorageSize = " + limits.maxComputeWorkgroupStorageSize);
+  log("limits.maxComputeWorkgroupStorageSize = " + info.limits.maxComputeWorkgroupStorageSize);
   log("has_f16 = " + wantF16);
   await postResult({ event: "adapter", info });
 
-  setStatus("compiling kernels…", "warn");
+  // ---- Matmul bench ----
+  setStatus("compiling matmul kernel…", "warn");
+  const matmulSrc = await fetchKernel(wantF16
+    ? "/src/kernels/wgsl/f16_matmul_batched_tiled_v3_f16lds.wgsl"
+    : "/src/kernels/wgsl/f16_matmul_batched_tiled_v3.wgsl");
+  const matmulPipe = await buildPipeline(device, matmulSrc,
+    wantF16 ? "matmul-f16lds" : "matmul-f32lds");
+  log("matmul pipeline ok (" + (wantF16 ? "f16-LDS" : "f32-LDS") + ")");
 
-  const shaderSrc = wantF16 ? F16_MATMUL_BATCHED_TILED_V3_F16LDS : F16_MATMUL_BATCHED_TILED_V3;
-  let module;
-  try {
-    module = device.createShaderModule({ code: shaderSrc });
-    // Wait for compilation status to surface any errors.
-    const compInfo = await module.getCompilationInfo();
-    for (const m of compInfo.messages) {
-      log("[shader " + m.type + "] " + m.message, m.type === "error" ? "err" : "warn");
-    }
-  } catch (e) {
-    setStatus("shader compile failed", "err");
-    log(String(e), "err");
-    await postResult({ event: "shader_error", error: String(e), shader: wantF16 ? "f16" : "f32" });
-    return;
-  }
-  const pipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module, entryPoint: "main" },
-  });
-  log("pipeline ok (variant: " + (wantF16 ? "f16-LDS" : "f32-LDS") + ")");
-
-  setStatus("running bench…", "warn");
-
-  const shapes = [
+  setStatus("benching matmul…", "warn");
+  const matmulShapes = [
     { label: "attn QKV  768x768  ",  k: 768,  n:  768, batch: 2304 },
     { label: "attn out  768x768  ",  k: 768,  n:  768, batch: 2304 },
     { label: "ffn up    768x3072 ",  k: 768,  n: 3072, batch: 2304 },
     { label: "ffn down  3072x768 ",  k: 3072, n:  768, batch: 2304 },
   ];
-
-  for (const shape of shapes) {
+  for (const shape of matmulShapes) {
     const { label, k, n, batch } = shape;
-    // Allocate buffers.
     const w_pairs = Math.max(1, (k * n / 2) | 0);
-    const wBuf = device.createBuffer({ size: w_pairs * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    const wInit = new Uint32Array(w_pairs).fill(0x33333333);
-    device.queue.writeBuffer(wBuf, 0, wInit);
-    const xBuf = device.createBuffer({ size: batch * k * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    const xInit = new Float32Array(batch * k).fill(0.01);
-    device.queue.writeBuffer(xBuf, 0, xInit);
-    const yBuf = device.createBuffer({ size: batch * n * 4, usage: GPUBufferUsage.STORAGE });
-    const pBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(pBuf, 0, new Uint32Array([k, n, batch, 0]));
+    const wBuf = makeStorage(device, w_pairs * 4, new Uint32Array(w_pairs).fill(0x33333333));
+    const xBuf = makeStorage(device, batch * k * 4, new Float32Array(batch * k).fill(0.01));
+    const yBuf = makeStorage(device, batch * n * 4);
+    const pBuf = makeUniform(device, new Uint32Array([k, n, batch, 0]));
 
     const bg = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
+      layout: matmulPipe.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: pBuf } },
         { binding: 1, resource: { buffer: wBuf } },
@@ -306,44 +180,73 @@ async function main() {
         { binding: 3, resource: { buffer: yBuf } },
       ],
     });
-
     const dispatchX = Math.ceil(n / 32);
     const dispatchY = Math.ceil(batch / 32);
+    const perMs = await timedDispatch(device, label,
+      (p) => { p.setPipeline(matmulPipe); p.setBindGroup(0, bg); },
+      (p) => { p.dispatchWorkgroups(dispatchX, dispatchY, 1); });
 
-    // Warmup × 3
-    for (let i = 0; i < 3; i++) {
-      const enc = device.createCommandEncoder();
-      const pass = enc.beginComputePass();
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, bg);
-      pass.dispatchWorkgroups(dispatchX, dispatchY, 1);
-      pass.end();
-      device.queue.submit([enc.finish()]);
-    }
-    await device.queue.onSubmittedWorkDone();
-
-    // Timed × N
-    const ITERS = 5;
-    const t0 = performance.now();
-    for (let i = 0; i < ITERS; i++) {
-      const enc = device.createCommandEncoder();
-      const pass = enc.beginComputePass();
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, bg);
-      pass.dispatchWorkgroups(dispatchX, dispatchY, 1);
-      pass.end();
-      device.queue.submit([enc.finish()]);
-    }
-    await device.queue.onSubmittedWorkDone();
-    const elapsed = performance.now() - t0;
-    const perMs = elapsed / ITERS;
     const flops = 2 * k * n * batch;
     const gflops = flops / (perMs / 1000) / 1e9;
     const line = `${label} k=${String(k).padStart(4)} n=${String(n).padStart(4)} batch=${String(batch).padStart(4)} | ${perMs.toFixed(2)} ms/iter   ${gflops.toFixed(1)} GFLOPS`;
     log(line, "ok");
-    await postResult({ event: "bench", shape, ms_per_iter: perMs, gflops });
+    await postResult({ event: "matmul", shape, ms_per_iter: perMs, gflops });
 
     wBuf.destroy(); xBuf.destroy(); yBuf.destroy(); pBuf.destroy();
+  }
+
+  // ---- Attention bench ----
+  // Same shapes the Rust matmul_bench uses for the vision tower:
+  // n_patches=2304, n_heads=12, head_dim=64.
+  if (wantF16) {
+    setStatus("compiling HPD attention kernel…", "warn");
+    let attnSrc;
+    try {
+      attnSrc = await fetchKernel("/src/kernels/wgsl/vision_attention_flash_hpd_f16.wgsl");
+    } catch (e) {
+      log("attn kernel fetch failed: " + e, "err");
+      await postResult({ event: "done" });
+      setStatus("done (matmul only) ✓", "ok");
+      return;
+    }
+    const attnPipe = await buildPipeline(device, attnSrc, "attn-hpd-f16");
+    log("attention pipeline ok (HPD f16, no subgroup)");
+
+    setStatus("benching attention…", "warn");
+    const n_patches = 2304, n_heads = 12, head_dim = 64;
+    const qkv_len = n_patches * n_heads * head_dim;
+    const qkv_bytes = qkv_len * 4;
+    // Buffers already in HPD layout [n_heads, n_patches, head_dim].
+    const qBuf = makeStorage(device, qkv_bytes, new Float32Array(qkv_len).fill(0.01));
+    const kBuf = makeStorage(device, qkv_bytes, new Float32Array(qkv_len).fill(0.01));
+    const vBuf = makeStorage(device, qkv_bytes, new Float32Array(qkv_len).fill(0.01));
+    const oBuf = makeStorage(device, qkv_bytes);
+    const pBuf = makeUniform(device, new Uint32Array([head_dim, n_heads, n_patches, 0]));
+
+    const bg = device.createBindGroup({
+      layout: attnPipe.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: pBuf } },
+        { binding: 1, resource: { buffer: qBuf } },
+        { binding: 2, resource: { buffer: kBuf } },
+        { binding: 3, resource: { buffer: vBuf } },
+        { binding: 4, resource: { buffer: oBuf } },
+      ],
+    });
+    // Dispatch: (ceil(n_patches/Q_PER_WG=8), n_heads, 1)
+    const dispatchX = Math.ceil(n_patches / 8);
+    const dispatchY = n_heads;
+    const perMs = await timedDispatch(device, "attn",
+      (p) => { p.setPipeline(attnPipe); p.setBindGroup(0, bg); },
+      (p) => { p.dispatchWorkgroups(dispatchX, dispatchY, 1); },
+      3);
+    log(`  vision_attention (HPD f16): ${perMs.toFixed(2)} ms/iter  (×16 layers ≈ ${(perMs * 16).toFixed(0)} ms)`, "ok");
+    await postResult({ event: "attn", variant: "hpd_f16",
+      n_patches, n_heads, head_dim, ms_per_iter: perMs, total_16_layers_ms: perMs * 16 });
+
+    qBuf.destroy(); kBuf.destroy(); vBuf.destroy(); oBuf.destroy(); pBuf.destroy();
+  } else {
+    log("(attention bench skipped — adapter lacks shader-f16)", "warn");
   }
 
   setStatus("done ✓", "ok");

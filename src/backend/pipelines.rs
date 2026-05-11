@@ -68,6 +68,12 @@ pub struct Pipelines {
     /// Q=16 variant of `vision_attention_flash_sub_hpd_f16`. Halves WG count
     /// at the same total work — amortises per-WG cost.
     pub vision_attention_flash_sub_hpd_f16_q16: Option<wgpu::ComputePipeline>,
+    /// HPD + f16-LDS attention **without subgroups** (barrier-tree reduction).
+    /// Targets devices that have SHADER_F16 but where subgroup_max_size < 64
+    /// — i.e. Apple Silicon (32) / NVIDIA (32) / Intel — so our subgroup-
+    /// collapsed kernels would produce wrong output. Built when has_f16 is
+    /// set, regardless of subgroup support.
+    pub vision_attention_flash_hpd_f16: Option<wgpu::ComputePipeline>,
     pub transpose_phd_to_hpd: wgpu::ComputePipeline,
     pub transpose_hpd_to_phd: wgpu::ComputePipeline,
     pub half_residual_add: wgpu::ComputePipeline,
@@ -131,6 +137,14 @@ impl Pipelines {
             }
         }
         if has_f16 {
+            // Universal subgroup-free fast path — works on any adapter with
+            // SHADER_F16, including the ones where our subgroup-collapsed
+            // kernels would be incorrect (subgroup_max_size < 64).
+            me.vision_attention_flash_hpd_f16 = Some(build(
+                device,
+                "vision_attention_flash_hpd_f16",
+                kernels::VISION_ATTENTION_FLASH_HPD_F16,
+            ));
             me.f16_matmul_batched_tiled_v3_f16lds = Some(build(
                 device,
                 "f16_matmul_batched_tiled_v3_f16lds",
@@ -196,6 +210,7 @@ impl Pipelines {
             vision_attention_flash_sub_hpd: None,
             vision_attention_flash_sub_hpd_f16: None,
             vision_attention_flash_sub_hpd_f16_q16: None,
+            vision_attention_flash_hpd_f16: None,
             transpose_phd_to_hpd: build(device, "transpose_phd_to_hpd", kernels::TRANSPOSE_PHD_TO_HPD),
             transpose_hpd_to_phd: build(device, "transpose_hpd_to_phd", kernels::TRANSPOSE_HPD_TO_PHD),
             half_residual_add: build(device, "half_residual_add", kernels::HALF_RESIDUAL_ADD),

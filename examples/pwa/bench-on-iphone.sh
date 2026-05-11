@@ -228,13 +228,21 @@ print('  has_f16 = %s' % d.get('has_f16'))
 print('  ua: %s...' % d.get('ua', '')[:90])
 "
                         ;;
-                    bench)
+                    matmul)
                         printf '%s\n' "$line" | python3 -c "
 import sys, json
 d = json.loads(sys.stdin.read())
 s = d['shape']
 print('  %s k=%4d n=%4d batch=%4d | %7.2f ms/iter   %6.1f GFLOPS' % (
     s['label'], s['k'], s['n'], s['batch'], d['ms_per_iter'], d['gflops']))
+"
+                        ;;
+                    attn)
+                        printf '%s\n' "$line" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+print('  vision_attention (%s): n_patches=%d, n_heads=%d, head_dim=%d | %.2f ms/iter  (x16 layers = %.0f ms)' % (
+    d['variant'], d['n_patches'], d['n_heads'], d['head_dim'], d['ms_per_iter'], d['total_16_layers_ms']))
 "
                         ;;
                     done)

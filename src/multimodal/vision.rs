@@ -555,8 +555,15 @@ impl VisionForward {
         // patch-major even with the 4 wrapping transposes counted in.
         // Prefer the f16-LDS HPD variant when SHADER_F16 is available — same
         // numerics within f16-rounding tolerance, half the workgroup storage.
+        // Routing precedence (best → worst):
+        //   1. subgroup + f16 LDS (AMD GCN + Qualcomm Adreno with SHADER_F16)
+        //   2. subgroup + f32 LDS (subgroup-capable adapters w/o SHADER_F16)
+        //   3. **subgroup-free + f16 LDS** (Apple Silicon, NVIDIA, Intel
+        //      with SHADER_F16 — the iPhone A18 case)
+        //   4. fallthrough → original Q=8 barrier-tree kernel
         let hpd_pipe = self.pipes.vision_attention_flash_sub_hpd_f16.as_ref()
-            .or(self.pipes.vision_attention_flash_sub_hpd.as_ref());
+            .or(self.pipes.vision_attention_flash_sub_hpd.as_ref())
+            .or(self.pipes.vision_attention_flash_hpd_f16.as_ref());
         if let Some(hpd) = hpd_pipe {
             crate::backend::dispatch::transpose_phd_to_hpd_chained(&self.ctx, &self.pipes, enc,
                 &self.q_norm, &self.q_hpd, n_patches, n_heads, head_dim);
