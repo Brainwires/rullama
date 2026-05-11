@@ -1,52 +1,42 @@
-import { useEffect, useState } from "react";
-import { cn } from "@/lib/utils";
-
-interface EnvCheck {
-    webgpu: boolean;
-    secureContext: boolean;
-    crossOriginIsolated: boolean;
-    opfs: boolean;
-}
-
-function probeEnv(): EnvCheck {
-    return {
-        webgpu: typeof navigator !== "undefined" && "gpu" in navigator,
-        secureContext: typeof window !== "undefined" && window.isSecureContext,
-        crossOriginIsolated: typeof window !== "undefined" && window.crossOriginIsolated,
-        opfs:
-            typeof navigator !== "undefined" &&
-            !!navigator.storage &&
-            typeof navigator.storage.getDirectory === "function",
-    };
-}
-
-function StatusPill({ ok, label }: { ok: boolean; label: string }) {
-    return (
-        <span
-            className={cn(
-                "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium",
-                ok
-                    ? "bg-green-500/15 text-green-400 ring-1 ring-green-500/30"
-                    : "bg-destructive/15 text-destructive ring-1 ring-destructive/30",
-            )}
-        >
-            <span className={cn("h-1.5 w-1.5 rounded-full", ok ? "bg-green-400" : "bg-destructive")} />
-            {label}: {ok ? "ok" : "no"}
-        </span>
-    );
-}
+import { useState } from "react";
+import { EnvironmentStatus } from "@/components/EnvironmentStatus";
+import { ModelLoader, type ModelStatus } from "@/components/ModelLoader";
+import { ChatPanel } from "@/components/ChatPanel";
+import { SettingsDialog } from "@/components/SettingsDialog";
+import { type ChatMessage, type SamplingOptions, DEFAULT_SAMPLING } from "@/lib/types";
 
 export function App() {
-    const [env, setEnv] = useState<EnvCheck>({
-        webgpu: false,
-        secureContext: false,
-        crossOriginIsolated: false,
-        opfs: false,
-    });
+    // Model load state
+    const [modelStatus, setModelStatus] = useState<ModelStatus>("idle");
+    const [loadingPercent, setLoadingPercent] = useState(0);
+    const [loadingLabel, setLoadingLabel]     = useState("");
+    const [statusText, setStatusText]         = useState("no model");
 
-    useEffect(() => {
-        setEnv(probeEnv());
-    }, []);
+    // Chat state
+    const [messages, setMessages] = useState<ChatMessage[]>([]);
+    const [prompt, setPrompt]     = useState("");
+    const [busy, setBusy]         = useState(false);
+
+    // Settings
+    const [systemPrompt, setSystemPrompt] = useState("");
+    const [sampling, setSampling]         = useState<SamplingOptions>(DEFAULT_SAMPLING);
+    const [maxTokens, setMaxTokens]       = useState(256);
+
+    const onLoad = (_m: import("@/lib/api").ModelEntry) => {
+        // Phase 4 wires this to the inference worker. For now, simulate progress.
+        setModelStatus("loading");
+        setLoadingPercent(0);
+        setLoadingLabel("(phase 3 stub — inference wiring lands next commit)");
+        setStatusText("loading…");
+        // No-op
+    };
+
+    const onSend = () => {
+        const text = prompt.trim();
+        if (!text) return;
+        setMessages([...messages, { role: "user", content: text }]);
+        setPrompt("");
+    };
 
     return (
         <div className="min-h-screen bg-background safe-top">
@@ -58,24 +48,46 @@ export function App() {
                     </p>
                 </header>
 
-                <section className="rounded-lg border border-border bg-card p-4">
-                    <h2 className="mb-3 text-sm font-medium">Environment</h2>
-                    <div className="flex flex-wrap gap-2">
-                        <StatusPill ok={env.webgpu} label="WebGPU" />
-                        <StatusPill ok={env.secureContext} label="Secure" />
-                        <StatusPill ok={env.crossOriginIsolated} label="COOP/COEP" />
-                        <StatusPill ok={env.opfs} label="OPFS" />
-                    </div>
-                    <p className="mt-3 text-xs text-muted-foreground">
-                        WebGPU is required to run inference. OPFS is required to load models &gt; 4 GB.
-                    </p>
-                </section>
+                <div className="space-y-6">
+                    <EnvironmentStatus />
+                    <ModelLoader
+                        status={modelStatus}
+                        loadingPercent={loadingPercent}
+                        loadingLabel={loadingLabel}
+                        statusText={statusText}
+                        onLoad={onLoad}
+                    />
+                    <SettingsDialog
+                        systemPrompt={systemPrompt}
+                        onSystemPromptChange={setSystemPrompt}
+                        sampling={sampling}
+                        onSamplingChange={setSampling}
+                        maxTokens={maxTokens}
+                        onMaxTokensChange={setMaxTokens}
+                    />
+                    <ChatPanel
+                        messages={messages}
+                        canSend={modelStatus === "ready" && !busy && prompt.trim().length > 0}
+                        canStop={busy}
+                        canReset={modelStatus === "ready" && messages.length > 0 && !busy}
+                        prompt={prompt}
+                        onPromptChange={setPrompt}
+                        onSend={() => { setBusy(true); onSend(); setBusy(false); }}
+                        onStop={() => setBusy(false)}
+                        onReset={() => setMessages([])}
+                    />
+                </div>
 
-                <section className="mt-6 rounded-lg border border-dashed border-border bg-card/30 p-6 text-center">
-                    <p className="text-sm text-muted-foreground">
-                        UI scaffolding in progress — model loader + chat panel ship next.
-                    </p>
-                </section>
+                <footer className="mt-10 text-center text-xs text-muted-foreground safe-bottom">
+                    <a
+                        href="https://github.com/Brainwires/rullama"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="hover:text-foreground"
+                    >
+                        Brainwires / rullama
+                    </a>
+                </footer>
             </div>
         </div>
     );
