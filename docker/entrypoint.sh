@@ -2,15 +2,17 @@
 # rullama container entrypoint.
 #
 # Modes:
-#   1. Local-Ollama-mount mode (default): scan $OLLAMA_MODELS/manifests,
-#      build symlinks at /tmp/rullama/blobs/<name>, generate models.json
-#      from the local manifests. /api/blob/<name> then serves the bytes
-#      via nginx + sendfile, with Range support.
-#   2. Public-CDN mode (RULLAMA_REMOTE_ONLY=1): skip the local scan
-#      entirely and ship a curated models.json whose entries each carry
-#      a public `url` (Hugging Face GGUF blobs). The client fetches the
-#      blob directly from that URL — this server contributes ~zero
-#      bandwidth to model downloads.
+#   1. Public-CDN mode (DEFAULT): ship a curated models.json whose
+#      entries each carry a public `url` (Hugging Face GGUF blobs). The
+#      client fetches the blob directly from that URL — this server
+#      contributes ~zero bandwidth to model downloads. The whole point
+#      of the public demo.
+#   2. Local-Ollama-mount mode (RULLAMA_SERVE_LOCAL=1): scan
+#      $OLLAMA_MODELS/manifests, build symlinks at
+#      /tmp/rullama/blobs/<name>, generate models.json from the local
+#      manifests. /api/blob/<name> then serves the bytes via nginx +
+#      sendfile with Range support. Use this on developer machines /
+#      private deploys where you want the full multimodal blobs.
 #
 # Restart the container after `ollama pull <new model>` to re-index.
 
@@ -28,7 +30,14 @@ MANIFEST_LIST="$WORK_DIR/.manifests.list"
 
 MODEL_LAYER="application/vnd.ollama.image.model"
 
-REMOTE_ONLY="${RULLAMA_REMOTE_ONLY:-0}"
+# Default: remote (HF) mode. Opt in to local serving with
+# RULLAMA_SERVE_LOCAL=1 (preferred) or the legacy inverse alias
+# RULLAMA_REMOTE_ONLY=0 (kept for compatibility with prior compose
+# files that explicitly set it to 1 — no-op now).
+SERVE_LOCAL="${RULLAMA_SERVE_LOCAL:-0}"
+if [ "${RULLAMA_REMOTE_ONLY:-1}" = "0" ]; then
+    SERVE_LOCAL=1
+fi
 
 mkdir -p "$BLOB_DIR"
 : > "$ITEMS_TMP"
@@ -52,8 +61,8 @@ emit_hf_entries() {
         >> "$ITEMS_TMP"
 }
 
-# ───── Local Ollama scan (skipped when RULLAMA_REMOTE_ONLY=1) ────────
-if [ "$REMOTE_ONLY" != "1" ] && [ -d "$MANIFESTS" ]; then
+# ───── Local Ollama scan (only when RULLAMA_SERVE_LOCAL=1) ────────────
+if [ "$SERVE_LOCAL" = "1" ] && [ -d "$MANIFESTS" ]; then
     find "$MANIFESTS" -type f > "$MANIFEST_LIST" 2>/dev/null
 fi
 
@@ -103,10 +112,11 @@ done < "$MANIFEST_LIST"
 
 local_count=$(wc -l < "$ITEMS_TMP" | tr -d ' ')
 
-# Fall back to the HF curated list when:
-#   - remote-only mode is requested, OR
-#   - the local scan produced zero entries (no mount / empty mount).
-if [ "$REMOTE_ONLY" = "1" ] || [ "$local_count" = "0" ]; then
+# Emit the HF curated list when:
+#   - we're in remote mode (default), OR
+#   - local mode was requested but the scan found nothing (no mount or
+#     empty mount — fall back so the demo isn't broken).
+if [ "$SERVE_LOCAL" != "1" ] || [ "$local_count" = "0" ]; then
     emit_hf_entries
     mode="remote"
 else
