@@ -1,15 +1,19 @@
 import { useCallback, useRef, useState } from "react";
 import { EnvironmentStatus } from "@/components/EnvironmentStatus";
-import { ModelLoader, type ModelStatus } from "@/components/ModelLoader";
+import { ModelLoader, ModelLoadProgress, type ModelStatus } from "@/components/ModelLoader";
 import { ChatPanel } from "@/components/ChatPanel";
 import { SettingsDialog } from "@/components/SettingsDialog";
+import { Button } from "@/components/ui/button";
 import { type ChatMessage, type SamplingOptions, DEFAULT_SAMPLING } from "@/lib/types";
 import { type ModelEntry, blobUrl, beacon } from "@/lib/api";
 import { ensureModel, opfsSupported, requestPersistent } from "@/lib/opfs";
 import { getClient } from "@/lib/inference";
 import { fmtBytes } from "@/lib/utils";
+import { Settings2 } from "lucide-react";
 
 const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
+const THINK_TOKEN = "<|think|>";
 
 export function App() {
     // Model load state
@@ -25,13 +29,11 @@ export function App() {
     const [statusLine, setStatusLine] = useState<string | undefined>();
 
     // Settings
+    const [settingsOpen, setSettingsOpen] = useState(false);
     const [systemPrompt, setSystemPrompt] = useState("");
     const [sampling, setSampling]         = useState<SamplingOptions>(DEFAULT_SAMPLING);
-    // 1024 = 4× the prior 256 default. Gemma 4's context window comfortably
-    // accommodates this on desktop; on mobile the per-load `maxContext=512`
-    // cap (set below) still bounds total prompt+generated tokens, so the
-    // practical mobile ceiling is whatever's left after the prompt.
     const [maxTokens, setMaxTokens]       = useState(1024);
+    const [thinking, setThinking]         = useState(false);
 
     const cancelRef = useRef(false);
 
@@ -77,7 +79,7 @@ export function App() {
             });
 
             setModelStatus("ready");
-            setStatusText(`ready: ${m.name}${fromCache ? " (cached)" : ""}`);
+            setStatusText(`${m.name}${fromCache ? " ⚡" : ""}`);
             setLoadingLabel("");
             setMessages([]);
         } catch (e) {
@@ -98,10 +100,18 @@ export function App() {
         setPrompt("");
         setStatusLine(undefined);
 
+        // Compose the system message. When thinking mode is on, prepend
+        // <|think|> to whatever the user wrote (or stand alone if empty).
+        // This is silent — the displayed history below uses `messages`,
+        // which has no system entry to begin with.
+        const sysContent = thinking
+            ? (systemPrompt.trim() ? `${THINK_TOKEN}${systemPrompt.trim()}` : THINK_TOKEN)
+            : systemPrompt.trim();
+
         // Build the new history list with the user turn appended.
         const history: ChatMessage[] = [
-            ...(systemPrompt.trim() && messages.length === 0
-                ? [{ role: "system" as const, content: systemPrompt.trim() }]
+            ...(sysContent && messages.length === 0
+                ? [{ role: "system" as const, content: sysContent }]
                 : []),
             ...messages,
             { role: "user", content: text },
@@ -143,14 +153,14 @@ export function App() {
             }
             const dt = performance.now() - tg0;
             const tps = emitted > 0 ? (emitted * 1000 / dt) : 0;
-            setStatusLine(`prompt-eval ${peMs.toFixed(0)} ms · gen ${emitted} tok in ${dt.toFixed(0)} ms · ${tps.toFixed(2)} tok/s`);
+            setStatusLine(`pe ${peMs.toFixed(0)} ms · gen ${emitted} tok in ${dt.toFixed(0)} ms · ${tps.toFixed(2)} tok/s`);
             beacon("chat", `gen ${emitted} tok in ${dt.toFixed(0)} ms (${tps.toFixed(2)} tok/s)`);
         } catch (e) {
             setStatusLine(`error: ${(e as Error).message}`);
         } finally {
             setBusy(false);
         }
-    }, [busy, maxTokens, messages, modelStatus, prompt, sampling, systemPrompt]);
+    }, [busy, maxTokens, messages, modelStatus, prompt, sampling, systemPrompt, thinking]);
 
     const onReset = useCallback(() => {
         if (busy) return;
@@ -160,17 +170,12 @@ export function App() {
     }, [busy]);
 
     return (
-        <div className="min-h-screen bg-background safe-top">
-            <div className="mx-auto max-w-3xl px-4 py-6 sm:py-10">
-                <header className="mb-6">
-                    <h1 className="text-2xl font-semibold tracking-tight">rullama</h1>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                        Gemma 4 in your browser. Pure Rust → WebAssembly + WebGPU. No server.
-                    </p>
-                </header>
-
-                <div className="space-y-6">
-                    <EnvironmentStatus />
+        <div className="flex h-[100dvh] flex-col overflow-hidden bg-background text-foreground">
+            {/* Compact top toolbar — title, env, model picker, settings. */}
+            <header className="flex flex-wrap items-center gap-2 border-b border-border bg-card/40 px-3 py-1.5 text-xs safe-top">
+                <span className="font-semibold tracking-tight">rullama</span>
+                <EnvironmentStatus />
+                <div className="ml-auto flex flex-wrap items-center gap-1">
                     <ModelLoader
                         status={modelStatus}
                         loadingPercent={loadingPercent}
@@ -178,40 +183,49 @@ export function App() {
                         statusText={statusText}
                         onLoad={onLoad}
                     />
-                    <SettingsDialog
-                        systemPrompt={systemPrompt}
-                        onSystemPromptChange={setSystemPrompt}
-                        sampling={sampling}
-                        onSamplingChange={setSampling}
-                        maxTokens={maxTokens}
-                        onMaxTokensChange={setMaxTokens}
-                    />
-                    <ChatPanel
-                        messages={messages}
-                        canType={modelStatus === "ready" && !busy}
-                        canSend={modelStatus === "ready" && !busy && prompt.trim().length > 0}
-                        canStop={busy}
-                        canReset={modelStatus === "ready" && messages.length > 0 && !busy}
-                        prompt={prompt}
-                        onPromptChange={setPrompt}
-                        onSend={onSend}
-                        onStop={() => { cancelRef.current = true; }}
-                        onReset={onReset}
-                        statusLine={statusLine}
-                    />
-                </div>
-
-                <footer className="mt-10 text-center text-xs text-muted-foreground safe-bottom">
-                    <a
-                        href="https://github.com/Brainwires/rullama"
-                        target="_blank"
-                        rel="noreferrer"
-                        className="hover:text-foreground"
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        onClick={() => setSettingsOpen(!settingsOpen)}
+                        title="Toggle settings"
+                        aria-pressed={settingsOpen}
                     >
-                        Brainwires / rullama
-                    </a>
-                </footer>
-            </div>
+                        <Settings2 />
+                    </Button>
+                </div>
+            </header>
+
+            {modelStatus === "loading" && (
+                <ModelLoadProgress percent={loadingPercent} label={loadingLabel} />
+            )}
+
+            {settingsOpen && (
+                <SettingsDialog
+                    systemPrompt={systemPrompt}
+                    onSystemPromptChange={setSystemPrompt}
+                    sampling={sampling}
+                    onSamplingChange={setSampling}
+                    maxTokens={maxTokens}
+                    onMaxTokensChange={setMaxTokens}
+                    thinking={thinking}
+                    onThinkingChange={setThinking}
+                />
+            )}
+
+            <ChatPanel
+                messages={messages}
+                canType={modelStatus === "ready" && !busy}
+                canSend={modelStatus === "ready" && !busy && prompt.trim().length > 0}
+                canStop={busy}
+                canReset={modelStatus === "ready" && messages.length > 0 && !busy}
+                prompt={prompt}
+                onPromptChange={setPrompt}
+                onSend={onSend}
+                onStop={() => { cancelRef.current = true; }}
+                onReset={onReset}
+                statusLine={statusLine}
+            />
         </div>
     );
 }

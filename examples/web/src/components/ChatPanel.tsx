@@ -1,5 +1,4 @@
 import { useEffect, useRef } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { type ChatMessage } from "@/lib/types";
@@ -18,6 +17,7 @@ interface Props {
     onStop:      () => void;
     onReset:     () => void;
     statusLine?: string;
+    className?:  string;
 }
 
 function MessageBubble({ msg }: { msg: ChatMessage }) {
@@ -40,6 +40,10 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
     );
 }
 
+/**
+ * Chat panel meant to fill its parent's remaining flex height. History scrolls
+ * internally; input row pins to the bottom. The outer page should NOT scroll.
+ */
 export function ChatPanel(props: Props) {
     const historyRef = useRef<HTMLDivElement>(null);
 
@@ -58,42 +62,41 @@ export function ChatPanel(props: Props) {
     };
 
     return (
-        <Card>
-            <CardHeader>
-                <CardTitle>Chat</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-                <div
-                    ref={historyRef}
-                    className="flex max-h-[55vh] min-h-[10rem] flex-col gap-2 overflow-y-auto rounded-md border border-border bg-background/40 p-2 sm:max-h-[28rem]"
-                >
-                    {props.messages.length === 0 ? (
-                        <p className="m-auto text-xs text-muted-foreground">
-                            Load a model and say hi.
-                        </p>
-                    ) : (
-                        props.messages.map((m, i) => <MessageBubble key={i} msg={m} />)
-                    )}
-                </div>
-
-                <div className="flex flex-wrap gap-2 safe-bottom">
-                    <Input
-                        placeholder='e.g. "What is the capital of France?"'
-                        value={props.prompt}
-                        onChange={(e) => props.onPromptChange(e.target.value)}
-                        onKeyDown={onKeyDown}
-                        disabled={!props.canType}
-                        className="flex-1 min-w-0"
-                    />
-                    <Button onClick={props.onSend}      disabled={!props.canSend}><Send /> Send</Button>
-                    <Button onClick={props.onStop}      disabled={!props.canStop}  variant="destructive"><Square /></Button>
-                    <Button onClick={props.onReset}     disabled={!props.canReset} variant="outline"><RotateCcw /></Button>
-                </div>
-
-                {props.statusLine && (
-                    <p className="text-xs text-muted-foreground">{props.statusLine}</p>
+        <div className={cn("flex min-h-0 flex-1 flex-col", props.className)}>
+            <div
+                ref={historyRef}
+                className="flex-1 min-h-0 overflow-y-auto px-3 py-2 sm:px-4"
+            >
+                {props.messages.length === 0 ? (
+                    <p className="mt-8 text-center text-xs text-muted-foreground">
+                        Load a model and say hi.
+                    </p>
+                ) : (
+                    <div className="mx-auto flex max-w-3xl flex-col gap-2">
+                        {props.messages.map((m, i) => <MessageBubble key={i} msg={m} />)}
+                    </div>
                 )}
-            </CardContent>
-        </Card>
+            </div>
+
+            {props.statusLine && (
+                <p className="border-t border-border bg-background/60 px-3 py-1 text-[0.65rem] text-muted-foreground sm:px-4">
+                    {props.statusLine}
+                </p>
+            )}
+
+            <div className="flex gap-1.5 border-t border-border bg-background/80 px-2 py-2 safe-bottom sm:px-3">
+                <Input
+                    placeholder='Say something…'
+                    value={props.prompt}
+                    onChange={(e) => props.onPromptChange(e.target.value)}
+                    onKeyDown={onKeyDown}
+                    disabled={!props.canType}
+                    className="flex-1 min-w-0"
+                />
+                <Button onClick={props.onSend}  disabled={!props.canSend}><Send /></Button>
+                <Button onClick={props.onStop}  disabled={!props.canStop}  variant="destructive"><Square /></Button>
+                <Button onClick={props.onReset} disabled={!props.canReset} variant="outline"><RotateCcw /></Button>
+            </div>
+        </div>
     );
 }
