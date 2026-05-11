@@ -90,10 +90,12 @@ fn main(
     let row = wg_id.x;          // 0..padded_len
     let h   = wg_id.y;          // 0..n_heads
     let tid = lid.x;            // 0..head_dim
-
-    // Per the dispatch we always launch HEAD_DIM threads, so an out-of-range
-    // mask isn't needed in practice — but stay safe if config changes later.
-    if (tid >= p.head_dim) { return; }
+    // No `if (tid >= p.head_dim) return` guard: HEAD_DIM and head_dim are
+    // both 128 (Gemma 4 audio) and the dispatch matches @workgroup_size(128).
+    // An early return ahead of workgroupBarrier() trips Safari/Tint's
+    // uniformity analysis ("workgroupBarrier must only be called from
+    // uniform control flow"), since the validator can't prove the guard
+    // is dead.
 
     let u = row / p.chunk_size;     // chunk index
     let r = row % p.chunk_size;     // position within chunk
