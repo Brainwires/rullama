@@ -57,6 +57,9 @@ pub struct Pipelines {
     /// memory footprint → ~2× higher per-CU wave occupancy. Requires
     /// `Features::SHADER_F16` and SUBGROUP.
     pub vision_attention_flash_sub_hpd_f16: Option<wgpu::ComputePipeline>,
+    /// Q=16 variant of `vision_attention_flash_sub_hpd_f16`. Halves WG count
+    /// at the same total work — amortises per-WG cost.
+    pub vision_attention_flash_sub_hpd_f16_q16: Option<wgpu::ComputePipeline>,
     pub transpose_phd_to_hpd: wgpu::ComputePipeline,
     pub transpose_hpd_to_phd: wgpu::ComputePipeline,
     pub half_residual_add: wgpu::ComputePipeline,
@@ -110,6 +113,11 @@ impl Pipelines {
                     "vision_attention_flash_sub_hpd_f16",
                     kernels::VISION_ATTENTION_FLASH_SUB_HPD_F16,
                 ));
+                me.vision_attention_flash_sub_hpd_f16_q16 = Some(build(
+                    device,
+                    "vision_attention_flash_sub_hpd_f16_q16",
+                    kernels::VISION_ATTENTION_FLASH_SUB_HPD_F16_Q16,
+                ));
             }
         }
         if has_f16 {
@@ -158,6 +166,7 @@ impl Pipelines {
             vision_attention_flash_sub_t64: None,
             vision_attention_flash_sub_hpd: None,
             vision_attention_flash_sub_hpd_f16: None,
+            vision_attention_flash_sub_hpd_f16_q16: None,
             transpose_phd_to_hpd: build(device, "transpose_phd_to_hpd", kernels::TRANSPOSE_PHD_TO_HPD),
             transpose_hpd_to_phd: build(device, "transpose_hpd_to_phd", kernels::TRANSPOSE_HPD_TO_PHD),
             half_residual_add: build(device, "half_residual_add", kernels::HALF_RESIDUAL_ADD),

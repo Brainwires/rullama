@@ -367,6 +367,26 @@ fn main() {
         println!("vision_attention_flash (sub+HPD): {per_iterh:?}/iter  (with 3+1 transposes; ×16 ≈ {:?})", per_iterh * 16);
         println!("vision_attention_flash (HPD only): {per_itera:?}/iter  (attn-only; ×16 ≈ {:?})", per_itera * 16);
 
+        if let Some(sub_hpd_f16_q16) = pipes.vision_attention_flash_sub_hpd_f16_q16.as_ref() {
+            for _ in 0..2 {
+                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                dispatch::vision_attention_flash_sub_hpd_f16_q16_chained(&ctx, &pipes, sub_hpd_f16_q16, &mut enc, &q_t, &k_t, &v_t, &out_t,
+                    head_dim, n_heads, n_patches);
+                ctx.queue.submit(Some(enc.finish()));
+                ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+            }
+            let taq = Instant::now();
+            for _ in 0..n_iters {
+                let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                dispatch::vision_attention_flash_sub_hpd_f16_q16_chained(&ctx, &pipes, sub_hpd_f16_q16, &mut enc, &q_t, &k_t, &v_t, &out_t,
+                    head_dim, n_heads, n_patches);
+                ctx.queue.submit(Some(enc.finish()));
+            }
+            ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+            let per_iteraq = taq.elapsed() / n_iters as u32;
+            println!("vision_attention_flash (HPD f16 Q=16): {per_iteraq:?}/iter  (attn-only; ×16 ≈ {:?})", per_iteraq * 16);
+        }
+
         if let Some(sub_hpd_f16) = pipes.vision_attention_flash_sub_hpd_f16.as_ref() {
             for _ in 0..2 {
                 let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });

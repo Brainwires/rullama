@@ -1064,6 +1064,45 @@ pub fn vision_attention_flash_sub_hpd_f16_chained(
     vision_attention_flash_sub_hpd_chained(ctx, p, pipe, enc, q, k, v, out, head_dim, n_heads, n_patches);
 }
 
+/// Q=16 variant of `vision_attention_flash_sub_hpd_f16_chained`. Dispatches
+/// half as many WGs (`ceil(n_patches/16)` per head). Uses the same uniform
+/// layout so the dispatcher just wraps the same bind-group construction.
+pub fn vision_attention_flash_sub_hpd_f16_q16_chained(
+    ctx: &WgpuCtx, p: &Pipelines, pipe: &wgpu::ComputePipeline,
+    enc: &mut wgpu::CommandEncoder,
+    q: &wgpu::Buffer, k: &wgpu::Buffer, v: &wgpu::Buffer, out: &wgpu::Buffer,
+    head_dim: usize, n_heads: usize, n_patches: usize,
+) {
+    let _ = p;
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = VisionAttnParams {
+        head_dim: head_dim as u32,
+        n_heads: n_heads as u32,
+        n_patches: n_patches as u32,
+        _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "vattnSubHPDQ16.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("vattnSubHPDQ16.bg"),
+        layout: &pipe.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: q.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: k.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: v.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: out.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("vattnSubHPDQ16.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(pipe);
+    cp.set_bind_group(0, &bg, &[]);
+    let n_query_groups = (n_patches as u32).div_ceil(16);
+    cp.dispatch_workgroups(n_query_groups, n_heads as u32, 1);
+}
+
 /// Head-major (HPD) subgroup flash attention. Caller must pre-transpose Q/K/V
 /// to [n_heads, n_patches, head_dim]; output is written in the same layout.
 pub fn vision_attention_flash_sub_hpd_chained(
