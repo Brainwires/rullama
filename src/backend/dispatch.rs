@@ -580,6 +580,12 @@ pub fn matmul_q4_k_chained(
     ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
     w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer, k: usize, n: usize,
 ) {
+    // Non-tiled (1 thread per output, no shared LDS) wins on AMD GCN / Metal
+    // for single-token text inference — the path is weight-bandwidth bound, so
+    // the LDS-tiling overhead doesn't pay off.
+    // A/B (Pro 555, e2b): non-tiled 939 ms/tok, tiled 996, f16-LDS 975.
+    // Tiled and f16-LDS variants are built (when SHADER_F16) but unrouted —
+    // try them on Apple Silicon where packed-FP16 throughput is higher.
     matmul_chained_inner(&ctx.device, &ctx.queue, enc, &p.q4_k_matmul, "q4k_chain", w, x, y, k, n);
 }
 
