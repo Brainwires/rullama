@@ -37,14 +37,14 @@ export function huggingfaceModels(): ModelEntry[] {
             name:   "gemma4:e2b",
             family: "gemma4",
             tag:    "e2b",
-            // Q4_K_S, not Q4_K_M. Our v1 dequant scope is
-            // F32/F16/BF16/Q4_K/Q6_K; Unsloth's "Q4_K_M" actually uses
-            // Q5_K for the boost tensors (V / ffn_down) instead of the
-            // standard ggml Q6_K, which our kernel rejects. Q4_K_S is
-            // pure Q4_K + F16/F32 — ~60 MB smaller and fully supported.
-            size:   3043932288,
-            digest: "0a2fac16f388b4839f075dedb681357aec3e73a96bd66b413e462b6853550c99",
-            url:    "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_S.gguf",
+            // Q6_K, not Q4_K_M / Q4_K_S. Our v1 dequant scope is
+            // F32/F16/BF16/Q4_K/Q6_K; Unsloth's Q4_K_* variants both
+            // sneak Q5_K tensors in (loader rejects them). Pure Q6_K
+            // is the only safe option in their repo — every weight is
+            // Q6_K + the standard F16/F32 norms. 4.5 GB instead of 3.
+            size:   4501719168,
+            digest: "b36824f13bf9fab2910cb7b4282a4d73b13799ee4126d4ec241309ce69c0e783",
+            url:    "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q6_K.gguf",
         },
     ];
 }

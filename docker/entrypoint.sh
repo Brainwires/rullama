@@ -47,20 +47,20 @@ mkdir -p "$BLOB_DIR"
 # Each entry has the same shape as a local one PLUS a `url` field. The
 # client honours `url` first; nginx never sees these requests.
 emit_hf_entries() {
-    # gemma4:e2b — Q4_K_S, text-only. rullama's v1 dequant scope is
-    # F32/F16/BF16/Q4_K/Q6_K. Unsloth's "Q4_K_M" actually uses Q5_K for
-    # the boost tensors (V/ffn_down) instead of the standard ggml Q6_K,
-    # which our kernel can't handle. Q4_K_S is pure Q4_K throughout —
-    # ~60 MB smaller, fully supported. Multimodal weights ship as
-    # mmproj-*.gguf on the same repo and the text-only loader skips
-    # them anyway.
+    # gemma4:e2b — Q6_K, text-only. rullama's v1 dequant scope is
+    # F32/F16/BF16/Q4_K/Q6_K. Unsloth's Q4_K_M and Q4_K_S BOTH sneak
+    # Q5_K tensors in (loader rejects them), so we fall back to pure
+    # Q6_K — every weight is Q6_K plus the standard F16/F32 norms.
+    # ~4.5 GB instead of ~3 GB, but it's the only quant in the unsloth
+    # repo that our v1 kernel set can load without surprises. mmproj
+    # weights ship separately and the text-only loader skips them.
     jq -nc \
         --arg name   "gemma4:e2b" \
         --arg family "gemma4" \
         --arg tag    "e2b" \
-        --argjson size 3043932288 \
-        --arg digest "0a2fac16f388b4839f075dedb681357aec3e73a96bd66b413e462b6853550c99" \
-        --arg url    "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_S.gguf" \
+        --argjson size 4501719168 \
+        --arg digest "b36824f13bf9fab2910cb7b4282a4d73b13799ee4126d4ec241309ce69c0e783" \
+        --arg url    "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q6_K.gguf" \
         '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url}' \
         >> "$ITEMS_TMP"
 }
