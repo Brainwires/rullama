@@ -27,7 +27,11 @@ export function App() {
     // Settings
     const [systemPrompt, setSystemPrompt] = useState("");
     const [sampling, setSampling]         = useState<SamplingOptions>(DEFAULT_SAMPLING);
-    const [maxTokens, setMaxTokens]       = useState(256);
+    // 1024 = 4× the prior 256 default. Gemma 4's context window comfortably
+    // accommodates this on desktop; on mobile the per-load `maxContext=512`
+    // cap (set below) still bounds total prompt+generated tokens, so the
+    // practical mobile ceiling is whatever's left after the prompt.
+    const [maxTokens, setMaxTokens]       = useState(1024);
 
     const cancelRef = useRef(false);
 
