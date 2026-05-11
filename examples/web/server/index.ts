@@ -16,7 +16,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serve } from "@hono/node-server";
 
-import { discoverModels, findBlob } from "./ollama.js";
+import { discoverModels, findBlob, huggingfaceModels } from "./ollama.js";
 
 const PAGE_LOG  = process.env.PAGE_LOG  || "/tmp/rullama-page.log";
 const BENCH_LOG = process.env.BENCH_LOG || "/tmp/rullama-bench.jsonl";
@@ -30,7 +30,17 @@ app.get("/api/health", (c) =>
 );
 
 // ───── /api/models ─────────────────────────────────────────────────────
-app.get("/api/models", (c) => c.json(discoverModels()));
+// Local Ollama models first; fall back to the public HF list when the
+// local scan finds nothing OR `RULLAMA_REMOTE_ONLY=1` forces it. This is
+// how the public demo offloads model bandwidth to HF — `gemma.brainwires.dev`
+// sets the env var and serves only the HF entries, while devs running
+// locally with `~/.ollama/models` keep their multimodal blobs.
+app.get("/api/models", (c) => {
+    const remoteOnly = process.env.RULLAMA_REMOTE_ONLY === "1";
+    const local = remoteOnly ? [] : discoverModels();
+    if (local.length > 0) return c.json(local);
+    return c.json(huggingfaceModels());
+});
 
 // ───── /api/blob/:name ─────────────────────────────────────────────────
 // `:name` is "family:tag", URL-encoded by the caller.

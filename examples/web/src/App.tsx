@@ -211,7 +211,7 @@ export function App() {
 
             const modelKey = m.digest.replace(/[^A-Za-z0-9_.-]/g, "_");
             const filename = m.name.replace(/[^A-Za-z0-9_.-]/g, "_") + ".gguf";
-            const url = blobUrl(m.name);
+            const url = blobUrl(m);
 
             const t0 = performance.now();
             const { totalBytes, fromCache } = await ensureModel(url, modelKey, filename, ({ bytesWritten, totalBytes }) => {
@@ -233,9 +233,14 @@ export function App() {
             setLoadingLabel("loading into wasm…");
             const mobile = isMobileUA();
             const mobileMaxCtx = 512;
+            // HF entries are text-only GGUFs (mmproj ships separately on
+            // the same repo). Force textOnly when fetching from a custom
+            // URL so the desktop path doesn't try to load vision/audio
+            // tensors that aren't in the file.
+            const fromRemote = !!m.url;
             await client.load(modelKey, filename, {
                 maxContext: mobile ? mobileMaxCtx : 0,
-                textOnly:   mobile,
+                textOnly:   mobile || fromRemote,
             });
             setModelStatus("ready");
             setStatusText(`${m.name}${fromCache ? " ⚡" : ""}`);

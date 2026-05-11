@@ -6,6 +6,10 @@ export interface ModelEntry {
     tag:    string;
     size:   number;
     digest: string;
+    /** When set, the client fetches the blob from this absolute URL
+     *  instead of /api/blob. Used by the public demo to offload model
+     *  bandwidth to Hugging Face. */
+    url?:   string;
 }
 
 /** Whether this entry is something we'll actually run. */
@@ -19,8 +23,11 @@ export async function listModels(signal?: AbortSignal): Promise<ModelEntry[]> {
     return resp.json();
 }
 
-export function blobUrl(name: string): string {
-    return "/api/blob/" + encodeURIComponent(name);
+/** Where to fetch the GGUF bytes from. Prefer the model's own URL
+ *  (public CDN) when present; fall back to the local API blob stream. */
+export function blobUrl(m: ModelEntry): string {
+    if (m.url) return m.url;
+    return "/api/blob/" + encodeURIComponent(m.name);
 }
 
 export function beacon(tag: string, msg: string) {

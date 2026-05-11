@@ -17,6 +17,35 @@ export interface ModelEntry {
     size: number;
     /** sha256 hex, no "sha256:" prefix */
     digest: string;
+    /** Optional absolute URL — when set the client fetches the blob from
+     *  here directly instead of going through /api/blob. Used for the
+     *  public demo to offload bandwidth to Hugging Face's CDN. */
+    url?: string;
+}
+
+/**
+ * Curated public-CDN fallback. Returned when the local Ollama install
+ * has no models or `RULLAMA_REMOTE_ONLY=1` forces it. Each entry points
+ * at an HF-hosted GGUF — CORS + Range verified working from the browser.
+ *
+ * These are text-only quants. The multimodal blobs Ollama distributes
+ * (text + vision + audio in one file) aren't mirrored anywhere public.
+ */
+export function huggingfaceModels(): ModelEntry[] {
+    return [
+        {
+            name:   "gemma4:e2b",
+            family: "gemma4",
+            tag:    "e2b",
+            // Reported by HF in `x-linked-size`. ~3.1 GB Q4_K_M, text layers
+            // only — the mmproj weights (vision/audio) ship as a separate
+            // file in this repo and rullama's loadFromOpfsTextOnly path
+            // ignores them anyway.
+            size:   3106736256,
+            digest: "9378bc471710229ef165709b62e34bfb62231420ddaf6d729e727305b5b8672d",
+            url:    "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf",
+        },
+    ];
 }
 
 export function ollamaRoot(): string {
