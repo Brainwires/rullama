@@ -79,11 +79,11 @@
 
 <section id="model">
     <h2>Model</h2>
-    <p style="font-size:0.9rem;color:#888;margin:0 0 var(--gap) 0;">
+    <!-- <p style="font-size:0.9rem;color:#888;margin:0 0 var(--gap) 0;">
         The dev server scans <code>$OLLAMA_MODELS</code> (default <code>~/.ollama/models</code>) and lists everything it finds.
         Only <code>gemma4:*</code> variants will actually run — others fail at config-parse with a clear error.
         Browser caveat: a wasm32 module is capped at 4&nbsp;GB linear memory, so models larger than ~3&nbsp;GB compressed will OOM the page.
-    </p>
+    </p> -->
     <div class="row">
         <select id="model-select"><option value="">— scanning —</option></select>
         <button id="refresh-btn">Refresh</button>
