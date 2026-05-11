@@ -54,7 +54,7 @@ export function ModelLoader(props: Props) {
                 onChange={(e) => setSelected(e.target.value)}
                 disabled={refreshing || models.length === 0}
                 className="h-7 max-w-[12rem] rounded border border-input bg-background px-2 text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                title="Choose a model from ~/.ollama/models"
+                title="Choose a model to load"
             >
                 {models.length === 0 && <option value="">— scanning —</option>}
                 {models.map((m) => (

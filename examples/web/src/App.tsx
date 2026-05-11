@@ -429,7 +429,11 @@ export function App() {
     return (
         <div className="flex h-[100dvh] flex-col overflow-hidden bg-background text-foreground">
             {/* ─── top header (3rem / 48px tall — matches DualSidebarLayout offset) ─── */}
-            <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border bg-card/50 px-3 safe-top">
+            {/* `min-h-12` not `h-12` so the safe-area-inset-top padding
+                actually grows the header on iPhones with a notch /
+                Dynamic Island — fixed h-12 was stuffing all content
+                under the status bar in standalone PWA mode. */}
+            <header className="flex min-h-12 shrink-0 items-center gap-2 border-b border-border bg-card/50 px-3 safe-top">
                 <Button
                     variant="ghost"
                     size="icon"
@@ -526,11 +530,10 @@ export function App() {
                                     <CardHeader>
                                         <CardTitle>Load a model</CardTitle>
                                         <CardDescription>
-                                            Pick a model from your local{" "}
-                                            <code className="rounded bg-muted px-1">~/.ollama/models</code>{" "}
-                                            and click Load. Only <code className="rounded bg-muted px-1">gemma4:*</code>{" "}
-                                            variants will run; others fail at parse time.
-                                            {" "}Past conversations live in the History sidebar.
+                                            Pick a model and click Load. It'll cache to this
+                                            browser's local OPFS storage so subsequent visits
+                                            are instant. Past conversations live in the
+                                            History sidebar.
                                         </CardDescription>
                                     </CardHeader>
                                     <CardContent>

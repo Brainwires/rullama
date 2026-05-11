@@ -17,8 +17,13 @@ import { cn } from "@/lib/utils";
 // Swipe-to-close on mobile with vertical-drift + velocity guards so the
 // gesture doesn't fight chat-history scrolling.
 
-const HEADER_HEIGHT_PX  = 48;   // 3rem
-const TRANSITION_MS     = 220;
+// Header height = 48 px base + iOS safe-area inset (notch / Dynamic
+// Island). Using env() here keeps the body offset in sync with the
+// header's actual rendered height on PWA-installed iOS without us
+// having to measure it at runtime.
+const HEADER_BASE_PX = 48;
+const HEADER_OFFSET  = `calc(${HEADER_BASE_PX}px + env(safe-area-inset-top, 0px))`;
+const TRANSITION_MS  = 220;
 const MIN_SWIPE_VELOCITY = 0.3; // px / ms
 const MAX_VERTICAL_DRIFT = 100; // px — exceed → assume scroll, not swipe
 
@@ -115,7 +120,7 @@ export const DualSidebarLayout: FC<Props> = ({
     return (
         <div
             className="relative w-full overflow-hidden bg-background"
-            style={{ height: `calc(100dvh - ${HEADER_HEIGHT_PX}px)` }}
+            style={{ height: `calc(100dvh - ${HEADER_OFFSET})` }}
         >
             {/* ─── desktop layout ─── */}
             {isMobile === false && (
@@ -158,7 +163,7 @@ export const DualSidebarLayout: FC<Props> = ({
                             (isLeftOpen || isRightOpen) ? "opacity-100" : "pointer-events-none opacity-0",
                         )}
                         style={{
-                            top: HEADER_HEIGHT_PX,
+                            top: HEADER_OFFSET,
                             bottom: 0,
                             transitionDuration: transition,
                         }}
@@ -173,7 +178,7 @@ export const DualSidebarLayout: FC<Props> = ({
                             )}
                             style={{
                                 width: leftWidth,
-                                top: HEADER_HEIGHT_PX,
+                                top: HEADER_OFFSET,
                                 bottom: 0,
                                 transitionDuration: transition,
                             }}
@@ -193,7 +198,7 @@ export const DualSidebarLayout: FC<Props> = ({
                             )}
                             style={{
                                 width: rightWidth,
-                                top: HEADER_HEIGHT_PX,
+                                top: HEADER_OFFSET,
                                 bottom: 0,
                                 transitionDuration: transition,
                             }}
