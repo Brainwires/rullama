@@ -53,7 +53,7 @@ export function App() {
     const [systemPrompt, setSystemPrompt] = usePersistedState<string>("systemPrompt", DEFAULT_SYSTEM_PROMPT);
     const [sampling,     setSampling]     = usePersistedState<SamplingOptions>("sampling", DEFAULT_SAMPLING);
     const [maxTokens,    setMaxTokens]    = usePersistedState<number>("maxTokens", 1024);
-    const [thinking,     setThinking]     = usePersistedState<boolean>("thinking", false);
+    const [thinking,     setThinking]     = usePersistedState<boolean>("thinking", true);
 
     const cancelRef = useRef(false);
     const { showToast, dismissToast } = useToast();
@@ -163,7 +163,7 @@ export function App() {
         setSystemPrompt(DEFAULT_SYSTEM_PROMPT);
         setSampling(DEFAULT_SAMPLING);
         setMaxTokens(SETTINGS_BOUNDS.maxTokens.fallback);
-        setThinking(false);
+        setThinking(true);
         showToast({
             level: "success",
             title: "Settings reset to defaults",
