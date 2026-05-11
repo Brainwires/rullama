@@ -197,24 +197,29 @@ impl WeightCache {
         }
         let layout = self.tile_layout(name, max_bytes_per_tile)?;
 
-        // Fetch the whole tensor once (the fetcher decides whether that's a memcpy or
-        // a single Range request), then split + upload + drop.
-        let all_bytes = self.reader.fetch_tensor_bytes(name).await?;
-
+        // Per-tile fetch — only one tile's bytes live in wasm linear memory at a
+        // time. The old code path pulled the whole tensor (315 MiB for
+        // `token_embd.weight` in gemma4:e2b) into one `Vec<u8>` before tiling,
+        // which on iPhone 16e (8 GB shared RAM) was the spike that crashed the
+        // WebContent process during the first `step()` — even with 1 GB
+        // `max_buffer_size`, the wasm-side 315 MB allocation on top of ~2 GB of
+        // already-resident layer weights tipped iOS Jetsam over.
         let mut bufs = Vec::new();
         let mut metas = Vec::new();
         let mut row_start = 0usize;
         while row_start < layout.n_rows {
             let row_end = (row_start + layout.rows_per_tile).min(layout.n_rows);
-            let byte_start = row_start * layout.row_bytes;
-            let byte_end   = row_end   * layout.row_bytes;
-            let chunk = &all_bytes[byte_start..byte_end];
-            let buf = self.upload(&format!("{name}#tile{row_start}"), chunk);
+            let byte_start = (row_start * layout.row_bytes) as u64;
+            let byte_end   = (row_end   * layout.row_bytes) as u64;
+            let chunk = self.reader
+                .fetch_tensor_range(name, byte_start, byte_end - byte_start)
+                .await?;
+            let buf = self.upload(&format!("{name}#tile{row_start}"), &chunk);
+            drop(chunk);
             metas.push((row_start, row_end - row_start));
             bufs.push(buf);
             row_start = row_end;
         }
-        drop(all_bytes);
 
         Ok(self.commit_tiles(key, bufs, metas))
     }

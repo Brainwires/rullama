@@ -106,6 +106,19 @@ impl WgpuCtx {
                     l.max_compute_workgroup_size_x = adapter_limits
                         .max_compute_workgroup_size_x
                         .max(l.max_compute_workgroup_size_x);
+                    // Take whatever the adapter actually advertises for
+                    // max_buffer_size / max_storage_buffer_binding_size. The
+                    // downlevel defaults are 256 MiB / 128 MiB; iPad Pro
+                    // reportedly advertises ~993 MB and Apple A18 likely
+                    // beats the 256 MiB floor too. Raising the request
+                    // costs nothing when the adapter caps it; the floor
+                    // remains the spec minimum if the adapter says less.
+                    l.max_buffer_size = adapter_limits
+                        .max_buffer_size
+                        .max(l.max_buffer_size);
+                    l.max_storage_buffer_binding_size = adapter_limits
+                        .max_storage_buffer_binding_size
+                        .max(l.max_storage_buffer_binding_size);
                     l
                 },
                 experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -114,6 +127,33 @@ impl WgpuCtx {
             })
             .await
             .map_err(|e| RullamaError::DeviceRequest(format!("{e}")))?;
+
+        // Surface what the adapter actually granted, so iPhone runs tell us
+        // whether `max_buffer_size` is the 256 MiB downlevel floor or the
+        // (hopefully) larger A18-class number. Useful for diagnosing OOMs
+        // on tight-RAM phones.
+        let granted = device.limits();
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsValue;
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "[rullama wgpu limits] max_buffer_size={} MiB \
+                 max_storage_buffer_binding_size={} MiB \
+                 max_storage_buffers_per_shader_stage={}",
+                granted.max_buffer_size / (1024 * 1024),
+                granted.max_storage_buffer_binding_size / (1024 * 1024),
+                granted.max_storage_buffers_per_shader_stage,
+            )));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            eprintln!(
+                "[rullama wgpu limits] max_buffer_size={} MiB \
+                 max_storage_buffer_binding_size={} MiB",
+                granted.max_buffer_size / (1024 * 1024),
+                granted.max_storage_buffer_binding_size / (1024 * 1024),
+            );
+        }
 
         Ok(Self {
             instance,

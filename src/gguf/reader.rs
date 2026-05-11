@@ -212,6 +212,31 @@ impl GgufReader {
         let (start, len) = self.tensor_range(name)?;
         self.fetcher.fetch(start, len).await
     }
+
+    /// Owned bytes for a sub-range of a tensor's payload. `byte_offset` and `byte_len`
+    /// are relative to the tensor's payload start (not the file). Useful for streaming
+    /// huge tensors (e.g. the 315 MiB `token_embd.weight`) tile-by-tile without ever
+    /// materializing the whole thing in wasm linear memory — which is what kills the
+    /// WebContent process on iPhone-class shared-RAM devices.
+    pub async fn fetch_tensor_range(
+        &self,
+        name: &str,
+        byte_offset: u64,
+        byte_len: u64,
+    ) -> Result<Vec<u8>> {
+        let (start, total) = self.tensor_range(name)?;
+        let end = byte_offset.checked_add(byte_len).ok_or_else(|| {
+            RullamaError::Gguf(format!(
+                "fetch_tensor_range({name}): range overflow {byte_offset}+{byte_len}"
+            ))
+        })?;
+        if end > total {
+            return Err(RullamaError::Gguf(format!(
+                "fetch_tensor_range({name}): range {byte_offset}..{end} extends past tensor end ({total})"
+            )));
+        }
+        self.fetcher.fetch(start + byte_offset, byte_len).await
+    }
 }
 
 fn align_up(x: u64, a: u64) -> u64 {

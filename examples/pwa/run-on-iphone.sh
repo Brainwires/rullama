@@ -71,19 +71,33 @@ log "device $UDID → $URL"
 log "model='${MODEL}' prompt='${PROMPT}' max_tok=${MAX_TOK}"
 
 # ---- Session ----
-SESSION=$(curl -sS -X POST -H "Content-Type: application/json" \
-    -d "{\"capabilities\":{\"alwaysMatch\":{\"platformName\":\"iOS\",\"safari:deviceType\":\"iPhone\",\"safari:deviceUDID\":\"$UDID\",\"safari:useSimulator\":false,\"acceptInsecureCerts\":true}}}" \
-    "http://localhost:${WD_PORT}/session" \
-    | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["value"]["sessionId"])')
-[[ -z "$SESSION" ]] && { err "session create failed"; exit 1; }
-# Note: do NOT auto-delete the WebDriver session on exit. When the page
-# crashes mid-generation the session-tear-down closes the tab and we lose
-# all visibility into what the page state actually was. Leaving the
-# session live lets the user inspect the phone screen for the real error
-# (chat-log line, status pill, any "page reloaded due to memory issue"
-# banner). Run `./examples/pwa/clean-iphone.sh` between runs to wipe OPFS
-# orphans, or `curl -X DELETE` the session manually when done.
-log "session $SESSION will be left alive on the phone — clean up with: curl -X DELETE http://localhost:${WD_PORT}/session/${SESSION}"
+# Prefer reusing a long-lived session created by iphone-session-keeper.sh.
+# That's the only way OPFS data (in particular the 7 GB GGUF) survives
+# across runs — each safaridriver `POST /session` is an isolated storage
+# scope.
+SID_FILE="${SID_FILE:-/tmp/rullama-iphone-session-id}"
+SESSION=""
+SESSION_IS_OURS=0    # 1 = we created it (and may clean up); 0 = reused from keeper (leave alone)
+if [[ -f "$SID_FILE" ]]; then
+    candidate=$(cat "$SID_FILE")
+    if curl -sS --max-time 5 "http://localhost:${WD_PORT}/session/${candidate}/url" 2>/dev/null \
+        | grep -qv '"error":"invalid session id"'; then
+        SESSION="$candidate"
+        log "reusing kept-alive session $SESSION (OPFS will persist)"
+    else
+        log "stale $SID_FILE — will create a fresh session"
+        rm -f "$SID_FILE"
+    fi
+fi
+if [[ -z "$SESSION" ]]; then
+    SESSION=$(curl -sS -X POST -H "Content-Type: application/json" \
+        -d "{\"capabilities\":{\"alwaysMatch\":{\"platformName\":\"iOS\",\"safari:deviceType\":\"iPhone\",\"safari:deviceUDID\":\"$UDID\",\"safari:useSimulator\":false,\"acceptInsecureCerts\":true}}}" \
+        "http://localhost:${WD_PORT}/session" \
+        | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["value"]["sessionId"])')
+    [[ -z "$SESSION" ]] && { err "session create failed"; exit 1; }
+    SESSION_IS_OURS=1
+    log "session $SESSION (ours — will be deleted on exit). Run iphone-session-keeper.sh to persist OPFS across runs."
+fi
 log "session = $SESSION"
 
 # Helper: run JS in page, return its .value (JSON-decoded).
@@ -235,12 +249,21 @@ run_js '"return document.getElementById(\"chat-log\").textContent.slice(-600);"'
 try: print(json.loads(sys.stdin.read()))
 except Exception: print("(no chat-log)")'
 
-# Park here so safaridriver doesn't tear down the session — that closes the
-# tab on the phone. The user can now inspect the iPhone screen for the real
-# error state. Press Ctrl-C (or Enter) to release the session.
-echo
-log "keeping session $SESSION alive so the iPhone tab stays open."
-log "Press Enter (or Ctrl-C) when done inspecting the phone."
-read -r _ || true
-curl -sS --max-time 5 -X DELETE "http://localhost:${WD_PORT}/session/${SESSION}" >/dev/null 2>&1 || true
-log "session deleted"
+# Session lifecycle: if we reused a kept-alive session (created by
+# iphone-session-keeper.sh), we MUST NOT delete it — that would also wipe
+# OPFS and force a re-download next run. Only delete sessions we created
+# ourselves, and even then only when stdin is a TTY (interactive use).
+if (( SESSION_IS_OURS )); then
+    if [[ -t 0 ]]; then
+        echo
+        log "session $SESSION (ours) — Press Enter or Ctrl-C to delete and exit."
+        read -r _ || true
+        curl -sS --max-time 5 -X DELETE "http://localhost:${WD_PORT}/session/${SESSION}" >/dev/null 2>&1 || true
+        log "session deleted"
+    else
+        log "non-interactive — leaving session $SESSION alive. Delete manually with:"
+        log "  curl -X DELETE http://localhost:${WD_PORT}/session/${SESSION}"
+    fi
+else
+    log "keeper session preserved — OPFS data persists for the next run"
+fi

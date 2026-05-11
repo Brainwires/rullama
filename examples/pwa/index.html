@@ -140,9 +140,68 @@
 </section>
 
 <script type="module">
-import init, { Model, computeSpike } from "/pkg/rullama.js";
-import { ensureModel, getReadFn, opfsSupported, listOpfs, deleteOpfs,
+import init, { computeSpike } from "/pkg/rullama.js";
+import { ensureModel, opfsSupported, listOpfs, deleteOpfs,
          opfsQuota, requestPersistent, wipeAllOpfs } from "./opfs-store.js";
+
+// WorkerClient — thin RPC wrapper over inference-worker.js. Keeps the wasm
+// Model entirely off the main thread; the worker holds the OPFS sync handle
+// and runs every step(). On iPhone 16e this is the difference between "page
+// crashes during first step" and "tokens stream back."
+class WorkerClient {
+    constructor() {
+        this.worker = new Worker("./inference-worker.js", { type: "module" });
+        this.pending = new Map();
+        this.nextId  = 1;
+        this.meta    = null;
+        this.worker.addEventListener("message", (ev) => {
+            const m = ev.data || {};
+            if (m.type === "log") { console.log("[inference-worker]", ...m.args); return; }
+            const p = this.pending.get(m.requestId);
+            if (!p) return;
+            this.pending.delete(m.requestId);
+            if (m.ok) p.resolve(m.result); else p.reject(new Error(m.error));
+        });
+        this.worker.addEventListener("error", (ev) => {
+            console.error("[inference-worker] worker error:", ev.message || ev);
+        });
+    }
+    _rpc(type, args = {}) {
+        const requestId = this.nextId++;
+        return new Promise((resolve, reject) => {
+            this.pending.set(requestId, { resolve, reject });
+            this.worker.postMessage({ requestId, type, ...args });
+        });
+    }
+
+    async load(modelKey, filename, { maxContext = 0, textOnly = false } = {}) {
+        this.meta = await this._rpc("load", { modelKey, filename, maxContext, textOnly });
+        return this.meta;
+    }
+
+    // Properties cached on `meta` so callers read them synchronously.
+    get vocabSize()        { return this.meta?.vocabSize; }
+    get hasVision()        { return !!this.meta?.hasVision; }
+    get hasAudio()         { return !!this.meta?.hasAudio; }
+    imageSentinelIds()     { return this.meta?.imageSentinelIds ?? null; }
+    audioSentinelIds()     { return this.meta?.audioSentinelIds ?? null; }
+
+    // RPC-mirror of Model.* (all async — every call is a postMessage RTT).
+    encode(text)                  { return this._rpc("encode", { text })
+                                          .then(arr => new Uint32Array(arr)); }
+    step(tokenId)                 { return this._rpc("step", { tokenId }); }
+    stepWithEmbedding(embedding)  { return this._rpc("stepWithEmb", { embedding }); }
+    tokenStr(id)                  { return this._rpc("tokenStr", { id }); }
+    isEos(id)                     { return this._rpc("isEos", { id }); }
+    reset()                       { return this._rpc("reset"); }
+    setSampling(opts)             { return this._rpc("setSampling", { opts }); }
+    renderChat(messages, withBos) { return this._rpc("renderChat", { messages, withBos }); }
+    imageSoftTokenCount(h, w)     { return this._rpc("imageSoftTokenCount", { h, w }); }
+    decodeWav(bytes)              { return this._rpc("decodeWav", { bytes }); }
+    encodeImage(pixels, h, w)     { return this._rpc("encodeImage", { pixels, h, w }); }
+    encodeAudio(pcm)              { return this._rpc("encodeAudio", { pcm }); }
+    free()                        { return this._rpc("free"); }
+}
 import { preprocessImage } from "./image_preprocess.js";
 
 const $ = (id) => document.getElementById(id);
@@ -241,9 +300,13 @@ await refreshModels();
 // side uses `file.slice().arrayBuffer()` so bytes never aggregate in JS
 // memory. Resumable too — if the writer is interrupted, the next start
 // continues from the existing offset.
-let model = null;
-let modelMeta = null;     // { name, digest } of the currently-loaded model
-let readFnInUse = null;   // keep the Function alive while Model holds it
+// One WorkerClient per page. The worker imports its own copy of the wasm
+// bundle and owns the FileSystemSyncAccessHandle for the lifetime of the
+// loaded model. `model` exposes the same surface a direct `Model` would
+// (vocabSize getter, async methods) so the chat loop reads naturally.
+const model = new WorkerClient();
+let modelLoaded = false;
+let modelMeta   = null;     // { name, digest } of the currently-loaded model
 
 $("load-btn").addEventListener("click", async () => {
     const name = $("model-select").value;
@@ -269,8 +332,10 @@ $("load-btn").addEventListener("click", async () => {
     progLabel.textContent = "checking cache…";
 
     try {
-        if (model) { model.free?.(); model = null; }
-        readFnInUse = null;
+        if (modelLoaded) {
+            try { await model.free(); } catch (_) {}
+            modelLoaded = false;
+        }
 
         if (!(await opfsSupported())) {
             throw new Error("OPFS not supported in this browser — required for models > ~2 GB on iOS Safari");
@@ -326,29 +391,23 @@ $("load-btn").addEventListener("click", async () => {
 
         progLabel.textContent = "loading into wasm…";
 
-        // Build the OPFS-backed readFn and hand it to Rust. The closure must
-        // outlive the Model, so we stash it on a module-scoped variable.
-        const { readFn, totalBytes: actualTotal } = await getReadFn(modelKey, filename);
-        readFnInUse = readFn;
-
-        // Mobile/iOS Safari: text-only load skips eager construction of the
-        // vision + audio towers (~5 GB of GPU buffer allocs on gemma4:e2b)
-        // so the WebContent process doesn't get Jetsam'd during loadFromOpfs.
-        // Desktop loads the full multimodal model. Toggle by user agent for
-        // now — explicit setting can come later.
+        // The worker opens its own FileSystemSyncAccessHandle to OPFS — it
+        // doesn't need a main-thread readFn handed in. Mobile (iPhone/iPad/
+        // Android) goes text-only + KV cap of 512 to fit shared 8 GB RAM;
+        // desktop loads the full multimodal model.
         const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-        // Mobile: text-only + cap KV cache at 512 tokens. The pre-allocated KV
-        // buffers were the second memory cliff after the vision/audio towers.
         const mobileMaxCtx = 512;
         log($("model-log"),
             isMobile
-              ? `using loadFromOpfsTextOnly (max_context=${mobileMaxCtx})`
-              : `using loadFromOpfs (multimodal)`);
+              ? `worker.load text-only (max_context=${mobileMaxCtx})`
+              : `worker.load multimodal`);
 
         const t1 = performance.now();
-        model = isMobile
-            ? await Model.loadFromOpfsTextOnly(readFn, actualTotal, mobileMaxCtx)
-            : await Model.loadFromOpfs(readFn, actualTotal);
+        await model.load(modelKey, filename, {
+            maxContext: isMobile ? mobileMaxCtx : 0,
+            textOnly:   isMobile,
+        });
+        modelLoaded = true;
         const loaderName = isMobile ? "loadFromOpfsTextOnly" : "loadFromOpfs";
         const dtLoad = (performance.now() - t1) / 1000;
         log($("model-log"),
@@ -450,7 +509,7 @@ $("img-btn").addEventListener("click", () => $("img-input").click());
 $("img-input").addEventListener("change", async (ev) => {
     const file = ev.target.files?.[0];
     if (!file) return;
-    if (!model) {
+    if (!modelLoaded) {
         log($("chat-log"), "load a model before attaching images");
         return;
     }
@@ -461,8 +520,9 @@ $("img-input").addEventListener("change", async (ev) => {
     try {
         pendingImage = await preprocessImage(file);
         $("img-thumb").src = pendingImage.dataUrl;
+        const nSoft = await model.imageSoftTokenCount(pendingImage.h, pendingImage.w);
         $("img-info").textContent =
-            `${pendingImage.w}×${pendingImage.h} → ${model.imageSoftTokenCount(pendingImage.h, pendingImage.w)} soft tokens`;
+            `${pendingImage.w}×${pendingImage.h} → ${nSoft} soft tokens`;
         $("img-attach").style.display = "";
     } catch (e) {
         log($("chat-log"), "image preprocess error: " + (e?.message ?? String(e)));
@@ -481,7 +541,7 @@ $("aud-btn").addEventListener("click", () => $("aud-input").click());
 $("aud-input").addEventListener("change", async (ev) => {
     const file = ev.target.files?.[0];
     if (!file) return;
-    if (!model) {
+    if (!modelLoaded) {
         log($("chat-log"), "load a model before attaching audio");
         return;
     }
@@ -491,7 +551,7 @@ $("aud-input").addEventListener("change", async (ev) => {
     }
     try {
         const bytes = new Uint8Array(await file.arrayBuffer());
-        const pcm = model.decodeWav(bytes);     // → Float32Array @ 16 kHz mono
+        const pcm = await model.decodeWav(bytes);   // → Float32Array @ 16 kHz mono
         const durSec = pcm.length / 16000;
         if (durSec > 30) {
             log($("chat-log"), `warning: ${durSec.toFixed(1)} s — Gemma's audio max is 30 s; will truncate`);
@@ -510,9 +570,9 @@ $("aud-remove").addEventListener("click", () => {
     $("aud-attach").style.display = "none";
 });
 
-$("reset-btn").addEventListener("click", () => {
-    if (!model) return;
-    model.reset();
+$("reset-btn").addEventListener("click", async () => {
+    if (!modelLoaded) return;
+    await model.reset();
     chatMessages = [];
     renderChat();
     log($("chat-log"), "new chat — KV cache cleared.");
@@ -523,7 +583,7 @@ $("stop-btn").addEventListener("click", () => {
 });
 
 $("send-btn").addEventListener("click", async () => {
-    if (!model) return;
+    if (!modelLoaded) return;
     const text = $("prompt").value.trim();
     if (!text && !pendingImage && !pendingAudio) return;
     $("send-btn").disabled = true;
@@ -575,23 +635,44 @@ $("send-btn").addEventListener("click", async () => {
     cancelGen = false;
     let emitted = 0;
     let sawError = null;
+    // Top-level beacon: keepalive-tagged so it survives a WebContent crash
+    // and lets the server log show exactly which step trips iOS Jetsam.
+    const beacon = (tag, msg) => {
+        try {
+            fetch("/api/log", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ tag, msg, ts: Date.now() }),
+                keepalive: true,
+            }).catch(()=>{});
+        } catch (_) {}
+    };
+    beacon("chat", "send-handler entered");
     try {
-        model.setSampling({
+        beacon("chat", "before setSampling");
+        await model.setSampling({
             temperature: parseFloat($("temp").value),
             top_k: parseInt($("topk").value, 10),
             top_p: parseFloat($("topp").value),
             repetition_penalty: 1.1,
             seed: 0,
         });
+        beacon("chat", "after setSampling");
 
         // KV cache persists across turns, so each Send only needs to feed the
         // *new* portion of the rendered prompt. For now we always reset before
         // each Send and re-feed the whole history — simpler and correct,
         // accepting the prompt-eval cost.
-        model.reset();
+        beacon("chat", "before reset");
+        await model.reset();
+        beacon("chat", "after reset");
 
-        const prompt = model.renderChat(messages, false);
-        const ids = model.encode(prompt);
+        beacon("chat", "before renderChat");
+        const prompt = await model.renderChat(messages, false);
+        beacon("chat", `after renderChat (prompt.len=${prompt.length})`);
+        beacon("chat", "before encode");
+        const ids = await model.encode(prompt);
+        beacon("chat", `after encode (n=${ids.length})`);
 
         // Soft tokens for image / audio (encoded once per send if attached).
         // Each modality contributes its own `(begin_id, end_id, soft_tokens)`
@@ -603,7 +684,7 @@ $("send-btn").addEventListener("click", async () => {
                 log($("chat-log"), `encoding image ${turnImage.w}×${turnImage.h} ...`);
                 const t = performance.now();
                 const softTokens = await model.encodeImage(turnImage.pixels, turnImage.h, turnImage.w);
-                const nSoft = model.imageSoftTokenCount(turnImage.h, turnImage.w);
+                const nSoft = await model.imageSoftTokenCount(turnImage.h, turnImage.w);
                 const dText = softTokens.length / nSoft;
                 softMap.set(sent[0], { nSoft, dText, softTokens });
                 log($("chat-log"),
@@ -633,20 +714,8 @@ $("send-btn").addEventListener("click", async () => {
         const totalSoft = [...softMap.values()].reduce((s, v) => s + v.nSoft, 0);
         log($("chat-log"), `prompt-eval starting: ${ids.length} tokens${totalSoft ? ` + ${totalSoft} soft` : ""}`);
 
-        // Server-side beacon: useful for iPhone debugging — when the page
-        // crashes mid-generation the chat-log on the tab is lost, but
-        // /tmp/rullama-page.log keeps every step we logged. `keepalive`
-        // makes the request survive page tear-down.
-        const beacon = (tag, msg) => {
-            try {
-                fetch("/api/log", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ tag, msg, ts: Date.now() }),
-                    keepalive: true,
-                }).catch(()=>{});
-            } catch (_) {}
-        };
+        // beacon() was declared up top so it's also available to chat-loop
+        // diagnostics before any awaits.
         beacon("gen", `prompt-eval starting: ${ids.length} tokens${totalSoft ? ` + ${totalSoft} soft` : ""}`);
 
         const t0 = performance.now();
@@ -678,8 +747,8 @@ $("send-btn").addEventListener("click", async () => {
         const tg0 = performance.now();
         for (let i = 0; i < max; i++) {
             if (cancelGen) break;
-            if (model.isEos(next)) break;
-            const piece = (model.tokenStr(next) ?? "").replaceAll("▁", " ");
+            if (await model.isEos(next)) break;
+            const piece = ((await model.tokenStr(next)) ?? "").replaceAll("▁", " ");
             assistantMsg.content += piece;
             lastBody.textContent = assistantMsg.content;
             $("chat-history").scrollTop = $("chat-history").scrollHeight;

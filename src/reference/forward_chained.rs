@@ -415,22 +415,48 @@ impl Forward {
         }
 
         // ---- transformer layers ----
-        // We'll need per-layer weights + KV writes; pre-resolve the weight buffers
-        // up front (so encoding doesn't fight the borrow checker by awaiting mid-encode).
+        // Per-layer submit + restart. Each flush hands its commands off to the
+        // GPU and frees the CPU-side encoder; persistent buffer state on the
+        // GPU is unaffected so this is semantically identical to a single
+        // submit. On iPhone 16e (8 GB shared RAM) building one giant encoder
+        // spanning all 35 layers was enough to crash the WebContent process
+        // during the first step. Submitting after every layer keeps peak
+        // command-buffer memory bounded.
         for i in 0..n_layers as u32 {
             self.encode_layer(&mut enc, i, pos).await?;
+            self.ctx.queue.submit(Some(enc.finish()));
+            enc = self.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fwd.token_encoder.cont"),
+            });
         }
 
         // ---- final norm (in-place into hidden via norm_y as scratch) ----
         rmsnorm_chained(&self.ctx, &self.pipes, &mut enc,
             &self.hidden, Some(&final_norm), &self.dummy, &self.norm_x, d_model, eps);
 
+        // Flush before the output projection — it's the second-largest concentration
+        // of GPU work in the step (262K-row matmul against the embedding) and we
+        // don't want it queued behind a still-encoding layer batch.
+        self.ctx.queue.submit(Some(enc.finish()));
+        enc = self.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("fwd.out_proj_encoder"),
+        });
+
         // ---- output projection (tiled): tile along vocab axis ----
         // Each tile matmul writes its rows into `logits_tile` starting at offset 0
         // (so it always satisfies the storage-binding alignment), then we copy
         // those bytes into `logits` at offset `row_start * 4` (copy_buffer_to_buffer
-        // only needs 4-byte alignment).
-        const MAX_TILE_BYTES: usize = 80 * 1024 * 1024;
+        // only needs 4-byte alignment). Submit between tiles too, for the same
+        // command-buffer-size reason that we submit between layers.
+        // token_embd is the largest single tensor in the model (315 MiB
+        // compressed Q6_K for gemma4:e2b). On iPhone 16e, the original
+        // 80 MiB tile size crashed the WebContent process inside this very
+        // call — either the 80 MiB wasm-side Vec<u8> staging buffer or the
+        // 80 MiB wgpu::Buffer allocation tipped iOS Jetsam over given the
+        // ~2 GB of layer weights already resident. 8 MiB tiles keep the
+        // peak working set bounded while still respecting the 128 MiB
+        // storage-binding floor in shaders.
+        const MAX_TILE_BYTES: usize = 8 * 1024 * 1024;
         let tiles = wc.buffer_tiles_async("token_embd.weight", MAX_TILE_BYTES).await?;
         for tile in &tiles {
             run_matmul_into_buf(
@@ -444,6 +470,10 @@ impl Forward {
                 &self.logits, (tile.row_start as u64) * 4,
                 (tile.n_rows as u64) * 4,
             );
+            self.ctx.queue.submit(Some(enc.finish()));
+            enc = self.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fwd.out_proj_encoder.cont"),
+            });
         }
 
         // ---- softcap ----
