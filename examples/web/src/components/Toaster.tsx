@@ -16,7 +16,12 @@ export function Toaster() {
     if (toasts.length === 0) return null;
     return (
         <div
-            className="pointer-events-none fixed inset-x-0 top-2 z-50 flex flex-col items-center gap-1 px-2 safe-top"
+            className="pointer-events-none fixed inset-x-0 z-50 flex flex-col items-center gap-1 px-2"
+            // Anchor below the app header. 48 px is the header's base
+            // height (min-h-12) and env(safe-area-inset-top) is the iOS
+            // notch / Dynamic Island padding the header has on a PWA-
+            // installed device; toasts need to clear both.
+            style={{ top: `calc(48px + env(safe-area-inset-top, 0px) + 0.5rem)` }}
             aria-live="polite"
             aria-atomic="false"
         >
