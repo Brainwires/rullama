@@ -9,6 +9,7 @@ import { type ModelEntry, blobUrl, beacon } from "@/lib/api";
 import { ensureModel, opfsSupported, requestPersistent, wipeModel } from "@/lib/opfs";
 import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
+import { usePersistedState } from "@/lib/persisted";
 import { fmtBytes } from "@/lib/utils";
 import { Settings2, History } from "lucide-react";
 
@@ -41,12 +42,15 @@ export function App() {
     const [historyOpen, setHistoryOpen]         = useState(false);
 
     // Settings — opens by default since first mount is always "no model".
-    // We don't auto-close on load; user dismisses with ⚙.
+    // We don't auto-close on load; user dismisses with ⚙. Open/closed
+    // state is transient (per page load).
     const [settingsOpen, setSettingsOpen] = useState(true);
-    const [systemPrompt, setSystemPrompt] = useState("");
-    const [sampling, setSampling]         = useState<SamplingOptions>(DEFAULT_SAMPLING);
-    const [maxTokens, setMaxTokens]       = useState(1024);
-    const [thinking, setThinking]         = useState(false);
+
+    // The four user-tunable settings persist across reloads via localStorage.
+    const [systemPrompt, setSystemPrompt] = usePersistedState<string>("systemPrompt", "");
+    const [sampling,     setSampling]     = usePersistedState<SamplingOptions>("sampling", DEFAULT_SAMPLING);
+    const [maxTokens,    setMaxTokens]    = usePersistedState<number>("maxTokens", 1024);
+    const [thinking,     setThinking]     = usePersistedState<boolean>("thinking", false);
 
     const cancelRef = useRef(false);
     const { showToast, dismissToast } = useToast();
