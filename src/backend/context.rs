@@ -53,9 +53,26 @@ impl WgpuCtx {
         // If an adapter lacks any of these, fall back to the f32-only path; the
         // f32 kernels stay as the correctness oracle either way.
         let adapter_feats = adapter.features();
+        let adapter_info = adapter.get_info();
         let mut requested = wgpu::Features::empty();
+        // SUBGROUP feature alone isn't enough — our kernels declare
+        // `@workgroup_size(64)` and reduce over the whole WG via `subgroupMax`
+        // / `subgroupAdd`. Those intrinsics only reduce **within a subgroup**,
+        // so we need a runtime guarantee that subgroups can hold all 64 lanes
+        // of the WG. `AdapterInfo::subgroup_max_size` is the ceiling the
+        // adapter may produce; if it's below 64, the WG gets split across
+        // multiple subgroups and the reduction is incorrect.
+        //
+        // Typical values (wgpu/Metal-reported):
+        //   AMD GCN / Vega / Qualcomm Adreno: max ≥ 64 — kernels correct.
+        //   AMD RDNA+: max 64 — correct.
+        //   Apple Silicon:    max 32 — split, would silently produce wrong output → skip.
+        //   NVIDIA:           max 32 — same.
+        //   Intel:            max 16-32 — same.
+        let subgroup_fits = adapter_info.subgroup_max_size >= 64;
         let has_subgroups = adapter_feats.contains(wgpu::Features::SUBGROUP)
-            && adapter_feats.contains(wgpu::Features::SUBGROUP_BARRIER);
+            && adapter_feats.contains(wgpu::Features::SUBGROUP_BARRIER)
+            && subgroup_fits;
         if has_subgroups {
             requested |= wgpu::Features::SUBGROUP;
             requested |= wgpu::Features::SUBGROUP_BARRIER;
