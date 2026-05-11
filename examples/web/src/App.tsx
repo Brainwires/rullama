@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ModelLoader, ModelLoadProgress, type ModelStatus } from "@/components/ModelLoader";
+import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChatPanel } from "@/components/ChatPanel";
 import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
@@ -493,7 +494,12 @@ export function App() {
                                     </CardContent>
                                 </Card>
                             </div>
-                        ) : undefined
+                        ) : (
+                            <WelcomeScreen
+                                modelName={statusText}
+                                onSuggest={(p) => setPrompt(p)}
+                            />
+                        )
                     }
                     canType={modelStatus === "ready"}
                     canSend={modelStatus === "ready" && !busy && prompt.trim().length > 0}
