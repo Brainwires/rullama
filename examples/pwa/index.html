@@ -337,12 +337,19 @@ $("load-btn").addEventListener("click", async () => {
         // Desktop loads the full multimodal model. Toggle by user agent for
         // now — explicit setting can come later.
         const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-        const loader = isMobile ? Model.loadFromOpfsTextOnly : Model.loadFromOpfs;
-        const loaderName = isMobile ? "loadFromOpfsTextOnly" : "loadFromOpfs";
-        log($("model-log"), `using ${loaderName} (mobile=${isMobile})`);
+        // Mobile: text-only + cap KV cache at 512 tokens. The pre-allocated KV
+        // buffers were the second memory cliff after the vision/audio towers.
+        const mobileMaxCtx = 512;
+        log($("model-log"),
+            isMobile
+              ? `using loadFromOpfsTextOnly (max_context=${mobileMaxCtx})`
+              : `using loadFromOpfs (multimodal)`);
 
         const t1 = performance.now();
-        model = await loader(readFn, actualTotal);
+        model = isMobile
+            ? await Model.loadFromOpfsTextOnly(readFn, actualTotal, mobileMaxCtx)
+            : await Model.loadFromOpfs(readFn, actualTotal);
+        const loaderName = isMobile ? "loadFromOpfsTextOnly" : "loadFromOpfs";
         const dtLoad = (performance.now() - t1) / 1000;
         log($("model-log"),
             `${loaderName} done in ${dtLoad.toFixed(1)}s — vocab=${model.vocabSize}`);
@@ -626,13 +633,31 @@ $("send-btn").addEventListener("click", async () => {
         const totalSoft = [...softMap.values()].reduce((s, v) => s + v.nSoft, 0);
         log($("chat-log"), `prompt-eval starting: ${ids.length} tokens${totalSoft ? ` + ${totalSoft} soft` : ""}`);
 
+        // Server-side beacon: useful for iPhone debugging — when the page
+        // crashes mid-generation the chat-log on the tab is lost, but
+        // /tmp/rullama-page.log keeps every step we logged. `keepalive`
+        // makes the request survive page tear-down.
+        const beacon = (tag, msg) => {
+            try {
+                fetch("/api/log", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ tag, msg, ts: Date.now() }),
+                    keepalive: true,
+                }).catch(()=>{});
+            } catch (_) {}
+        };
+        beacon("gen", `prompt-eval starting: ${ids.length} tokens${totalSoft ? ` + ${totalSoft} soft` : ""}`);
+
         const t0 = performance.now();
         let next = 0;
         let i = 0;
         while (i < ids.length) {
             if (cancelGen) throw new Error("cancelled");
             const id = ids[i];
+            beacon("pe", `before step pe[${i}/${ids.length}] id=${id}`);
             next = await model.step(id);
+            beacon("pe", `after step pe[${i}/${ids.length}] -> ${next}`);
             i++;
             // After feeding a begin marker, splice in soft tokens before the
             // matching end marker.
@@ -649,6 +674,7 @@ $("send-btn").addEventListener("click", async () => {
             `prompt-eval: ${(performance.now()-t0).toFixed(0)}ms (${ids.length}${totalSoft ? `+${totalSoft}` : ""} positions)`);
 
         const max = parseInt($("maxtok").value, 10);
+        beacon("gen", `prompt-eval done in ${(performance.now()-t0).toFixed(0)}ms — gen up to ${max}`);
         const tg0 = performance.now();
         for (let i = 0; i < max; i++) {
             if (cancelGen) break;
@@ -658,7 +684,9 @@ $("send-btn").addEventListener("click", async () => {
             lastBody.textContent = assistantMsg.content;
             $("chat-history").scrollTop = $("chat-history").scrollHeight;
             emitted++;
+            beacon("tg", `before step tg[${i}/${max}] id=${next}`);
             next = await model.step(next);
+            beacon("tg", `after step tg[${i}/${max}] -> ${next} piece='${piece.slice(0,20)}'`);
         }
         const dt = performance.now() - tg0;
         log($("chat-log"),

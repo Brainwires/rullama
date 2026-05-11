@@ -76,7 +76,14 @@ SESSION=$(curl -sS -X POST -H "Content-Type: application/json" \
     "http://localhost:${WD_PORT}/session" \
     | python3 -c 'import sys,json; print(json.loads(sys.stdin.read())["value"]["sessionId"])')
 [[ -z "$SESSION" ]] && { err "session create failed"; exit 1; }
-trap 'curl -sS --max-time 5 -X DELETE "http://localhost:'"${WD_PORT}"'/session/'"${SESSION}"'" >/dev/null 2>&1 || true' EXIT
+# Note: do NOT auto-delete the WebDriver session on exit. When the page
+# crashes mid-generation the session-tear-down closes the tab and we lose
+# all visibility into what the page state actually was. Leaving the
+# session live lets the user inspect the phone screen for the real error
+# (chat-log line, status pill, any "page reloaded due to memory issue"
+# banner). Run `./examples/pwa/clean-iphone.sh` between runs to wipe OPFS
+# orphans, or `curl -X DELETE` the session manually when done.
+log "session $SESSION will be left alive on the phone — clean up with: curl -X DELETE http://localhost:${WD_PORT}/session/${SESSION}"
 log "session = $SESSION"
 
 # Helper: run JS in page, return its .value (JSON-decoded).
@@ -227,3 +234,13 @@ log "final chat-log tail:"
 run_js '"return document.getElementById(\"chat-log\").textContent.slice(-600);"' 30 | python3 -c 'import sys,json
 try: print(json.loads(sys.stdin.read()))
 except Exception: print("(no chat-log)")'
+
+# Park here so safaridriver doesn't tear down the session — that closes the
+# tab on the phone. The user can now inspect the iPhone screen for the real
+# error state. Press Ctrl-C (or Enter) to release the session.
+echo
+log "keeping session $SESSION alive so the iPhone tab stays open."
+log "Press Enter (or Ctrl-C) when done inspecting the phone."
+read -r _ || true
+curl -sS --max-time 5 -X DELETE "http://localhost:${WD_PORT}/session/${SESSION}" >/dev/null 2>&1 || true
+log "session deleted"

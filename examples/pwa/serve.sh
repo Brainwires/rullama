@@ -145,7 +145,33 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         if u.path == "/api/bench-result":
             return self._recv_bench_result()
+        if u.path == "/api/log":
+            return self._recv_log()
         self.send_error(404, "no such endpoint")
+
+    def _recv_log(self):
+        # Beacon endpoint for the iPhone PWA: receives `{tag, msg, ts}`
+        # blobs and appends them to /tmp/rullama-page.log (one per line).
+        # Used during phone debugging so we can see what the page was doing
+        # right before a WebContent crash — `keepalive: true` on the JS
+        # side ensures the request flushes even if the page is dying.
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(n) if n > 0 else b"{}"
+            payload = json.loads(body)
+        except Exception as e:
+            self.send_error(400, f"bad JSON: {e}")
+            return
+        log_path = Path(os.environ.get("PAGE_LOG", "/tmp/rullama-page.log"))
+        line = json.dumps(payload)
+        with log_path.open("a") as f:
+            f.write(line + "\n")
+            f.flush()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
 
     def _recv_bench_result(self):
         # Receive a JSON result blob from bench.html and append it to a log

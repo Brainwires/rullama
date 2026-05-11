@@ -97,11 +97,18 @@ pub struct Forward {
     // Bound dummy zero buffer for "no weight" / "no factors" slots.
     dummy: wgpu::Buffer,
 
+    /// Cap the KV cache can grow to (configured at construction). Step
+    /// methods bounds-check against this instead of the compile-time
+    /// `MAX_CONTEXT`, so a mobile build with a smaller cache can still
+    /// surface a clean "context length exceeded" error.
+    max_context: u32,
+
     // Cached scale factor for the final logits softcap dispatch.
     pos: u32,
 }
 
 impl Forward {
+    /// Default constructor — preallocates KV cache for `MAX_CONTEXT` tokens.
     pub async fn new(
         cfg: Gemma4Config,
         ctx: WgpuCtx,
@@ -109,6 +116,31 @@ impl Forward {
         weights: Weights,
         wcache: Arc<WeightCache>,
     ) -> Result<Self> {
+        Self::new_with_max_context(cfg, ctx, pipes, weights, wcache, MAX_CONTEXT).await
+    }
+
+    /// Variant of [`new`] that lets the caller cap the KV-cache pre-allocation
+    /// at fewer than `MAX_CONTEXT` tokens. The KV cache is the dominant GPU
+    /// memory cost at load time: per non-donor layer it's
+    /// `max_context * n_kv_heads * head_dim * 4 bytes` × 2 (K and V). On
+    /// gemma4:e2b a `max_context=4096` cache lands at several hundred MB
+    /// before any tensor is uploaded; on iPhone-class shared RAM (8 GB total)
+    /// that's enough to push the WebContent process over Jetsam during the
+    /// first inference step. Mobile callers pass a smaller value (e.g. 512)
+    /// and get a working model that just can't grow past that turn length.
+    pub async fn new_with_max_context(
+        cfg: Gemma4Config,
+        ctx: WgpuCtx,
+        pipes: Arc<Pipelines>,
+        weights: Weights,
+        wcache: Arc<WeightCache>,
+        max_context: u32,
+    ) -> Result<Self> {
+        if max_context == 0 || max_context > MAX_CONTEXT {
+            return Err(crate::error::RullamaError::Inference(format!(
+                "max_context={max_context} out of range (1..={MAX_CONTEXT})"
+            )));
+        }
         let device = &ctx.device;
 
         let alloc_storage = |label: &str, n: usize| -> wgpu::Buffer {
@@ -187,7 +219,7 @@ impl Forward {
             if donor_map[i].is_none() {
                 let n_kv = cfg.n_kv_heads(i as u32) as usize;
                 let hd   = cfg.head_dim(i as u32) as usize;
-                let bytes = (MAX_CONTEXT as usize * n_kv * hd * 4) as u64;
+                let bytes = (max_context as usize * n_kv * hd * 4) as u64;
                 kv_k_opt[i] = Some(Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some(&format!("fwd.kv_k.{i}")),
                     size: bytes,
@@ -241,6 +273,7 @@ impl Forward {
             kv_k, kv_v, kv_lens, donor_map,
             layer_scalars,
             dummy,
+            max_context,
             pos: 0,
         })
     }
@@ -261,9 +294,9 @@ impl Forward {
                 "token_id {token_id} >= vocab_size {}", self.cfg.vocab_size
             )));
         }
-        if self.pos >= MAX_CONTEXT {
+        if self.pos >= self.max_context {
             return Err(RullamaError::Inference(format!(
-                "context length exceeded MAX_CONTEXT={}", MAX_CONTEXT
+                "context length exceeded max_context={}", self.max_context
             )));
         }
         let d_model = self.cfg.d_model as usize;
@@ -307,9 +340,9 @@ impl Forward {
                 embedding.len(),
             )));
         }
-        if self.pos >= MAX_CONTEXT {
+        if self.pos >= self.max_context {
             return Err(RullamaError::Inference(format!(
-                "context length exceeded MAX_CONTEXT={}", MAX_CONTEXT
+                "context length exceeded max_context={}", self.max_context
             )));
         }
         // Direct upload — caller's embedding is the new hidden state.

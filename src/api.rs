@@ -67,18 +67,21 @@ impl Model {
     /// Build a Model from an already-constructed GGUF reader. Shared by both
     /// the in-memory and streaming entry points so they can't drift.
     async fn from_reader(reader: GgufReader) -> Result<Self> {
-        Self::from_reader_with_modes(reader, true, true).await
+        Self::from_reader_with_modes(reader, true, true,
+            crate::reference::forward_chained::MAX_CONTEXT).await
     }
 
     /// Like [`from_reader`] but lets the caller skip the vision and/or audio
-    /// tower construction. Useful on memory-constrained targets (e.g. iPhone
-    /// 16e shared 8 GB RAM) where eagerly building `VisionForward` /
-    /// `GpuAudioForward` would push the WebContent process over Jetsam and
-    /// the page crashes during wasm-load.
+    /// tower construction and cap the KV-cache pre-allocation. Useful on
+    /// memory-constrained targets (e.g. iPhone 16e shared 8 GB RAM) where
+    /// eagerly building `VisionForward` / `GpuAudioForward` + a 4096-token
+    /// KV cache would push the WebContent process over Jetsam and the page
+    /// crashes during wasm-load or the first inference step.
     async fn from_reader_with_modes(
         reader: GgufReader,
         with_vision: bool,
         with_audio: bool,
+        max_context: u32,
     ) -> Result<Self> {
         let cfg = Gemma4Config::from_gguf(&reader)?;
         let tokenizer = BpeTokenizer::from_gguf(&reader)?;
@@ -109,7 +112,7 @@ impl Model {
             None
         };
 
-        let forward = Forward::new(cfg, ctx, pipes, weights, wcache).await?;
+        let forward = Forward::new_with_max_context(cfg, ctx, pipes, weights, wcache, max_context).await?;
         Ok(Self {
             tokenizer,
             forward,
@@ -205,16 +208,17 @@ impl Model {
     }
 
     /// Text-only streaming load. Skips the vision and audio towers even if the
-    /// GGUF contains them. Saves ~5 GB of GPU buffer allocation up front on
-    /// `gemma4:e2b`, which is what makes the difference between "iPhone Safari
-    /// WebContent process gets killed mid-load" and "model loads in 4 s and
-    /// generates tokens." Equivalent to `load_streaming` on hardware that has
-    /// the RAM for everything.
+    /// GGUF contains them and caps the KV cache to `max_context` tokens
+    /// (rather than the compile-time `MAX_CONTEXT = 4096`). The pair makes
+    /// the difference between "iPhone Safari WebContent process gets killed
+    /// mid-load" and "model loads and generates tokens." 512 is a fine
+    /// default for chat-bot-sized turns on a phone.
     pub async fn load_streaming_text_only(
         fetcher: std::sync::Arc<dyn crate::gguf::TensorFetcher>,
+        max_context: u32,
     ) -> Result<Self> {
         let reader = GgufReader::new_streaming(fetcher).await?;
-        Self::from_reader_with_modes(reader, false, false).await
+        Self::from_reader_with_modes(reader, false, false, max_context).await
     }
 
     /// Encode text → token IDs (Ollama-matching BPE).
@@ -328,22 +332,26 @@ impl Model {
     }
 
     /// JS entry point: text-only variant of [`loadFromOpfs`]. Skips vision and
-    /// audio tower construction so the wasm-load footprint stays small enough
-    /// to fit a Q4_K_M `gemma4:e2b` in iPhone-class shared RAM (8 GB).
-    /// `encode_image` / `encode_audio` will fail with "this checkpoint has no
-    /// vision/audio tower" — text inference and chat work as normal.
+    /// audio tower construction AND caps the KV cache at `max_context` tokens
+    /// (default 512 if `max_context` is 0 or absent) so the wasm-load
+    /// footprint stays small enough to fit a Q4_K_M `gemma4:e2b` in
+    /// iPhone-class shared RAM (8 GB). `encode_image` / `encode_audio` will
+    /// fail with "this checkpoint has no vision/audio tower" — text
+    /// inference and chat work as normal.
     #[wasm_bindgen(js_name = loadFromOpfsTextOnly)]
     pub async fn load_from_opfs_text_only_js(
         read_fn: js_sys::Function,
         total_bytes: f64,
+        max_context: u32,
     ) -> std::result::Result<Model, JsError> {
         if !total_bytes.is_finite() || total_bytes < 0.0 {
             return Err(JsError::new("loadFromOpfsTextOnly: total_bytes must be a non-negative finite number"));
         }
         let total = total_bytes as u64;
+        let max_ctx = if max_context == 0 { 512 } else { max_context };
         let fetcher = crate::gguf::OpfsFetcher::new(read_fn, total);
         let arc: std::sync::Arc<dyn crate::gguf::TensorFetcher> = std::sync::Arc::new(fetcher);
-        Self::load_streaming_text_only(arc).await.map_err(|e| JsError::new(&format!("{e}")))
+        Self::load_streaming_text_only(arc, max_ctx).await.map_err(|e| JsError::new(&format!("{e}")))
     }
 
     #[wasm_bindgen(js_name = encode)]
