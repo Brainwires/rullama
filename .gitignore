@@ -7,6 +7,13 @@ Cargo.lock.bak
 /dist
 /examples/pwa/.served
 
+# examples/web (Vite + React + Hono PWA) — build artifacts and deps
+/examples/web/node_modules
+/examples/web/dist
+/examples/web/dev-dist
+/examples/web/.vite
+/examples/web/server/dist
+
 # editors / OS
 .DS_Store
 .idea/
