@@ -1,0 +1,79 @@
+# rullama: PWA + model-blob HTTP service.
+#
+# Designed to sit behind Cloudflare (Tunnel or proxy) — the listener is plain
+# HTTP and we publish only on the host's loopback interface so cloudflared can
+# reach it without exposing the port to the LAN.
+#
+#   docker compose up --build -d
+#
+# To repoint the model store override OLLAMA_MODELS_DIR in your shell or .env:
+#   OLLAMA_MODELS_DIR=/path/to/.ollama/models docker compose up -d
+
+services:
+  rullama:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rullama:local
+    container_name: rullama
+    restart: unless-stopped
+
+    # The nginx-unprivileged image runs as UID 101. The host Ollama model
+    # store under /usr/share/ollama is mode 755/644, world-readable, so 101
+    # can read it across the bind mount without UID matching.
+
+    # Loopback-only on the host. cloudflared connects to 127.0.0.1:2026.
+    # The container still listens on 8088 internally; the host-side port is
+    # the only thing cloudflared sees. Switch to "2026:8088" to expose on the LAN.
+    ports:
+      - "127.0.0.1:2026:8088"
+
+    environment:
+      OLLAMA_MODELS: "/ollama/models"
+
+    volumes:
+      # Read-only bind of the host's Ollama model store. The default matches
+      # the systemd-installed Ollama on this host (user `ollama`, home
+      # /usr/share/ollama). Override OLLAMA_MODELS_DIR for a user install
+      # (e.g. ${HOME}/.ollama/models).
+      - type: bind
+        source: ${OLLAMA_MODELS_DIR:-/usr/share/ollama/.ollama/models}
+        target: /ollama/models
+        read_only: true
+        bind:
+          create_host_path: false
+
+    # ---------- security hardening ----------
+    read_only: true                       # root FS is RO
+    cap_drop: ["ALL"]                     # no Linux capabilities
+    security_opt:
+      - "no-new-privileges:true"
+    tmpfs:
+      # nginx-unprivileged keeps client_body_temp, fastcgi_temp, proxy_temp,
+      # scgi_temp, uwsgi_temp, and the pid file all under /tmp. The entrypoint
+      # also writes /tmp/rullama/{models.json, blobs/*} (symlinks) here. 64 MB
+      # is plenty — the model blobs themselves live on the RO bind mount.
+      - /tmp:size=64m,mode=1777
+
+    # ---------- resource limits ----------
+    # Single nginx worker streaming blobs from disk. IO-bound, very modest CPU.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 128M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # nginx returns 200 on /api/models with `[]` when the store is empty,
+    # so the healthcheck stays green even before any models are pulled.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --tries=1 --timeout=3 http://127.0.0.1:8088/api/models >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

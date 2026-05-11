@@ -1,0 +1,27 @@
+# Build artifacts — re-generated inside the image
+target/
+pkg/
+dist/
+
+# VCS / editor / OS
+.git/
+.gitignore
+.claude/
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*~
+
+# Docs and licenses don't need to enter the build context
+*.md
+LICENSE-*
+
+# Local bench / session logs
+/tmp/
+/examples/pwa/.served
+
+# The container builds its own server.py; don't ship Docker files into themselves
+Dockerfile
+compose.yaml
+.dockerignore
