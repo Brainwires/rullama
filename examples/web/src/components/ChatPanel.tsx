@@ -8,7 +8,8 @@ import { Send, Square, RotateCcw } from "lucide-react";
 
 interface Props {
     messages:    ChatMessage[];
-    canSend:     boolean;
+    canType:     boolean;   // input enabled (model ready, not busy)
+    canSend:     boolean;   // Send button enabled (canType AND prompt non-empty)
     canStop:     boolean;
     canReset:    boolean;
     prompt:      string;
@@ -81,7 +82,7 @@ export function ChatPanel(props: Props) {
                         value={props.prompt}
                         onChange={(e) => props.onPromptChange(e.target.value)}
                         onKeyDown={onKeyDown}
-                        disabled={!props.canSend && !props.canStop}
+                        disabled={!props.canType}
                         className="flex-1 min-w-0"
                     />
                     <Button onClick={props.onSend}      disabled={!props.canSend}><Send /> Send</Button>

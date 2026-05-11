@@ -184,6 +184,7 @@ export function App() {
                     />
                     <ChatPanel
                         messages={messages}
+                        canType={modelStatus === "ready" && !busy}
                         canSend={modelStatus === "ready" && !busy && prompt.trim().length > 0}
                         canStop={busy}
                         canReset={modelStatus === "ready" && messages.length > 0 && !busy}
