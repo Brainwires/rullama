@@ -16,6 +16,14 @@ pub mod tokenizer;
 
 pub use error::RullamaError;
 
+// Re-export rsqlite-wasm's `WasmDatabase` so wasm-bindgen sees it as a
+// reachable public symbol and emits its JS bindings into pkg/rullama.js.
+// Without the re-export, the rlib's #[wasm_bindgen] exports get
+// dead-code-stripped because nothing in rullama itself calls them — the
+// PWA uses them only from JS.
+#[cfg(target_arch = "wasm32")]
+pub use rsqlite_wasm::WasmDatabase;
+
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn __wasm_start() {

@@ -15,7 +15,24 @@
 // The wasm-pack output lives at /pkg/rullama.js (aliased in vite.config.ts).
 // Vite resolves this URL at build time and emits the wasm asset alongside.
 // @ts-expect-error — generated bundle, no .d.ts
-import init, { Model } from "/pkg/rullama.js";
+import init, { Model, WasmDatabase } from "/pkg/rullama.js";
+
+interface WasmDbHandle {
+    exec(sql: string): bigint;
+    execParams(sql: string, params: unknown[]): bigint;
+    query(sql: string): unknown[];
+    queryParams(sql: string, params: unknown[]): unknown[];
+    queryOne(sql: string): unknown | null;
+    execMany(sql: string): void;
+    flush(): void;
+    close(): void;
+    free?(): void;
+}
+interface WasmDbStatic {
+    openWithOpfs(name: string, chunkSize?: bigint | null, maxShards?: number | null): Promise<WasmDbHandle>;
+    openInMemory(): WasmDbHandle;
+}
+const Db = WasmDatabase as unknown as WasmDbStatic;
 
 interface ModelHandle {
     free?(): void;
@@ -55,6 +72,49 @@ const OPFS_DIR = "rullama-models";
 let wasmReady: Promise<unknown> | null = null;
 let model: ModelHandle | null = null;
 let syncHandle: FileSystemSyncAccessHandle | null = null;
+let dbReady: Promise<WasmDbHandle> | null = null;
+
+const DB_NAME = "rullama-chat.db";
+const SCHEMA = [
+    `CREATE TABLE IF NOT EXISTS conversations (
+        id          TEXT PRIMARY KEY,
+        title       TEXT NOT NULL DEFAULT 'New chat',
+        model       TEXT,
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL
+     )`,
+    `CREATE INDEX IF NOT EXISTS conv_updated_idx ON conversations(updated_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS messages (
+        conversation_id TEXT NOT NULL,
+        message_id      TEXT NOT NULL,
+        role            TEXT NOT NULL,
+        content         TEXT NOT NULL DEFAULT '',
+        created_at      INTEGER NOT NULL,
+        PRIMARY KEY (conversation_id, message_id),
+        FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+     )`,
+    `CREATE INDEX IF NOT EXISTS msg_conv_idx ON messages(conversation_id, created_at)`,
+];
+
+async function ensureDb(): Promise<WasmDbHandle> {
+    if (!dbReady) {
+        dbReady = (async () => {
+            await ensureWasm();
+            const db = await Db.openWithOpfs(DB_NAME);
+            try { db.exec("PRAGMA foreign_keys = ON"); } catch { /* */ }
+            for (const stmt of SCHEMA) db.exec(stmt);
+            db.flush();
+            log(`db: opened ${DB_NAME}`);
+            return db;
+        })();
+    }
+    return dbReady;
+}
+
+// Lightweight UUID — `crypto.randomUUID()` is available in DedicatedWorkerGlobalScope.
+function newId(): string {
+    return crypto.randomUUID();
+}
 
 function log(...args: unknown[]) {
     const msg = args.map((a) => String(a)).join(" ");
@@ -160,6 +220,143 @@ const RPC: Record<string, (a: Args) => unknown | Promise<unknown>> = {
     free: () => {
         if (model) { try { model.free?.(); } catch { /* */ } model = null; }
         if (syncHandle) { try { syncHandle.close(); } catch { /* */ } syncHandle = null; }
+    },
+
+    // ── chat persistence (rsqlite-wasm OPFS-backed SQLite) ─────────────
+    dbInit:   async () => { await ensureDb(); return true; },
+
+    convList: async () => {
+        const db = await ensureDb();
+        return db.queryParams(
+            `SELECT id, title, model, created_at, updated_at
+             FROM conversations
+             ORDER BY updated_at DESC`,
+            [],
+        );
+    },
+
+    convCreate: async (a) => {
+        const db = await ensureDb();
+        const id    = (a.id as string | undefined) ?? newId();
+        const title = (a.title as string | undefined) ?? "New chat";
+        const model = (a.model as string | null | undefined) ?? null;
+        const now   = Date.now();
+        db.execParams(
+            `INSERT INTO conversations (id, title, model, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)`,
+            [id, title, model, now, now],
+        );
+        db.flush();
+        return { id, title, model, created_at: now, updated_at: now };
+    },
+
+    convDelete: async (a) => {
+        const db = await ensureDb();
+        const id = String(a.id);
+        // FK ON DELETE CASCADE removes messages too (PRAGMA foreign_keys=ON
+        // is set on open).
+        db.execParams(`DELETE FROM conversations WHERE id = ?`, [id]);
+        db.flush();
+        return true;
+    },
+
+    convRename: async (a) => {
+        const db = await ensureDb();
+        const id    = String(a.id);
+        const title = String(a.title);
+        db.execParams(
+            `UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?`,
+            [title, Date.now(), id],
+        );
+        db.flush();
+        return true;
+    },
+
+    convTouch: async (a) => {
+        const db = await ensureDb();
+        const id = String(a.id);
+        const titleIfBlank = a.titleIfBlank as string | undefined;
+        const now = Date.now();
+        if (titleIfBlank !== undefined && titleIfBlank.length > 0) {
+            // Only overwrite the auto-title 'New chat', never the user's
+            // explicit rename.
+            db.execParams(
+                `UPDATE conversations
+                 SET updated_at = ?,
+                     title = CASE WHEN title = 'New chat' THEN ? ELSE title END
+                 WHERE id = ?`,
+                [now, titleIfBlank, id],
+            );
+        } else {
+            db.execParams(
+                `UPDATE conversations SET updated_at = ? WHERE id = ?`,
+                [now, id],
+            );
+        }
+        db.flush();
+        return true;
+    },
+
+    msgList: async (a) => {
+        const db = await ensureDb();
+        const cid = String(a.conversationId);
+        return db.queryParams(
+            `SELECT conversation_id, message_id, role, content, created_at
+             FROM messages
+             WHERE conversation_id = ?
+             ORDER BY created_at ASC`,
+            [cid],
+        );
+    },
+
+    msgInsert: async (a) => {
+        const db = await ensureDb();
+        const cid     = String(a.conversationId);
+        const mid     = (a.messageId as string | undefined) ?? newId();
+        const role    = String(a.role);
+        const content = String(a.content ?? "");
+        const now     = Date.now();
+        db.execParams(
+            `INSERT INTO messages (conversation_id, message_id, role, content, created_at)
+             VALUES (?, ?, ?, ?, ?)`,
+            [cid, mid, role, content, now],
+        );
+        // Don't flush per-message during streaming — caller does an explicit
+        // flush via dbFlush after each turn.
+        return { messageId: mid, created_at: now };
+    },
+
+    msgAppend: async (a) => {
+        const db = await ensureDb();
+        const cid   = String(a.conversationId);
+        const mid   = String(a.messageId);
+        const delta = String(a.delta ?? "");
+        db.execParams(
+            `UPDATE messages
+             SET content = content || ?
+             WHERE conversation_id = ? AND message_id = ?`,
+            [delta, cid, mid],
+        );
+        return true;
+    },
+
+    msgSetContent: async (a) => {
+        const db = await ensureDb();
+        const cid     = String(a.conversationId);
+        const mid     = String(a.messageId);
+        const content = String(a.content ?? "");
+        db.execParams(
+            `UPDATE messages SET content = ?
+             WHERE conversation_id = ? AND message_id = ?`,
+            [content, cid, mid],
+        );
+        return true;
+    },
+
+    dbFlush: async () => {
+        const db = await ensureDb();
+        db.flush();
+        return true;
     },
 };
 

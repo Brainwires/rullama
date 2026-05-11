@@ -45,6 +45,11 @@ web-sys = { version = "0.3.98", features = [
 ] }
 console_error_panic_hook = "0.1.7"
 console_log = "1.0.0"
+# Dogfood Brainwires' own SQLite-in-Rust port. wasm-pack inlines its
+# #[wasm_bindgen] exports (WasmDatabase) into pkg/rullama.js alongside
+# our Model bindings, so the PWA's inference worker can persist chat
+# history without a second wasm package.
+rsqlite-wasm = { git = "https://github.com/Brainwires/rsqlite-wasm", rev = "71b85b0b1232be32c15f58c1953bea83eb08b320" }
 
 [features]
 default = []

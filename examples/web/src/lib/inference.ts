@@ -102,6 +102,47 @@ export class WorkerClient {
         return this.rpc("renderChat", { messages, withBos });
     }
     free(): Promise<void> { return this.rpc("free"); }
+
+    // ── chat persistence (rsqlite-wasm OPFS-backed SQLite) ──────────
+    dbInit(): Promise<boolean> { return this.rpc("dbInit"); }
+    convList(): Promise<ConversationRow[]> { return this.rpc("convList"); }
+    convCreate(opts: { id?: string; title?: string; model?: string | null } = {}): Promise<ConversationRow> {
+        return this.rpc("convCreate", opts as Record<string, unknown>);
+    }
+    convDelete(id: string): Promise<boolean> { return this.rpc("convDelete", { id }); }
+    convRename(id: string, title: string): Promise<boolean> { return this.rpc("convRename", { id, title }); }
+    convTouch(id: string, titleIfBlank?: string): Promise<boolean> {
+        return this.rpc("convTouch", { id, titleIfBlank });
+    }
+
+    msgList(conversationId: string): Promise<MessageRow[]> {
+        return this.rpc("msgList", { conversationId });
+    }
+    msgInsert(opts: { conversationId: string; messageId?: string; role: string; content?: string }): Promise<{ messageId: string; created_at: number }> {
+        return this.rpc("msgInsert", opts as Record<string, unknown>);
+    }
+    msgAppend(conversationId: string, messageId: string, delta: string): Promise<boolean> {
+        return this.rpc("msgAppend", { conversationId, messageId, delta });
+    }
+    msgSetContent(conversationId: string, messageId: string, content: string): Promise<boolean> {
+        return this.rpc("msgSetContent", { conversationId, messageId, content });
+    }
+    dbFlush(): Promise<boolean> { return this.rpc("dbFlush"); }
+}
+
+export interface ConversationRow {
+    id:         string;
+    title:      string;
+    model:      string | null;
+    created_at: number;
+    updated_at: number;
+}
+export interface MessageRow {
+    conversation_id: string;
+    message_id:      string;
+    role:            string;
+    content:         string;
+    created_at:      number;
 }
 
 /** Singleton — one worker per page. */
