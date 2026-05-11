@@ -204,6 +204,14 @@ fn main() {
     let bg_v3 = mk_bg(&pipes.f16_matmul_batched_tiled_v3);
     run_shape_force("v3 tiled 32×32×16", &ctx, &pipes, &pipes.f16_matmul_batched_tiled_v3,
         &bg_v3, (n as u32).div_ceil(32), (batch as u32).div_ceil(32), k, n, batch, 5);
+    let bg_v4 = mk_bg(&pipes.f16_matmul_batched_tiled_v4);
+    run_shape_force("v4 tiled 64×32×16", &ctx, &pipes, &pipes.f16_matmul_batched_tiled_v4,
+        &bg_v4, (n as u32).div_ceil(32), (batch as u32).div_ceil(64), k, n, batch, 5);
+    if let Some(pipe_f) = pipes.f16_matmul_batched_tiled_v3_f16lds.as_ref() {
+        let bg_vf = mk_bg(pipe_f);
+        run_shape_force("v3 f16-LDS 32×32×16", &ctx, &pipes, pipe_f,
+            &bg_vf, (n as u32).div_ceil(32), (batch as u32).div_ceil(32), k, n, batch, 5);
+    }
 
     // Per-block estimate: 6 matmuls per block × 16 blocks = 96 matmuls.
     // Avg matmul ~ middle of the shapes above.

@@ -32,6 +32,10 @@ pub struct Pipelines {
     pub f16_matmul_batched_tiled: wgpu::ComputePipeline,
     pub f16_matmul_batched_tiled_v2: wgpu::ComputePipeline,
     pub f16_matmul_batched_tiled_v3: wgpu::ComputePipeline,
+    pub f16_matmul_batched_tiled_v4: wgpu::ComputePipeline,
+    /// v3-layout matmul with f16 LDS storage + f16 inner-loop arithmetic.
+    /// Only built when `Features::SHADER_F16` is available.
+    pub f16_matmul_batched_tiled_v3_f16lds: Option<wgpu::ComputePipeline>,
     pub pos_embed_add:     wgpu::ComputePipeline,
     pub vision_attention:  wgpu::ComputePipeline,
     pub vision_attention_flash: wgpu::ComputePipeline,
@@ -108,6 +112,13 @@ impl Pipelines {
                 ));
             }
         }
+        if has_f16 {
+            me.f16_matmul_batched_tiled_v3_f16lds = Some(build(
+                device,
+                "f16_matmul_batched_tiled_v3_f16lds",
+                kernels::F16_MATMUL_BATCHED_TILED_V3_F16LDS,
+            ));
+        }
         me
     }
 
@@ -135,6 +146,8 @@ impl Pipelines {
             f16_matmul_batched_tiled: build(device, "f16_matmul_batched_tiled", kernels::F16_MATMUL_BATCHED_TILED),
             f16_matmul_batched_tiled_v2: build(device, "f16_matmul_batched_tiled_v2", kernels::F16_MATMUL_BATCHED_TILED_V2),
             f16_matmul_batched_tiled_v3: build(device, "f16_matmul_batched_tiled_v3", kernels::F16_MATMUL_BATCHED_TILED_V3),
+            f16_matmul_batched_tiled_v4: build(device, "f16_matmul_batched_tiled_v4", kernels::F16_MATMUL_BATCHED_TILED_V4),
+            f16_matmul_batched_tiled_v3_f16lds: None,
             pos_embed_add:     build(device, "pos_embed_add",     kernels::POS_EMBED_ADD),
             vision_attention:  build(device, "vision_attention",  kernels::VISION_ATTENTION),
             vision_attention_flash: build(device, "vision_attention_flash", kernels::VISION_ATTENTION_FLASH),

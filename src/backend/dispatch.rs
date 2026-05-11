@@ -1329,6 +1329,13 @@ fn use_tiled_batched_v3(k: usize, n: usize, batch: usize) -> bool {
     k >= 16 && n >= 32 && batch >= 32
 }
 
+/// V4 tiled batched matmul: 64×32 output tile, 8×4 register sub-blocks per
+/// thread. Larger output tile (2× v3) + better arithmetic intensity
+/// (2.67 vs 2.0 MACs/load). Needs batch ≥ 64 to fill the 64-row dim.
+fn use_tiled_batched_v4(k: usize, n: usize, batch: usize) -> bool {
+    k >= 16 && n >= 32 && batch >= 64
+}
+
 /// Batched BF16-weight matmul: y[b, j] = Σ_i x[b, i] * W[j, i]. Used by the
 /// audio Conformer tower so each block linear processes all `seq` frames
 /// in a single dispatch instead of `seq` separate ones.
@@ -1386,7 +1393,14 @@ pub fn matmul_f16_batched_chained(
     w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer,
     k: usize, n: usize, batch: usize,
 ) {
+    // v4 (64×32 tile, 8×4 regs) exists in tree but **NOT ROUTED** — the 32
+    // accumulators per thread spill on Pro 555 (117 vs 128 GFLOPS for v3 on
+    // the ffn_up shape). Kept as reference; the next reader should expect a
+    // similar register-pressure regression on similar GCN hardware.
     if use_tiled_batched_v3(k, n, batch) {
+        if let Some(pipe_f) = p.f16_matmul_batched_tiled_v3_f16lds.as_ref() {
+            return matmul_f16_batched_tiled_v3_f16lds_chained(ctx, p, pipe_f, enc, w, x, y, k, n, batch);
+        }
         matmul_f16_batched_tiled_v3_chained(ctx, p, enc, w, x, y, k, n, batch);
         return;
     }
@@ -1550,6 +1564,71 @@ pub fn matmul_f16_batched_tiled_v3_chained(
     cp.set_pipeline(&p.f16_matmul_batched_tiled_v3);
     cp.set_bind_group(0, &bg, &[]);
     cp.dispatch_workgroups((n as u32).div_ceil(32), (batch as u32).div_ceil(32), 1);
+}
+
+/// V3 tiled batched matmul with f16 LDS + f16 arithmetic. Caller-supplied
+/// pipeline since it's only built when SHADER_F16 is available.
+pub fn matmul_f16_batched_tiled_v3_f16lds_chained(
+    ctx: &WgpuCtx, p: &Pipelines, pipe: &wgpu::ComputePipeline,
+    enc: &mut wgpu::CommandEncoder,
+    w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer,
+    k: usize, n: usize, batch: usize,
+) {
+    let _ = p;
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = BatchedMatmulParams {
+        k: k as u32, n: n as u32, batch: batch as u32, _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "f16bmmt3f.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("f16bmmt3f.bg"),
+        layout: &pipe.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("f16bmmt3f.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(pipe);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups((n as u32).div_ceil(32), (batch as u32).div_ceil(32), 1);
+}
+
+/// V4 tiled batched f16-weight matmul: 64×32 output tile, 8×4 register
+/// sub-blocks per thread. Higher arithmetic intensity than v3 (2.67 vs 2.0
+/// MACs/load) and 2× more outputs per WG launch.
+pub fn matmul_f16_batched_tiled_v4_chained(
+    ctx: &WgpuCtx, p: &Pipelines, enc: &mut wgpu::CommandEncoder,
+    w: &wgpu::Buffer, x: &wgpu::Buffer, y: &wgpu::Buffer,
+    k: usize, n: usize, batch: usize,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = BatchedMatmulParams {
+        k: k as u32, n: n as u32, batch: batch as u32, _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "f16bmmt4.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("f16bmmt4.bg"),
+        layout: &p.f16_matmul_batched_tiled_v4.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: p_buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("f16bmmt4.pass"), timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.f16_matmul_batched_tiled_v4);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups((n as u32).div_ceil(32), (batch as u32).div_ceil(64), 1);
 }
 
 /// V3 tiled batched bf16-weight matmul: 32×32 output tile, 4×4 register
