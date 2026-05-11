@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { type ChatMessage } from "@/lib/types";
@@ -18,6 +18,9 @@ interface Props {
     onStop:      () => void;
     onNewChat:   () => void;
     statusLine?: string;
+    /** Optional drop-in for the empty chat history pane (e.g. a
+     *  no-model-loaded card). Falls back to a plain hint when omitted. */
+    emptyState?: ReactNode;
     className?:  string;
 }
 
@@ -103,9 +106,11 @@ export function ChatPanel(props: Props) {
                 className="flex-1 min-h-0 overflow-y-auto px-3 py-2 sm:px-4"
             >
                 {props.messages.length === 0 ? (
-                    <p className="mt-8 text-center text-xs text-muted-foreground">
-                        Load a model and say hi.
-                    </p>
+                    props.emptyState ?? (
+                        <p className="mt-8 text-center text-xs text-muted-foreground">
+                            Say hi.
+                        </p>
+                    )
                 ) : (
                     <div className="mx-auto flex max-w-3xl flex-col gap-2">
                         {props.messages.map((m, i) => <MessageBubble key={i} msg={m} />)}

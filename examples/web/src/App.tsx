@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ModelLoadProgress, type ModelStatus } from "@/components/ModelLoader";
+import { ModelLoader, ModelLoadProgress, type ModelStatus } from "@/components/ModelLoader";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChatPanel } from "@/components/ChatPanel";
 import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
 import { ConversationList } from "@/components/ConversationList";
@@ -466,6 +467,34 @@ export function App() {
             >
                 <ChatPanel
                     messages={messages}
+                    emptyState={
+                        modelStatus !== "ready" ? (
+                            <div className="mx-auto mt-6 w-full max-w-md">
+                                <Card>
+                                    <CardHeader>
+                                        <CardTitle>Load a model</CardTitle>
+                                        <CardDescription>
+                                            Pick a model from your local{" "}
+                                            <code className="rounded bg-muted px-1">~/.ollama/models</code>{" "}
+                                            and click Load. Only <code className="rounded bg-muted px-1">gemma4:*</code>{" "}
+                                            variants will run; others fail at parse time.
+                                            {" "}Past conversations live in the History sidebar.
+                                        </CardDescription>
+                                    </CardHeader>
+                                    <CardContent>
+                                        <ModelLoader
+                                            status={modelStatus}
+                                            loadingPercent={loadingPercent}
+                                            loadingLabel={loadingLabel}
+                                            statusText={statusText}
+                                            onLoad={onLoad}
+                                            onDelete={onDeleteModel}
+                                        />
+                                    </CardContent>
+                                </Card>
+                            </div>
+                        ) : undefined
+                    }
                     canType={modelStatus === "ready"}
                     canSend={modelStatus === "ready" && !busy && prompt.trim().length > 0}
                     canStop={busy}
