@@ -128,8 +128,11 @@ export function ChatPanel(props: Props) {
                     disabled={!props.canType}
                     className="flex-1 min-w-0"
                 />
-                <Button onClick={props.onSend}    disabled={!props.canSend}><Send /></Button>
-                <Button onClick={props.onStop}    disabled={!props.canStop}    variant="destructive"><Square /></Button>
+                {props.canStop ? (
+                    <Button onClick={props.onStop} variant="destructive" title="Stop"><Square /></Button>
+                ) : (
+                    <Button onClick={props.onSend} disabled={!props.canSend} title="Send"><Send /></Button>
+                )}
                 <Button onClick={props.onNewChat} disabled={!props.canNewChat} variant="outline" title="New chat"><Plus /></Button>
             </div>
         </div>
