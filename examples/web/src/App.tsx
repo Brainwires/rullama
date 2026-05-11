@@ -108,6 +108,19 @@ export function App() {
         }
     }, [showToast]);
 
+    // Global Escape → stop generation. Mirrors the toolbar Stop button.
+    // Attached to window so it fires regardless of focus (input, sidebar
+    // toggle, anything). No-op when nothing is generating.
+    useEffect(() => {
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === "Escape" && busy) {
+                cancelRef.current = true;
+            }
+        };
+        window.addEventListener("keydown", onKeyDown);
+        return () => window.removeEventListener("keydown", onKeyDown);
+    }, [busy]);
+
     // Bootstrap DB + conversation list on mount.
     useEffect(() => {
         const client = getClient();
