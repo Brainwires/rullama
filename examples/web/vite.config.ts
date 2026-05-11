@@ -22,6 +22,14 @@ export default defineConfig({
             // Only precache the small static shell — the 7 GB GGUF is *not*
             // precached, it lives in OPFS via our own writer worker.
             workbox: {
+                // Take over from any prior SW immediately on install, so a
+                // soft refresh after a deploy doesn't keep serving stale
+                // precached responses (we hit exactly this when an earlier
+                // deploy cached CSS with the wrong Content-Type — only a
+                // hard reload would bypass the SW and fix the page).
+                skipWaiting:  true,
+                clientsClaim: true,
+                cleanupOutdatedCaches: true,
                 globPatterns: ["**/*.{html,css,js,svg,png,webmanifest}"],
                 globIgnores:  ["**/pkg/**", "**/*.wasm"],
                 // The wasm bundle is large; we don't want Workbox to inline-

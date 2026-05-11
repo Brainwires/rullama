@@ -37,6 +37,33 @@ export async function requestPersistent(): Promise<boolean> {
     } catch { return false; }
 }
 
+// GGUF magic bytes: "GGUF" (0x47 0x47 0x55 0x46).
+const GGUF_MAGIC = [0x47, 0x47, 0x55, 0x46];
+
+async function magicLooksValid(fh: FileSystemFileHandle): Promise<boolean> {
+    try {
+        const head = await (await fh.getFile()).slice(0, 4).arrayBuffer();
+        const b    = new Uint8Array(head);
+        return b.length === 4 && b.every((v, i) => v === GGUF_MAGIC[i]);
+    } catch { return false; }
+}
+
+async function removeFile(modelKey: string, filename: string): Promise<void> {
+    try {
+        const root  = await navigator.storage.getDirectory();
+        const dlDir = await root.getDirectoryHandle(OPFS_DIR, { create: false });
+        const md    = await dlDir.getDirectoryHandle(modelKey, { create: false });
+        await md.removeEntry(filename);
+    } catch { /* */ }
+}
+
+/**
+ * Returns the size of the cached OPFS file if its first 4 bytes match the
+ * GGUF magic, otherwise 0. Files that fail the magic check are deleted so
+ * the next download starts clean — iOS Safari Jetsam can kill the writer
+ * worker between `truncate()` and the next 64 MiB `flush()`, leaving the
+ * file at its truncated size with a zero-byte prefix.
+ */
 export async function existingSize(modelKey: string, filename: string): Promise<number> {
     try {
         const root  = await navigator.storage.getDirectory();
@@ -44,6 +71,11 @@ export async function existingSize(modelKey: string, filename: string): Promise<
         const md    = await dlDir.getDirectoryHandle(modelKey, { create: false });
         const fh    = await md.getFileHandle(filename, { create: false });
         const f     = await fh.getFile();
+        if (f.size < 4) return 0;
+        if (!(await magicLooksValid(fh))) {
+            await removeFile(modelKey, filename);
+            return 0;
+        }
         return f.size;
     } catch { return 0; }
 }
