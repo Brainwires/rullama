@@ -8,8 +8,12 @@ export interface ModelEntry {
     digest: string;
     /** When set, the client fetches the blob from this absolute URL
      *  instead of /api/blob. Used by the public demo to offload model
-     *  bandwidth to Hugging Face. */
+     *  bandwidth to a CDN (R2, Hugging Face). */
     url?:   string;
+    /** When `url` points at a full Ollama-style multimodal blob (text +
+     *  vision + audio), set this so the loader doesn't force text-only.
+     *  Default for HF-style text-only GGUFs: omit. */
+    multimodal?: boolean;
 }
 
 /** Whether this entry is something we'll actually run. */

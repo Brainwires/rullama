@@ -1,0 +1,25 @@
+[
+    {
+        "AllowedOrigins": [
+            "https://gemma.brainwires.dev",
+            "http://localhost:5173",
+            "http://localhost:8088"
+        ],
+        "AllowedMethods": [
+            "GET",
+            "HEAD"
+        ],
+        "AllowedHeaders": [
+            "Range",
+            "Content-Type"
+        ],
+        "ExposeHeaders": [
+            "Content-Range",
+            "Content-Length",
+            "Accept-Ranges",
+            "ETag",
+            "Last-Modified"
+        ],
+        "MaxAgeSeconds": 86400
+    }
+]

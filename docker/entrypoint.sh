@@ -43,25 +43,44 @@ mkdir -p "$BLOB_DIR"
 : > "$ITEMS_TMP"
 : > "$MANIFEST_LIST"
 
-# ───── Curated Hugging Face fallback ──────────────────────────────────
-# Each entry has the same shape as a local one PLUS a `url` field. The
-# client honours `url` first; nginx never sees these requests.
+# ───── Curated remote-CDN fallback ─────────────────────────────────────
+# Ollama-style multimodal blobs (text + vision + audio in one file)
+# hosted on Cloudflare R2. Digests match the user's local
+# ~/.ollama/models copies so an OPFS cache populated locally stays
+# valid against the public demo. Each entry's `url` points at the
+# bucket's custom domain — override via R2_HOST env var if needed.
+#
+# Why R2 and not HF: every public-author HF GGUF for Gemma 4 either
+# (a) ships text-only with `mmproj` split out for vision (and no
+# audio at all), or (b) sneaks Q5_K / Q8_0 tensors into its tensor
+# table that our v1 dequant scope rejects. Ollama's own quant
+# pipeline produces clean Q4_K_M (pure Q4_K + Q6_K) with the full
+# multimodal weight set bundled — but that artifact only lives in
+# Ollama's registry. Uploading it to R2 makes it browser-fetchable
+# at zero egress cost.
+R2_HOST="${R2_HOST:-models.brainwires.dev}"
+
 emit_hf_entries() {
-    # gemma4:e2b — Q6_K, text-only. rullama's v1 dequant scope is
-    # F32/F16/BF16/Q4_K/Q6_K. Unsloth's Q4_K_M and Q4_K_S BOTH sneak
-    # Q5_K tensors in (loader rejects them), so we fall back to pure
-    # Q6_K — every weight is Q6_K plus the standard F16/F32 norms.
-    # ~4.5 GB instead of ~3 GB, but it's the only quant in the unsloth
-    # repo that our v1 kernel set can load without surprises. mmproj
-    # weights ship separately and the text-only loader skips them.
     jq -nc \
         --arg name   "gemma4:e2b" \
         --arg family "gemma4" \
         --arg tag    "e2b" \
-        --argjson size 4501719168 \
-        --arg digest "b36824f13bf9fab2910cb7b4282a4d73b13799ee4126d4ec241309ce69c0e783" \
-        --arg url    "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q6_K.gguf" \
-        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url}' \
+        --argjson size 7162394016 \
+        --arg digest "4e30e2665218745ef463f722c0bf86be0cab6ee676320f1cfadf91e989107448" \
+        --arg url    "https://${R2_HOST}/gemma4-e2b.gguf" \
+        --argjson multimodal true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, multimodal:$multimodal}' \
+        >> "$ITEMS_TMP"
+
+    jq -nc \
+        --arg name   "gemma4:e4b" \
+        --arg family "gemma4" \
+        --arg tag    "e4b" \
+        --argjson size 9608338848 \
+        --arg digest "4c27e0f5b5adf02ac956c7322bd2ee7636fe3f45a8512c9aba5385242cb6e09a" \
+        --arg url    "https://${R2_HOST}/gemma4-e4b.gguf" \
+        --argjson multimodal true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, multimodal:$multimodal}' \
         >> "$ITEMS_TMP"
 }
 

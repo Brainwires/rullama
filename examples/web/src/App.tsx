@@ -274,14 +274,16 @@ export function App() {
             setLoadingLabel("loading into wasm…");
             const mobile = isMobileUA();
             const mobileMaxCtx = 512;
-            // HF entries are text-only GGUFs (mmproj ships separately on
-            // the same repo). Force textOnly when fetching from a custom
-            // URL so the desktop path doesn't try to load vision/audio
-            // tensors that aren't in the file.
-            const fromRemote = !!m.url;
+            // textOnly is forced when:
+            //   - mobile (no headroom for vision/audio towers), OR
+            //   - the remote URL points at a text-only blob (HF-style:
+            //     `mmproj` ships separately and audio isn't in GGUF at
+            //     all). R2-hosted Ollama-style blobs have `multimodal:
+            //     true` and load the full weight set on desktop.
+            const textOnlyRemote = !!m.url && !m.multimodal;
             await client.load(modelKey, filename, {
                 maxContext: mobile ? mobileMaxCtx : 0,
-                textOnly:   mobile || fromRemote,
+                textOnly:   mobile || textOnlyRemote,
             });
             setModelStatus("ready");
             setStatusText(`${m.name}${fromCache ? " ⚡" : ""}`);
