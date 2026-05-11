@@ -152,6 +152,19 @@ const RPC = {
     step:            async ({ tokenId }) => await requireModel().step(tokenId),
     stepWithEmb:     async ({ embedding }) =>
         await requireModel().stepWithEmbedding(embedding),
+    /// One-RPC variant for the generation hot loop: step + isEos + tokenStr
+    /// in a single round-trip. Saves 2 postMessage RTTs per token vs calling
+    /// the three RPCs separately — adds up at ~120 ms/tok where each RTT
+    /// is a couple of milliseconds.
+    stepAndDecode:   async ({ tokenId }) => {
+        const m = requireModel();
+        const next = await m.step(tokenId);
+        return {
+            next,
+            isEos: m.isEos(next),
+            str:   m.tokenStr(next) ?? null,
+        };
+    },
     tokenStr:        ({ id })        => requireModel().tokenStr(id) ?? null,
     isEos:           ({ id })        => requireModel().isEos(id),
     reset:           ()              => requireModel().reset(),
@@ -175,6 +188,12 @@ const RPC = {
     },
 };
 
+// Per-RPC tracing costs a /api/log beacon per call which adds up across
+// step/isEos/tokenStr at every token. Off by default; flip on by setting
+// `RULLAMA_RPC_TRACE = '1'` on the worker scope (e.g. via a query string
+// the page reads, or just edit here when debugging).
+const RPC_TRACE = false;
+
 self.addEventListener('message', async (ev) => {
     const msg = ev.data;
     if (!msg || typeof msg !== 'object' || !msg.type) return;
@@ -184,13 +203,14 @@ self.addEventListener('message', async (ev) => {
         self.postMessage({ requestId, ok: false, error: `unknown RPC type: ${type}` });
         return;
     }
-    log(`rpc-start ${type}`);
+    if (RPC_TRACE) log(`rpc-start ${type}`);
     try {
         const result = await handler(msg);
-        log(`rpc-done  ${type}`);
+        if (RPC_TRACE) log(`rpc-done  ${type}`);
         self.postMessage({ requestId, ok: true, result });
     } catch (e) {
         const err = e?.message ?? String(e);
+        // Errors always beacon — these are real signal.
         log(`rpc ${type} failed: ${err}`);
         self.postMessage({ requestId, ok: false, error: err });
     }

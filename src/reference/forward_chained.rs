@@ -417,11 +417,9 @@ impl Forward {
         // ---- transformer layers ----
         // Per-layer submit + restart. Each flush hands its commands off to the
         // GPU and frees the CPU-side encoder; persistent buffer state on the
-        // GPU is unaffected so this is semantically identical to a single
-        // submit. On iPhone 16e (8 GB shared RAM) building one giant encoder
-        // spanning all 35 layers was enough to crash the WebContent process
-        // during the first step. Submitting after every layer keeps peak
-        // command-buffer memory bounded.
+        // GPU is unaffected. Empirically anything wider than 1 layer per
+        // submit (tried 3) re-introduces the iPhone WebContent crash on the
+        // first step — the per-layer cadence is the working strip-line.
         for i in 0..n_layers as u32 {
             self.encode_layer(&mut enc, i, pos).await?;
             self.ctx.queue.submit(Some(enc.finish()));
@@ -449,13 +447,11 @@ impl Forward {
         // only needs 4-byte alignment). Submit between tiles too, for the same
         // command-buffer-size reason that we submit between layers.
         // token_embd is the largest single tensor in the model (315 MiB
-        // compressed Q6_K for gemma4:e2b). On iPhone 16e, the original
-        // 80 MiB tile size crashed the WebContent process inside this very
-        // call — either the 80 MiB wasm-side Vec<u8> staging buffer or the
-        // 80 MiB wgpu::Buffer allocation tipped iOS Jetsam over given the
-        // ~2 GB of layer weights already resident. 8 MiB tiles keep the
-        // peak working set bounded while still respecting the 128 MiB
-        // storage-binding floor in shaders.
+        // compressed Q6_K for gemma4:e2b). Empirically 80 MiB tiles crash
+        // the WebContent process on iPhone 16e mid-step even after the
+        // wasm-side per-tile range fetch landed — the issue isn't the
+        // staging allocation, it's a single 80 MiB wgpu::Buffer creation
+        // on top of ~2 GB of resident layer weights. 8 MiB tiles work.
         const MAX_TILE_BYTES: usize = 8 * 1024 * 1024;
         let tiles = wc.buffer_tiles_async("token_embd.weight", MAX_TILE_BYTES).await?;
         for tile in &tiles {

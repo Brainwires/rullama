@@ -191,6 +191,9 @@ class WorkerClient {
                                           .then(arr => new Uint32Array(arr)); }
     step(tokenId)                 { return this._rpc("step", { tokenId }); }
     stepWithEmbedding(embedding)  { return this._rpc("stepWithEmb", { embedding }); }
+    // Fused step + isEos + tokenStr for the generation hot loop. Returns
+    // `{ next, isEos, str }` in one round-trip instead of three.
+    stepAndDecode(tokenId)        { return this._rpc("stepAndDecode", { tokenId }); }
     tokenStr(id)                  { return this._rpc("tokenStr", { id }); }
     isEos(id)                     { return this._rpc("isEos", { id }); }
     reset()                       { return this._rpc("reset"); }
@@ -745,17 +748,27 @@ $("send-btn").addEventListener("click", async () => {
         const max = parseInt($("maxtok").value, 10);
         beacon("gen", `prompt-eval done in ${(performance.now()-t0).toFixed(0)}ms — gen up to ${max}`);
         const tg0 = performance.now();
+        // Generation hot loop. `stepAndDecode` fuses step + isEos + tokenStr
+        // into one postMessage round-trip instead of three.
+        // We already have `next` from the prompt-eval phase, so the loop
+        // body order is: emit-then-step, with isEos checked on the *next*
+        // value before we emit it.
+        let curStr = (await model.tokenStr(next)) ?? "";
+        let curIsEos = await model.isEos(next);
         for (let i = 0; i < max; i++) {
             if (cancelGen) break;
-            if (await model.isEos(next)) break;
-            const piece = ((await model.tokenStr(next)) ?? "").replaceAll("▁", " ");
+            if (curIsEos) break;
+            const piece = curStr.replaceAll("▁", " ");
             assistantMsg.content += piece;
             lastBody.textContent = assistantMsg.content;
             $("chat-history").scrollTop = $("chat-history").scrollHeight;
             emitted++;
             beacon("tg", `before step tg[${i}/${max}] id=${next}`);
-            next = await model.step(next);
-            beacon("tg", `after step tg[${i}/${max}] -> ${next} piece='${piece.slice(0,20)}'`);
+            const r = await model.stepAndDecode(next);
+            next = r.next;
+            curStr = r.str ?? "";
+            curIsEos = r.isEos;
+            beacon("tg", `after step tg[${i}/${max}] -> ${next}`);
         }
         const dt = performance.now() - tg0;
         log($("chat-log"),
