@@ -8,7 +8,7 @@ import { ConversationList } from "@/components/ConversationList";
 import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { type ChatMessage, type SamplingOptions, DEFAULT_SAMPLING } from "@/lib/types";
+import { type ChatMessage, type SamplingOptions, DEFAULT_SAMPLING, DEFAULT_SYSTEM_PROMPT } from "@/lib/types";
 import { type ModelEntry, blobUrl, beacon } from "@/lib/api";
 import { ensureModel, opfsSupported, requestPersistent, wipeModel } from "@/lib/opfs";
 import { getClient, type ConversationRow } from "@/lib/inference";
@@ -50,7 +50,7 @@ export function App() {
     const [settingsOpen, setSettingsOpen] = usePersistedState<boolean>("ui.settingsOpen", true);
 
     // Persisted tunables.
-    const [systemPrompt, setSystemPrompt] = usePersistedState<string>("systemPrompt", "");
+    const [systemPrompt, setSystemPrompt] = usePersistedState<string>("systemPrompt", DEFAULT_SYSTEM_PROMPT);
     const [sampling,     setSampling]     = usePersistedState<SamplingOptions>("sampling", DEFAULT_SAMPLING);
     const [maxTokens,    setMaxTokens]    = usePersistedState<number>("maxTokens", 1024);
     const [thinking,     setThinking]     = usePersistedState<boolean>("thinking", false);
@@ -160,7 +160,7 @@ export function App() {
     }, [busy, showToast]);
 
     const onResetDefaults = useCallback(() => {
-        setSystemPrompt("");
+        setSystemPrompt(DEFAULT_SYSTEM_PROMPT);
         setSampling(DEFAULT_SAMPLING);
         setMaxTokens(SETTINGS_BOUNDS.maxTokens.fallback);
         setThinking(false);

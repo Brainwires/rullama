@@ -22,3 +22,6 @@ export const DEFAULT_SAMPLING: SamplingOptions = {
     repetition_penalty: 1.1,
     seed:               0,
 };
+
+export const DEFAULT_SYSTEM_PROMPT =
+    "You are a helpful AI chat assistant.";
