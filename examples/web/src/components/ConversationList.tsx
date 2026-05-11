@@ -20,56 +20,60 @@ function relativeTime(ms: number): string {
     return new Date(ms).toLocaleDateString();
 }
 
-/** Slide-out drawer panel listing persisted conversations newest-first. */
+/**
+ * Full-height sidebar listing persisted conversations newest-first.
+ * Title + "+ New chat" pin at the top; list scrolls below.
+ */
 export function ConversationList(props: Props) {
     return (
-        <div className="border-b border-border bg-background/60 px-3 py-2 sm:px-4">
-            <div className="mx-auto flex max-w-3xl flex-col gap-1.5">
-                <div className="flex items-center justify-between">
-                    <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">
-                        History ({props.conversations.length})
-                    </span>
-                    <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 px-2 text-xs"
-                        onClick={props.onCreate}
-                    >
-                        <Plus />
-                        New chat
-                    </Button>
-                </div>
+        <div className="flex h-full min-h-0 flex-col">
+            <header className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
+                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    History
+                </span>
+                <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 px-2 text-xs"
+                    onClick={props.onCreate}
+                >
+                    <Plus />
+                    New
+                </Button>
+            </header>
+
+            <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
                 {props.conversations.length === 0 ? (
-                    <p className="px-1 py-1 text-xs text-muted-foreground">
+                    <p className="px-2 py-2 text-xs text-muted-foreground">
                         No prior chats yet. Send a message to start one.
                     </p>
                 ) : (
-                    <ul className="flex max-h-[40vh] flex-col gap-0.5 overflow-y-auto pr-1">
+                    <ul className="flex flex-col gap-0.5">
                         {props.conversations.map((c) => (
                             <li
                                 key={c.id}
                                 className={cn(
-                                    "group flex items-center gap-2 rounded px-2 py-1 text-xs",
+                                    "group flex items-center gap-2 rounded px-2 py-1.5 text-xs",
                                     c.id === props.activeId
-                                        ? "bg-primary/10 text-foreground"
+                                        ? "bg-primary/15 text-foreground"
                                         : "hover:bg-muted/60",
                                 )}
                             >
                                 <button
                                     type="button"
                                     onClick={() => props.onSelect(c.id)}
-                                    className="flex flex-1 items-center justify-between gap-2 truncate text-left"
+                                    className="flex min-w-0 flex-1 flex-col items-start text-left"
                                     title={c.title}
                                 >
-                                    <span className="truncate">{c.title}</span>
-                                    <span className="shrink-0 text-[0.6rem] text-muted-foreground">
+                                    <span className="w-full truncate">{c.title}</span>
+                                    <span className="text-[0.6rem] text-muted-foreground">
                                         {relativeTime(c.updated_at)}
                                     </span>
                                 </button>
                                 <button
                                     type="button"
                                     onClick={() => props.onDelete(c.id)}
-                                    className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+                                    className="opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
                                     title="Delete conversation"
                                     aria-label={`Delete ${c.title}`}
                                 >

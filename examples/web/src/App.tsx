@@ -3,7 +3,9 @@ import { ModelLoadProgress, type ModelStatus } from "@/components/ModelLoader";
 import { ChatPanel } from "@/components/ChatPanel";
 import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
 import { ConversationList } from "@/components/ConversationList";
+import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { type ChatMessage, type SamplingOptions, DEFAULT_SAMPLING } from "@/lib/types";
 import { type ModelEntry, blobUrl, beacon } from "@/lib/api";
 import { ensureModel, opfsSupported, requestPersistent, wipeModel } from "@/lib/opfs";
@@ -37,16 +39,15 @@ export function App() {
     const [statusLine, setStatusLine] = useState<string | undefined>();
 
     // Conversation persistence (rsqlite-wasm)
-    const [conversations, setConversations]     = useState<ConversationRow[]>([]);
-    const [activeConvId, setActiveConvId]       = useState<string | null>(null);
-    const [historyOpen, setHistoryOpen]         = useState(false);
+    const [conversations, setConversations] = useState<ConversationRow[]>([]);
+    const [activeConvId, setActiveConvId]   = useState<string | null>(null);
 
-    // Settings — opens by default since first mount is always "no model".
-    // We don't auto-close on load; user dismisses with ⚙. Open/closed
-    // state is transient (per page load).
-    const [settingsOpen, setSettingsOpen] = useState(true);
+    // Sidebar visibility — persisted across reloads. Settings defaults
+    // open on first ever load so the model picker is visible.
+    const [historyOpen,  setHistoryOpen]  = usePersistedState<boolean>("ui.historyOpen",  false);
+    const [settingsOpen, setSettingsOpen] = usePersistedState<boolean>("ui.settingsOpen", true);
 
-    // The four user-tunable settings persist across reloads via localStorage.
+    // Persisted tunables.
     const [systemPrompt, setSystemPrompt] = usePersistedState<string>("systemPrompt", "");
     const [sampling,     setSampling]     = usePersistedState<SamplingOptions>("sampling", DEFAULT_SAMPLING);
     const [maxTokens,    setMaxTokens]    = usePersistedState<number>("maxTokens", 1024);
@@ -76,41 +77,30 @@ export function App() {
         }
         const mt = clampInt(maxTokens, B.maxTokens.min, B.maxTokens.max, B.maxTokens.fallback);
         if (mt !== maxTokens) setMaxTokens(mt);
-        // Run once on mount with the hydrated values.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    // Probe environment once on mount. Failures become sticky toasts the
-    // user must dismiss (vs the prior compact pill row that was always
-    // visible). Successful capabilities are silent.
+    // Environment probe → sticky toasts on missing capabilities.
     useEffect(() => {
         const has = (k: () => boolean) => { try { return k(); } catch { return false; } };
         if (!has(() => typeof navigator !== "undefined" && "gpu" in navigator)) {
             showToast({
-                id: "env-webgpu",
-                level: "error",
-                title: "WebGPU not available",
-                message: "rullama cannot run inference without WebGPU. On iOS, update to iOS 18+. On desktop, use a recent Chrome / Edge / Safari.",
+                id: "env-webgpu", level: "error", title: "WebGPU not available",
+                message: "rullama cannot run inference without WebGPU. On iOS update to iOS 18+; on desktop use a recent Chrome/Edge/Safari.",
                 persist: true,
             });
         }
-        if (!has(() => typeof navigator !== "undefined"
-                       && !!navigator.storage
-                       && typeof navigator.storage.getDirectory === "function")) {
+        if (!has(() => typeof navigator !== "undefined" && !!navigator.storage && typeof navigator.storage.getDirectory === "function")) {
             showToast({
-                id: "env-opfs",
-                level: "error",
-                title: "OPFS not available",
-                message: "Models larger than ~3 GB need the Origin Private File System for streaming. Without it, large GGUFs will OOM the page.",
+                id: "env-opfs", level: "error", title: "OPFS not available",
+                message: "Models larger than ~3 GB need OPFS for streaming. Without it, large GGUFs will OOM the page.",
                 persist: true,
             });
         }
         if (!has(() => typeof window !== "undefined" && window.crossOriginIsolated)) {
             showToast({
-                id: "env-coi",
-                level: "warn",
-                title: "Cross-origin isolation off",
-                message: "Required for SharedArrayBuffer / high-res timers. Make sure the page is served with COOP+COEP headers.",
+                id: "env-coi", level: "warn", title: "Cross-origin isolation off",
+                message: "Required for SharedArrayBuffer and high-res timers. Make sure the page is served with COOP+COEP headers.",
                 persist: true,
             });
         }
@@ -125,11 +115,7 @@ export function App() {
                 const rows = await client.convList();
                 setConversations(rows);
             } catch (e) {
-                showToast({
-                    level: "error",
-                    title: "Database init failed",
-                    message: (e as Error).message,
-                });
+                showToast({ level: "error", title: "Database init failed", message: (e as Error).message });
             }
         })();
     }, [showToast]);
@@ -147,8 +133,6 @@ export function App() {
         if (busy) return;
         try {
             const rows = await getClient().msgList(id);
-            // Ignore any legacy system rows on load — system content is
-            // derived per-send from current settings, not from history.
             const ms: ChatMessage[] = rows
                 .filter((r) => r.role === "user" || r.role === "model")
                 .map((r) => ({ role: r.role as ChatMessage["role"], content: r.content }));
@@ -160,12 +144,11 @@ export function App() {
         }
     }, [busy, showToast]);
 
-    const onCreateConversation = useCallback(async () => {
+    const onCreateConversation = useCallback(() => {
         if (busy) return;
         setMessages([]);
-        setActiveConvId(null); // a new row will be created on the next send
+        setActiveConvId(null);
         setStatusLine(undefined);
-        setHistoryOpen(false);
     }, [busy]);
 
     const onDeleteConversation = useCallback(async (id: string) => {
@@ -211,7 +194,6 @@ export function App() {
                     setLoadingLabel(fmtBytes(bytesWritten));
                 }
             });
-
             if (fromCache) {
                 beacon("chat", `OPFS cache hit (${fmtBytes(totalBytes)})`);
             } else {
@@ -225,27 +207,21 @@ export function App() {
                 maxContext: mobile ? mobileMaxCtx : 0,
                 textOnly:   mobile,
             });
-
             setModelStatus("ready");
             setStatusText(`${m.name}${fromCache ? " ⚡" : ""}`);
             setLoadingLabel("");
             showToast({
-                level: "success",
-                title: `Loaded ${m.name}`,
+                level: "success", title: `Loaded ${m.name}`,
                 message: fromCache ? "from OPFS cache" : `downloaded ${fmtBytes(totalBytes)}`,
             });
-            // Don't clobber messages here — selecting a conversation
-            // before loading the model is a valid flow.
         } catch (e) {
             const err = (e as Error).message ?? String(e);
             setModelStatus("error");
             setStatusText(`load failed: ${err}`);
             setLoadingLabel("");
             showToast({
-                id: "model-load-error",
-                level: "error",
-                title: "Model load failed",
-                message: err,
+                id: "model-load-error", level: "error",
+                title: "Model load failed", message: err,
             });
         }
     }, [dismissToast, showToast]);
@@ -260,18 +236,10 @@ export function App() {
         setPrompt("");
         setStatusLine(undefined);
 
-        // Compose the system message. When thinking mode is on, prepend
-        // <|think|> to whatever the user wrote (or stand alone if empty).
-        // This is silent — the displayed history doesn't show it.
         const sysContent = thinking
             ? (systemPrompt.trim() ? `${THINK_TOKEN}${systemPrompt.trim()}` : THINK_TOKEN)
             : systemPrompt.trim();
 
-        // Strip any system messages from local state when building the
-        // rendered prompt — the system block is derived from current
-        // settings (sysContent above), NOT from whatever was persisted
-        // earlier. That way toggling Thinking takes effect on the very
-        // next send, even after the chat has started.
         const userTurns = messages.filter((m) => m.role !== "system");
         const history: ChatMessage[] = [
             ...(sysContent ? [{ role: "system" as const, content: sysContent }] : []),
@@ -281,7 +249,6 @@ export function App() {
         ];
         setMessages(history);
 
-        // Ensure we have a conversation row to attach messages to.
         let convId = activeConvId;
         let modelMsgId: string | null = null;
         try {
@@ -293,24 +260,19 @@ export function App() {
                 convId = row.id;
                 setActiveConvId(convId);
             }
-            // Persist user/model turns only. The system message is derived
-            // from current settings (Thinking toggle, systemPrompt) on every
-            // send — it doesn't belong in long-term storage.
             await client.msgInsert({ conversationId: convId, role: "user", content: text });
             const modelInsert = await client.msgInsert({ conversationId: convId, role: "model", content: "" });
             modelMsgId = modelInsert.messageId;
         } catch (e) {
-            // Continue anyway — we'd rather generate without persistence than fail outright.
             showToast({ level: "warn", title: "Persistence failure", message: (e as Error).message });
         }
 
         try {
             await client.setSampling(sampling);
-            await client.reset();   // simple-correct: re-feed full history each Send
+            await client.reset();
             const rendered = await client.renderChat(history.slice(0, -1), false);
             const ids = await client.encode(rendered);
 
-            // Prompt-eval
             const t0 = performance.now();
             let next = 0;
             for (let i = 0; i < ids.length; i++) {
@@ -319,7 +281,6 @@ export function App() {
             }
             const peMs = performance.now() - t0;
 
-            // Generation
             const tg0 = performance.now();
             let emitted = 0;
             let curStr   = (await client.tokenStr(next)) ?? "";
@@ -341,12 +302,10 @@ export function App() {
                 pendingDelta += piece;
                 setMessages([...history]);
                 emitted++;
-
                 if ((emitted % 16 === 0) || (performance.now() - lastFlushAt > 750)) {
                     await flushPending();
                     lastFlushAt = performance.now();
                 }
-
                 const r = await client.stepAndDecode(next);
                 next     = r.next;
                 curStr   = r.str ?? "";
@@ -414,32 +373,53 @@ export function App() {
         void getClient().reset();
     }, [busy]);
 
+    // Active conversation title for the header.
+    const activeTitle = activeConvId
+        ? conversations.find((c) => c.id === activeConvId)?.title
+        : undefined;
+
     return (
         <div className="flex h-[100dvh] flex-col overflow-hidden bg-background text-foreground">
-            {/* Slim toolbar — title + history + settings. */}
-            <header className="flex items-center gap-2 border-b border-border bg-card/40 px-3 py-1.5 text-xs safe-top">
-                <span className="font-semibold tracking-tight">rullama</span>
-                <span
-                    className="ml-1 truncate text-xs text-muted-foreground"
-                    title={statusText}
+            {/* ─── top header (3rem / 48px tall — matches DualSidebarLayout offset) ─── */}
+            <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border bg-card/50 px-3 safe-top">
+                <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={() => setHistoryOpen(!historyOpen)}
+                    title="Toggle conversation history"
+                    aria-pressed={historyOpen}
                 >
-                    {modelStatus === "ready" ? statusText : ""}
-                </span>
-                <div className="ml-auto flex items-center gap-1">
+                    <History />
+                </Button>
+                <span className="font-semibold tracking-tight">rullama</span>
+                {activeTitle && (
+                    <span className="hidden truncate text-xs text-muted-foreground sm:inline">
+                        / {activeTitle}
+                    </span>
+                )}
+                <div className="ml-auto flex items-center gap-2">
+                    {modelStatus === "ready" && (
+                        <Badge
+                            tone="ok"
+                            className="hidden max-w-[14rem] truncate sm:inline-flex"
+                            title={statusText}
+                        >
+                            {statusText}
+                        </Badge>
+                    )}
+                    {modelStatus === "loading" && (
+                        <Badge tone="warn" className="max-w-[14rem] truncate">
+                            {loadingLabel || "loading…"}
+                        </Badge>
+                    )}
+                    {modelStatus === "error" && (
+                        <Badge tone="err">error</Badge>
+                    )}
                     <Button
                         variant="ghost"
                         size="icon"
-                        className="h-7 w-7"
-                        onClick={() => setHistoryOpen(!historyOpen)}
-                        title="Toggle conversation history"
-                        aria-pressed={historyOpen}
-                    >
-                        <History />
-                    </Button>
-                    <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7"
+                        className="h-8 w-8"
                         onClick={() => setSettingsOpen(!settingsOpen)}
                         title="Toggle settings"
                         aria-pressed={settingsOpen}
@@ -453,48 +433,55 @@ export function App() {
                 <ModelLoadProgress percent={loadingPercent} label={loadingLabel} />
             )}
 
-            {historyOpen && (
-                <ConversationList
-                    conversations={conversations}
-                    activeId={activeConvId}
-                    onSelect={(id) => { void onSelectConversation(id); setHistoryOpen(false); }}
-                    onCreate={onCreateConversation}
-                    onDelete={(id) => void onDeleteConversation(id)}
+            <DualSidebarLayout
+                leftOpen={historyOpen}
+                rightOpen={settingsOpen}
+                onToggleLeft={setHistoryOpen}
+                onToggleRight={setSettingsOpen}
+                leftWidth={280}
+                rightWidth={320}
+                leftSidebar={
+                    <ConversationList
+                        conversations={conversations}
+                        activeId={activeConvId}
+                        onSelect={(id) => { void onSelectConversation(id); }}
+                        onCreate={onCreateConversation}
+                        onDelete={(id) => void onDeleteConversation(id)}
+                    />
+                }
+                rightSidebar={
+                    <SettingsDialog
+                        modelStatus={modelStatus}
+                        loadingPercent={loadingPercent}
+                        loadingLabel={loadingLabel}
+                        statusText={statusText}
+                        onLoadModel={onLoad}
+                        onDeleteModel={onDeleteModel}
+                        systemPrompt={systemPrompt}
+                        onSystemPromptChange={setSystemPrompt}
+                        sampling={sampling}
+                        onSamplingChange={setSampling}
+                        maxTokens={maxTokens}
+                        onMaxTokensChange={setMaxTokens}
+                        thinking={thinking}
+                        onThinkingChange={setThinking}
+                    />
+                }
+            >
+                <ChatPanel
+                    messages={messages}
+                    canType={modelStatus === "ready"}
+                    canSend={modelStatus === "ready" && !busy && prompt.trim().length > 0}
+                    canStop={busy}
+                    canReset={modelStatus === "ready" && messages.length > 0 && !busy}
+                    prompt={prompt}
+                    onPromptChange={setPrompt}
+                    onSend={onSend}
+                    onStop={() => { cancelRef.current = true; }}
+                    onReset={onReset}
+                    statusLine={statusLine}
                 />
-            )}
-
-            {settingsOpen && (
-                <SettingsDialog
-                    modelStatus={modelStatus}
-                    loadingPercent={loadingPercent}
-                    loadingLabel={loadingLabel}
-                    statusText={statusText}
-                    onLoadModel={onLoad}
-                    onDeleteModel={onDeleteModel}
-                    systemPrompt={systemPrompt}
-                    onSystemPromptChange={setSystemPrompt}
-                    sampling={sampling}
-                    onSamplingChange={setSampling}
-                    maxTokens={maxTokens}
-                    onMaxTokensChange={setMaxTokens}
-                    thinking={thinking}
-                    onThinkingChange={setThinking}
-                />
-            )}
-
-            <ChatPanel
-                messages={messages}
-                canType={modelStatus === "ready"}
-                canSend={modelStatus === "ready" && !busy && prompt.trim().length > 0}
-                canStop={busy}
-                canReset={modelStatus === "ready" && messages.length > 0 && !busy}
-                prompt={prompt}
-                onPromptChange={setPrompt}
-                onSend={onSend}
-                onStop={() => { cancelRef.current = true; }}
-                onReset={onReset}
-                statusLine={statusLine}
-            />
+            </DualSidebarLayout>
         </div>
     );
 }
