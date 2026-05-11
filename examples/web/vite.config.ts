@@ -22,13 +22,23 @@ export default defineConfig({
             // Only precache the small static shell — the 7 GB GGUF is *not*
             // precached, it lives in OPFS via our own writer worker.
             workbox: {
-                // Take over from any prior SW immediately on install, so a
-                // soft refresh after a deploy doesn't keep serving stale
-                // precached responses (we hit exactly this when an earlier
-                // deploy cached CSS with the wrong Content-Type — only a
-                // hard reload would bypass the SW and fix the page).
+                // Take over from any prior SW immediately on install — a
+                // soft refresh after a deploy otherwise keeps serving
+                // stale precached responses (we hit exactly this when an
+                // earlier deploy cached CSS with the wrong Content-Type;
+                // only a hard reload bypassed the SW and fixed the page).
                 skipWaiting:  true,
                 clientsClaim: true,
+                // `cleanupOutdatedCaches` evicts cache buckets whose
+                // *prefix* no longer matches; bumping `cacheId` is what
+                // changes the prefix. Workbox precaches by URL+revision
+                // and refuses to refetch when both match — even if the
+                // server response (e.g. Content-Type) has since changed.
+                // Bump this suffix any time a deploy needs every device
+                // to drop the precache and start clean.
+                //   docs: https://developer.chrome.com/docs/workbox/modules/workbox-precaching
+                //   issue: https://github.com/GoogleChrome/workbox/issues/2757
+                cacheId: "rullama-v2",
                 cleanupOutdatedCaches: true,
                 globPatterns: ["**/*.{html,css,js,svg,png,webmanifest}"],
                 globIgnores:  ["**/pkg/**", "**/*.wasm"],
