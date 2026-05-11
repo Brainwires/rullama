@@ -34,4 +34,7 @@ fn main() {
     println!("  max_compute_workgroup_size_x            = {}", limits.max_compute_workgroup_size_x);
     println!("  max_storage_buffer_binding_size         = {}", limits.max_storage_buffer_binding_size);
     println!("  max_buffer_size                         = {}", limits.max_buffer_size);
+    println!("\nSubgroup adapter info:");
+    println!("  subgroup_min_size                       = {}", info.subgroup_min_size);
+    println!("  subgroup_max_size                       = {}", info.subgroup_max_size);
 }

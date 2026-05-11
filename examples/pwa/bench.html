@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>rullama WebGPU bench</title>
+<link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>⚡</text></svg>">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<style>
+  html, body { margin: 0; padding: 0; background: #0c0f12; color: #d9e0e6; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.4; }
+  #out { white-space: pre-wrap; padding: 14px; padding-bottom: 80px; }
+  .status { padding: 14px; border-bottom: 1px solid #233; position: sticky; top: 0; background: #0c0f12; }
+  .ok  { color: #6cc; } .err { color: #f88; } .warn { color: #fc6; }
+  button { background: #1d242b; color: #d9e0e6; border: 1px solid #3a4753; padding: 8px 14px; border-radius: 6px; font: inherit; }
+</style>
+</head>
+<body>
+<div class="status" id="status">init…</div>
+<div id="out"></div>
+<script>
+const out = document.getElementById("out");
+const status = document.getElementById("status");
+function log(msg, cls) {
+  const line = document.createElement("div");
+  if (cls) line.className = cls;
+  line.textContent = msg;
+  out.appendChild(line);
+  console.log(msg);
+}
+function setStatus(t, cls) {
+  status.textContent = t;
+  status.className = "status " + (cls || "");
+}
+
+// --- Mac-side result posting -------------------------------------------------
+// Bench page lives on the Mac dev server; results POST back to /api/bench-result
+// so the bench-on-iphone.sh script (running on the Mac) can collate output.
+const RUN_ID = (Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8));
+async function postResult(payload) {
+  try {
+    await fetch("/api/bench-result", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ run_id: RUN_ID, ...payload }),
+    });
+  } catch (e) {
+    log("postResult failed: " + e, "err");
+  }
+}
+
+// --- WGSL: minimal subset of the kernels we actually care about benching -----
+// f16-LDS batched matmul (the routed default on AMD GCN + has_f16). We embed
+// it inline so the bench page is self-contained — no wasm-pack build needed.
+const F16_MATMUL_BATCHED_TILED_V3_F16LDS = `
+enable f16;
+struct Params { k: u32, n: u32, batch: u32, _pad: u32 }
+@group(0) @binding(0) var<uniform>             params: Params;
+@group(0) @binding(1) var<storage, read>       weight: array<u32>;
+@group(0) @binding(2) var<storage, read>       x:      array<f32>;
+@group(0) @binding(3) var<storage, read_write> y:      array<f32>;
+const TILE_M: u32 = 32u; const TILE_N: u32 = 32u; const TILE_K: u32 = 16u;
+const THREADS_M: u32 = 8u; const THREADS_N: u32 = 8u;
+var<workgroup> x_tile: array<f16, 512>;
+var<workgroup> w_tile: array<f16, 512>;
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wg_id: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let tid = lid.x; let wg_n = wg_id.x; let wg_m = wg_id.y;
+  let tm = tid / THREADS_N; let tn = tid % THREADS_N;
+  let half_k = params.k / 2u;
+  var acc: array<f32, 16>;
+  for (var i: u32 = 0u; i < 16u; i = i + 1u) { acc[i] = 0.0; }
+  let n_k_iters = (params.k + TILE_K - 1u) / TILE_K;
+  for (var iter: u32 = 0u; iter < n_k_iters; iter = iter + 1u) {
+    let k_offset = iter * TILE_K;
+    for (var s: u32 = 0u; s < 8u; s = s + 1u) {
+      let i = tid * 8u + s; let mx = i / TILE_K; let kx = i % TILE_K;
+      let xr = wg_m * TILE_M + mx; let xk = k_offset + kx;
+      if (xr < params.batch && xk < params.k) { x_tile[i] = f16(x[xr * params.k + xk]); }
+      else { x_tile[i] = f16(0.0); }
+    }
+    for (var s: u32 = 0u; s < 4u; s = s + 1u) {
+      let pid = tid * 4u + s; let nw = pid / 8u; let kp = pid % 8u;
+      let wcol = wg_n * TILE_N + nw; let pi = (k_offset / 2u) + kp;
+      if (wcol < params.n && pi < half_k) {
+        let packed = weight[wcol * half_k + pi];
+        let pair = unpack2x16float(packed);
+        w_tile[nw * TILE_K + 2u * kp]      = f16(pair.x);
+        w_tile[nw * TILE_K + 2u * kp + 1u] = f16(pair.y);
+      } else {
+        w_tile[nw * TILE_K + 2u * kp]      = f16(0.0);
+        w_tile[nw * TILE_K + 2u * kp + 1u] = f16(0.0);
+      }
+    }
+    workgroupBarrier();
+    let m0 = tm * 4u; let n0 = tn * 4u;
+    for (var kk: u32 = 0u; kk < TILE_K; kk = kk + 1u) {
+      let x0 = x_tile[(m0) * TILE_K + kk]; let x1 = x_tile[(m0+1u) * TILE_K + kk];
+      let x2 = x_tile[(m0+2u) * TILE_K + kk]; let x3 = x_tile[(m0+3u) * TILE_K + kk];
+      let w0 = w_tile[(n0) * TILE_K + kk]; let w1 = w_tile[(n0+1u) * TILE_K + kk];
+      let w2 = w_tile[(n0+2u) * TILE_K + kk]; let w3 = w_tile[(n0+3u) * TILE_K + kk];
+      acc[ 0] += f32(x0*w0); acc[ 1] += f32(x0*w1); acc[ 2] += f32(x0*w2); acc[ 3] += f32(x0*w3);
+      acc[ 4] += f32(x1*w0); acc[ 5] += f32(x1*w1); acc[ 6] += f32(x1*w2); acc[ 7] += f32(x1*w3);
+      acc[ 8] += f32(x2*w0); acc[ 9] += f32(x2*w1); acc[10] += f32(x2*w2); acc[11] += f32(x2*w3);
+      acc[12] += f32(x3*w0); acc[13] += f32(x3*w1); acc[14] += f32(x3*w2); acc[15] += f32(x3*w3);
+    }
+    workgroupBarrier();
+  }
+  let m_base = wg_m * TILE_M + tm * 4u; let n_base = wg_n * TILE_N + tn * 4u;
+  for (var dm: u32 = 0u; dm < 4u; dm = dm + 1u) {
+    for (var dn: u32 = 0u; dn < 4u; dn = dn + 1u) {
+      let m = m_base + dm; let n = n_base + dn;
+      if (m < params.batch && n < params.n) { y[m * params.n + n] = acc[dm * 4u + dn]; }
+    }
+  }
+}`;
+
+// f32-LDS variant for adapters without SHADER_F16.
+const F16_MATMUL_BATCHED_TILED_V3 = `
+struct Params { k: u32, n: u32, batch: u32, _pad: u32 }
+@group(0) @binding(0) var<uniform>             params: Params;
+@group(0) @binding(1) var<storage, read>       weight: array<u32>;
+@group(0) @binding(2) var<storage, read>       x:      array<f32>;
+@group(0) @binding(3) var<storage, read_write> y:      array<f32>;
+const TILE_M: u32 = 32u; const TILE_N: u32 = 32u; const TILE_K: u32 = 16u;
+const THREADS_M: u32 = 8u; const THREADS_N: u32 = 8u;
+var<workgroup> x_tile: array<f32, 512>;
+var<workgroup> w_tile: array<f32, 512>;
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wg_id: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let tid = lid.x; let wg_n = wg_id.x; let wg_m = wg_id.y;
+  let tm = tid / THREADS_N; let tn = tid % THREADS_N;
+  let half_k = params.k / 2u;
+  var acc: array<f32, 16>;
+  for (var i: u32 = 0u; i < 16u; i = i + 1u) { acc[i] = 0.0; }
+  let n_k_iters = (params.k + TILE_K - 1u) / TILE_K;
+  for (var iter: u32 = 0u; iter < n_k_iters; iter = iter + 1u) {
+    let k_offset = iter * TILE_K;
+    for (var s: u32 = 0u; s < 8u; s = s + 1u) {
+      let i = tid * 8u + s; let mx = i / TILE_K; let kx = i % TILE_K;
+      let xr = wg_m * TILE_M + mx; let xk = k_offset + kx;
+      if (xr < params.batch && xk < params.k) { x_tile[i] = x[xr * params.k + xk]; }
+      else { x_tile[i] = 0.0; }
+    }
+    for (var s: u32 = 0u; s < 4u; s = s + 1u) {
+      let pid = tid * 4u + s; let nw = pid / 8u; let kp = pid % 8u;
+      let wcol = wg_n * TILE_N + nw; let pi = (k_offset / 2u) + kp;
+      if (wcol < params.n && pi < half_k) {
+        let packed = weight[wcol * half_k + pi];
+        let pair = unpack2x16float(packed);
+        w_tile[nw * TILE_K + 2u * kp]      = pair.x;
+        w_tile[nw * TILE_K + 2u * kp + 1u] = pair.y;
+      } else {
+        w_tile[nw * TILE_K + 2u * kp]      = 0.0;
+        w_tile[nw * TILE_K + 2u * kp + 1u] = 0.0;
+      }
+    }
+    workgroupBarrier();
+    let m0 = tm * 4u; let n0 = tn * 4u;
+    for (var kk: u32 = 0u; kk < TILE_K; kk = kk + 1u) {
+      let x0 = x_tile[(m0) * TILE_K + kk]; let x1 = x_tile[(m0+1u) * TILE_K + kk];
+      let x2 = x_tile[(m0+2u) * TILE_K + kk]; let x3 = x_tile[(m0+3u) * TILE_K + kk];
+      let w0 = w_tile[(n0) * TILE_K + kk]; let w1 = w_tile[(n0+1u) * TILE_K + kk];
+      let w2 = w_tile[(n0+2u) * TILE_K + kk]; let w3 = w_tile[(n0+3u) * TILE_K + kk];
+      acc[ 0] += x0*w0; acc[ 1] += x0*w1; acc[ 2] += x0*w2; acc[ 3] += x0*w3;
+      acc[ 4] += x1*w0; acc[ 5] += x1*w1; acc[ 6] += x1*w2; acc[ 7] += x1*w3;
+      acc[ 8] += x2*w0; acc[ 9] += x2*w1; acc[10] += x2*w2; acc[11] += x2*w3;
+      acc[12] += x3*w0; acc[13] += x3*w1; acc[14] += x3*w2; acc[15] += x3*w3;
+    }
+    workgroupBarrier();
+  }
+  let m_base = wg_m * TILE_M + tm * 4u; let n_base = wg_n * TILE_N + tn * 4u;
+  for (var dm: u32 = 0u; dm < 4u; dm = dm + 1u) {
+    for (var dn: u32 = 0u; dn < 4u; dn = dn + 1u) {
+      let m = m_base + dm; let n = n_base + dn;
+      if (m < params.batch && n < params.n) { y[m * params.n + n] = acc[dm * 4u + dn]; }
+    }
+  }
+}`;
+
+// ---------------------------------------------------------------------------
+async function main() {
+  setStatus("checking environment…", "warn");
+  // Report environment state up front so a quick log-only POST lets the
+  // Mac-side script diagnose what's wrong without needing the device in hand.
+  const env = {
+    ua:                  navigator.userAgent,
+    href:                location.href,
+    origin:              location.origin,
+    protocol:            location.protocol,
+    isSecureContext:     window.isSecureContext,
+    crossOriginIsolated: window.crossOriginIsolated,
+    has_navigator_gpu:   typeof navigator.gpu !== "undefined",
+    has_GPUAdapter:      typeof GPUAdapter !== "undefined",
+    has_GPU:             typeof GPU !== "undefined",
+  };
+  log("env: " + JSON.stringify(env, null, 2));
+  await postResult({ event: "env", env });
+
+  setStatus("requesting WebGPU adapter…", "warn");
+  if (!navigator.gpu) {
+    setStatus("ERROR: navigator.gpu is undefined", "err");
+    if (!window.isSecureContext) {
+      log("Page is NOT a secure context — WebGPU is gated on HTTPS/localhost.", "err");
+      log("Fix: switch the Mac dev server to HTTPS (self-signed cert) or use localhost.", "err");
+    } else {
+      log("Safari → Apps → Safari → Advanced → Feature Flags → WebGPU?", "err");
+    }
+    await postResult({ event: "no_webgpu", env });
+    return;
+  }
+
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+  if (!adapter) {
+    setStatus("ERROR: no GPU adapter", "err");
+    await postResult({ event: "no_adapter", ua: navigator.userAgent });
+    return;
+  }
+
+  // Feature negotiation — try to get shader-f16, fall back if not available.
+  const wantF16 = adapter.features.has("shader-f16");
+  const features = wantF16 ? ["shader-f16"] : [];
+  const limits = {
+    maxStorageBufferBindingSize: Math.min(adapter.limits.maxStorageBufferBindingSize, 1 << 30),
+    maxBufferSize:                Math.min(adapter.limits.maxBufferSize,                1 << 30),
+    maxComputeWorkgroupStorageSize: adapter.limits.maxComputeWorkgroupStorageSize,
+    maxComputeInvocationsPerWorkgroup: adapter.limits.maxComputeInvocationsPerWorkgroup,
+  };
+  const device = await adapter.requestDevice({
+    requiredFeatures: features,
+    requiredLimits: {
+      maxStorageBufferBindingSize: limits.maxStorageBufferBindingSize,
+      maxBufferSize: limits.maxBufferSize,
+    },
+  });
+
+  const info = {
+    vendor:        adapter.info?.vendor || "",
+    architecture:  adapter.info?.architecture || "",
+    device:        adapter.info?.device || "",
+    description:   adapter.info?.description || "",
+    has_f16:       wantF16,
+    limits,
+    features: Array.from(adapter.features).sort(),
+    ua: navigator.userAgent,
+  };
+  log("adapter: " + JSON.stringify(info.vendor || "(no vendor)") + " / " +
+      JSON.stringify(info.architecture || info.device || info.description || ""));
+  log("features: " + info.features.join(", "));
+  log("limits.maxStorageBufferBindingSize = " + limits.maxStorageBufferBindingSize);
+  log("limits.maxComputeWorkgroupStorageSize = " + limits.maxComputeWorkgroupStorageSize);
+  log("has_f16 = " + wantF16);
+  await postResult({ event: "adapter", info });
+
+  setStatus("compiling kernels…", "warn");
+
+  const shaderSrc = wantF16 ? F16_MATMUL_BATCHED_TILED_V3_F16LDS : F16_MATMUL_BATCHED_TILED_V3;
+  let module;
+  try {
+    module = device.createShaderModule({ code: shaderSrc });
+    // Wait for compilation status to surface any errors.
+    const compInfo = await module.getCompilationInfo();
+    for (const m of compInfo.messages) {
+      log("[shader " + m.type + "] " + m.message, m.type === "error" ? "err" : "warn");
+    }
+  } catch (e) {
+    setStatus("shader compile failed", "err");
+    log(String(e), "err");
+    await postResult({ event: "shader_error", error: String(e), shader: wantF16 ? "f16" : "f32" });
+    return;
+  }
+  const pipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module, entryPoint: "main" },
+  });
+  log("pipeline ok (variant: " + (wantF16 ? "f16-LDS" : "f32-LDS") + ")");
+
+  setStatus("running bench…", "warn");
+
+  const shapes = [
+    { label: "attn QKV  768x768  ",  k: 768,  n:  768, batch: 2304 },
+    { label: "attn out  768x768  ",  k: 768,  n:  768, batch: 2304 },
+    { label: "ffn up    768x3072 ",  k: 768,  n: 3072, batch: 2304 },
+    { label: "ffn down  3072x768 ",  k: 3072, n:  768, batch: 2304 },
+  ];
+
+  for (const shape of shapes) {
+    const { label, k, n, batch } = shape;
+    // Allocate buffers.
+    const w_pairs = Math.max(1, (k * n / 2) | 0);
+    const wBuf = device.createBuffer({ size: w_pairs * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    const wInit = new Uint32Array(w_pairs).fill(0x33333333);
+    device.queue.writeBuffer(wBuf, 0, wInit);
+    const xBuf = device.createBuffer({ size: batch * k * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    const xInit = new Float32Array(batch * k).fill(0.01);
+    device.queue.writeBuffer(xBuf, 0, xInit);
+    const yBuf = device.createBuffer({ size: batch * n * 4, usage: GPUBufferUsage.STORAGE });
+    const pBuf = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(pBuf, 0, new Uint32Array([k, n, batch, 0]));
+
+    const bg = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: pBuf } },
+        { binding: 1, resource: { buffer: wBuf } },
+        { binding: 2, resource: { buffer: xBuf } },
+        { binding: 3, resource: { buffer: yBuf } },
+      ],
+    });
+
+    const dispatchX = Math.ceil(n / 32);
+    const dispatchY = Math.ceil(batch / 32);
+
+    // Warmup × 3
+    for (let i = 0; i < 3; i++) {
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(dispatchX, dispatchY, 1);
+      pass.end();
+      device.queue.submit([enc.finish()]);
+    }
+    await device.queue.onSubmittedWorkDone();
+
+    // Timed × N
+    const ITERS = 5;
+    const t0 = performance.now();
+    for (let i = 0; i < ITERS; i++) {
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(dispatchX, dispatchY, 1);
+      pass.end();
+      device.queue.submit([enc.finish()]);
+    }
+    await device.queue.onSubmittedWorkDone();
+    const elapsed = performance.now() - t0;
+    const perMs = elapsed / ITERS;
+    const flops = 2 * k * n * batch;
+    const gflops = flops / (perMs / 1000) / 1e9;
+    const line = `${label} k=${String(k).padStart(4)} n=${String(n).padStart(4)} batch=${String(batch).padStart(4)} | ${perMs.toFixed(2)} ms/iter   ${gflops.toFixed(1)} GFLOPS`;
+    log(line, "ok");
+    await postResult({ event: "bench", shape, ms_per_iter: perMs, gflops });
+
+    wBuf.destroy(); xBuf.destroy(); yBuf.destroy(); pBuf.destroy();
+  }
+
+  setStatus("done ✓", "ok");
+  log("");
+  log("--- bench complete ---");
+  await postResult({ event: "done" });
+}
+
+main().catch(e => {
+  setStatus("FATAL", "err");
+  log(String(e), "err");
+  log(e.stack || "", "err");
+  postResult({ event: "fatal", error: String(e), stack: e.stack || "" });
+});
+</script>
+</body>
+</html>
