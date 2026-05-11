@@ -1,9 +1,11 @@
 import { Textarea } from "@/components/ui/textarea";
 import { Slider } from "@/components/ui/slider";
+import { Button } from "@/components/ui/button";
 import { ModelLoader, type ModelStatus } from "@/components/ModelLoader";
 import { type SamplingOptions } from "@/lib/types";
 import { type ModelEntry } from "@/lib/api";
 import { clampInt, clampNum } from "@/lib/utils";
+import { RotateCcw } from "lucide-react";
 
 // Hard bounds — also used by App.tsx to normalize old persisted values on
 // boot. Keep these conservative; users with a real need can edit the JSON
@@ -34,6 +36,9 @@ interface Props {
     onMaxTokensChange: (n: number) => void;
     thinking: boolean;
     onThinkingChange: (b: boolean) => void;
+
+    /** Reset systemPrompt + sampling + maxTokens + thinking to defaults. */
+    onResetDefaults: () => void;
 }
 
 /** Full-height sidebar: Model + Generation settings, sections scroll. */
@@ -44,10 +49,24 @@ export function SettingsDialog(props: Props) {
 
     return (
         <div className="flex h-full min-h-0 flex-col">
-            <header className="border-b border-border px-3 py-2">
+            <header className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
                 <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                     Settings
                 </span>
+                <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => {
+                        if (window.confirm("Reset system prompt, sampling, max tokens, and thinking mode to defaults?")) {
+                            props.onResetDefaults();
+                        }
+                    }}
+                    title="Reset all generation settings to defaults"
+                >
+                    <RotateCcw />
+                    Defaults
+                </Button>
             </header>
 
             <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-3 py-3">

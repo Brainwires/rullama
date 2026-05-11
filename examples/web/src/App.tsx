@@ -159,6 +159,17 @@ export function App() {
         }
     }, [busy, showToast]);
 
+    const onResetDefaults = useCallback(() => {
+        setSystemPrompt("");
+        setSampling(DEFAULT_SAMPLING);
+        setMaxTokens(SETTINGS_BOUNDS.maxTokens.fallback);
+        setThinking(false);
+        showToast({
+            level: "success",
+            title: "Settings reset to defaults",
+        });
+    }, [setSystemPrompt, setSampling, setMaxTokens, setThinking, showToast]);
+
     const onCreateConversation = useCallback(() => {
         if (busy) return;
         setMessages([]);
@@ -481,6 +492,7 @@ export function App() {
                         onMaxTokensChange={setMaxTokens}
                         thinking={thinking}
                         onThinkingChange={setThinking}
+                        onResetDefaults={onResetDefaults}
                     />
                 }
             >
