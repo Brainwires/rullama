@@ -74,8 +74,10 @@ export function App() {
         if (busy) return;
         try {
             const rows = await getClient().msgList(id);
+            // Ignore any legacy system rows on load — system content is
+            // derived per-send from current settings, not from history.
             const ms: ChatMessage[] = rows
-                .filter((r) => r.role === "user" || r.role === "model" || r.role === "system")
+                .filter((r) => r.role === "user" || r.role === "model")
                 .map((r) => ({ role: r.role as ChatMessage["role"], content: r.content }));
             setMessages(ms);
             setActiveConvId(id);
@@ -175,18 +177,20 @@ export function App() {
 
         // Compose the system message. When thinking mode is on, prepend
         // <|think|> to whatever the user wrote (or stand alone if empty).
-        // This is silent — the displayed history below uses `messages`,
-        // which has no system entry to begin with.
+        // This is silent — the displayed history doesn't show it.
         const sysContent = thinking
             ? (systemPrompt.trim() ? `${THINK_TOKEN}${systemPrompt.trim()}` : THINK_TOKEN)
             : systemPrompt.trim();
 
-        // Build the new history list with the user turn appended.
+        // Strip any system messages from local state when building the
+        // rendered prompt — the system block is derived from current
+        // settings (sysContent above), NOT from whatever was persisted
+        // earlier. That way toggling Thinking takes effect on the very
+        // next send, even after the chat has started.
+        const userTurns = messages.filter((m) => m.role !== "system");
         const history: ChatMessage[] = [
-            ...(sysContent && messages.length === 0
-                ? [{ role: "system" as const, content: sysContent }]
-                : []),
-            ...messages,
+            ...(sysContent ? [{ role: "system" as const, content: sysContent }] : []),
+            ...userTurns,
             { role: "user", content: text },
             { role: "model", content: "" },
         ];
@@ -204,10 +208,9 @@ export function App() {
                 convId = row.id;
                 setActiveConvId(convId);
             }
-            // Persist the user turn (full content known) and an empty model turn.
-            if (sysContent && messages.length === 0) {
-                await client.msgInsert({ conversationId: convId, role: "system", content: sysContent });
-            }
+            // Persist user/model turns only. The system message is derived
+            // from current settings (Thinking toggle, systemPrompt) on every
+            // send — it doesn't belong in long-term storage.
             await client.msgInsert({ conversationId: convId, role: "user", content: text });
             const modelInsert = await client.msgInsert({ conversationId: convId, role: "model", content: "" });
             modelMsgId = modelInsert.messageId;
