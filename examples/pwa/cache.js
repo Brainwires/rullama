@@ -105,17 +105,37 @@ export async function fetchAndCache(url, digest, name, onProgress) {
     if (!res.ok) throw new Error(`fetch ${url} → ${res.status}`);
     const total = parseInt(res.headers.get("Content-Length") || "0", 10);
 
+    // Stream chunks into intermediate Blobs every ~32 MB so the runtime can
+    // spill them to disk-backed storage. iOS Safari's WebContent process gets
+    // killed around ~2 GB of live JS memory; for a 7 GB model we must NOT
+    // keep every fetched chunk pinned in an Array<Uint8Array> until the end.
+    // Concatenating an Array<Blob> with `new Blob(...)` doesn't copy bytes
+    // (it stores references), so the final Blob is effectively free.
+    const FLUSH_BYTES = 32 * 1024 * 1024; // 32 MiB per spill
     const reader = res.body.getReader();
-    const chunks = [];
+    const blobParts = [];          // Blob chunks, disk-spillable
+    let pending = [];              // Uint8Array fragments not yet wrapped
+    let pendingSize = 0;
     let received = 0;
     while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        chunks.push(value);
+        pending.push(value);
+        pendingSize += value.byteLength;
         received += value.byteLength;
+        if (pendingSize >= FLUSH_BYTES) {
+            blobParts.push(new Blob(pending));
+            pending = [];
+            pendingSize = 0;
+        }
         onProgress?.(received, total);
     }
-    const blob = new Blob(chunks);
+    if (pendingSize > 0) {
+        blobParts.push(new Blob(pending));
+        pending = [];
+        pendingSize = 0;
+    }
+    const blob = new Blob(blobParts);
 
     try {
         await putCachedBlob(digest, name, blob);

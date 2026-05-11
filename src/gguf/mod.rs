@@ -18,6 +18,8 @@ pub use dtype::GgmlDtype;
 pub use fetcher::{InMemoryFetcher, TensorFetcher};
 #[cfg(target_arch = "wasm32")]
 pub use fetcher::HttpRangeFetcher;
+#[cfg(target_arch = "wasm32")]
+pub use fetcher::OpfsFetcher;
 pub use reader::{GgufReader, TensorDesc};
 pub use tensor::{
     dequant_row_to_f32, dequant_row_to_f32_async,

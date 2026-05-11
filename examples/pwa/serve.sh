@@ -119,6 +119,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        # Dev mode: never let Safari/Chrome cache the wasm bundle or page JS.
+        # Without this iOS Safari will happily serve a stale rullama.js with
+        # the wrong wasm-bindgen exports after a rebuild.
+        path = getattr(self, "path", "") or ""
+        if path.endswith((".js", ".html", ".wasm", ".d.ts", ".css", ".mjs")):
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
         super().end_headers()
 
     def log_message(self, fmt, *args):

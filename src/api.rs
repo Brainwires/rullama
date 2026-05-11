@@ -279,6 +279,28 @@ impl Model {
         Self::load_streaming(arc).await.map_err(|e| JsError::new(&format!("{e}")))
     }
 
+    /// JS entry point: stream the GGUF from a file the host has already saved to
+    /// OPFS (Origin Private File System). `read_fn` is a JS callback with signature
+    /// `(offset_f64, len_f64) -> Promise<Uint8Array> | Uint8Array`. `total_bytes`
+    /// is the file's full size (caller knows this from the OPFS file handle).
+    ///
+    /// This is the path that bypasses iOS Safari's ~5.6 GiB single-Blob cap and
+    /// ~2 GiB live-JS-heap cap — bytes are read directly from the disk-backed
+    /// OPFS file in slices and never aggregate in JS memory.
+    #[wasm_bindgen(js_name = loadFromOpfs)]
+    pub async fn load_from_opfs_js(
+        read_fn: js_sys::Function,
+        total_bytes: f64,
+    ) -> std::result::Result<Model, JsError> {
+        if !total_bytes.is_finite() || total_bytes < 0.0 {
+            return Err(JsError::new("loadFromOpfs: total_bytes must be a non-negative finite number"));
+        }
+        let total = total_bytes as u64;
+        let fetcher = crate::gguf::OpfsFetcher::new(read_fn, total);
+        let arc: std::sync::Arc<dyn crate::gguf::TensorFetcher> = std::sync::Arc::new(fetcher);
+        Self::load_streaming(arc).await.map_err(|e| JsError::new(&format!("{e}")))
+    }
+
     #[wasm_bindgen(js_name = encode)]
     pub fn encode_js(&self, text: &str) -> Vec<u32> { self.encode_tokens(text) }
 

@@ -141,7 +141,8 @@
 
 <script type="module">
 import init, { Model, computeSpike } from "/pkg/rullama.js";
-import { fetchAndCache, listCached, deleteCached } from "./cache.js";
+import { ensureModel, getReadFn, opfsSupported, listOpfs, deleteOpfs,
+         opfsQuota, requestPersistent, wipeAllOpfs } from "./opfs-store.js";
 import { preprocessImage } from "./image_preprocess.js";
 
 const $ = (id) => document.getElementById(id);
@@ -231,21 +232,18 @@ async function refreshModels() {
 $("refresh-btn").addEventListener("click", refreshModels);
 await refreshModels();
 
-// 5) Model load — IndexedDB cache + Range-streamed wasm load
+// 5) Model load — OPFS-backed streaming load
 //
-// Two paths:
-//   * Cache hit → wrap the on-disk Blob in a blob: URL and hand that to
-//     Model.loadFromUrl. Modern Chrome/Firefox honor Range requests against
-//     blob: URLs, so the wasm32 4 GB cap stays respected.
-//   * Cache miss → fetchAndCache streams the model into IndexedDB, then we
-//     use the same blob: URL path so subsequent reloads are instant.
+// The IndexedDB / Blob path used to live here but hit two implicit iOS Safari
+// caps for GGUFs > ~2 GiB (live-JS-heap limit) and > ~5.6 GiB (combined Blob
+// size). The OPFS path bypasses both: the writer worker streams the file
+// straight to disk via `FileSystemSyncAccessHandle.write()`, and the read
+// side uses `file.slice().arrayBuffer()` so bytes never aggregate in JS
+// memory. Resumable too — if the writer is interrupted, the next start
+// continues from the existing offset.
 let model = null;
 let modelMeta = null;     // { name, digest } of the currently-loaded model
-let blobUrlInUse = null;  // revoked when a new model loads or page unloads
-
-window.addEventListener("beforeunload", () => {
-    if (blobUrlInUse) URL.revokeObjectURL(blobUrlInUse);
-});
+let readFnInUse = null;   // keep the Function alive while Model holds it
 
 $("load-btn").addEventListener("click", async () => {
     const name = $("model-select").value;
@@ -271,42 +269,73 @@ $("load-btn").addEventListener("click", async () => {
     progLabel.textContent = "checking cache…";
 
     try {
-        // Free any prior blob URL.
-        if (blobUrlInUse) { URL.revokeObjectURL(blobUrlInUse); blobUrlInUse = null; }
         if (model) { model.free?.(); model = null; }
+        readFnInUse = null;
 
+        if (!(await opfsSupported())) {
+            throw new Error("OPFS not supported in this browser — required for models > ~2 GB on iOS Safari");
+        }
+
+        // Probe + request persistent storage so we get the full origin quota
+        // instead of an evictable best-effort one. Safari's WebDriver context
+        // may decline; log either way.
+        await requestPersistent();
+        const q0 = await opfsQuota();
+        log($("model-log"),
+            `OPFS quota: ${fmtBytes(q0.usage)} used / ${fmtBytes(q0.quota)} total — persisted=${q0.persisted}`);
+
+        // If the persisted quota can't hold the model, wipe stale entries
+        // and re-check. WebDriver sessions sometimes leave orphan OPFS
+        // data from prior runs that doesn't get evicted automatically.
+        if (q0.quota > 0 && q0.usage + totalSize > q0.quota * 0.95) {
+            log($("model-log"), `quota tight — wiping rullama-models/ before download`);
+            await wipeAllOpfs();
+            const q1 = await opfsQuota();
+            log($("model-log"),
+                `after wipe: ${fmtBytes(q1.usage)} used / ${fmtBytes(q1.quota)} total`);
+        }
+
+        // Use the digest as the OPFS dirname (stable per blob), and a sanitized
+        // model name as the filename (purely for human inspection — the read
+        // path is keyed by digest anyway).
+        const modelKey = digest.replace(/[^A-Za-z0-9_.-]/g, "_");
+        const filename = name.replace(/[^A-Za-z0-9_.-]/g, "_") + ".gguf";
         const url = "/api/blob/" + encodeURIComponent(name);
+
         const dlT0 = performance.now();
-        const { blob, fromCache } = await fetchAndCache(url, digest, name, (received, total) => {
-            const t = total || totalSize;
+        progLabel.textContent = "checking OPFS…";
+        const { totalBytes, fromCache } = await ensureModel(url, modelKey, filename, ({ bytesWritten, totalBytes }) => {
+            const t = totalBytes || totalSize;
             if (t > 0) {
-                prog.value = (received / t) * 100;
+                prog.value = (bytesWritten / t) * 100;
                 const elapsed = (performance.now() - dlT0) / 1000;
-                const rate = received / Math.max(elapsed, 0.001);
+                const rate = bytesWritten / Math.max(elapsed, 0.001);
                 progLabel.textContent =
-                    `${fmtBytes(received)} / ${fmtBytes(t)} — ${fmtBytes(rate)}/s`;
+                    `${fmtBytes(bytesWritten)} / ${fmtBytes(t)} — ${fmtBytes(rate)}/s`;
             } else {
-                progLabel.textContent = fmtBytes(received);
+                progLabel.textContent = fmtBytes(bytesWritten);
             }
         });
         if (fromCache) {
-            log($("model-log"), `cache hit (${fmtBytes(blob.size)}) — skipping network fetch`);
+            log($("model-log"), `OPFS cache hit (${fmtBytes(totalBytes)}) — skipping network fetch`);
         } else {
             const dt = (performance.now() - dlT0) / 1000;
             log($("model-log"),
-                `downloaded ${fmtBytes(blob.size)} in ${dt.toFixed(1)}s — saved to IndexedDB`);
+                `downloaded ${fmtBytes(totalBytes)} in ${dt.toFixed(1)}s — saved to OPFS`);
         }
 
-        // Wrap the cached/just-fetched Blob in a URL the Rust side can hit with
-        // Range requests via fetch().
-        blobUrlInUse = URL.createObjectURL(blob);
         progLabel.textContent = "loading into wasm…";
 
+        // Build the OPFS-backed readFn and hand it to Rust. The closure must
+        // outlive the Model, so we stash it on a module-scoped variable.
+        const { readFn, totalBytes: actualTotal } = await getReadFn(modelKey, filename);
+        readFnInUse = readFn;
+
         const t1 = performance.now();
-        model = await Model.loadFromUrl(blobUrlInUse);
+        model = await Model.loadFromOpfs(readFn, actualTotal);
         const dtLoad = (performance.now() - t1) / 1000;
         log($("model-log"),
-            `Model.loadFromUrl done in ${dtLoad.toFixed(1)}s — vocab=${model.vocabSize}`);
+            `Model.loadFromOpfs done in ${dtLoad.toFixed(1)}s — vocab=${model.vocabSize}`);
 
         modelMeta = { name, digest };
         setPill($("model-status"), `ready: ${name}${fromCache ? " (cached)" : ""}`, "ok");
@@ -334,7 +363,7 @@ async function refreshCachedPanel() {
     const panel = $("cached-panel");
     if (!panel) return;
     let entries = [];
-    try { entries = await listCached(); } catch (_) { /* ignore */ }
+    try { entries = await listOpfs(); } catch (_) { /* ignore */ }
     if (entries.length === 0) {
         panel.innerHTML = `<small>no cached models yet</small>`;
         return;
@@ -346,14 +375,14 @@ async function refreshCachedPanel() {
         const row = document.createElement("div");
         row.className = "row";
         row.innerHTML =
-            `<span class="grow">${e.name}</span>` +
+            `<span class="grow">${e.filename}</span>` +
             `<small>${fmtBytes(e.size)}</small>` +
-            `<button class="danger" data-digest="${e.digest}">remove</button>`;
+            `<button class="danger" data-key="${e.modelKey}">remove</button>`;
         row.querySelector("button").addEventListener("click", async (ev) => {
-            const d = ev.currentTarget.dataset.digest;
-            await deleteCached(d);
+            const key = ev.currentTarget.dataset.key;
+            await deleteOpfs(key);
             await refreshCachedPanel();
-            log($("model-log"), `removed cached model (digest ${d.slice(0,12)}…)`);
+            log($("model-log"), `removed cached model (key ${key.slice(0,16)}…)`);
         });
         panel.appendChild(row);
     }

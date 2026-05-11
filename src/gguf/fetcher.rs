@@ -220,6 +220,89 @@ impl TensorFetcher for HttpRangeFetcher {
     }
 }
 
+// ---------- OpfsFetcher (wasm32-only) ----------
+
+/// Browser-side fetcher backed by a JS callback that resolves ranges from an
+/// **OPFS** (Origin Private File System) file.
+///
+/// Why this exists: iOS Safari silently caps a combined Blob at ~5.6 GiB and
+/// kills the WebContent process around ~2 GiB of *live* JS memory — both apply
+/// during the IndexedDB-Blob path used by `HttpRangeFetcher` callers that
+/// cache. OPFS sidesteps both: bytes are written through a
+/// `FileSystemSyncAccessHandle` in a Worker (no JS-heap residency) and reads
+/// go through `file.slice(offset, end).arrayBuffer()` (disk-backed, also no
+/// JS-heap residency for the source).
+///
+/// The wasm side never touches OPFS directly — it calls into the JS
+/// `read_fn(offset_f64, len_f64) -> Promise<Uint8Array>` callback. JS owns the
+/// `FileSystemFileHandle` lifetime; this struct just holds the callback and
+/// the total file size (passed in at construction time so the GGUF parser can
+/// bounds-check without a round-trip).
+#[cfg(target_arch = "wasm32")]
+pub struct OpfsFetcher {
+    read_fn: js_sys::Function,
+    total: u64,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl OpfsFetcher {
+    pub fn new(read_fn: js_sys::Function, total: u64) -> Self {
+        Self { read_fn, total }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[async_trait(?Send)]
+impl TensorFetcher for OpfsFetcher {
+    fn total_len(&self) -> u64 {
+        self.total
+    }
+
+    async fn fetch(&self, offset: u64, len: u64) -> Result<Vec<u8>> {
+        use wasm_bindgen::{JsCast, JsValue};
+        use wasm_bindgen_futures::JsFuture;
+
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let end = offset.checked_add(len).ok_or_else(|| {
+            RullamaError::Gguf(format!("OpfsFetcher: range overflow {offset}+{len}"))
+        })?;
+        if end > self.total {
+            return Err(RullamaError::Gguf(format!(
+                "OpfsFetcher: range {offset}..{end} extends past file end ({})",
+                self.total
+            )));
+        }
+
+        let result = self.read_fn.call2(
+            &JsValue::NULL,
+            &JsValue::from_f64(offset as f64),
+            &JsValue::from_f64(len as f64),
+        ).map_err(|e| RullamaError::Gguf(format!("OPFS read_fn call failed: {e:?}")))?;
+
+        // The JS side may return a Uint8Array directly (sync) or a Promise.
+        // Probe for thenable and await it if present.
+        let value = if let Ok(promise) = result.clone().dyn_into::<js_sys::Promise>() {
+            JsFuture::from(promise).await.map_err(|e| {
+                RullamaError::Gguf(format!("OPFS read_fn promise rejected: {e:?}"))
+            })?
+        } else {
+            result
+        };
+
+        let array = js_sys::Uint8Array::new(&value);
+        let bytes = array.to_vec();
+        if bytes.len() as u64 != len {
+            return Err(RullamaError::Gguf(format!(
+                "OpfsFetcher: read_fn returned {} bytes, expected {len}",
+                bytes.len()
+            )));
+        }
+        Ok(bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
