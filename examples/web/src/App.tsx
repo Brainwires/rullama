@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { type ChatMessage, type SamplingOptions, DEFAULT_SAMPLING, DEFAULT_SYSTEM_PROMPT } from "@/lib/types";
 import { type ModelEntry, blobUrl, beacon } from "@/lib/api";
-import { ensureModel, opfsSupported, pruneOrphanedModels, requestPersistent, wipeModel } from "@/lib/opfs";
+import { ensureModel, opfsSupported, requestPersistent, wipeModel } from "@/lib/opfs";
 import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
 import { usePersistedState } from "@/lib/persisted";
@@ -133,33 +133,6 @@ export function App() {
                 showToast({ level: "error", title: "Database init failed", message: (e as Error).message });
             }
         })();
-    }, [showToast]);
-
-    // Once /api/models resolves, prune any cached model folder in OPFS
-    // that isn't in the current catalog — stops us from carrying around
-    // dead downloads (an old quant we swapped away from, a model the
-    // catalog dropped, the broken Q4_K_M / Q4_K_S blobs that the loader
-    // rejected before we switched to pure Q6_K, etc.).
-    useEffect(() => {
-        let cancelled = false;
-        (async () => {
-            try {
-                const resp = await fetch("/api/models");
-                if (!resp.ok) return;
-                const models: ModelEntry[] = await resp.json();
-                if (cancelled) return;
-                const keep = models.map((m) => m.digest.replace(/[^A-Za-z0-9_.-]/g, "_"));
-                const swept = await pruneOrphanedModels(keep);
-                if (swept.removed.length > 0) {
-                    showToast({
-                        level:   "info",
-                        title:   `Freed ${fmtBytes(swept.freedBytes)} of stale OPFS cache`,
-                        message: `Removed ${swept.removed.length} unused model file${swept.removed.length === 1 ? "" : "s"}.`,
-                    });
-                }
-            } catch { /* network down / OPFS unsupported — silent */ }
-        })();
-        return () => { cancelled = true; };
     }, [showToast]);
 
     const refreshConversations = useCallback(async () => {
