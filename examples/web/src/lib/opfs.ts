@@ -186,12 +186,6 @@ export interface OrphanSweepResult {
     freedBytes: number;     // sum of sizes across pruned folders
 }
 
-// FS Access API's directory iterator isn't in lib.dom.d.ts yet; declare
-// the bit we need so we don't have to `as any` at every call site.
-interface AsyncIterableDirHandle extends FileSystemDirectoryHandle {
-    entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
-}
-
 /**
  * Remove cached model folders under OPFS_DIR whose name isn't in the
  * `keepModelKeys` set. Used at app start once `/api/models` loads, so
@@ -207,14 +201,17 @@ export async function pruneOrphanedModels(keepModelKeys: Iterable<string>): Prom
     try {
         const root  = await navigator.storage.getDirectory();
         const dlDir = await root.getDirectoryHandle(OPFS_DIR, { create: false });
-        for await (const [name, handle] of (dlDir as AsyncIterableDirHandle).entries()) {
+        // FS Access API's `entries()` async iterator types vary across
+        // TS lib.dom.d.ts versions — cast and walk by hand.
+        const outerIt = (dlDir as unknown as { entries(): AsyncIterableIterator<[string, FileSystemHandle]> }).entries();
+        for await (const [name, handle] of outerIt) {
             if (handle.kind !== "directory") continue;
             if (keep.has(name)) continue;
-            // Sum the sizes inside before removing — purely informational
-            // for the success toast.
+            // Sum sizes inside before deletion — purely informational.
             let size = 0;
             try {
-                for await (const [, child] of (handle as AsyncIterableDirHandle).entries()) {
+                const innerIt = (handle as unknown as { entries(): AsyncIterableIterator<[string, FileSystemHandle]> }).entries();
+                for await (const [, child] of innerIt) {
                     if (child.kind !== "file") continue;
                     const f = await (child as FileSystemFileHandle).getFile();
                     size += f.size;
