@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { EnvironmentStatus } from "@/components/EnvironmentStatus";
-import { ModelLoader, ModelLoadProgress, type ModelStatus } from "@/components/ModelLoader";
+import { ModelLoadProgress, type ModelStatus } from "@/components/ModelLoader";
 import { ChatPanel } from "@/components/ChatPanel";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { ConversationList } from "@/components/ConversationList";
@@ -9,6 +8,7 @@ import { type ChatMessage, type SamplingOptions, DEFAULT_SAMPLING } from "@/lib/
 import { type ModelEntry, blobUrl, beacon } from "@/lib/api";
 import { ensureModel, opfsSupported, requestPersistent, wipeModel } from "@/lib/opfs";
 import { getClient, type ConversationRow } from "@/lib/inference";
+import { useToast } from "@/lib/toast";
 import { fmtBytes } from "@/lib/utils";
 import { Settings2, History } from "lucide-react";
 
@@ -40,14 +40,52 @@ export function App() {
     const [activeConvId, setActiveConvId]       = useState<string | null>(null);
     const [historyOpen, setHistoryOpen]         = useState(false);
 
-    // Settings
-    const [settingsOpen, setSettingsOpen] = useState(false);
+    // Settings — opens by default since first mount is always "no model".
+    // We don't auto-close on load; user dismisses with ⚙.
+    const [settingsOpen, setSettingsOpen] = useState(true);
     const [systemPrompt, setSystemPrompt] = useState("");
     const [sampling, setSampling]         = useState<SamplingOptions>(DEFAULT_SAMPLING);
     const [maxTokens, setMaxTokens]       = useState(1024);
     const [thinking, setThinking]         = useState(false);
 
     const cancelRef = useRef(false);
+    const { showToast, dismissToast } = useToast();
+
+    // Probe environment once on mount. Failures become sticky toasts the
+    // user must dismiss (vs the prior compact pill row that was always
+    // visible). Successful capabilities are silent.
+    useEffect(() => {
+        const has = (k: () => boolean) => { try { return k(); } catch { return false; } };
+        if (!has(() => typeof navigator !== "undefined" && "gpu" in navigator)) {
+            showToast({
+                id: "env-webgpu",
+                level: "error",
+                title: "WebGPU not available",
+                message: "rullama cannot run inference without WebGPU. On iOS, update to iOS 18+. On desktop, use a recent Chrome / Edge / Safari.",
+                persist: true,
+            });
+        }
+        if (!has(() => typeof navigator !== "undefined"
+                       && !!navigator.storage
+                       && typeof navigator.storage.getDirectory === "function")) {
+            showToast({
+                id: "env-opfs",
+                level: "error",
+                title: "OPFS not available",
+                message: "Models larger than ~3 GB need the Origin Private File System for streaming. Without it, large GGUFs will OOM the page.",
+                persist: true,
+            });
+        }
+        if (!has(() => typeof window !== "undefined" && window.crossOriginIsolated)) {
+            showToast({
+                id: "env-coi",
+                level: "warn",
+                title: "Cross-origin isolation off",
+                message: "Required for SharedArrayBuffer / high-res timers. Make sure the page is served with COOP+COEP headers.",
+                persist: true,
+            });
+        }
+    }, [showToast]);
 
     // Bootstrap DB + conversation list on mount.
     useEffect(() => {
@@ -58,17 +96,23 @@ export function App() {
                 const rows = await client.convList();
                 setConversations(rows);
             } catch (e) {
-                console.error("db init failed:", e);
+                showToast({
+                    level: "error",
+                    title: "Database init failed",
+                    message: (e as Error).message,
+                });
             }
         })();
-    }, []);
+    }, [showToast]);
 
     const refreshConversations = useCallback(async () => {
         try {
             const rows = await getClient().convList();
             setConversations(rows);
-        } catch (e) { console.error("convList failed:", e); }
-    }, []);
+        } catch (e) {
+            showToast({ level: "warn", title: "Could not refresh conversations", message: (e as Error).message });
+        }
+    }, [showToast]);
 
     const onSelectConversation = useCallback(async (id: string) => {
         if (busy) return;
@@ -83,9 +127,9 @@ export function App() {
             setActiveConvId(id);
             setStatusLine(undefined);
         } catch (e) {
-            setStatusLine(`load conversation failed: ${(e as Error).message}`);
+            showToast({ level: "error", title: "Failed to load conversation", message: (e as Error).message });
         }
-    }, [busy]);
+    }, [busy, showToast]);
 
     const onCreateConversation = useCallback(async () => {
         if (busy) return;
@@ -107,12 +151,13 @@ export function App() {
                 setMessages([]);
             }
         } catch (e) {
-            setStatusLine(`delete failed: ${(e as Error).message}`);
+            showToast({ level: "error", title: "Delete failed", message: (e as Error).message });
         }
-    }, [activeConvId, busy, conversations, refreshConversations]);
+    }, [activeConvId, busy, conversations, refreshConversations, showToast]);
 
     const onLoad = useCallback(async (m: ModelEntry) => {
         const client = getClient();
+        dismissToast("model-load-error");
         setModelStatus("loading");
         setLoadingPercent(0);
         setLoadingLabel("checking OPFS…");
@@ -155,6 +200,11 @@ export function App() {
             setModelStatus("ready");
             setStatusText(`${m.name}${fromCache ? " ⚡" : ""}`);
             setLoadingLabel("");
+            showToast({
+                level: "success",
+                title: `Loaded ${m.name}`,
+                message: fromCache ? "from OPFS cache" : `downloaded ${fmtBytes(totalBytes)}`,
+            });
             // Don't clobber messages here — selecting a conversation
             // before loading the model is a valid flow.
         } catch (e) {
@@ -162,8 +212,14 @@ export function App() {
             setModelStatus("error");
             setStatusText(`load failed: ${err}`);
             setLoadingLabel("");
+            showToast({
+                id: "model-load-error",
+                level: "error",
+                title: "Model load failed",
+                message: err,
+            });
         }
-    }, []);
+    }, [dismissToast, showToast]);
 
     const onSend = useCallback(async () => {
         if (modelStatus !== "ready" || busy) return;
@@ -215,8 +271,8 @@ export function App() {
             const modelInsert = await client.msgInsert({ conversationId: convId, role: "model", content: "" });
             modelMsgId = modelInsert.messageId;
         } catch (e) {
-            console.error("persist setup failed:", e);
             // Continue anyway — we'd rather generate without persistence than fail outright.
+            showToast({ level: "warn", title: "Persistence failure", message: (e as Error).message });
         }
 
         try {
@@ -239,8 +295,6 @@ export function App() {
             let emitted = 0;
             let curStr   = (await client.tokenStr(next)) ?? "";
             let curIsEos = await client.isEos(next);
-            // Buffer streamed tokens; flush to DB on a cadence so we don't
-            // pay an UPDATE per single token but still survive a crash.
             let pendingDelta = "";
             let lastFlushAt  = performance.now();
             const flushPending = async () => {
@@ -259,7 +313,6 @@ export function App() {
                 setMessages([...history]);
                 emitted++;
 
-                // Flush every ~16 tokens or 750 ms — whichever comes first.
                 if ((emitted % 16 === 0) || (performance.now() - lastFlushAt > 750)) {
                     await flushPending();
                     lastFlushAt = performance.now();
@@ -270,7 +323,6 @@ export function App() {
                 curStr   = r.str ?? "";
                 curIsEos = r.isEos;
             }
-            // Final flush + commit.
             await flushPending();
             if (convId) {
                 try {
@@ -284,11 +336,15 @@ export function App() {
             setStatusLine(`pe ${peMs.toFixed(0)} ms · gen ${emitted} tok in ${dt.toFixed(0)} ms · ${tps.toFixed(2)} tok/s`);
             beacon("chat", `gen ${emitted} tok in ${dt.toFixed(0)} ms (${tps.toFixed(2)} tok/s)`);
         } catch (e) {
-            setStatusLine(`error: ${(e as Error).message}`);
+            const msg = (e as Error).message;
+            setStatusLine(`error: ${msg}`);
+            if (msg !== "cancelled") {
+                showToast({ level: "error", title: "Generation failed", message: msg });
+            }
         } finally {
             setBusy(false);
         }
-    }, [activeConvId, busy, maxTokens, messages, modelStatus, prompt, refreshConversations, sampling, statusText, systemPrompt, thinking]);
+    }, [activeConvId, busy, maxTokens, messages, modelStatus, prompt, refreshConversations, sampling, statusText, systemPrompt, thinking, showToast]);
 
     const onDeleteModel = useCallback(async (m: ModelEntry) => {
         if (busy) return;
@@ -303,9 +359,6 @@ export function App() {
         const modelKey = m.digest.replace(/[^A-Za-z0-9_.-]/g, "_");
         const filename = m.name.replace(/[^A-Za-z0-9_.-]/g, "_") + ".gguf";
 
-        // If we're deleting the currently-loaded model, tear it down first.
-        // The worker holds an open OPFS SyncAccessHandle on it; removeEntry
-        // would otherwise fail with a lock error.
         const wasLoaded = modelStatus === "ready" && statusText.startsWith(m.name);
         if (wasLoaded) {
             try { await getClient().free(); } catch { /* */ }
@@ -317,44 +370,43 @@ export function App() {
 
         const removed = await wipeModel(modelKey, filename);
         beacon("chat", removed ? `deleted ${m.name} (${sizeLabel})` : `delete ${m.name} no-op (not cached)`);
-        if (!removed) {
-            window.alert(`No cached copy of "${m.name}" found in OPFS.`);
+        if (removed) {
+            showToast({ level: "info", title: `Deleted ${m.name}`, message: `Freed ${sizeLabel} from OPFS` });
+        } else {
+            showToast({ level: "info", title: `No cached copy of ${m.name}` });
         }
-    }, [busy, modelStatus, statusText]);
+    }, [busy, modelStatus, statusText, showToast]);
 
     const onReset = useCallback(() => {
         if (busy) return;
         setMessages([]);
-        setActiveConvId(null);  // next send starts a fresh conversation row
+        setActiveConvId(null);
         setStatusLine(undefined);
         void getClient().reset();
     }, [busy]);
 
     return (
         <div className="flex h-[100dvh] flex-col overflow-hidden bg-background text-foreground">
-            {/* Compact top toolbar — title, env, history, model picker, settings. */}
-            <header className="flex flex-wrap items-center gap-2 border-b border-border bg-card/40 px-3 py-1.5 text-xs safe-top">
+            {/* Slim toolbar — title + history + settings. */}
+            <header className="flex items-center gap-2 border-b border-border bg-card/40 px-3 py-1.5 text-xs safe-top">
                 <span className="font-semibold tracking-tight">rullama</span>
-                <EnvironmentStatus />
-                <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7"
-                    onClick={() => setHistoryOpen(!historyOpen)}
-                    title="Toggle conversation history"
-                    aria-pressed={historyOpen}
+                <span
+                    className="ml-1 truncate text-xs text-muted-foreground"
+                    title={statusText}
                 >
-                    <History />
-                </Button>
-                <div className="ml-auto flex flex-wrap items-center gap-1">
-                    <ModelLoader
-                        status={modelStatus}
-                        loadingPercent={loadingPercent}
-                        loadingLabel={loadingLabel}
-                        statusText={statusText}
-                        onLoad={onLoad}
-                        onDelete={onDeleteModel}
-                    />
+                    {modelStatus === "ready" ? statusText : ""}
+                </span>
+                <div className="ml-auto flex items-center gap-1">
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        onClick={() => setHistoryOpen(!historyOpen)}
+                        title="Toggle conversation history"
+                        aria-pressed={historyOpen}
+                    >
+                        <History />
+                    </Button>
                     <Button
                         variant="ghost"
                         size="icon"
@@ -384,6 +436,12 @@ export function App() {
 
             {settingsOpen && (
                 <SettingsDialog
+                    modelStatus={modelStatus}
+                    loadingPercent={loadingPercent}
+                    loadingLabel={loadingLabel}
+                    statusText={statusText}
+                    onLoadModel={onLoad}
+                    onDeleteModel={onDeleteModel}
                     systemPrompt={systemPrompt}
                     onSystemPromptChange={setSystemPrompt}
                     sampling={sampling}
@@ -397,8 +455,6 @@ export function App() {
 
             <ChatPanel
                 messages={messages}
-                // Typing stays enabled during generation so the user can
-                // queue up the next message. Send is still gated by `!busy`.
                 canType={modelStatus === "ready"}
                 canSend={modelStatus === "ready" && !busy && prompt.trim().length > 0}
                 canStop={busy}
