@@ -8,13 +8,14 @@ import { ConversationList } from "@/components/ConversationList";
 import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { type ChatMessage, type SamplingOptions, DEFAULT_SAMPLING, DEFAULT_SYSTEM_PROMPT } from "@/lib/types";
+import { type ChatMessage, type ImageAttachment, type SamplingOptions, DEFAULT_SAMPLING, DEFAULT_SYSTEM_PROMPT } from "@/lib/types";
 import { type ModelEntry, blobUrl, beacon } from "@/lib/api";
 import { ensureModel, opfsSupported, requestPersistent, wipeModel } from "@/lib/opfs";
 import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
 import { usePersistedState } from "@/lib/persisted";
 import { fmtBytes, clampInt, clampNum } from "@/lib/utils";
+import { preprocessImage } from "@/lib/image_preprocess";
 import { Settings, History } from "lucide-react";
 
 const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -39,6 +40,12 @@ export function App() {
     const [prompt, setPrompt]     = useState("");
     const [busy, setBusy]         = useState(false);
     const [statusLine, setStatusLine] = useState<string | undefined>();
+
+    // Multimodal: vision availability latches on after a successful model
+    // load (it's a property of the meta, only known post-load). Pending
+    // images are session-only — cleared after each send.
+    const [hasVision, setHasVision]   = useState(false);
+    const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
 
     // Conversation persistence (rsqlite-wasm)
     const [conversations, setConversations] = useState<ConversationRow[]>([]);
@@ -175,11 +182,38 @@ export function App() {
         setMessages([]);
         setActiveConvId(null);
         setStatusLine(undefined);
+        setPendingImages([]);
         // Clear the worker's KV cache up front. onSend would do this on
         // the next send anyway, but releasing the memory immediately is
         // friendlier when the user is intentionally starting fresh.
         void getClient().reset();
     }, [busy]);
+
+    const onAttachFiles = useCallback(async (files: FileList) => {
+        // Reject silently when vision is unavailable — the UI gating
+        // should already prevent the click, but a stale handler still
+        // could fire mid-unload.
+        if (!hasVision) return;
+        const next: ImageAttachment[] = [];
+        for (let i = 0; i < files.length; i++) {
+            const f = files[i];
+            if (!f.type.startsWith("image/")) continue;
+            try {
+                const p = await preprocessImage(f);
+                next.push(p);
+            } catch (e) {
+                showToast({
+                    level: "error", title: `Couldn't load ${f.name}`,
+                    message: (e as Error).message,
+                });
+            }
+        }
+        if (next.length) setPendingImages((prev) => [...prev, ...next]);
+    }, [hasVision, showToast]);
+
+    const onRemoveImage = useCallback((idx: number) => {
+        setPendingImages((prev) => prev.filter((_, i) => i !== idx));
+    }, []);
 
     const onDeleteConversation = useCallback(async (id: string) => {
         if (busy) return;
@@ -265,6 +299,7 @@ export function App() {
                 maxContext: mobile ? mobileMaxCtx : 0,
                 textOnly:   mobile || textOnlyRemote,
             });
+            setHasVision(client.hasVision);
             setModelStatus("ready");
             setStatusText(`${m.name}${fromCache ? " ⚡" : ""}`);
             setLoadingLabel("");
@@ -287,11 +322,15 @@ export function App() {
     const onSend = useCallback(async () => {
         if (modelStatus !== "ready" || busy) return;
         const text = prompt.trim();
-        if (!text) return;
+        // Snapshot attachments for this turn so the UI can clear them
+        // while generation runs.
+        const turnImages = pendingImages;
+        if (!text && turnImages.length === 0) return;
         const client = getClient();
         cancelRef.current = false;
         setBusy(true);
         setPrompt("");
+        setPendingImages([]);
         setStatusLine(undefined);
 
         const sysContent = thinking
@@ -301,16 +340,37 @@ export function App() {
         // Two parallel histories: `displayHistory` for the chat UI (no
         // system message — it's a control signal, not user content) and
         // `renderHistory` for tokenization (with system at the front).
+        //
+        // The renderer-side content prepends one `<|image><image|>`
+        // sentinel pair per attached image; JS splices the soft-token
+        // embeddings between them during the feed loop. Display bubbles
+        // show only the typed text + thumbnails — sentinels never reach
+        // the user.
         const userTurns = messages.filter((m) => m.role !== "system");
+        const userDisplayMsg: ChatMessage = {
+            role: "user",
+            content: text,
+            ...(turnImages.length ? { images: turnImages } : {}),
+        };
         const displayHistory: ChatMessage[] = [
             ...userTurns,
-            { role: "user", content: text },
+            userDisplayMsg,
             { role: "model", content: "" },
         ];
         setMessages(displayHistory);
+        const imageMarkers = "<|image><image|>".repeat(turnImages.length);
+        const userRenderContent = imageMarkers + text;
+        const renderPriorTurns = userTurns;   // assumed text-only for now
         const renderHistory: ChatMessage[] = sysContent
-            ? [{ role: "system", content: sysContent }, ...displayHistory.slice(0, -1)]
-            : displayHistory.slice(0, -1);
+            ? [
+                { role: "system", content: sysContent },
+                ...renderPriorTurns,
+                { role: "user", content: userRenderContent },
+            ]
+            : [
+                ...renderPriorTurns,
+                { role: "user", content: userRenderContent },
+            ];
 
         let convId = activeConvId;
         let modelMsgId: string | null = null;
@@ -336,11 +396,47 @@ export function App() {
             const rendered = await client.renderChat(renderHistory, false);
             const ids = await client.encode(rendered);
 
+            // Encode each attached image once per send. Result lives in
+            // softMap keyed by the begin-sentinel token id — the feed
+            // loop checks the map after every step() and splices in
+            // `nSoft` stepWithEmbedding calls before continuing.
+            //
+            // Only one sentinel pair exists in the vocab, so multiple
+            // image attachments stack their soft tokens into the same
+            // softMap entry. The renderer emits N begin/end pairs, and
+            // each begin id consumes the next image's worth of soft
+            // tokens in order.
+            type SoftEntry = { nSoft: number; dText: number; softTokens: Float32Array };
+            const softQueue: SoftEntry[] = [];
+            let beginId: number | null = null;
+            if (turnImages.length > 0) {
+                const sent = client.imageSentinelIds();
+                if (!sent) {
+                    throw new Error("model exposes no <|image> sentinel — vision unavailable");
+                }
+                beginId = sent[0];
+                for (const im of turnImages) {
+                    const softTokens = await client.encodeImage(im.pixels, im.h, im.w);
+                    const nSoft = await client.imageSoftTokenCount(im.h, im.w);
+                    const dText = softTokens.length / nSoft;
+                    softQueue.push({ nSoft, dText, softTokens });
+                }
+            }
+
             const t0 = performance.now();
             let next = 0;
             for (let i = 0; i < ids.length; i++) {
                 if (cancelRef.current) throw new Error("cancelled");
-                next = await client.step(ids[i]);
+                const id = ids[i];
+                next = await client.step(id);
+                if (beginId !== null && id === beginId && softQueue.length > 0) {
+                    const ent = softQueue.shift()!;
+                    for (let r = 0; r < ent.nSoft; r++) {
+                        if (cancelRef.current) throw new Error("cancelled");
+                        const row = ent.softTokens.subarray(r * ent.dText, (r + 1) * ent.dText);
+                        next = await client.stepWithEmbedding(row);
+                    }
+                }
             }
             const peMs = performance.now() - t0;
 
@@ -395,7 +491,7 @@ export function App() {
         } finally {
             setBusy(false);
         }
-    }, [activeConvId, busy, maxTokens, messages, modelStatus, prompt, refreshConversations, sampling, statusText, systemPrompt, thinking, showToast]);
+    }, [activeConvId, busy, maxTokens, messages, modelStatus, pendingImages, prompt, refreshConversations, sampling, statusText, systemPrompt, thinking, showToast]);
 
     const onDeleteModel = useCallback(async (m: ModelEntry) => {
         if (busy) return;
@@ -417,6 +513,8 @@ export function App() {
             setStatusText("no model");
             setMessages([]);
             setStatusLine(undefined);
+            setHasVision(false);
+            setPendingImages([]);
         }
 
         const removed = await wipeModel(modelKey, filename);
@@ -563,14 +661,20 @@ export function App() {
                         )
                     }
                     canType={modelStatus === "ready"}
-                    canSend={modelStatus === "ready" && !busy && prompt.trim().length > 0}
+                    canSend={
+                        modelStatus === "ready"
+                        && !busy
+                        && (prompt.trim().length > 0 || pendingImages.length > 0)
+                    }
                     canStop={busy}
-                    canNewChat={modelStatus === "ready" && messages.length > 0 && !busy}
+                    canAttach={modelStatus === "ready" && hasVision}
+                    pendingImages={pendingImages}
                     prompt={prompt}
                     onPromptChange={setPrompt}
                     onSend={onSend}
                     onStop={() => { cancelRef.current = true; }}
-                    onNewChat={onCreateConversation}
+                    onAttachFiles={(files) => { void onAttachFiles(files); }}
+                    onRemoveImage={onRemoveImage}
                     statusLine={statusLine}
                 />
             </DualSidebarLayout>

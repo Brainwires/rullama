@@ -2,11 +2,11 @@ import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ThinkingBlock } from "@/components/ThinkingBlock";
-import { type ChatMessage } from "@/lib/types";
+import { type ChatMessage, type ImageAttachment } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
 import { parseModelContent } from "@/lib/parseModel";
 import { cn } from "@/lib/utils";
-import { Send, Square, Plus } from "lucide-react";
+import { Send, Square, Plus, X } from "lucide-react";
 
 // The think-token slips into the chat history when the user enables
 // thinking mode. It's a control signal for the model, not user content,
@@ -16,14 +16,19 @@ const THINK_TOKEN = "<|think|>";
 interface Props {
     messages:    ChatMessage[];
     canType:     boolean;   // input enabled (model ready, not busy)
-    canSend:     boolean;   // Send button enabled (canType AND prompt non-empty)
+    canSend:     boolean;   // Send button enabled (canType AND something to send)
     canStop:     boolean;
-    canNewChat:  boolean;
+    /** Set when the loaded model has the vision tower wired up. Drives
+     *  whether the "+" button surfaces an image picker. */
+    canAttach:   boolean;
     prompt:      string;
-    onPromptChange: (s: string) => void;
-    onSend:      () => void;
-    onStop:      () => void;
-    onNewChat:   () => void;
+    /** Images attached to the next user turn (cleared after send). */
+    pendingImages: ImageAttachment[];
+    onPromptChange:  (s: string) => void;
+    onSend:          () => void;
+    onStop:          () => void;
+    onAttachFiles:   (files: FileList) => void;
+    onRemoveImage:   (idx: number) => void;
     statusLine?: string;
     /** Optional drop-in for the empty chat history pane (e.g. a
      *  no-model-loaded card). Falls back to a plain hint when omitted. */
@@ -39,16 +44,32 @@ function RoleLabel({ role }: { role: ChatMessage["role"] }) {
     );
 }
 
-function UserBubble({ content }: { content: string }) {
+function ImageGrid({ images }: { images: ImageAttachment[] }) {
+    return (
+        <div className="mb-2 flex flex-wrap gap-1.5">
+            {images.map((im, i) => (
+                <img
+                    key={i}
+                    src={im.dataUrl}
+                    alt={`attachment ${i + 1}`}
+                    className="h-24 w-24 rounded-md border border-border object-cover"
+                />
+            ))}
+        </div>
+    );
+}
+
+function UserBubble({ content, images }: { content: string; images?: ImageAttachment[] }) {
     const html = useMemo(() => content ? renderMarkdown(content) : "", [content]);
     return (
         <div className="rounded-md border-l-2 border-primary bg-primary/10 p-3 text-sm break-words animate-fade-in">
             <RoleLabel role="user" />
+            {images && images.length > 0 && <ImageGrid images={images} />}
             {content ? (
                 <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />
-            ) : (
+            ) : !(images && images.length) ? (
                 <span className="inline-block animate-pulse text-muted-foreground">▍</span>
-            )}
+            ) : null}
         </div>
     );
 }
@@ -79,8 +100,6 @@ function ModelBubble({ content }: { content: string }) {
 }
 
 function SystemBubble({ content }: { content: string }) {
-    // Strip the bare `<|think|>` control token. Bubble disappears if
-    // nothing else remains — caller usually filters first but stay safe.
     const stripped = content.replaceAll(THINK_TOKEN, "").trim();
     if (!stripped) return null;
     return (
@@ -94,7 +113,7 @@ function SystemBubble({ content }: { content: string }) {
 function MessageBubble({ msg }: { msg: ChatMessage }) {
     if (msg.role === "system") return <SystemBubble content={msg.content} />;
     if (msg.role === "model")  return <ModelBubble  content={msg.content} />;
-    return <UserBubble content={msg.content} />;
+    return <UserBubble content={msg.content} images={msg.images} />;
 }
 
 /**
@@ -103,6 +122,7 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
  */
 export function ChatPanel(props: Props) {
     const historyRef = useRef<HTMLDivElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
 
     // Auto-scroll to the latest message.
     useEffect(() => {
@@ -143,6 +163,17 @@ export function ChatPanel(props: Props) {
         }
     };
 
+    const onAttachClick = () => {
+        fileInputRef.current?.click();
+    };
+
+    const onFilesPicked = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = e.target.files;
+        if (files && files.length > 0) props.onAttachFiles(files);
+        // Reset so re-picking the same file re-fires onChange.
+        e.target.value = "";
+    };
+
     return (
         <div className={cn("flex h-full min-h-0 flex-col", props.className)}>
             <div
@@ -168,7 +199,39 @@ export function ChatPanel(props: Props) {
                 </p>
             )}
 
+            {/* Pending-attachment preview strip, only when there's at
+                least one image queued. */}
+            {props.pendingImages.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 border-t border-border bg-background/60 px-2 py-2 sm:px-3">
+                    {props.pendingImages.map((im, i) => (
+                        <div
+                            key={i}
+                            className="relative h-16 w-16 overflow-hidden rounded-md border border-border"
+                        >
+                            <img src={im.dataUrl} alt={`pending ${i + 1}`} className="h-full w-full object-cover" />
+                            <button
+                                type="button"
+                                onClick={() => props.onRemoveImage(i)}
+                                className="absolute right-0.5 top-0.5 rounded-full bg-black/60 p-0.5 text-white hover:bg-black/80"
+                                aria-label={`Remove attachment ${i + 1}`}
+                                title="Remove"
+                            >
+                                <X className="h-3 w-3" />
+                            </button>
+                        </div>
+                    ))}
+                </div>
+            )}
+
             <div className="flex gap-1.5 border-t border-border bg-background/80 px-2 py-2 safe-bottom sm:px-3">
+                <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="hidden"
+                    onChange={onFilesPicked}
+                />
                 <Input
                     placeholder='Say something…'
                     value={props.prompt}
@@ -182,7 +245,14 @@ export function ChatPanel(props: Props) {
                 ) : (
                     <Button onClick={props.onSend} disabled={!props.canSend} title="Send"><Send /></Button>
                 )}
-                <Button onClick={props.onNewChat} disabled={!props.canNewChat} variant="outline" title="New chat"><Plus /></Button>
+                <Button
+                    onClick={onAttachClick}
+                    disabled={!props.canAttach || !props.canType}
+                    variant="outline"
+                    title={props.canAttach ? "Attach image" : "Vision tower unavailable for this model"}
+                >
+                    <Plus />
+                </Button>
             </div>
         </div>
     );

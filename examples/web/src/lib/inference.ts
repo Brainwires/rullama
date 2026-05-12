@@ -103,6 +103,14 @@ export class WorkerClient {
     }
     free(): Promise<void> { return this.rpc("free"); }
 
+    // ── multimodal ─────────────────────────────────────────────────
+    encodeImage(pixels: Float32Array, h: number, w: number): Promise<Float32Array> {
+        return this.rpc("encodeImage", { pixels, h, w });
+    }
+    imageSoftTokenCount(h: number, w: number): Promise<number> {
+        return this.rpc("imageSoftTokenCount", { h, w });
+    }
+
     // ── chat persistence (rsqlite-wasm OPFS-backed SQLite) ──────────
     dbInit(): Promise<boolean> { return this.rpc("dbInit"); }
     convList(): Promise<ConversationRow[]> { return this.rpc("convList"); }

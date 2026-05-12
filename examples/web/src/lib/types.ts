@@ -2,9 +2,23 @@
 
 export type Role = "system" | "user" | "model";
 
+export interface ImageAttachment {
+    /** Channel-first f32 [-1, 1] tensor — what `encodeImage` consumes. */
+    pixels:  Float32Array;
+    h:       number;
+    w:       number;
+    /** Small JPEG thumbnail — used to render the image inline in the
+     *  user message bubble + the input-row preview. */
+    dataUrl: string;
+}
+
 export interface ChatMessage {
     role:    Role;
     content: string;
+    /** Optional image attachments. Only set in-session on user turns
+     *  that came with files. Not persisted to SQLite — a chat reloaded
+     *  from history shows the message text alone. */
+    images?: ImageAttachment[];
 }
 
 export interface SamplingOptions {
