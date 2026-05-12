@@ -338,14 +338,25 @@ export function App() {
             // since the worker + sync-OPFS + per-tile range-fetch combo
             // stabilised, 2048 ctx (≈ 144 MB GPU on A18) is comfortable.
             const mobileMaxCtx = 2048;
-            // Catalog drives text-only vs multimodal — `multimodal: true`
-            // on a BAKED_IN_MODELS entry means the blob is an Ollama-style
-            // full mm tensor set (text + vision + audio + projectors).
-            // HF-style blobs without that flag are text-only by structure,
-            // so we honor that. Mobile no longer force-text-only: the
-            // device has more headroom than the M15 era assumed, and the
-            // user is explicitly opting in by choosing a multimodal entry.
-            const textOnly = !m.multimodal;
+            // textOnly policy:
+            //   - mobile: ALWAYS text-only for now. Multimodal loads the
+            //     vision + audio tower weights upfront and the iPhone
+            //     WebContent process gets jetsamed before they finish
+            //     uploading. Lifting this needs the per-tile streaming
+            //     pattern the text tower already has, applied to the
+            //     vision/audio towers — not landed yet.
+            //   - desktop: catalog flag drives it. R2 ollama-style
+            //     entries have `multimodal: true` and load the full
+            //     tensor set; HF-style text-only blobs don't and load
+            //     as text-only.
+            //   - locally-discovered Ollama entries: discoverModels()
+            //     doesn't set `multimodal`, so they read as text-only.
+            //     That matches what the M15-era code did when a local
+            //     entry was loaded with the old `mobile || textOnlyRemote`
+            //     formula on mobile, and it's the safer default since
+            //     not every local Ollama blob actually contains the mm
+            //     tensors.
+            const textOnly = mobile || !m.multimodal;
             await client.load(modelKey, filename, {
                 maxContext: mobile ? mobileMaxCtx : 0,
                 textOnly,
