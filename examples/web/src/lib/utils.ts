@@ -15,6 +15,19 @@ export function fmtBytes(n: number | undefined | null): string {
     return `${n} B`;
 }
 
+/** Format a duration in seconds as a compact ETA string. NaN / negative /
+ *  non-finite all collapse to "—" so the caller doesn't have to guard. */
+export function fmtEta(seconds: number | undefined | null): string {
+    if (seconds === undefined || seconds === null
+        || !isFinite(seconds) || seconds < 0) return "—";
+    const s = Math.round(seconds);
+    if (s < 60)    return `${s}s`;
+    if (s < 3600)  return `${Math.floor(s / 60)}m ${s % 60}s`;
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return `${h}h ${m}m`;
+}
+
 /** Clamp a number to [min, max]. NaN, ±Infinity, and non-numeric inputs
  *  fall back to `fallback` (so a blank or pasted-garbage input becomes a
  *  predictable value rather than silently breaking sampling). */

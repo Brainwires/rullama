@@ -15,7 +15,7 @@ import { getNetworkHint } from "@/lib/network";
 import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
 import { usePersistedState } from "@/lib/persisted";
-import { fmtBytes, clampInt, clampNum } from "@/lib/utils";
+import { fmtBytes, fmtEta, clampInt, clampNum } from "@/lib/utils";
 import { preprocessImage } from "@/lib/image_preprocess";
 import { Settings, History } from "lucide-react";
 
@@ -282,17 +282,35 @@ export function App() {
             // (~hundreds per second on a fast link). Updating React state
             // that often makes the label flicker; throttle to ~4 Hz, but
             // always emit the final tick so 100 % shows the real number.
-            let lastLabelAt = 0;
+            //
+            // Rate is computed from bytes/elapsed *since the first
+            // progress callback for this session* — `baselineBytes` is
+            // the resume offset (already on disk before we started),
+            // so resumed downloads don't report a wildly inflated rate
+            // from spreading the on-disk bytes across the new elapsed
+            // window.
+            let lastLabelAt    = 0;
+            let baselineBytes  = -1;
+            let baselineAt     = 0;
             const { totalBytes, fromCache } = await ensureModel(url, modelKey, filename, m.size, ({ bytesWritten, totalBytes }) => {
                 if (totalBytes > 0) {
                     setLoadingPercent((bytesWritten / totalBytes) * 100);
-                    const now     = performance.now();
-                    const done    = bytesWritten >= totalBytes;
+                    const now  = performance.now();
+                    const done = bytesWritten >= totalBytes;
+                    if (baselineBytes < 0) {
+                        baselineBytes = bytesWritten;
+                        baselineAt    = now;
+                    }
                     if (done || now - lastLabelAt > 250) {
                         lastLabelAt = now;
-                        const elapsed = (now - t0) / 1000;
-                        const rate    = bytesWritten / Math.max(elapsed, 0.001);
-                        setLoadingLabel(`${fmtBytes(bytesWritten)} / ${fmtBytes(totalBytes)} — ${fmtBytes(rate)}/s`);
+                        const elapsed   = (now - baselineAt) / 1000;
+                        const delta     = Math.max(0, bytesWritten - baselineBytes);
+                        const rate      = elapsed > 0.25 ? delta / elapsed : 0;
+                        const remaining = Math.max(0, totalBytes - bytesWritten);
+                        const eta       = rate > 0 ? remaining / rate : Number.POSITIVE_INFINITY;
+                        const rateLabel = rate > 0 ? `${fmtBytes(rate)}/s` : "—";
+                        const etaLabel  = (rate > 0 && !done) ? ` · ETA ${fmtEta(eta)}` : "";
+                        setLoadingLabel(`${fmtBytes(bytesWritten)} / ${fmtBytes(totalBytes)} — ${rateLabel}${etaLabel}`);
                     }
                 } else {
                     const now = performance.now();
