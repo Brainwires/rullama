@@ -98,6 +98,25 @@ impl WeightCache {
         Ok(cloned)
     }
 
+    /// Fetch a tensor as a fresh, *uncached* wgpu::Buffer. The returned handle is the
+    /// sole owner — drop it and the underlying GPU allocation is released. Use for
+    /// layer-scoped multimodal weights that the caller dispatches once and never
+    /// touches again, so the vision (16-block ViT, ~3 GB F16) and audio (12-block
+    /// Conformer, ~2 GB BF16) towers don't strand their entire weight set in GPU
+    /// memory for the lifetime of the model.
+    ///
+    /// Bypassing the cache means each call re-fetches from the GGUF reader, so a
+    /// second `encode_image()` call re-uploads the same weights. That's the
+    /// intended trade — wgpu::Buffer is internally Arc-refcounted, so if we
+    /// inserted into the cache the GPU memory wouldn't free until model drop
+    /// even if every external clone went out of scope.
+    pub async fn buffer_async_ephemeral(&self, name: &str) -> Result<wgpu::Buffer> {
+        let bytes = self.reader.fetch_tensor_bytes(name).await?;
+        let buf = self.upload(name, &bytes);
+        drop(bytes);
+        Ok(buf)
+    }
+
     /// Best-effort buffer fetch: Ok(None) if the tensor is absent.
     pub fn buffer_opt(&self, name: &str) -> Result<Option<wgpu::Buffer>> {
         if self.reader.tensor(name).is_err() {

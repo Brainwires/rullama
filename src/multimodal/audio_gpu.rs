@@ -24,8 +24,7 @@ use crate::backend::dispatch::{
 use crate::backend::{Pipelines, WeightCache, WgpuCtx};
 use crate::error::{Result, RullamaError};
 use crate::gguf::{dequant_tensor_to_f32_async, GgmlDtype};
-use crate::multimodal::audio::AudioConfig;
-use crate::multimodal::audio::AudioForward as CpuAudioForward;
+use crate::multimodal::audio::{AudioConfig, AudioPrefix};
 
 /// Maximum number of frames the GPU scratch buffers are sized for. ~25 frames
 /// per second of audio after SSCP downsampling, so 768 frames ≈ 30 s — Gemma's
@@ -35,10 +34,37 @@ const MAX_SEQ: usize = 768;
 #[derive(Clone, Copy, Default)]
 struct Clamp { in_min: f32, in_max: f32, out_min: f32, out_max: f32 }
 
-/// One block's worth of GPU-resident weight buffers, plus its CPU-side
-/// per_dim_scale (folded with q_scale_base into a single GPU buffer) and
-/// conv_dw weights.
-struct GpuAudioBlock {
+/// Long-lived per-block metadata: small CPU/GPU tensors plus the 10 clamp
+/// scalars. ~5 KB on GPU per block, ~60 KB total across 12 blocks — cheap
+/// to keep resident for the model's lifetime.
+struct GpuAudioBlockMeta {
+    /// Per-dim Q scale, pre-multiplied with `q_scale_base = head_dim^-0.5 / ln 2`.
+    /// Shape `[head_dim]` f32. Uploaded once at construction.
+    per_dim_scale:   wgpu::Buffer,
+    /// Depthwise conv kernel — F32 [hidden, kernel], small enough to keep
+    /// resident (a few KB).
+    conv_dw:         wgpu::Buffer,
+    // ClippableLinear clamps (10 sites). Pure CPU scalars.
+    cl_attn_q:       Clamp,
+    cl_attn_k:       Clamp,
+    cl_attn_v:       Clamp,
+    cl_attn_o:       Clamp,
+    cl_ffw_up:       Clamp,
+    cl_ffw_down:     Clamp,
+    cl_ffw_up_1:     Clamp,
+    cl_ffw_down_1:   Clamp,
+    cl_conv_pw1:     Clamp,
+    cl_conv_pw2:     Clamp,
+}
+
+/// Transient per-block weight buffers, fetched fresh on each encode() call
+/// via `WeightCache::buffer_async_ephemeral`. The whole struct's lifetime
+/// is one Conformer block's dispatch + submit: drop it and the ~170 MB
+/// (BF16, gemma4:e2b) of GPU weights is released before the next block's
+/// fetch begins. This is what makes audio fit on a memory-constrained
+/// device — old code uploaded all 12 blocks (~2 GB) at construction time
+/// and held them for the model's lifetime.
+struct GpuAudioBlockWeights {
     pre_norm:        wgpu::Buffer,    // [hidden] f32  (final block RMSNorm)
     // FFW start
     ffw_norm:        wgpu::Buffer,
@@ -58,26 +84,11 @@ struct GpuAudioBlock {
     attn_v:          wgpu::Buffer,    // BF16
     attn_o:          wgpu::Buffer,    // BF16
     linear_pos:      wgpu::Buffer,    // BF16 [hidden, hidden]
-    /// Per-dim Q scale, pre-multiplied with `q_scale_base = head_dim^-0.5 / ln 2`.
-    /// Shape `[head_dim]` f32. Uploaded once at construction.
-    per_dim_scale:   wgpu::Buffer,
     // LightConv
     conv_norm:       wgpu::Buffer,
     norm_conv:       wgpu::Buffer,
     conv_pw1:        wgpu::Buffer,    // BF16
     conv_pw2:        wgpu::Buffer,    // BF16
-    conv_dw:         wgpu::Buffer,    // F32 [hidden, kernel]
-    // ClippableLinear clamps (10 sites)
-    cl_attn_q:       Clamp,
-    cl_attn_k:       Clamp,
-    cl_attn_v:       Clamp,
-    cl_attn_o:       Clamp,
-    cl_ffw_up:       Clamp,
-    cl_ffw_down:     Clamp,
-    cl_ffw_up_1:     Clamp,
-    cl_ffw_down_1:   Clamp,
-    cl_conv_pw1:     Clamp,
-    cl_conv_pw2:     Clamp,
 }
 
 /// Persistent scratch buffers — one set, reused across all blocks and encodes.
@@ -107,16 +118,17 @@ pub struct GpuAudioForward {
     cfg: AudioConfig,
     ctx: WgpuCtx,
     pipes: Arc<Pipelines>,
-    #[allow(dead_code)]
     wcache: Arc<WeightCache>,
 
-    /// CPU oracle wrapping mel + SSCP + pre_encode (the prefix), reused for
-    /// the parts that stay on CPU. Construction loads its full weight set
-    /// (~360 MB f32) once; not as wasteful as it sounds because the GPU side
-    /// shares the same WeightCache.
-    cpu_prefix: CpuAudioForward,
+    /// CPU-side SSCP prefix (mel-spec + 2× 3×3 stride-2 conv + linear
+    /// projection to `hidden`). Small (~few MB of weights) and not yet
+    /// ported to GPU. Produces the `[seq, hidden]` f32 input to the
+    /// Conformer block loop.
+    cpu_prefix: AudioPrefix,
 
-    blocks: Vec<GpuAudioBlock>,
+    /// Long-lived per-block metadata (per-dim scale + conv_dw + 10 clamps).
+    /// Weight buffers are NOT here — they're fetched ephemerally in `encode()`.
+    blocks: Vec<GpuAudioBlockMeta>,
 
     // Projector weights.
     proj_fc:               wgpu::Buffer,    // F16 [hidden, d_text]
@@ -135,7 +147,7 @@ impl GpuAudioForward {
         pipes: Arc<Pipelines>,
         wcache: Arc<WeightCache>,
     ) -> Result<Self> {
-        let cpu_prefix = CpuAudioForward::new(cfg.clone(), wcache.clone()).await?;
+        let cpu_prefix = AudioPrefix::new(cfg.clone(), wcache.clone()).await?;
         let device = &ctx.device;
         let queue  = &ctx.queue;
 
@@ -210,13 +222,17 @@ impl GpuAudioForward {
             fc_out, fc_normed, soft, soft_read,
         };
 
-        // Per-block weight loading.
+        // Per-block META only — `per_dim_scale` + `conv_dw` + clamps. The 21
+        // wgpu::Buffer fields the old code put here are now fetched
+        // ephemerally inside `encode()`; that's the entire point of M16.
         let q_scale_base = (head_dim as f32).powf(-0.5) / std::f32::consts::LN_2;
         let mut blocks = Vec::with_capacity(cfg.n_layers as usize);
         for i in 0..cfg.n_layers {
-            blocks.push(load_gpu_block(&wcache, i, &ctx, q_scale_base).await?);
+            blocks.push(load_gpu_block_meta(&wcache, i, &ctx, q_scale_base).await?);
         }
 
+        // Projector weights stay cached — small (a few MB each) and hit at
+        // the end of every encode_audio call.
         let proj_fc        = wcache.buffer_async("mm.a.fc.weight").await?;
         let proj_fc_dtype  = wcache.reader().tensor("mm.a.fc.weight")?.dtype;
         let proj_fc_bias   = wcache.buffer_opt_async("mm.a.fc.bias").await?;
@@ -271,26 +287,34 @@ impl GpuAudioForward {
         let queue = &self.ctx.queue;
         queue.write_buffer(&self.scratch.h_main, 0, cast_slice(&h_cpu));
 
-        // 3. Build a single CommandEncoder for the whole encode.
-        let mut enc = self.ctx.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("aud.encode") }
-        );
-
-        // 4. Run all 12 Conformer blocks.
+        // 3. Per-block encode loop. Each iteration:
+        //    a) fetches the block's 21 weight buffers ephemerally,
+        //    b) records the block's dispatches into a fresh encoder,
+        //    c) submits and drops both the encoder and the weight handles,
+        //    so the GPU memory for this block's BF16 weights can be released
+        //    before the next block's fetch begins. Peak resident audio
+        //    weight memory caps at ~2 blocks (current + previous in-flight).
         for b in 0..self.blocks.len() {
+            let w = fetch_gpu_block_weights(&self.wcache, b as u32).await?;
+            let mut enc = self.ctx.device.create_command_encoder(
+                &wgpu::CommandEncoderDescriptor { label: Some(&format!("aud.block{b}")) }
+            );
             self.dispatch_block(
-                &mut enc, &self.blocks[b],
+                &mut enc, &self.blocks[b], &w,
                 seq, padded_len, k_padded_len,
                 hidden, n_heads, head_dim, chunk_size,
                 context_size, max_span, max_past, max_future,
                 pad_left, logit_cap, k_scale,
             );
+            self.ctx.queue.submit(Some(enc.finish()));
+            drop(w);
         }
 
-        // 5. Projector: h → fc_out + bias → unweighted RMSNorm → input_projection.
+        // 4. Projector + readback in a final encoder.
+        let mut enc = self.ctx.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("aud.projector") }
+        );
         self.dispatch_projector(&mut enc, seq, hidden, d_text);
-
-        // 6. Submit + readback (last seq * d_text * 4 bytes).
         let read_bytes = (seq * d_text * 4) as u64;
         enc.copy_buffer_to_buffer(&self.scratch.soft, 0, &self.scratch.soft_read, 0, read_bytes);
         self.ctx.queue.submit(Some(enc.finish()));
@@ -313,12 +337,16 @@ impl GpuAudioForward {
 
     /// Run one Conformer block on GPU. Mutates `h_main` in place across the
     /// block's four sub-ops (FFW1 → attention → LightConv → FFW2 → final
-    /// clamp + RMSNorm with `block.pre_norm`).
+    /// clamp + RMSNorm with `w.pre_norm`).
+    ///
+    /// `meta` holds the long-lived per-block scalars (per_dim_scale, conv_dw,
+    /// clamps); `w` holds the ephemeral weight buffers fetched per-encode.
     #[allow(clippy::too_many_arguments)]
     fn dispatch_block(
         &self,
         enc: &mut wgpu::CommandEncoder,
-        block: &GpuAudioBlock,
+        meta: &GpuAudioBlockMeta,
+        w: &GpuAudioBlockWeights,
         seq: usize, padded_len: usize, k_padded_len: usize,
         hidden: usize, n_heads: usize, head_dim: usize, chunk_size: usize,
         context_size: usize, max_span: usize, max_past: usize, max_future: usize,
@@ -333,10 +361,10 @@ impl GpuAudioForward {
 
         // ---- FFW1 ----
         self.dispatch_ffw(
-            enc, &block.ffw_norm,
-            &block.ffw_up,   &block.cl_ffw_up,
-            &block.ffw_down, &block.cl_ffw_down,
-            &block.ffw_post_norm,
+            enc, &w.ffw_norm,
+            &w.ffw_up,   &meta.cl_ffw_up,
+            &w.ffw_down, &meta.cl_ffw_down,
+            &w.ffw_post_norm,
             seq, hidden, ffn, eps, gc,
         );
 
@@ -348,7 +376,7 @@ impl GpuAudioForward {
         // RMSNorm h_main with attn_pre_norm → h_norm
         rmsnorm_per_row_chained(
             &self.ctx, &self.pipes, enc,
-            &s.h_main, Some(&block.attn_pre_norm), &s.h_main,
+            &s.h_main, Some(&w.attn_pre_norm), &s.h_main,
             &s.h_norm, seq, hidden, eps,
         );
 
@@ -368,7 +396,7 @@ impl GpuAudioForward {
         // which is per-call. To match exactly, do per-linear clamps via copies.
         // For now (M13.9 first cut) we apply Q's input clamp once and
         // accept that K/V/O clamps are the most common identical case.
-        let cl_q = &block.cl_attn_q;
+        let cl_q = &meta.cl_attn_q;
         if cl_q.in_max != 0.0 {
             clamp_chained(&self.ctx, &self.pipes, enc, &s.h_norm, n_h, cl_q.in_min, cl_q.in_max);
         }
@@ -376,7 +404,7 @@ impl GpuAudioForward {
         // Q matmul: h_norm [seq, hidden] × attn_q [hidden, hidden] → q_buf [seq, hidden]
         matmul_bf16_batched_chained(
             &self.ctx, &self.pipes, enc,
-            &block.attn_q, &s.h_norm, &s.q_buf,
+            &w.attn_q, &s.h_norm, &s.q_buf,
             hidden, hidden, seq,
         );
         if cl_q.out_max != 0.0 {
@@ -408,10 +436,10 @@ impl GpuAudioForward {
         // at offset pad_left * hidden * 4. Same for V.
         matmul_bf16_batched_chained(
             &self.ctx, &self.pipes, enc,
-            &block.attn_k, &s.h_norm, &s.attn_out,
+            &w.attn_k, &s.h_norm, &s.attn_out,
             hidden, hidden, seq,
         );
-        let cl_k = &block.cl_attn_k;
+        let cl_k = &meta.cl_attn_k;
         if cl_k.out_max != 0.0 {
             clamp_chained(&self.ctx, &self.pipes, enc, &s.attn_out,
                 seq * hidden, cl_k.out_min, cl_k.out_max);
@@ -428,10 +456,10 @@ impl GpuAudioForward {
         // V matmul → attn_out scratch → copy to v_padded.
         matmul_bf16_batched_chained(
             &self.ctx, &self.pipes, enc,
-            &block.attn_v, &s.h_norm, &s.attn_out,
+            &w.attn_v, &s.h_norm, &s.attn_out,
             hidden, hidden, seq,
         );
-        let cl_v = &block.cl_attn_v;
+        let cl_v = &meta.cl_attn_v;
         if cl_v.out_max != 0.0 {
             clamp_chained(&self.ctx, &self.pipes, enc, &s.attn_out,
                 seq * hidden, cl_v.out_min, cl_v.out_max);
@@ -446,14 +474,14 @@ impl GpuAudioForward {
         // (per_dim_scale buffer was pre-multiplied with q_scale_base at construction).
         scale_per_inner_dim_chained(
             &self.ctx, &self.pipes, enc,
-            &s.q_buf, &block.per_dim_scale,
+            &s.q_buf, &meta.per_dim_scale,
             seq * hidden, head_dim,
         );
 
         // Pos projection: pos_emb [max_span, hidden] × linear_pos [hidden, hidden] → pos_proj
         matmul_bf16_batched_chained(
             &self.ctx, &self.pipes, enc,
-            &block.linear_pos, &s.pos_emb, &s.pos_proj,
+            &w.linear_pos, &s.pos_emb, &s.pos_proj,
             hidden, hidden, max_span,
         );
 
@@ -476,14 +504,14 @@ impl GpuAudioForward {
         );
 
         // Output projection: attn_out [seq, hidden] × attn_o → ffw_out (reuse buffer)
-        let cl_o = &block.cl_attn_o;
+        let cl_o = &meta.cl_attn_o;
         if cl_o.in_max != 0.0 {
             clamp_chained(&self.ctx, &self.pipes, enc, &s.attn_out,
                 seq * hidden, cl_o.in_min, cl_o.in_max);
         }
         matmul_bf16_batched_chained(
             &self.ctx, &self.pipes, enc,
-            &block.attn_o, &s.attn_out, &s.ffw_out,
+            &w.attn_o, &s.attn_out, &s.ffw_out,
             hidden, hidden, seq,
         );
         if cl_o.out_max != 0.0 {
@@ -495,7 +523,7 @@ impl GpuAudioForward {
         // RMSNorm with attn_post_norm in-place
         rmsnorm_per_row_chained(
             &self.ctx, &self.pipes, enc,
-            &s.ffw_out, Some(&block.attn_post_norm), &s.h_main,
+            &s.ffw_out, Some(&w.attn_post_norm), &s.h_main,
             &s.h_norm, seq, hidden, eps,
         );
         // residual_add is in-place (x = x + y). Copy residual → h_main first,
@@ -508,24 +536,24 @@ impl GpuAudioForward {
 
         // ---- LightConv ----
         self.dispatch_lightconv(
-            enc, block,
+            enc, meta, w,
             seq, hidden, eps, gc,
         );
 
         // ---- FFW2 ----
         self.dispatch_ffw(
-            enc, &block.ffw_norm_1,
-            &block.ffw_up_1,   &block.cl_ffw_up_1,
-            &block.ffw_down_1, &block.cl_ffw_down_1,
-            &block.ffw_post_norm_1,
+            enc, &w.ffw_norm_1,
+            &w.ffw_up_1,   &meta.cl_ffw_up_1,
+            &w.ffw_down_1, &meta.cl_ffw_down_1,
+            &w.ffw_post_norm_1,
             seq, hidden, ffn, eps, gc,
         );
 
-        // ---- Final clamp + RMSNorm with block.pre_norm ----
+        // ---- Final clamp + RMSNorm with w.pre_norm ----
         clamp_chained(&self.ctx, &self.pipes, enc, &s.h_main, n_h, -gc, gc);
         rmsnorm_per_row_chained(
             &self.ctx, &self.pipes, enc,
-            &s.h_main, Some(&block.pre_norm), &s.h_main,
+            &s.h_main, Some(&w.pre_norm), &s.h_main,
             &s.ffw_out, seq, hidden, eps,
         );
         // Copy ffw_out → h_main.
@@ -603,7 +631,8 @@ impl GpuAudioForward {
     fn dispatch_lightconv(
         &self,
         enc: &mut wgpu::CommandEncoder,
-        block: &GpuAudioBlock,
+        meta: &GpuAudioBlockMeta,
+        w: &GpuAudioBlockWeights,
         seq: usize, hidden: usize, eps: f32, gc: f32,
     ) {
         let s = &self.scratch;
@@ -616,17 +645,17 @@ impl GpuAudioForward {
         // RMSNorm with conv_norm: h_main → h_norm
         rmsnorm_per_row_chained(
             &self.ctx, &self.pipes, enc,
-            &s.h_main, Some(&block.conv_norm), &s.h_main,
+            &s.h_main, Some(&w.conv_norm), &s.h_main,
             &s.h_norm, seq, hidden, eps,
         );
         // conv_pw1 (clipped): h_norm → pw1_out [seq, 2*hidden]
-        let cl_pw1 = &block.cl_conv_pw1;
+        let cl_pw1 = &meta.cl_conv_pw1;
         if cl_pw1.in_max != 0.0 {
             clamp_chained(&self.ctx, &self.pipes, enc, &s.h_norm, n_h, cl_pw1.in_min, cl_pw1.in_max);
         }
         matmul_bf16_batched_chained(
             &self.ctx, &self.pipes, enc,
-            &block.conv_pw1, &s.h_norm, &s.pw1_out,
+            &w.conv_pw1, &s.h_norm, &s.pw1_out,
             hidden, 2 * hidden, seq,
         );
         if cl_pw1.out_max != 0.0 {
@@ -637,7 +666,7 @@ impl GpuAudioForward {
         // Depthwise conv: glu_out × conv_dw → conv_dw_out
         depthwise_conv1d_chained(
             &self.ctx, &self.pipes, enc,
-            &s.glu_out, &block.conv_dw, &s.conv_dw_out,
+            &s.glu_out, &meta.conv_dw, &s.conv_dw_out,
             seq, hidden, kernel,
         );
         // clamp ±gc
@@ -645,19 +674,19 @@ impl GpuAudioForward {
         // RMSNorm with norm_conv (in-place via h_norm scratch)
         rmsnorm_per_row_chained(
             &self.ctx, &self.pipes, enc,
-            &s.conv_dw_out, Some(&block.norm_conv), &s.conv_dw_out,
+            &s.conv_dw_out, Some(&w.norm_conv), &s.conv_dw_out,
             &s.h_norm, seq, hidden, eps,
         );
         // SiLU in place
         silu_chained(&self.ctx, &self.pipes, enc, &s.h_norm, n_h);
         // conv_pw2 (clipped): h_norm → pw2_out
-        let cl_pw2 = &block.cl_conv_pw2;
+        let cl_pw2 = &meta.cl_conv_pw2;
         if cl_pw2.in_max != 0.0 {
             clamp_chained(&self.ctx, &self.pipes, enc, &s.h_norm, n_h, cl_pw2.in_min, cl_pw2.in_max);
         }
         matmul_bf16_batched_chained(
             &self.ctx, &self.pipes, enc,
-            &block.conv_pw2, &s.h_norm, &s.pw2_out,
+            &w.conv_pw2, &s.h_norm, &s.pw2_out,
             hidden, hidden, seq,
         );
         if cl_pw2.out_max != 0.0 {
@@ -726,16 +755,14 @@ impl GpuAudioForward {
     }
 }
 
-/// Helper: load one block's weights into GPU buffers + clamps into CPU values.
-async fn load_gpu_block(
+/// Load the long-lived meta for one Conformer block: per-dim Q scale,
+/// depthwise conv kernel, and the 10 ClippableLinear clamps. Total ~5 KB —
+/// safe to keep resident for the model's lifetime.
+async fn load_gpu_block_meta(
     wcache: &Arc<WeightCache>, i: u32, ctx: &WgpuCtx, q_scale_base: f32,
-) -> Result<GpuAudioBlock> {
+) -> Result<GpuAudioBlockMeta> {
     let p = format!("a.blk.{i}.");
     let r = wcache.reader();
-    let buf = |suffix: &str| -> _ {
-        let name = format!("{p}{suffix}");
-        async move { wcache.buffer_async(&name).await }
-    };
 
     // Pre-multiply q_scale_base into per_dim_scale and upload as a GPU buffer.
     let per_dim_scale_cpu = dequant_tensor_to_f32_async(r, &format!("{p}per_dim_scale.weight")).await?;
@@ -758,7 +785,37 @@ async fn load_gpu_block(
     });
     ctx.queue.write_buffer(&conv_dw_buf, 0, cast_slice(&conv_dw_cpu));
 
-    Ok(GpuAudioBlock {
+    Ok(GpuAudioBlockMeta {
+        per_dim_scale:   per_dim_scale_buf,
+        conv_dw:         conv_dw_buf,
+        cl_attn_q:       load_clamp(wcache, &format!("{p}attn_q")).await,
+        cl_attn_k:       load_clamp(wcache, &format!("{p}attn_k")).await,
+        cl_attn_v:       load_clamp(wcache, &format!("{p}attn_v")).await,
+        cl_attn_o:       load_clamp(wcache, &format!("{p}attn_out")).await,
+        cl_ffw_up:       load_clamp(wcache, &format!("{p}ffn_up")).await,
+        cl_ffw_down:     load_clamp(wcache, &format!("{p}ffn_down")).await,
+        cl_ffw_up_1:     load_clamp(wcache, &format!("{p}ffn_up_1")).await,
+        cl_ffw_down_1:   load_clamp(wcache, &format!("{p}ffn_down_1")).await,
+        cl_conv_pw1:     load_clamp(wcache, &format!("{p}conv_pw1")).await,
+        cl_conv_pw2:     load_clamp(wcache, &format!("{p}conv_pw2")).await,
+    })
+}
+
+/// Fetch one block's 21 weight buffers ephemerally — none of these go in
+/// the WeightCache HashMap, so dropping the returned struct (after submit)
+/// releases the GPU allocation. This is the core of the M16 multimodal
+/// memory budget: gemma4:e2b's audio tower has ~170 MB of BF16 weights per
+/// block, and 12 blocks × held-forever was ~2 GB of resident audio weight
+/// alone. Now: only one block's worth lives at a time.
+async fn fetch_gpu_block_weights(
+    wcache: &Arc<WeightCache>, i: u32,
+) -> Result<GpuAudioBlockWeights> {
+    let p = format!("a.blk.{i}.");
+    let buf = |suffix: &str| -> _ {
+        let name = format!("{p}{suffix}");
+        async move { wcache.buffer_async_ephemeral(&name).await }
+    };
+    Ok(GpuAudioBlockWeights {
         pre_norm:        buf("layer_pre_norm.weight").await?,
         ffw_norm:        buf("ffn_norm.weight").await?,
         ffw_up:          buf("ffn_up.weight").await?,
@@ -775,22 +832,10 @@ async fn load_gpu_block(
         attn_v:          buf("attn_v.weight").await?,
         attn_o:          buf("attn_out.weight").await?,
         linear_pos:      buf("linear_pos.weight").await?,
-        per_dim_scale:   per_dim_scale_buf,
         conv_norm:       buf("conv_norm.weight").await?,
         norm_conv:       buf("norm_conv.weight").await?,
         conv_pw1:        buf("conv_pw1.weight").await?,
         conv_pw2:        buf("conv_pw2.weight").await?,
-        conv_dw:         conv_dw_buf,
-        cl_attn_q:       load_clamp(wcache, &format!("{p}attn_q")).await,
-        cl_attn_k:       load_clamp(wcache, &format!("{p}attn_k")).await,
-        cl_attn_v:       load_clamp(wcache, &format!("{p}attn_v")).await,
-        cl_attn_o:       load_clamp(wcache, &format!("{p}attn_out")).await,
-        cl_ffw_up:       load_clamp(wcache, &format!("{p}ffn_up")).await,
-        cl_ffw_down:     load_clamp(wcache, &format!("{p}ffn_down")).await,
-        cl_ffw_up_1:     load_clamp(wcache, &format!("{p}ffn_up_1")).await,
-        cl_ffw_down_1:   load_clamp(wcache, &format!("{p}ffn_down_1")).await,
-        cl_conv_pw1:     load_clamp(wcache, &format!("{p}conv_pw1")).await,
-        cl_conv_pw2:     load_clamp(wcache, &format!("{p}conv_pw2")).await,
     })
 }
 
@@ -813,56 +858,7 @@ async fn load_clamp(wcache: &Arc<WeightCache>, prefix: &str) -> Clamp {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// GPU encoder must produce output close to the CPU oracle. BF16 weights
-    /// vs F32 weights gives ~3% per-mantissa rounding, accumulated through
-    /// 12 blocks → expect max_abs in the single-digit range. Calibrate
-    /// tolerance after first run.
-    #[test]
-    fn encode_gpu_matches_cpu_oracle() {
-        let path = "/Users/nightness/.ollama/models/blobs/sha256-4e30e2665218745ef463f722c0bf86be0cab6ee676320f1cfadf91e989107448";
-        if !std::path::Path::new(path).exists() {
-            eprintln!("skipping: gemma4 GGUF not available");
-            return;
-        }
-        let bytes = std::fs::read(path).unwrap();
-        let reader = crate::gguf::GgufReader::new(bytes).unwrap();
-        if reader.tensor("a.conv1d.0.weight").is_err() {
-            eprintln!("skipping: GGUF has no audio tower");
-            return;
-        }
-        let r_arc = std::sync::Arc::new(reader);
-        let cfg = AudioConfig::from_gguf(&r_arc, 1536).unwrap();
-        let ctx = pollster::block_on(WgpuCtx::new()).unwrap();
-        let pipes = std::sync::Arc::new(Pipelines::new(&ctx.device));
-        let wcache = std::sync::Arc::new(WeightCache::new(
-            r_arc.clone(), ctx.device.clone(), ctx.queue.clone()));
-
-        let cpu = pollster::block_on(CpuAudioForward::new(cfg.clone(), wcache.clone())).unwrap();
-        let gpu = pollster::block_on(GpuAudioForward::new(cfg, ctx, pipes, wcache)).unwrap();
-
-        // 0.25 s of pure tone — fast.
-        let sr = 16_000;
-        let n  = sr / 4;
-        let omega = 2.0 * std::f32::consts::PI * 440.0 / sr as f32;
-        let pcm: Vec<f32> = (0..n).map(|i| 0.3 * (omega * i as f32).sin()).collect();
-
-        let cpu_out = cpu.encode(&pcm).unwrap();
-        let gpu_out = pollster::block_on(gpu.encode(&pcm)).unwrap();
-        assert_eq!(cpu_out.len(), gpu_out.len(), "output length mismatch");
-        let mut max_abs = 0f32;
-        for i in 0..cpu_out.len() {
-            let d = (cpu_out[i] - gpu_out[i]).abs();
-            if d > max_abs { max_abs = d; }
-        }
-        eprintln!("encode_gpu vs cpu_oracle: max_abs={max_abs:e} (n={})", cpu_out.len());
-        // The CPU oracle dequantises BF16 weights to F32; the GPU kernels
-        // dequantise the same way at the call site (bf16→f32 bitcast). The
-        // only difference is matmul accumulation order, so divergence is
-        // pure F32 rounding noise — empirically ~1e-5 across 12 blocks.
-        assert!(max_abs < 1e-3, "GPU output too far from CPU oracle: {max_abs}");
-    }
-}
+// The in-tree `encode_gpu_matches_cpu_oracle` test was deleted alongside
+// the full CpuAudioForward Conformer path (M16). The GPU encoder is the
+// canonical implementation now; numeric parity is gated by the
+// `audio_parity` example against Ollama.

@@ -1271,8 +1271,9 @@ pub fn vision_attention_flash_q4_chained(
     cp.dispatch_workgroups(n_query_groups, n_heads as u32, 1);
 }
 
-/// Conformer block-local attention (Gemma 4 audio). Mirrors the CPU oracle
-/// in `multimodal::audio::AudioForward::forward_attention`'s inner loop.
+/// Conformer block-local attention (Gemma 4 audio). Mirrors Ollama's
+/// `model_audio.go::AudioConformerBlock.forwardAttention`'s inner loop —
+/// the in-tree CPU oracle was removed in M16, Ollama is the parity anchor.
 ///
 /// Inputs are already-prepared:
 ///   * `q_pad`     [padded_len, hidden] — Q projected and per-dim scaled

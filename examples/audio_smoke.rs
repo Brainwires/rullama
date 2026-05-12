@@ -1,9 +1,10 @@
-//! End-to-end smoke test for `AudioForward` (CPU oracle).
+//! End-to-end smoke test for the audio path.
 //!
-//! Synthesizes 1 second of pure-tone audio, runs it through the CPU Conformer
-//! encoder, and prints summary stats of the resulting soft tokens. Validates
-//! that the entire audio pipeline (mel → SSCP → 12 Conformer blocks → projector)
-//! runs without panic and emits f32s within plausible ranges.
+//! Synthesizes 1 second of pure-tone audio, runs it through the GPU audio
+//! encoder (CPU SSCP prefix + 12 Conformer blocks on GPU + projector), and
+//! prints summary stats of the resulting soft tokens. Validates that the
+//! entire audio pipeline runs without panic and emits f32s within plausible
+//! ranges.
 //!
 //! Build:
 //!   cargo run --release --features cpu-reference --example audio_smoke -- <gguf>

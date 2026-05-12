@@ -339,24 +339,21 @@ export function App() {
             // stabilised, 2048 ctx (≈ 144 MB GPU on A18) is comfortable.
             const mobileMaxCtx = 2048;
             // textOnly policy:
-            //   - mobile: ALWAYS text-only for now. Multimodal loads the
-            //     vision + audio tower weights upfront and the iPhone
-            //     WebContent process gets jetsamed before they finish
-            //     uploading. Lifting this needs the per-tile streaming
-            //     pattern the text tower already has, applied to the
-            //     vision/audio towers — not landed yet.
-            //   - desktop: catalog flag drives it. R2 ollama-style
-            //     entries have `multimodal: true` and load the full
-            //     tensor set; HF-style text-only blobs don't and load
-            //     as text-only.
-            //   - locally-discovered Ollama entries: discoverModels()
-            //     doesn't set `multimodal`, so they read as text-only.
-            //     That matches what the M15-era code did when a local
-            //     entry was loaded with the old `mobile || textOnlyRemote`
-            //     formula on mobile, and it's the safer default since
-            //     not every local Ollama blob actually contains the mm
-            //     tensors.
-            const textOnly = mobile || !m.multimodal;
+            //   Catalog drives it everywhere — `multimodal: true` on a
+            //   BAKED_IN_MODELS / R2 entry means the blob carries the
+            //   full vision+audio tensor set; locally-discovered Ollama
+            //   entries (no `multimodal` flag) and HF-style text-only
+            //   blobs both read as text-only.
+            //
+            //   M16 lifted the previous mobile force-textOnly: the
+            //   vision tower now ephemerally fetches per-block weights
+            //   inside `encode_image` (peak ~200 MB during encode, ~5
+            //   MB between encodes), and the audio tower does the same
+            //   per-block fetch inside `encode_audio`. Total resident
+            //   multimodal weight when idle is now tiny enough that
+            //   iPhone can hold the text tower + the multimodal
+            //   constants without jetsam.
+            const textOnly = !m.multimodal;
             await client.load(modelKey, filename, {
                 maxContext: mobile ? mobileMaxCtx : 0,
                 textOnly,
