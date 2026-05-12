@@ -7,7 +7,6 @@ import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
 import { ConversationList } from "@/components/ConversationList";
 import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { type ChatMessage, type ImageAttachment, type SamplingOptions, DEFAULT_SAMPLING, DEFAULT_SYSTEM_PROMPT } from "@/lib/types";
 import { type ModelEntry, blobUrl, beacon } from "@/lib/api";
 import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel } from "@/lib/opfs";
@@ -610,23 +609,6 @@ export function App() {
                     </span>
                 )}
                 <div className="ml-auto flex items-center gap-2">
-                    {modelStatus === "ready" && (
-                        <Badge
-                            tone="ok"
-                            className="hidden max-w-[14rem] truncate sm:inline-flex"
-                            title={statusText}
-                        >
-                            {statusText}
-                        </Badge>
-                    )}
-                    {modelStatus === "loading" && (
-                        <Badge tone="warn" className="max-w-[14rem] truncate">
-                            {loadingLabel || "loading…"}
-                        </Badge>
-                    )}
-                    {modelStatus === "error" && (
-                        <Badge tone="err">error</Badge>
-                    )}
                     <Button
                         variant="ghost"
                         size="icon"

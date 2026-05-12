@@ -100,15 +100,29 @@ export function ModelLoader(props: Props) {
                 </Badge>
             )}
             {props.status === "error"   && <Badge tone="err">error</Badge>}
-            {props.status === "loading" && (
-                <Badge
-                    tone="warn"
-                    className="truncate max-w-[14rem] font-mono tabular-nums"
-                    title={props.loadingLabel}
-                >
-                    {props.loadingLabel || "loading…"}
-                </Badge>
-            )}
+            {props.status === "loading" && (() => {
+                // Compact loading badge — just "% left · ETA Xm Ys". The
+                // full byte-counter + rate string lives in the progress
+                // bar that sits under the page header, no need to repeat
+                // it here. Tooltip preserves the full label.
+                const left = Math.max(0, 100 - props.loadingPercent);
+                const m    = /ETA\s+(.+)$/.exec(props.loadingLabel);
+                const eta  = m ? m[1] : null;
+                const compact = eta
+                    ? `${left.toFixed(0)}% · ETA ${eta}`
+                    : props.loadingPercent > 0
+                        ? `${left.toFixed(0)}% left`
+                        : "loading…";
+                return (
+                    <Badge
+                        tone="warn"
+                        className="font-mono tabular-nums"
+                        title={props.loadingLabel}
+                    >
+                        {compact}
+                    </Badge>
+                );
+            })()}
             {error && <span className="text-xs text-destructive">{error}</span>}
         </div>
     );
