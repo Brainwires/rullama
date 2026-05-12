@@ -38,7 +38,7 @@ export default defineConfig({
                 // to drop the precache and start clean.
                 //   docs: https://developer.chrome.com/docs/workbox/modules/workbox-precaching
                 //   issue: https://github.com/GoogleChrome/workbox/issues/2757
-                cacheId: "rullama-v2",
+                cacheId: "rullama-v3",
                 cleanupOutdatedCaches: true,
                 globPatterns: ["**/*.{html,css,js,svg,png,webmanifest}"],
                 globIgnores:  ["**/pkg/**", "**/*.wasm"],
@@ -69,7 +69,6 @@ export default defineConfig({
                 type: "module",
             },
             includeAssets: [
-                "favicon.svg",
                 "icons/icon-192.png",
                 "icons/icon-512.png",
                 "icons/icon-mask-512.png",
