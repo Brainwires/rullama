@@ -29,13 +29,38 @@
         --radius: 0.5rem;
     }
 
+    /* iOS viewport lockdown.
+     *
+     * Pin html/body/#root to the visual viewport with `fixed` so the
+     * document itself never scrolls — only flagged-as-scrollable inner
+     * panes do. This kills:
+     *   - the iOS rubber-band overscroll on the page background,
+     *   - the "shifted up by a few pixels after dismissing the keyboard"
+     *     state where the safe-area no longer matches the chrome,
+     *   - the springy slide when content slightly exceeds viewport height,
+     *   - the bottom-of-page double-tap that scrolls the page itself.
+     *
+     * Uses `100dvh` so the height tracks the visible viewport (excludes
+     * the iOS chrome) rather than the lying 100vh which includes it.
+     */
     html, body, #root {
-        height: 100%;
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100dvh;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        overscroll-behavior: none;
     }
 
     body {
         font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
         -webkit-tap-highlight-color: transparent;
+        -webkit-text-size-adjust: 100%;
+        /* Pinch-zoom is already disabled by the viewport meta; this
+         * blocks the iOS-Safari double-tap-to-zoom gesture too. */
+        touch-action: pan-x pan-y;
     }
 
     /* Respect the iOS safe area on installed PWAs. */

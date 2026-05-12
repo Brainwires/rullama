@@ -15,6 +15,7 @@ import { getNetworkHint } from "@/lib/network";
 import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
 import { usePersistedState } from "@/lib/persisted";
+import { useIOSKeyboard } from "@/lib/useIOSKeyboard";
 import { fmtBytes, fmtEta, clampInt, clampNum } from "@/lib/utils";
 import { preprocessImage } from "@/lib/image_preprocess";
 import { Settings, History } from "lucide-react";
@@ -65,6 +66,11 @@ export function App() {
 
     const cancelRef = useRef(false);
     const { showToast, dismissToast } = useToast();
+
+    // iOS keyboard handling — snaps the visual viewport back to the top
+    // when the keyboard dismisses, so the page doesn't end up offset
+    // a few px above the layout viewport (a classic iOS-Safari quirk).
+    useIOSKeyboard(true);
 
     // One-time sanitization of persisted values. Catches localStorage
     // entries from older versions (or hand-edited values) that fall
