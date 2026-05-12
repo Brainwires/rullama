@@ -103,17 +103,37 @@ export interface EnsureProgress {
 }
 export interface EnsureResult { totalBytes: number; fromCache: boolean; }
 
-/** Ensure the model file is fully present in OPFS. Resumes if partial. */
+/**
+ * Ensure the model file is fully present in OPFS. Resumes if partial.
+ *
+ * `expectedSize` is the catalog-declared size (`m.size`). When the local
+ * OPFS file already meets that size, we short-circuit and return without
+ * any network call — this is what lets a cached model load while the
+ * browser is offline. The remote probe + writer worker are only reached
+ * when we genuinely need bytes from the network.
+ */
 export async function ensureModel(
     url: string,
     modelKey: string,
     filename: string,
+    expectedSize: number,
     onProgress?: (p: EnsureProgress) => void,
 ): Promise<EnsureResult> {
     if (!(await opfsSupported())) throw new Error("OPFS not supported in this browser");
 
-    const remoteTotal = await discoverRemoteTotal(url);
+    // Fast path: the file is already fully here. No network, no probe,
+    // no writer-worker boot. Works offline.
     const have = await existingSize(modelKey, filename);
+    if (expectedSize > 0 && have >= expectedSize) {
+        onProgress?.({ bytesWritten: have, totalBytes: expectedSize, fromCache: true });
+        return { totalBytes: have, fromCache: true };
+    }
+
+    // Otherwise we genuinely need bytes — probe the remote for its
+    // current size. This is the call that fails offline; the load
+    // surfaces a "Failed to fetch" error which the App.tsx error path
+    // turns into a toast.
+    const remoteTotal = await discoverRemoteTotal(url);
     if (have >= remoteTotal && remoteTotal > 0) {
         onProgress?.({ bytesWritten: have, totalBytes: remoteTotal, fromCache: true });
         return { totalBytes: have, fromCache: true };

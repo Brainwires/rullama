@@ -219,7 +219,7 @@ export function App() {
             // that often makes the label flicker; throttle to ~4 Hz, but
             // always emit the final tick so 100 % shows the real number.
             let lastLabelAt = 0;
-            const { totalBytes, fromCache } = await ensureModel(url, modelKey, filename, ({ bytesWritten, totalBytes }) => {
+            const { totalBytes, fromCache } = await ensureModel(url, modelKey, filename, m.size, ({ bytesWritten, totalBytes }) => {
                 if (totalBytes > 0) {
                     setLoadingPercent((bytesWritten / totalBytes) * 100);
                     const now     = performance.now();
