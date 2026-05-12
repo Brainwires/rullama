@@ -10,7 +10,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { type ChatMessage, type ImageAttachment, type SamplingOptions, DEFAULT_SAMPLING, DEFAULT_SYSTEM_PROMPT } from "@/lib/types";
 import { type ModelEntry, blobUrl, beacon } from "@/lib/api";
-import { ensureModel, opfsSupported, requestPersistent, wipeModel } from "@/lib/opfs";
+import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel } from "@/lib/opfs";
+import { getNetworkHint } from "@/lib/network";
 import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
 import { usePersistedState } from "@/lib/persisted";
@@ -246,6 +247,35 @@ export function App() {
             const modelKey = m.digest.replace(/[^A-Za-z0-9_.-]/g, "_");
             const filename = m.name.replace(/[^A-Za-z0-9_.-]/g, "_") + ".gguf";
             const url = blobUrl(m);
+
+            // Bytes-over-the-wire guard. If OPFS already has the full file
+            // we skip the network entirely (offline reload path), so the
+            // confirm is only shown when the user is about to actually
+            // download. The 200 MB floor lets small files load silently.
+            //
+            // Network hints from `navigator.connection` are best-effort:
+            // iOS exposes `saveData` (= Low Data Mode) reliably but not
+            // `type`, so we always confirm large downloads — the warning
+            // copy just escalates when we have positive signal.
+            const CONFIRM_BYTES = 200 * 1024 * 1024;
+            const cachedBytes = await existingSize(modelKey, filename);
+            const needBytes   = Math.max(0, m.size - cachedBytes);
+            if (needBytes >= CONFIRM_BYTES) {
+                const hint = getNetworkHint();
+                const sizeLabel = fmtBytes(needBytes);
+                const head = hint.metered
+                    ? `⚠️ ${hint.reason}.`
+                    : `Heads up:`;
+                const msg = `${head}\n\nDownloading "${m.name}" needs ${sizeLabel} over the network. ` +
+                    `It will be cached locally so subsequent loads are free.\n\n` +
+                    `Continue?`;
+                if (!window.confirm(msg)) {
+                    setModelStatus("idle");
+                    setStatusText("no model");
+                    setLoadingLabel("");
+                    return;
+                }
+            }
 
             const t0 = performance.now();
             // The writer worker emits a progress event per stream chunk
