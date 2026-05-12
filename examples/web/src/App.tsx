@@ -333,32 +333,32 @@ export function App() {
 
             setLoadingLabel("loading into wasm…");
             const mobile = isMobileUA();
-            // Bumped 512 → 2048. The 512 was a conservative crash-avoidance
-            // number from the iPhone-load-path debugging phase; once the
-            // worker + sync-OPFS + per-tile range-fetch combination
-            // stabilised, we've never come close to the actual GPU memory
-            // budget. A18 exposes max_buffer_size = 1 GiB, KV-per-token is
-            // ~70 KB across all layers, so 2048 ctx ≈ 144 MB of GPU
-            // memory — comfortable headroom on a phone.
+            // KV-cache cap on mobile only — the original 512 was a
+            // crash-avoidance number from the iPhone-load-path work, but
+            // since the worker + sync-OPFS + per-tile range-fetch combo
+            // stabilised, 2048 ctx (≈ 144 MB GPU on A18) is comfortable.
             const mobileMaxCtx = 2048;
-            // textOnly is forced when:
-            //   - mobile (no headroom for vision/audio towers), OR
-            //   - the remote URL points at a text-only blob (HF-style:
-            //     `mmproj` ships separately and audio isn't in GGUF at
-            //     all). R2-hosted Ollama-style blobs have `multimodal:
-            //     true` and load the full weight set on desktop.
-            const textOnlyRemote = !!m.url && !m.multimodal;
+            // Catalog drives text-only vs multimodal — `multimodal: true`
+            // on a BAKED_IN_MODELS entry means the blob is an Ollama-style
+            // full mm tensor set (text + vision + audio + projectors).
+            // HF-style blobs without that flag are text-only by structure,
+            // so we honor that. Mobile no longer force-text-only: the
+            // device has more headroom than the M15 era assumed, and the
+            // user is explicitly opting in by choosing a multimodal entry.
+            const textOnly = !m.multimodal;
             await client.load(modelKey, filename, {
                 maxContext: mobile ? mobileMaxCtx : 0,
-                textOnly:   mobile || textOnlyRemote,
+                textOnly,
             });
             setHasVision(client.hasVision);
             setModelStatus("ready");
             setStatusText(`${m.name}${fromCache ? " ⚡" : ""}`);
             setLoadingLabel("");
+            const capsLine = `vision ${client.hasVision ? "✓" : "✗"} · audio ${client.hasAudio ? "✓" : "✗"}`;
+            beacon("chat", `loaded ${m.name} (${capsLine})`);
             showToast({
                 level: "success", title: `Loaded ${m.name}`,
-                message: fromCache ? "from OPFS cache" : `downloaded ${fmtBytes(totalBytes)}`,
+                message: `${capsLine}${fromCache ? " · from OPFS cache" : ""}`,
             });
         } catch (e) {
             const err = (e as Error).message ?? String(e);
