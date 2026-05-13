@@ -275,10 +275,10 @@ export function App() {
         setActiveConvId(null);
         setStatusLine(undefined);
         setPendingImages([]);
-        // Clear the worker's KV cache up front. onSend would do this on
-        // the next send anyway, but releasing the memory immediately is
-        // friendlier when the user is intentionally starting fresh.
-        void getClient().reset();
+        // The worker's KV cache is shared across tabs now, so a "new chat"
+        // here doesn't preemptively reset it — onSend will reset inside
+        // its own session window. (Resetting from here would either need
+        // a session we don't have, or be racy with another tab mid-step.)
     }, [busy]);
 
     const onAttachFiles = useCallback(async (files: FileList) => {
@@ -446,9 +446,15 @@ export function App() {
             //   iPhone can hold the text tower + the multimodal
             //   constants without jetsam.
             const textOnly = !m.multimodal;
-            await client.load(modelKey, filename, {
-                maxContext: mobile ? mobileMaxCtx : 0,
-                textOnly,
+            // `load` is session-scoped (it mutates the shared Model). Acquire
+            // for the duration of the wasm load + meta read. Other tabs'
+            // inference will wait until this resolves; the queue advances
+            // naturally on releaseSession (in the finally block).
+            await client.withSession(async () => {
+                await client.load(modelKey, filename, {
+                    maxContext: mobile ? mobileMaxCtx : 0,
+                    textOnly,
+                });
             });
             setHasVision(client.hasVision);
             setModelStatus("ready");
@@ -576,7 +582,15 @@ export function App() {
             showToast({ level: "warn", title: "Persistence failure", message: (e as Error).message });
         }
 
+        // acquireSession blocks if another tab is mid-generation. While
+        // we wait, hint via the status line; clear it once we own the
+        // session. Cooperative cancel via cancelRef takes over per-step
+        // inside the session (queued-acquire abort is a follow-up).
         try {
+            setStatusLine("waiting for another tab to finish…");
+            await client.acquireSession();
+            setStatusLine(undefined);
+
             await client.setSampling(sampling);
             await client.reset();
             const rendered = await client.renderChat(renderHistory, false);
@@ -682,6 +696,9 @@ export function App() {
                 showToast({ level: "error", title: "Generation failed", message: msg });
             }
         } finally {
+            // Release the session so the next tab in the queue (or this
+            // tab's next send) can proceed.
+            try { await client.releaseSession(); } catch { /* */ }
             setBusy(false);
         }
     }, [activeConvId, busy, maxTokens, messages, modelStatus, pendingImages, prompt, refreshConversations, sampling, statusText, systemPrompt, thinking, showToast]);
@@ -701,7 +718,7 @@ export function App() {
 
         const wasLoaded = modelStatus === "ready" && statusText.startsWith(m.name);
         if (wasLoaded) {
-            try { await getClient().free(); } catch { /* */ }
+            try { await getClient().withSession(() => getClient().free()); } catch { /* */ }
             setModelStatus("idle");
             setStatusText("no model");
             setMessages([]);

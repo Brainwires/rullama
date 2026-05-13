@@ -1,19 +1,25 @@
-// rullama inference Dedicated Worker.
+// rullama inference SharedWorker.
 //
-// Owns the wasm `Model` and the `FileSystemSyncAccessHandle` for the lifetime
-// of a loaded model. iOS Safari only exposes sync OPFS in Worker contexts,
-// and the worker isolates inference from main-thread page-watchdog reapers.
+// One per origin. Owns the wasm Model, the loaded GGUF sync handle, the
+// rsqlite-wasm chat DB, and the model-download (ensureModel) path. Tabs
+// open a MessagePort and route all heavy / OPFS-touching work through here.
 //
-// Wire protocol (main → worker), one message per RPC:
+// Why SharedWorker:
+//   OPFS's `FileSystemSyncAccessHandle` is single-writer by spec — a second
+//   tab opening the same file gets `NoModificationAllowedError`. By keeping
+//   the handles in one origin-scoped worker, every tab connects to the same
+//   handles. Concurrent inference is serialized through a session queue.
+//
+// Wire protocol (port → worker), one message per RPC:
 //   { requestId, type, ...args }
 //
-// Wire protocol (worker → main):
-//   { requestId, ok: true,  result }
-//   { requestId, ok: false, error }
-//   { type: "log", args }   (unsolicited)
+// Wire protocol (worker → port):
+//   { requestId, ok: true,  result }                     — RPC reply
+//   { requestId, ok: false, error }                      — RPC failure
+//   { type: "log",    args }                             — debug fanout
+//   { type: "notify", kind, ...payload }                 — cross-tab event
 
 // The wasm-pack output lives at /pkg/rullama.js (aliased in vite.config.ts).
-// Vite resolves this URL at build time and emits the wasm asset alongside.
 // @ts-expect-error — generated bundle, no .d.ts
 import init, { Model, WasmDatabase } from "/pkg/rullama.js";
 
@@ -67,14 +73,89 @@ interface ModelStatic {
 }
 const ModelClass = Model as unknown as ModelStatic;
 
+// ───────────────────────────────────────────────────────────────────────
+// State (singletons, shared across all connected ports)
+// ───────────────────────────────────────────────────────────────────────
+
 const OPFS_DIR = "rullama-models";
+const DB_NAME  = "rullama-chat.db";
 
 let wasmReady: Promise<unknown> | null = null;
 let model: ModelHandle | null = null;
 let syncHandle: FileSystemSyncAccessHandle | null = null;
 let dbReady: Promise<WasmDbHandle> | null = null;
 
-const DB_NAME = "rullama-chat.db";
+interface LoadedModelInfo {
+    modelKey: string;
+    filename: string;
+    hasVision: boolean;
+    hasAudio: boolean;
+    vocabSize: number;
+    imageSentinelIds: [number, number] | null;
+    audioSentinelIds: [number, number] | null;
+}
+let loadedInfo: LoadedModelInfo | null = null;
+
+const PORTS = new Set<MessagePort>();
+const PORT_LAST_SEEN = new WeakMap<MessagePort, number>();
+
+// Session arbitration — serializes inference (one Model, one KV cache).
+interface ActiveSession { sid: number; port: MessagePort; }
+let active: ActiveSession | null = null;
+let nextSid = 1;
+interface Waiter {
+    port: MessagePort;
+    abortToken: string;
+    resolve: (sid: number) => void;
+    reject:  (e: Error) => void;
+}
+const queue: Waiter[] = [];
+
+// In-flight ensureModel downloads, keyed by `modelKey/filename`.
+// Coalesce parallel calls — second caller awaits the first's promise.
+interface DownloadInflight {
+    promise: Promise<{ totalBytes: number; fromCache: boolean }>;
+}
+const inflight = new Map<string, DownloadInflight>();
+
+const RPC_TRACE = false;
+
+// ───────────────────────────────────────────────────────────────────────
+// Logging + notification fanout
+// ───────────────────────────────────────────────────────────────────────
+
+function log(...args: unknown[]) {
+    const argStrs = args.map((a) => String(a));
+    const msg = argStrs.join(" ");
+    for (const port of PORTS) {
+        try { port.postMessage({ type: "log", args: argStrs }); } catch { /* port closed */ }
+    }
+    try {
+        fetch("/api/log", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tag: "wkr", msg, ts: Date.now() }),
+            keepalive: true,
+        }).catch(() => {});
+    } catch { /* */ }
+}
+
+function notify(kind: string, payload: Record<string, unknown> = {}) {
+    const msg = { type: "notify", kind, ...payload };
+    for (const port of PORTS) {
+        try { port.postMessage(msg); } catch { /* port closed */ }
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Wasm + DB lifecycle
+// ───────────────────────────────────────────────────────────────────────
+
+async function ensureWasm() {
+    if (!wasmReady) wasmReady = init();
+    return wasmReady;
+}
+
 const SCHEMA = [
     `CREATE TABLE IF NOT EXISTS conversations (
         id          TEXT PRIMARY KEY,
@@ -94,16 +175,6 @@ const SCHEMA = [
         FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
      )`,
     `CREATE INDEX IF NOT EXISTS msg_conv_idx ON messages(conversation_id, created_at)`,
-    // Per-message image attachments. Display-only — see image_store.ts
-    // for the OPFS-backed blob layout. The row carries only a small
-    // path (UUID + .jpg suffix); the actual JPEG bytes live in OPFS.
-    //
-    // Earlier (ecc4fdd) this column was `thumb_data_url TEXT NOT NULL`
-    // holding ~30 KB base64 data URLs inline, which tripped an
-    // rsqlite-wasm panic on overflow-page handling (single-row payload
-    // > 4 KB SQLite page hit a u32 underflow at btree_write.rs:336).
-    // The DROP IF EXISTS reset migrates any client that ran 9add3d3 →
-    // current. No production rows survived the panic so nothing is lost.
     `DROP TABLE IF EXISTS message_images`,
     `CREATE TABLE IF NOT EXISTS message_images (
         conversation_id TEXT NOT NULL,
@@ -136,28 +207,11 @@ async function ensureDb(): Promise<WasmDbHandle> {
     return dbReady;
 }
 
-// Lightweight UUID — `crypto.randomUUID()` is available in DedicatedWorkerGlobalScope.
-function newId(): string {
-    return crypto.randomUUID();
-}
+function newId(): string { return crypto.randomUUID(); }
 
-function log(...args: unknown[]) {
-    const msg = args.map((a) => String(a)).join(" ");
-    (self as DedicatedWorkerGlobalScope).postMessage({ type: "log", args: args.map(String) });
-    try {
-        fetch("/api/log", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ tag: "wkr", msg, ts: Date.now() }),
-            keepalive: true,
-        }).catch(() => {});
-    } catch { /* */ }
-}
-
-async function ensureWasm() {
-    if (!wasmReady) wasmReady = init();
-    return wasmReady;
-}
+// ───────────────────────────────────────────────────────────────────────
+// Model lifecycle (sync-OPFS reader + Model.loadFromOpfs)
+// ───────────────────────────────────────────────────────────────────────
 
 async function openSyncReadFn(modelKey: string, filename: string) {
     if (syncHandle) {
@@ -190,12 +244,26 @@ interface LoadArgs {
     maxContext?: number;
     textOnly?:   boolean;
 }
-async function handleLoad(args: LoadArgs) {
+
+async function handleLoad(args: LoadArgs): Promise<LoadedModelInfo> {
     await ensureWasm();
+    // Short-circuit: if the requested model is already the one we have
+    // loaded, skip the free+reload. Crucial for auto-load on page reload
+    // (the SharedWorker outlives the tab) and for two tabs both
+    // independently auto-loading the same model.
+    if (model && loadedInfo
+        && loadedInfo.modelKey === args.modelKey
+        && loadedInfo.filename === args.filename) {
+        log(`load: short-circuit, already have ${args.modelKey}/${args.filename}`);
+        return loadedInfo;
+    }
     if (model) {
         try { model.free?.(); } catch { /* */ }
         model = null;
+        loadedInfo = null;
+        notify("modelFreed", {});
     }
+    notify("modelLoading", { modelKey: args.modelKey, filename: args.filename });
     const { readFn, totalBytes: size } = await openSyncReadFn(args.modelKey, args.filename);
     log(`load: Model.loadFromOpfs${args.textOnly ? "TextOnly" : ""} size=${size} max_ctx=${args.maxContext || "default"}`);
 
@@ -204,13 +272,17 @@ async function handleLoad(args: LoadArgs) {
         : await ModelClass.loadFromOpfs(readFn, size);
 
     log(`load: ready vocabSize=${model.vocabSize}`);
-    return {
+    loadedInfo = {
+        modelKey:         args.modelKey,
+        filename:         args.filename,
         vocabSize:        model.vocabSize,
         hasVision:        model.hasVision,
         hasAudio:         model.hasAudio,
-        imageSentinelIds: model.imageSentinelIds() ?? null,
-        audioSentinelIds: model.audioSentinelIds() ?? null,
+        imageSentinelIds: (model.imageSentinelIds() ?? null) as [number, number] | null,
+        audioSentinelIds: (model.audioSentinelIds() ?? null) as [number, number] | null,
     };
+    notify("modelLoaded", loadedInfo as unknown as Record<string, unknown>);
+    return loadedInfo;
 }
 
 function requireModel(): ModelHandle {
@@ -218,36 +290,325 @@ function requireModel(): ModelHandle {
     return model;
 }
 
-const RPC_TRACE = false;
+// ───────────────────────────────────────────────────────────────────────
+// ensureModel — download GGUF to OPFS via streaming write
+// (Replaces the per-tab opfs-writer-worker. Coalesces parallel callers.)
+// ───────────────────────────────────────────────────────────────────────
+
+const FLUSH_INTERVAL = 64 * 1024 * 1024;
+
+async function existingOpfsSize(modelKey: string, filename: string): Promise<number> {
+    try {
+        const root  = await navigator.storage.getDirectory();
+        const dlDir = await root.getDirectoryHandle(OPFS_DIR, { create: false });
+        const md    = await dlDir.getDirectoryHandle(modelKey, { create: false });
+        const fh    = await md.getFileHandle(filename, { create: false });
+        const f     = await fh.getFile();
+        if (f.size < 4) return 0;
+        // GGUF magic check (read first 4 bytes via async getFile API — concurrent-safe).
+        const head = new Uint8Array(await f.slice(0, 4).arrayBuffer());
+        if (head[0] !== 0x47 || head[1] !== 0x47 || head[2] !== 0x55 || head[3] !== 0x46) return 0;
+        return f.size;
+    } catch { return 0; }
+}
+
+interface EnsureArgs {
+    url:          string;
+    modelKey:     string;
+    filename:     string;
+    expectedSize: number;
+}
+
+async function doDownload(args: EnsureArgs): Promise<{ totalBytes: number; fromCache: boolean }> {
+    const { url, modelKey, filename, expectedSize } = args;
+    const key = `${modelKey}/${filename}`;
+
+    const have = await existingOpfsSize(modelKey, filename);
+    if (have > 0 && expectedSize > 0 && have >= expectedSize) {
+        notify("downloadDone", { modelKey, filename, totalBytes: have, fromCache: true });
+        return { totalBytes: have, fromCache: true };
+    }
+
+    let currentOffset = have;
+    const root     = await navigator.storage.getDirectory();
+    const dlDir    = await root.getDirectoryHandle(OPFS_DIR, { create: true });
+    const modelDir = await dlDir.getDirectoryHandle(modelKey, { create: true });
+    const fileHandle = await modelDir.getFileHandle(filename, { create: true });
+
+    // Reuse a model file write handle only if the model file isn't *also*
+    // being read for inference (which holds syncHandle). The two would race
+    // on the same OPFS file; in practice we never download a model that's
+    // currently loaded, but be defensive.
+    let writeHandle: FileSystemSyncAccessHandle | null = null;
+    let bytesSinceFlush = 0;
+    try {
+        writeHandle = await fileHandle.createSyncAccessHandle();
+        writeHandle.truncate(currentOffset);
+        writeHandle.flush();
+
+        const headers: Record<string, string> = {};
+        if (currentOffset > 0) headers["Range"] = `bytes=${currentOffset}-`;
+        const resp = await fetch(url, { headers });
+
+        if (resp.status === 416) {
+            const size = writeHandle.getSize();
+            writeHandle.close();
+            notify("downloadDone", { modelKey, filename, totalBytes: size, fromCache: true });
+            return { totalBytes: size, fromCache: false };
+        }
+        if (!resp.ok && resp.status !== 206) {
+            writeHandle.close();
+            throw new Error(`fetch failed (${resp.status})`);
+        }
+        if (resp.status === 200 && currentOffset > 0) {
+            writeHandle.truncate(0);
+            currentOffset = 0;
+        }
+
+        const cr = resp.headers.get("content-range");
+        const contentLength = Number(resp.headers.get("content-length") || "0") || 0;
+        const totalBytes = cr?.match(/\/(\d+)\s*$/)
+            ? Number(cr.match(/\/(\d+)\s*$/)![1])
+            : currentOffset + contentLength;
+
+        if (!resp.body) {
+            writeHandle.close();
+            throw new Error("no response body");
+        }
+        const reader = resp.body.getReader();
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (!value) continue;
+
+            const written = writeHandle.write(value, { at: currentOffset });
+            currentOffset   += written;
+            bytesSinceFlush += written;
+
+            if (bytesSinceFlush >= FLUSH_INTERVAL) {
+                writeHandle.flush();
+                bytesSinceFlush = 0;
+            }
+            notify("downloadProgress", {
+                modelKey, filename,
+                bytesWritten: currentOffset,
+                totalBytes,
+                chunkBytes: written,
+            });
+        }
+
+        writeHandle.flush();
+        writeHandle.close();
+        writeHandle = null;
+
+        notify("downloadDone", { modelKey, filename, totalBytes: currentOffset, fromCache: false });
+        return { totalBytes: currentOffset, fromCache: false };
+    } catch (err) {
+        if (writeHandle) {
+            try { writeHandle.flush(); } catch { /* */ }
+            try { writeHandle.close(); } catch { /* */ }
+        }
+        const error = (err as Error)?.message ?? String(err);
+        notify("downloadError", { modelKey, filename, error });
+        throw new Error(error);
+    } finally {
+        inflight.delete(key);
+    }
+}
+
+async function handleEnsureModel(args: EnsureArgs): Promise<{ totalBytes: number; fromCache: boolean }> {
+    const key = `${args.modelKey}/${args.filename}`;
+    const existing = inflight.get(key);
+    if (existing) return existing.promise;
+    const promise = doDownload(args);
+    inflight.set(key, { promise });
+    return promise;
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Session arbitration
+// ───────────────────────────────────────────────────────────────────────
+
+interface AcquireArgs {
+    abortToken: string;
+}
+
+function acquireSession(args: AcquireArgs, port: MessagePort): Promise<number> {
+    return new Promise<number>((resolve, reject) => {
+        if (!active) {
+            active = { sid: ++nextSid, port };
+            resolve(active.sid);
+            return;
+        }
+        queue.push({
+            port,
+            abortToken: args.abortToken,
+            resolve,
+            reject,
+        });
+    });
+}
+
+function releaseSession(sid: number, port: MessagePort): boolean {
+    if (!active || active.sid !== sid || active.port !== port) {
+        // Stale release — ignore (e.g. caller's tab held until close, the
+        // disconnect handler already cleared it).
+        return false;
+    }
+    active = null;
+    wakeNext();
+    return true;
+}
+
+function cancelAcquire(abortToken: string): boolean {
+    const idx = queue.findIndex((w) => w.abortToken === abortToken);
+    if (idx < 0) return false;
+    const w = queue.splice(idx, 1)[0];
+    w.reject(new Error("aborted"));
+    return true;
+}
+
+function wakeNext() {
+    if (active) return;
+    const w = queue.shift();
+    if (!w) return;
+    active = { sid: ++nextSid, port: w.port };
+    w.resolve(active.sid);
+}
+
+function requireSession(port: MessagePort, sid: unknown) {
+    const n = Number(sid);
+    if (!active) throw new Error("no active session");
+    if (active.sid !== n) throw new Error(`session mismatch: held=${active.sid} called=${n}`);
+    if (active.port !== port) throw new Error("session not owned by this port");
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Port lifecycle
+// ───────────────────────────────────────────────────────────────────────
+
+function disconnectPort(port: MessagePort, reason: string) {
+    PORTS.delete(port);
+    PORT_LAST_SEEN.delete(port);
+    // Release any session held by this port.
+    if (active && active.port === port) {
+        const sid = active.sid;
+        active = null;
+        log(`port disconnect (${reason}) released session ${sid}`);
+        wakeNext();
+    }
+    // Drop any queued waiters from this port.
+    for (let i = queue.length - 1; i >= 0; i--) {
+        if (queue[i].port === port) {
+            queue[i].reject(new Error("port disconnected"));
+            queue.splice(i, 1);
+        }
+    }
+    try { port.close(); } catch { /* */ }
+}
+
+// Heartbeat GC — ports that don't ping in HEARTBEAT_DEAD_MS are presumed
+// crashed/closed (browsers don't fire onclose on MessagePort).
+const HEARTBEAT_GC_INTERVAL = 15_000;
+const HEARTBEAT_DEAD_MS      = 30_000;
+setInterval(() => {
+    const now = Date.now();
+    for (const port of PORTS) {
+        const seen = PORT_LAST_SEEN.get(port) ?? now;
+        if (now - seen > HEARTBEAT_DEAD_MS) {
+            disconnectPort(port, "heartbeat timeout");
+        }
+    }
+}, HEARTBEAT_GC_INTERVAL);
+
+// ───────────────────────────────────────────────────────────────────────
+// RPC table
+// ───────────────────────────────────────────────────────────────────────
 
 type Args = Record<string, unknown>;
-const RPC: Record<string, (a: Args) => unknown | Promise<unknown>> = {
-    load:                 (a) => handleLoad(a as unknown as LoadArgs),
-    encode:               (a) => Array.from(requireModel().encode(String(a.text))),
-    step:           async (a) => await requireModel().step(Number(a.tokenId)),
-    stepWithEmb:    async (a) => await requireModel().stepWithEmbedding(a.embedding as Float32Array),
-    stepAndDecode:  async (a) => {
-        const m = requireModel();
-        const next = await m.step(Number(a.tokenId));
-        return { next, isEos: m.isEos(next), str: m.tokenStr(next) ?? null };
+type Handler = (a: Args, port: MessagePort) => unknown | Promise<unknown>;
+
+const RPC: Record<string, Handler> = {
+    // ── Session arbitration ─────────────────────────────────────────────
+    acquireSession: (a, port) => acquireSession(a as unknown as AcquireArgs, port),
+    releaseSession: (a, port) => releaseSession(Number(a.sid), port),
+    cancelAcquire:  (a)       => cancelAcquire(String(a.abortToken)),
+
+    // ── Lifecycle ──────────────────────────────────────────────────────
+    ping: (_a, port) => {
+        PORT_LAST_SEEN.set(port, Date.now());
+        return true;
     },
+    disconnect: (_a, port) => {
+        disconnectPort(port, "client disconnect");
+        return true;
+    },
+
+    // ── Model lifecycle (session-scoped) ────────────────────────────────
+    load: async (a, port) => {
+        requireSession(port, a.sid);
+        return handleLoad(a as unknown as LoadArgs);
+    },
+    free: (a, port) => {
+        requireSession(port, a.sid);
+        if (model) { try { model.free?.(); } catch { /* */ } model = null; }
+        if (syncHandle) { try { syncHandle.close(); } catch { /* */ } syncHandle = null; }
+        if (loadedInfo) { loadedInfo = null; notify("modelFreed", {}); }
+    },
+
+    // ── ensureModel (stateless wrt session; coalesces) ──────────────────
+    ensureModel: (a) => handleEnsureModel(a as unknown as EnsureArgs),
+
+    // ── Stateless inference helpers ─────────────────────────────────────
+    encode:               (a) => Array.from(requireModel().encode(String(a.text))),
     tokenStr:             (a) => requireModel().tokenStr(Number(a.id)) ?? null,
     isEos:                (a) => requireModel().isEos(Number(a.id)),
-    reset:                () => requireModel().reset(),
-    setSampling:          (a) => requireModel().setSampling(a.opts),
     renderChat:           (a) => requireModel().renderChat(a.messages, !!a.withBos),
     imageSentinelIds:     () => requireModel().imageSentinelIds() ?? null,
     audioSentinelIds:     () => requireModel().audioSentinelIds() ?? null,
     imageSoftTokenCount:  (a) => requireModel().imageSoftTokenCount(Number(a.h), Number(a.w)),
     decodeWav:            (a) => requireModel().decodeWav(a.bytes as Uint8Array),
-    encodeImage:    async (a) => await requireModel().encodeImage(a.pixels as Float32Array, Number(a.h), Number(a.w)),
-    encodeAudio:    async (a) => await requireModel().encodeAudio(a.pcm as Float32Array),
-    free: () => {
-        if (model) { try { model.free?.(); } catch { /* */ } model = null; }
-        if (syncHandle) { try { syncHandle.close(); } catch { /* */ } syncHandle = null; }
+
+    // ── Stateful inference (session-scoped) ─────────────────────────────
+    step: async (a, port) => {
+        requireSession(port, a.sid);
+        return await requireModel().step(Number(a.tokenId));
+    },
+    stepWithEmb: async (a, port) => {
+        requireSession(port, a.sid);
+        return await requireModel().stepWithEmbedding(a.embedding as Float32Array);
+    },
+    stepAndDecode: async (a, port) => {
+        requireSession(port, a.sid);
+        const m = requireModel();
+        const next = await m.step(Number(a.tokenId));
+        return { next, isEos: m.isEos(next), str: m.tokenStr(next) ?? null };
+    },
+    encodeImage: async (a, port) => {
+        requireSession(port, a.sid);
+        return await requireModel().encodeImage(a.pixels as Float32Array, Number(a.h), Number(a.w));
+    },
+    encodeAudio: async (a, port) => {
+        requireSession(port, a.sid);
+        return await requireModel().encodeAudio(a.pcm as Float32Array);
+    },
+    reset: (a, port) => {
+        requireSession(port, a.sid);
+        return requireModel().reset();
+    },
+    setSampling: (a, port) => {
+        requireSession(port, a.sid);
+        return requireModel().setSampling(a.opts);
     },
 
-    // ── chat persistence (rsqlite-wasm OPFS-backed SQLite) ─────────────
+    // ── Worker meta (stateless) ─────────────────────────────────────────
+    currentMeta: () => ({
+        loaded: loadedInfo,
+        activeSessionPortHeld: active != null,
+    }),
+
+    // ── Chat persistence (rsqlite-wasm OPFS-backed SQLite) ──────────────
     dbInit:   async () => { await ensureDb(); return true; },
 
     convList: async () => {
@@ -264,23 +625,21 @@ const RPC: Record<string, (a: Args) => unknown | Promise<unknown>> = {
         const db = await ensureDb();
         const id    = (a.id as string | undefined) ?? newId();
         const title = (a.title as string | undefined) ?? "New chat";
-        const model = (a.model as string | null | undefined) ?? null;
+        const m     = (a.model as string | null | undefined) ?? null;
         const now   = Date.now();
         db.execParams(
             `INSERT INTO conversations (id, title, model, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?)`,
-            [id, title, model, now, now],
+            [id, title, m, now, now],
         );
         db.flush();
-        return { id, title, model, created_at: now, updated_at: now };
+        notify("dbChanged", { kind: "convInsert", conversationId: id });
+        return { id, title, model: m, created_at: now, updated_at: now };
     },
 
     convDelete: async (a) => {
         const db = await ensureDb();
         const id = String(a.id);
-        // Collect orphaned OPFS image paths BEFORE the cascade nukes the
-        // rows — caller (App.tsx) then sweeps the actual files. Wrapped
-        // in a try/catch so an empty/missing table never breaks delete.
         let opfsPaths: string[] = [];
         try {
             const rows = db.queryParams(
@@ -288,11 +647,10 @@ const RPC: Record<string, (a: Args) => unknown | Promise<unknown>> = {
                 [id],
             ) as Array<{ opfs_path: string }>;
             opfsPaths = rows.map((r) => r.opfs_path).filter(Boolean);
-        } catch { /* table may not exist yet on a fresh DB */ }
-        // FK ON DELETE CASCADE removes messages + message_images too
-        // (PRAGMA foreign_keys=ON is set on open).
+        } catch { /* */ }
         db.execParams(`DELETE FROM conversations WHERE id = ?`, [id]);
         db.flush();
+        notify("dbChanged", { kind: "convDelete", conversationId: id });
         return { ok: true, opfsPaths };
     },
 
@@ -305,6 +663,7 @@ const RPC: Record<string, (a: Args) => unknown | Promise<unknown>> = {
             [title, Date.now(), id],
         );
         db.flush();
+        notify("dbChanged", { kind: "convRename", conversationId: id });
         return true;
     },
 
@@ -314,8 +673,6 @@ const RPC: Record<string, (a: Args) => unknown | Promise<unknown>> = {
         const titleIfBlank = a.titleIfBlank as string | undefined;
         const now = Date.now();
         if (titleIfBlank !== undefined && titleIfBlank.length > 0) {
-            // Only overwrite the auto-title 'New chat', never the user's
-            // explicit rename.
             db.execParams(
                 `UPDATE conversations
                  SET updated_at = ?,
@@ -330,6 +687,7 @@ const RPC: Record<string, (a: Args) => unknown | Promise<unknown>> = {
             );
         }
         db.flush();
+        notify("dbChanged", { kind: "convTouch", conversationId: id });
         return true;
     },
 
@@ -357,8 +715,9 @@ const RPC: Record<string, (a: Args) => unknown | Promise<unknown>> = {
              VALUES (?, ?, ?, ?, ?)`,
             [cid, mid, role, content, now],
         );
-        // Don't flush per-message during streaming — caller does an explicit
-        // flush via dbFlush after each turn.
+        // No broadcast on every msgInsert — they fire during streaming and
+        // would storm the other tab. Caller emits a single `convTouch` at
+        // the end of each turn which broadcasts.
         return { messageId: mid, created_at: now };
     },
 
@@ -425,23 +784,52 @@ const RPC: Record<string, (a: Args) => unknown | Promise<unknown>> = {
     },
 };
 
-self.addEventListener("message", async (ev: MessageEvent<{ requestId: number; type: string } & Args>) => {
-    const msg = ev.data;
+// ───────────────────────────────────────────────────────────────────────
+// Per-port request dispatch
+// ───────────────────────────────────────────────────────────────────────
+
+async function handleRequest(
+    port: MessagePort,
+    msg: { requestId: number; type: string } & Args,
+) {
     if (!msg || typeof msg !== "object" || !msg.type) return;
     const { requestId, type } = msg;
+    PORT_LAST_SEEN.set(port, Date.now());
     const handler = RPC[type];
     if (!handler) {
-        (self as DedicatedWorkerGlobalScope).postMessage({ requestId, ok: false, error: `unknown RPC type: ${type}` });
+        port.postMessage({ requestId, ok: false, error: `unknown RPC type: ${type}` });
         return;
     }
     if (RPC_TRACE) log(`rpc-start ${type}`);
     try {
-        const result = await handler(msg as Args);
+        const result = await handler(msg as Args, port);
         if (RPC_TRACE) log(`rpc-done  ${type}`);
-        (self as DedicatedWorkerGlobalScope).postMessage({ requestId, ok: true, result });
+        port.postMessage({ requestId, ok: true, result });
     } catch (e) {
         const err = (e as Error)?.message ?? String(e);
         log(`rpc ${type} failed: ${err}`);
-        (self as DedicatedWorkerGlobalScope).postMessage({ requestId, ok: false, error: err });
+        port.postMessage({ requestId, ok: false, error: err });
     }
-});
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// SharedWorker entry — one onconnect per tab
+// ───────────────────────────────────────────────────────────────────────
+
+(self as unknown as SharedWorkerGlobalScope).onconnect = (e: MessageEvent) => {
+    const port = (e.ports as MessagePort[])[0];
+    if (!port) return;
+    port.start();
+    PORTS.add(port);
+    PORT_LAST_SEEN.set(port, Date.now());
+    port.addEventListener("message", (ev: MessageEvent) => {
+        void handleRequest(port, ev.data);
+    });
+    // Push initial state so the freshly connected tab can skip "Load a
+    // model" if a model is already active in the worker.
+    port.postMessage({
+        type: "notify",
+        kind: "meta",
+        loaded: loadedInfo,
+    });
+};

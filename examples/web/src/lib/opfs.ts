@@ -1,13 +1,13 @@
 // OPFS-backed model storage. Replaces the IndexedDB Blob cache from the
 // legacy `examples/pwa/cache.js` — the iOS Safari ceilings on JS-heap
 // (~2 GB) and combined Blob size (~5.6 GB) both bite a 7 GB GGUF straight
-// in the face, so the writer worker streams via `FileSystemSyncAccessHandle`
-// instead.
+// in the face, so the actual streaming write lives inside the inference
+// SharedWorker (M17) — one download per origin, progress broadcast to
+// every connected tab.
+
+import { getClient } from "@/lib/inference";
 
 const OPFS_DIR = "rullama-models";
-
-// Type-only import of the worker so Vite emits it as a separate chunk.
-import OpfsWriterWorker from "@/workers/opfs-writer-worker?worker";
 
 export async function opfsSupported(): Promise<boolean> {
     return (
@@ -80,21 +80,6 @@ export async function existingSize(modelKey: string, filename: string): Promise<
     } catch { return 0; }
 }
 
-async function discoverRemoteTotal(url: string): Promise<number> {
-    const resp = await fetch(url, { headers: { Range: "bytes=0-0" } });
-    if (!resp.ok && resp.status !== 206) throw new Error(`probe ${url} → ${resp.status}`);
-    const cr = resp.headers.get("content-range");
-    if (cr) {
-        const m = /\/(\d+)\s*$/.exec(cr);
-        if (m) return Number(m[1]);
-    }
-    const xt = resp.headers.get("x-total-size");
-    if (xt) return Number(xt);
-    const cl = resp.headers.get("content-length");
-    if (cl) return Number(cl);
-    throw new Error(`no Content-Range / X-Total-Size / Content-Length for ${url}`);
-}
-
 export interface EnsureProgress {
     bytesWritten: number;
     totalBytes: number;
@@ -104,13 +89,17 @@ export interface EnsureProgress {
 export interface EnsureResult { totalBytes: number; fromCache: boolean; }
 
 /**
- * Ensure the model file is fully present in OPFS. Resumes if partial.
+ * Ensure the model file is fully present in OPFS. The actual streaming
+ * write happens inside the inference SharedWorker (so a single download
+ * serves every tab and we never race the OPFS write handle).
  *
  * `expectedSize` is the catalog-declared size (`m.size`). When the local
- * OPFS file already meets that size, we short-circuit and return without
- * any network call — this is what lets a cached model load while the
- * browser is offline. The remote probe + writer worker are only reached
- * when we genuinely need bytes from the network.
+ * OPFS file already meets that size, the worker short-circuits with no
+ * network call — works offline.
+ *
+ * Progress is delivered via the worker's `notify: downloadProgress`
+ * broadcast, scoped here to the matching modelKey/filename and surfaced
+ * through the optional `onProgress` callback.
  */
 export async function ensureModel(
     url: string,
@@ -121,61 +110,36 @@ export async function ensureModel(
 ): Promise<EnsureResult> {
     if (!(await opfsSupported())) throw new Error("OPFS not supported in this browser");
 
-    // Fast path: the file is already fully here. No network, no probe,
-    // no writer-worker boot. Works offline.
-    const have = await existingSize(modelKey, filename);
-    if (expectedSize > 0 && have >= expectedSize) {
-        onProgress?.({ bytesWritten: have, totalBytes: expectedSize, fromCache: true });
-        return { totalBytes: have, fromCache: true };
-    }
+    const client = getClient();
+    const unsubscribers: Array<() => void> = [];
 
-    // Otherwise we genuinely need bytes — probe the remote for its
-    // current size. This is the call that fails offline; the load
-    // surfaces a "Failed to fetch" error which the App.tsx error path
-    // turns into a toast.
-    const remoteTotal = await discoverRemoteTotal(url);
-    if (have >= remoteTotal && remoteTotal > 0) {
-        onProgress?.({ bytesWritten: have, totalBytes: remoteTotal, fromCache: true });
-        return { totalBytes: have, fromCache: true };
-    }
-
-    return new Promise((resolve, reject) => {
-        const worker = new OpfsWriterWorker();
-        worker.addEventListener("message", (ev: MessageEvent) => {
-            const m = ev.data;
-            switch (m?.type) {
-                case "progress":
-                    onProgress?.({
-                        bytesWritten: m.bytesWritten,
-                        totalBytes:   m.totalBytes,
-                        chunkBytes:   m.chunkBytes,
-                        fromCache:    false,
-                    });
-                    break;
-                case "done":
-                    worker.terminate();
-                    resolve({ totalBytes: m.totalBytes, fromCache: false });
-                    break;
-                case "cancelled":
-                    worker.terminate();
-                    reject(new Error(`download cancelled at ${m.bytesWritten} bytes`));
-                    break;
-                case "error":
-                    worker.terminate();
-                    reject(new Error(`opfs-writer: ${m.error}`));
-                    break;
+    if (onProgress) {
+        unsubscribers.push(client.subscribe("downloadProgress", (p) => {
+            if (p.modelKey === modelKey && p.filename === filename) {
+                onProgress({
+                    bytesWritten: Number(p.bytesWritten),
+                    totalBytes:   Number(p.totalBytes),
+                    chunkBytes:   Number(p.chunkBytes),
+                    fromCache:    false,
+                });
             }
-        });
-        worker.addEventListener("error", (ev: ErrorEvent) => {
-            worker.terminate();
-            reject(new Error(`opfs-writer worker error: ${ev.message || ev}`));
-        });
-        worker.postMessage({
-            type: "start",
-            modelKey, filename, url,
-            offset: have,
-        });
-    });
+        }));
+        unsubscribers.push(client.subscribe("downloadDone", (p) => {
+            if (p.modelKey === modelKey && p.filename === filename) {
+                onProgress({
+                    bytesWritten: Number(p.totalBytes),
+                    totalBytes:   Number(p.totalBytes),
+                    fromCache:    !!p.fromCache,
+                });
+            }
+        }));
+    }
+
+    try {
+        return await client.ensureModel({ url, modelKey, filename, expectedSize });
+    } finally {
+        for (const u of unsubscribers) u();
+    }
 }
 
 export async function wipeAllOpfs(): Promise<boolean> {

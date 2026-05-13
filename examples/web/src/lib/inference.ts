@@ -1,12 +1,18 @@
-// WorkerClient — thin RPC wrapper over the inference worker.
+// WorkerClient — thin RPC wrapper over the inference SharedWorker.
 //
-// The wasm Model lives inside a Dedicated Worker (see
-// `src/workers/inference-worker.ts`). Every method here is a postMessage
-// round-trip; cached meta (vocabSize / hasVision / …) is fetched once on
-// `load()` so the React tree can read it synchronously thereafter.
+// One SharedWorker per origin owns the wasm Model, the chat DB, and the
+// OPFS handles. Every tab opens a MessagePort to it and routes RPCs
+// through that port. The `pending: Map<requestId, …>` keeps the
+// promise-per-request mechanic; the transport switched from a Dedicated
+// Worker's postMessage to a port's postMessage.
+//
+// Cross-tab inference is serialized via the worker's session arbitration
+// (`acquireSession` / `releaseSession`); cancellation of a *queued*
+// acquire is handled with an AbortSignal + an abort token the worker
+// uses to drop the waiter from the queue.
 
 import type { ChatMessage, SamplingOptions } from "@/lib/types";
-import InferenceWorker from "@/workers/inference-worker?worker";
+import InferenceWorker from "@/workers/inference-worker?sharedworker";
 import { requestRestart } from "@/lib/restart";
 
 interface ModelMeta {
@@ -22,17 +28,16 @@ interface Pending {
     reject:  (e: Error) => void;
 }
 
-type WorkerMsg =
-    | { type: "log"; args: string[] }
+type NotifyMsg     = { type: "notify"; kind: string } & Record<string, unknown>;
+type LogMsg        = { type: "log"; args: string[] };
+type RpcReply      =
     | { requestId: number; ok: true;  result: unknown }
     | { requestId: number; ok: false; error: string };
+type WorkerMsg     = NotifyMsg | LogMsg | RpcReply;
 
-/** Heuristic: does this error message look like the SW serving a stale
- *  reference to a hashed asset that no longer exists? Browsers phrase the
- *  same failure differently — Chrome says "Failed to fetch dynamically
- *  imported module", Safari says "Importing a module script failed",
- *  Firefox says "Loading chunk N failed". WebAssembly.instantiate errors
- *  on a 404'd .wasm fall in here too. */
+type NotifyHandler = (payload: Record<string, unknown>) => void;
+
+/** Heuristic for "this looks like a stale-asset error after a deploy". */
 function looksLikeStaleAssetError(msg: string): boolean {
     const m = msg.toLowerCase();
     return m.includes("failed to fetch")
@@ -47,57 +52,87 @@ function looksLikeStaleAssetError(msg: string): boolean {
 }
 
 export class WorkerClient {
-    private worker: Worker;
+    private port: MessagePort;
     private pending = new Map<number, Pending>();
     private nextId  = 1;
-    private meta:   ModelMeta | null = null;
+    private subscribers = new Map<string, Set<NotifyHandler>>();
+
+    /** Last `notify: meta` payload from the worker (the currently-loaded
+     *  model, or null when nothing is loaded). React state syncs to this
+     *  via subscribe("meta", …). */
+    public lastMeta: { loaded: ModelMeta | null } | null = null;
+
+    /** Set after a successful `acquireSession`; cleared on
+     *  `releaseSession` or implicit release (port disconnect, etc.). */
+    private session: number | null = null;
 
     /** Last log line from the worker, useful in dev consoles. */
     public onLog?: (line: string) => void;
 
     constructor() {
+        let sw: SharedWorker;
         try {
-            this.worker = new InferenceWorker();
+            sw = new InferenceWorker();
         } catch (e) {
-            // Construction itself failed — Vite's worker glue couldn't
-            // resolve the hashed URL. Surface the restart overlay and
-            // rethrow so callers don't end up with a half-built client.
             requestRestart("the inference worker failed to construct");
             throw e;
         }
-        this.worker.addEventListener("message", (ev: MessageEvent<WorkerMsg>) => {
+        this.port = sw.port;
+        this.port.start();
+        this.port.addEventListener("message", (ev: MessageEvent<WorkerMsg>) => {
             const m = ev.data;
+            if (!m || typeof m !== "object") return;
             if ("type" in m && m.type === "log") {
-                const line = m.args.join(" ");
+                const line = (m as LogMsg).args.join(" ");
                 console.log("[inference-worker]", line);
                 this.onLog?.(line);
                 return;
             }
-            if ("requestId" in m) {
-                const p = this.pending.get(m.requestId);
+            if ("type" in m && m.type === "notify") {
+                const n = m as NotifyMsg;
+                if (n.kind === "meta") {
+                    this.lastMeta = { loaded: (n.loaded ?? null) as ModelMeta | null };
+                }
+                const subs = this.subscribers.get(n.kind);
+                if (subs) for (const h of subs) {
+                    try { h(n as unknown as Record<string, unknown>); }
+                    catch (e) { console.error("[notify handler]", e); }
+                }
+                return;
+            }
+            const r = m as RpcReply;
+            if ("requestId" in r) {
+                const p = this.pending.get(r.requestId);
                 if (!p) return;
-                this.pending.delete(m.requestId);
-                if (m.ok) p.resolve(m.result);
-                else      p.reject(new Error(m.error));
+                this.pending.delete(r.requestId);
+                if (r.ok) p.resolve(r.result);
+                else      p.reject(new Error(r.error));
             }
         });
-        this.worker.addEventListener("error", (ev) => {
+        // SharedWorker `onerror` exists; route through the same stale-
+        // asset / restart-overlay path the old Dedicated Worker did.
+        sw.addEventListener("error", (ev: ErrorEvent) => {
             const msg = ev.message || String(ev);
             console.error("[inference-worker] worker error:", msg);
-            // A worker boot failure after a deploy is the canonical
-            // "stale tab" symptom: the cached index-*.js asks for an
-            // inference-worker-*.js URL that's no longer in the SW's
-            // precache (cleaned up by the new build) and no longer on
-            // disk on the server (replaced by the new hash). Surface
-            // the restart overlay so the user gets a single click to
-            // recover instead of a cryptic console error.
             if (looksLikeStaleAssetError(msg)) {
                 requestRestart("the inference worker failed to load");
             }
         });
-        this.worker.addEventListener("messageerror", () => {
-            requestRestart("the inference worker failed to start");
-        });
+
+        // Send a final `disconnect` on tab close so the worker can
+        // immediately release any held session + drop the port without
+        // waiting for the heartbeat GC.
+        const onLeave = () => {
+            try { this.port.postMessage({ requestId: -1, type: "disconnect" }); } catch { /* */ }
+        };
+        window.addEventListener("pagehide", onLeave);
+        window.addEventListener("beforeunload", onLeave);
+
+        // Heartbeat keeps the worker's port-liveness tracker happy. 10 s
+        // is well inside the 30 s reaper window (HEARTBEAT_DEAD_MS).
+        setInterval(() => {
+            try { this.port.postMessage({ requestId: -1, type: "ping" }); } catch { /* */ }
+        }, 10_000);
     }
 
     private rpc<T = unknown>(type: string, args: Record<string, unknown> = {}): Promise<T> {
@@ -107,53 +142,152 @@ export class WorkerClient {
                 resolve: (v) => resolve(v as T),
                 reject,
             });
-            this.worker.postMessage({ requestId, type, ...args });
+            this.port.postMessage({ requestId, type, ...args });
         });
     }
 
+    // ── Notification subscription ──────────────────────────────────────
+    subscribe(kind: string, handler: NotifyHandler): () => void {
+        let set = this.subscribers.get(kind);
+        if (!set) { set = new Set(); this.subscribers.set(kind, set); }
+        set.add(handler);
+        return () => { set!.delete(handler); };
+    }
+
+    // ── Session arbitration ────────────────────────────────────────────
+    /**
+     * Acquire the inference session. Resolves when this client owns the
+     * model. If another tab is already generating, this awaits until they
+     * release. Pass an AbortSignal to allow cancelling while queued.
+     */
+    async acquireSession(signal?: AbortSignal): Promise<number> {
+        const abortToken = `t-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const requestId = this.nextId++;
+        const sid = await new Promise<number>((resolve, reject) => {
+            this.pending.set(requestId, {
+                resolve: (v) => resolve(Number(v)),
+                reject,
+            });
+            this.port.postMessage({ requestId, type: "acquireSession", abortToken });
+            if (signal) {
+                if (signal.aborted) {
+                    // Already aborted before we sent — fire the cancel
+                    // immediately so the worker doesn't keep us in queue.
+                    try {
+                        this.port.postMessage({ requestId: -1, type: "cancelAcquire", abortToken });
+                    } catch { /* */ }
+                    reject(new Error("aborted"));
+                    return;
+                }
+                signal.addEventListener("abort", () => {
+                    try {
+                        this.port.postMessage({ requestId: -1, type: "cancelAcquire", abortToken });
+                    } catch { /* */ }
+                }, { once: true });
+            }
+        });
+        this.session = sid;
+        return sid;
+    }
+
+    async releaseSession(): Promise<void> {
+        const sid = this.session;
+        this.session = null;
+        if (sid == null) return;
+        try { await this.rpc("releaseSession", { sid }); } catch { /* worker may have released already */ }
+    }
+
+    currentSession(): number | null { return this.session; }
+
+    /** Convenience: acquire → run fn → release. Forwards abort to the
+     *  acquire wait; the fn itself runs once the session is held, so
+     *  callers should use their own cooperative cancellation inside fn
+     *  (e.g. `cancelRef` checks before each step). */
+    async withSession<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+        await this.acquireSession(signal);
+        try { return await fn(); }
+        finally { await this.releaseSession(); }
+    }
+
+    // ── Model lifecycle (session-scoped) ───────────────────────────────
     async load(modelKey: string, filename: string, opts: { maxContext?: number; textOnly?: boolean } = {}): Promise<ModelMeta> {
-        this.meta = await this.rpc<ModelMeta>("load", {
+        if (this.session == null) throw new Error("load requires an active session — call acquireSession first");
+        const result = await this.rpc<{
+            modelKey: string; filename: string;
+            vocabSize: number; hasVision: boolean; hasAudio: boolean;
+            imageSentinelIds: [number, number] | null;
+            audioSentinelIds: [number, number] | null;
+        }>("load", {
+            sid:       this.session,
             modelKey, filename,
             maxContext: opts.maxContext ?? 0,
             textOnly:   !!opts.textOnly,
         });
-        return this.meta;
+        // Mirror the meta the worker just broadcast.
+        this.lastMeta = { loaded: {
+            vocabSize:        result.vocabSize,
+            hasVision:        result.hasVision,
+            hasAudio:         result.hasAudio,
+            imageSentinelIds: result.imageSentinelIds,
+            audioSentinelIds: result.audioSentinelIds,
+        } };
+        return this.lastMeta.loaded as ModelMeta;
     }
 
-    get vocabSize() { return this.meta?.vocabSize; }
-    get hasVision() { return !!this.meta?.hasVision; }
-    get hasAudio()  { return !!this.meta?.hasAudio; }
-    imageSentinelIds() { return this.meta?.imageSentinelIds ?? null; }
-    audioSentinelIds() { return this.meta?.audioSentinelIds ?? null; }
+    async free(): Promise<void> {
+        if (this.session == null) throw new Error("free requires an active session");
+        return this.rpc("free", { sid: this.session });
+    }
 
+    // ── Stateless meta accessors (cached from notify: meta or load) ────
+    get vocabSize() { return this.lastMeta?.loaded?.vocabSize; }
+    get hasVision() { return !!this.lastMeta?.loaded?.hasVision; }
+    get hasAudio()  { return !!this.lastMeta?.loaded?.hasAudio; }
+    imageSentinelIds() { return this.lastMeta?.loaded?.imageSentinelIds ?? null; }
+    audioSentinelIds() { return this.lastMeta?.loaded?.audioSentinelIds ?? null; }
+
+    // ── Stateless inference ────────────────────────────────────────────
     encode(text: string): Promise<Uint32Array> {
         return this.rpc<number[]>("encode", { text }).then((arr) => new Uint32Array(arr));
     }
-    step(tokenId: number): Promise<number> { return this.rpc("step", { tokenId }); }
-    stepWithEmbedding(embedding: Float32Array): Promise<number> {
-        return this.rpc("stepWithEmb", { embedding });
-    }
-    stepAndDecode(tokenId: number): Promise<{ next: number; isEos: boolean; str: string | null }> {
-        return this.rpc("stepAndDecode", { tokenId });
-    }
     tokenStr(id: number): Promise<string | null> { return this.rpc("tokenStr", { id }); }
     isEos(id: number): Promise<boolean> { return this.rpc("isEos", { id }); }
-    reset(): Promise<void> { return this.rpc("reset"); }
-    setSampling(opts: SamplingOptions): Promise<void> { return this.rpc("setSampling", { opts }); }
     renderChat(messages: ChatMessage[], withBos: boolean): Promise<string> {
         return this.rpc("renderChat", { messages, withBos });
-    }
-    free(): Promise<void> { return this.rpc("free"); }
-
-    // ── multimodal ─────────────────────────────────────────────────
-    encodeImage(pixels: Float32Array, h: number, w: number): Promise<Float32Array> {
-        return this.rpc("encodeImage", { pixels, h, w });
     }
     imageSoftTokenCount(h: number, w: number): Promise<number> {
         return this.rpc("imageSoftTokenCount", { h, w });
     }
 
-    // ── chat persistence (rsqlite-wasm OPFS-backed SQLite) ──────────
+    // ── Stateful inference (auto-inject sid) ───────────────────────────
+    step(tokenId: number): Promise<number> {
+        return this.rpc("step", { sid: this.session, tokenId });
+    }
+    stepWithEmbedding(embedding: Float32Array): Promise<number> {
+        return this.rpc("stepWithEmb", { sid: this.session, embedding });
+    }
+    stepAndDecode(tokenId: number): Promise<{ next: number; isEos: boolean; str: string | null }> {
+        return this.rpc("stepAndDecode", { sid: this.session, tokenId });
+    }
+    encodeImage(pixels: Float32Array, h: number, w: number): Promise<Float32Array> {
+        return this.rpc("encodeImage", { sid: this.session, pixels, h, w });
+    }
+    encodeAudio(pcm: Float32Array): Promise<Float32Array> {
+        return this.rpc("encodeAudio", { sid: this.session, pcm });
+    }
+    reset(): Promise<void> { return this.rpc("reset", { sid: this.session }); }
+    setSampling(opts: SamplingOptions): Promise<void> {
+        return this.rpc("setSampling", { sid: this.session, opts });
+    }
+
+    // ── ensureModel (download — coalesces across tabs in the worker) ───
+    ensureModel(args: {
+        url: string; modelKey: string; filename: string; expectedSize: number;
+    }): Promise<{ totalBytes: number; fromCache: boolean }> {
+        return this.rpc("ensureModel", args as Record<string, unknown>);
+    }
+
+    // ── Chat persistence ───────────────────────────────────────────────
     dbInit(): Promise<boolean> { return this.rpc("dbInit"); }
     convList(): Promise<ConversationRow[]> { return this.rpc("convList"); }
     convCreate(opts: { id?: string; title?: string; model?: string | null } = {}): Promise<ConversationRow> {
@@ -218,7 +352,7 @@ export interface MessageImageRow {
     opfs_path:       string;
 }
 
-/** Singleton — one worker per page. */
+/** Singleton — one client per page, but the SharedWorker is one per origin. */
 let _client: WorkerClient | null = null;
 export function getClient(): WorkerClient {
     if (!_client) _client = new WorkerClient();
