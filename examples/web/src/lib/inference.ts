@@ -177,6 +177,19 @@ export class WorkerClient {
     msgSetContent(conversationId: string, messageId: string, content: string): Promise<boolean> {
         return this.rpc("msgSetContent", { conversationId, messageId, content });
     }
+    msgInsertImage(opts: {
+        conversationId: string;
+        messageId:      string;
+        seq:            number;
+        width:          number;
+        height:         number;
+        thumbDataUrl:   string;
+    }): Promise<boolean> {
+        return this.rpc("msgInsertImage", opts as Record<string, unknown>);
+    }
+    msgListImages(conversationId: string): Promise<MessageImageRow[]> {
+        return this.rpc("msgListImages", { conversationId });
+    }
     dbFlush(): Promise<boolean> { return this.rpc("dbFlush"); }
 }
 
@@ -193,6 +206,14 @@ export interface MessageRow {
     role:            string;
     content:         string;
     created_at:      number;
+}
+export interface MessageImageRow {
+    conversation_id: string;
+    message_id:      string;
+    seq:             number;
+    width:           number;
+    height:          number;
+    thumb_data_url:  string;
 }
 
 /** Singleton — one worker per page. */

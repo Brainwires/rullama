@@ -3,12 +3,15 @@
 export type Role = "system" | "user" | "model";
 
 export interface ImageAttachment {
-    /** Channel-first f32 [-1, 1] tensor — what `encodeImage` consumes. */
-    pixels:  Float32Array;
+    /** Channel-first f32 [-1, 1] tensor — what `encodeImage` consumes.
+     *  Present only for in-session attachments (the user just picked
+     *  the file). Reloaded-from-history images have only the thumbnail. */
+    pixels?: Float32Array;
     h:       number;
     w:       number;
     /** Small JPEG thumbnail — used to render the image inline in the
-     *  user message bubble + the input-row preview. */
+     *  user message bubble + the input-row preview. Persisted to
+     *  SQLite alongside the message so reloaded conversations restore. */
     dataUrl: string;
 }
 

@@ -161,10 +161,38 @@ export function App() {
     const onSelectConversation = useCallback(async (id: string) => {
         if (busy) return;
         try {
-            const rows = await getClient().msgList(id);
+            const client = getClient();
+            // Fire both queries in parallel — text rows and image rows are
+            // independent; SQLite handles concurrent reads fine.
+            const [rows, imgRows] = await Promise.all([
+                client.msgList(id),
+                client.msgListImages(id),
+            ]);
+            // Bucket images by message_id, preserving the `seq` order
+            // the table is already sorted by.
+            const imagesByMsg = new Map<string, ImageAttachment[]>();
+            for (const r of imgRows) {
+                const arr = imagesByMsg.get(r.message_id) ?? [];
+                arr.push({
+                    h:       r.height,
+                    w:       r.width,
+                    dataUrl: r.thumb_data_url,
+                    // pixels intentionally omitted — reloaded images are
+                    // display-only. The LM doesn't re-encode past-turn
+                    // images today (see renderPriorTurns in onSend).
+                });
+                imagesByMsg.set(r.message_id, arr);
+            }
             const ms: ChatMessage[] = rows
                 .filter((r) => r.role === "user" || r.role === "model")
-                .map((r) => ({ role: r.role as ChatMessage["role"], content: r.content }));
+                .map((r) => {
+                    const images = imagesByMsg.get(r.message_id);
+                    return {
+                        role:    r.role as ChatMessage["role"],
+                        content: r.content,
+                        ...(images && images.length ? { images } : {}),
+                    };
+                });
             setMessages(ms);
             setActiveConvId(id);
             setStatusLine(undefined);
@@ -445,7 +473,30 @@ export function App() {
                 convId = row.id;
                 setActiveConvId(convId);
             }
-            await client.msgInsert({ conversationId: convId, role: "user", content: text });
+            const userInsert = await client.msgInsert({ conversationId: convId, role: "user", content: text });
+            // Persist image thumbnails alongside the user turn so reloading
+            // the conversation restores the bubble visuals. Only the
+            // dataUrl + dims go in; pixel arrays aren't useful at restore
+            // time because past-turn images aren't re-encoded.
+            for (let i = 0; i < turnImages.length; i++) {
+                const im = turnImages[i];
+                try {
+                    await client.msgInsertImage({
+                        conversationId: convId,
+                        messageId:      userInsert.messageId,
+                        seq:            i,
+                        width:          im.w,
+                        height:         im.h,
+                        thumbDataUrl:   im.dataUrl,
+                    });
+                } catch (e) {
+                    showToast({
+                        level: "warn",
+                        title: "Image not persisted",
+                        message: (e as Error).message,
+                    });
+                }
+            }
             const modelInsert = await client.msgInsert({ conversationId: convId, role: "model", content: "" });
             modelMsgId = modelInsert.messageId;
         } catch (e) {
@@ -478,6 +529,13 @@ export function App() {
                 }
                 beginId = sent[0];
                 for (const im of turnImages) {
+                    if (!im.pixels) {
+                        // Reloaded-from-history image — no pixel data to
+                        // re-encode. Skip silently. The current send's
+                        // attachments always have pixels because they
+                        // come from preprocessImage in onAttachFiles.
+                        continue;
+                    }
                     const softTokens = await client.encodeImage(im.pixels, im.h, im.w);
                     const nSoft = await client.imageSoftTokenCount(im.h, im.w);
                     const dText = softTokens.length / nSoft;

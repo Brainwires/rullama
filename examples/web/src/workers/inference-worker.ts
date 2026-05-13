@@ -94,6 +94,26 @@ const SCHEMA = [
         FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
      )`,
     `CREATE INDEX IF NOT EXISTS msg_conv_idx ON messages(conversation_id, created_at)`,
+    // Per-message image attachments. Display-only — the JPEG thumbnail is
+    // stored inline as a data URL (typically 10–30 KB each). Pixel arrays
+    // aren't persisted because the LM forward pass doesn't re-encode
+    // past-turn images anyway (see App.tsx's renderPriorTurns comment);
+    // adding full re-encode would be a separate feature requiring the
+    // original blob in OPFS.
+    `CREATE TABLE IF NOT EXISTS message_images (
+        conversation_id TEXT NOT NULL,
+        message_id      TEXT NOT NULL,
+        seq             INTEGER NOT NULL,
+        width           INTEGER NOT NULL,
+        height          INTEGER NOT NULL,
+        thumb_data_url  TEXT NOT NULL,
+        PRIMARY KEY (conversation_id, message_id, seq),
+        FOREIGN KEY (conversation_id, message_id)
+            REFERENCES messages(conversation_id, message_id)
+            ON DELETE CASCADE
+     )`,
+    `CREATE INDEX IF NOT EXISTS msg_img_conv_idx
+        ON message_images(conversation_id, message_id, seq)`,
 ];
 
 async function ensureDb(): Promise<WasmDbHandle> {
@@ -351,6 +371,35 @@ const RPC: Record<string, (a: Args) => unknown | Promise<unknown>> = {
             [content, cid, mid],
         );
         return true;
+    },
+
+    msgInsertImage: async (a) => {
+        const db = await ensureDb();
+        const cid          = String(a.conversationId);
+        const mid          = String(a.messageId);
+        const seq          = Number(a.seq);
+        const width        = Number(a.width);
+        const height       = Number(a.height);
+        const thumbDataUrl = String(a.thumbDataUrl);
+        db.execParams(
+            `INSERT INTO message_images
+                 (conversation_id, message_id, seq, width, height, thumb_data_url)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [cid, mid, seq, width, height, thumbDataUrl],
+        );
+        return true;
+    },
+
+    msgListImages: async (a) => {
+        const db = await ensureDb();
+        const cid = String(a.conversationId);
+        return db.queryParams(
+            `SELECT conversation_id, message_id, seq, width, height, thumb_data_url
+             FROM message_images
+             WHERE conversation_id = ?
+             ORDER BY message_id, seq ASC`,
+            [cid],
+        );
     },
 
     dbFlush: async () => {
