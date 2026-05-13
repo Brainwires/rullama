@@ -14,6 +14,11 @@ const MAX_TOKENS   = 280;
 const PATCH_AREA   = 16 * 16 * 3 * 3;
 // const MIN_PIXELS = MIN_TOKENS * PATCH_AREA;
 const MAX_PIXELS   = MAX_TOKENS * PATCH_AREA;
+// Matches Rust's `vision::MAX_IMG_DIM`. The pixel budget bounds total area,
+// not per-dim, so an extreme aspect ratio could land beyond this even when
+// MAX_PIXELS is respected. Clamp here to stay inside the Rust scratch-buffer
+// and aligned to ALIGN.
+const MAX_DIM      = 1536;
 
 export interface ProcessedImage {
     pixels:  Float32Array;
@@ -36,6 +41,11 @@ function smartResize(origW: number, origH: number): { targetW: number; targetH: 
         targetH = Math.max(ALIGN, Math.floor(origH / ALIGN) * ALIGN);
         targetW = Math.max(ALIGN, Math.floor(origW / ALIGN) * ALIGN);
     }
+    // Per-dim cap (MAX_DIM) for extreme aspect ratios — even when MAX_PIXELS
+    // is satisfied, a very long-and-thin image could exceed the Rust
+    // scratch-buffer's per-axis size. Clamp and re-align to ALIGN.
+    if (targetW > MAX_DIM) targetW = Math.floor(MAX_DIM / ALIGN) * ALIGN;
+    if (targetH > MAX_DIM) targetH = Math.floor(MAX_DIM / ALIGN) * ALIGN;
     // MIN_TOKENS floor (not enforced in legacy preprocessor either,
     // but here for completeness — small images get padded by the
     // resize to a minimum size).

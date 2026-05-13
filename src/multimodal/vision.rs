@@ -115,7 +115,14 @@ const LINEARS_PER_LAYER: usize = 7;
 /// 2560 so workgroup reductions get nice numbers.
 pub const MAX_PATCHES: u32 = 2560;
 /// Maximum input image dimension on either axis. Aligned to patch_size×n_merge=48.
-pub const MAX_IMG_DIM: u32 = 768;
+///
+/// This is a *scratch-buffer* cap, not a model cap. The real ceiling is the
+/// total pixel budget (`MAX_PATCHES` and `MAX_POOLED`), which the client-side
+/// `smartResize` already enforces by scaling proportionally. 1536 covers every
+/// realistic phone / laptop aspect ratio (16:9, 19:9, 21:9) at the pixel
+/// budget, since smart-resize keeps total pixels ≤ ~645k. The one-time
+/// `pixel_buf` allocation grows to ~27 MB — negligible vs the weight set.
+pub const MAX_IMG_DIM: u32 = 1536;
 /// Maximum pooled patches (d_text-wide soft tokens) — matches Ollama's max.
 pub const MAX_POOLED: u32 = 280;
 
