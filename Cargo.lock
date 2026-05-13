@@ -1486,6 +1486,7 @@ name = "rullama-finetune"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "futures-channel",
  "pollster",
  "rullama",
  "serde",
