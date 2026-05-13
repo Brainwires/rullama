@@ -3,6 +3,7 @@ import { ModelLoader, ModelLoadProgress, type ModelStatus } from "@/components/M
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChatPanel } from "@/components/ChatPanel";
+import { RestartOverlay } from "@/components/RestartOverlay";
 import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
 import { ConversationList } from "@/components/ConversationList";
 import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
@@ -722,6 +723,7 @@ export function App() {
                     statusLine={statusLine}
                 />
             </DualSidebarLayout>
+            <RestartOverlay />
         </div>
     );
 }

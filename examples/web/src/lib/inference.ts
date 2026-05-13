@@ -7,6 +7,7 @@
 
 import type { ChatMessage, SamplingOptions } from "@/lib/types";
 import InferenceWorker from "@/workers/inference-worker?worker";
+import { requestRestart } from "@/lib/restart";
 
 interface ModelMeta {
     vocabSize:        number;
@@ -26,6 +27,25 @@ type WorkerMsg =
     | { requestId: number; ok: true;  result: unknown }
     | { requestId: number; ok: false; error: string };
 
+/** Heuristic: does this error message look like the SW serving a stale
+ *  reference to a hashed asset that no longer exists? Browsers phrase the
+ *  same failure differently — Chrome says "Failed to fetch dynamically
+ *  imported module", Safari says "Importing a module script failed",
+ *  Firefox says "Loading chunk N failed". WebAssembly.instantiate errors
+ *  on a 404'd .wasm fall in here too. */
+function looksLikeStaleAssetError(msg: string): boolean {
+    const m = msg.toLowerCase();
+    return m.includes("failed to fetch")
+        || m.includes("dynamically imported module")
+        || m.includes("importing a module script")
+        || m.includes("loading chunk")
+        || m.includes("loading css chunk")
+        || m.includes("script error")
+        || m.includes("module specifier")
+        || m.includes("webassembly")
+        || m.includes("import error");
+}
+
 export class WorkerClient {
     private worker: Worker;
     private pending = new Map<number, Pending>();
@@ -36,7 +56,15 @@ export class WorkerClient {
     public onLog?: (line: string) => void;
 
     constructor() {
-        this.worker = new InferenceWorker();
+        try {
+            this.worker = new InferenceWorker();
+        } catch (e) {
+            // Construction itself failed — Vite's worker glue couldn't
+            // resolve the hashed URL. Surface the restart overlay and
+            // rethrow so callers don't end up with a half-built client.
+            requestRestart("the inference worker failed to construct");
+            throw e;
+        }
         this.worker.addEventListener("message", (ev: MessageEvent<WorkerMsg>) => {
             const m = ev.data;
             if ("type" in m && m.type === "log") {
@@ -54,7 +82,21 @@ export class WorkerClient {
             }
         });
         this.worker.addEventListener("error", (ev) => {
-            console.error("[inference-worker] worker error:", ev.message || ev);
+            const msg = ev.message || String(ev);
+            console.error("[inference-worker] worker error:", msg);
+            // A worker boot failure after a deploy is the canonical
+            // "stale tab" symptom: the cached index-*.js asks for an
+            // inference-worker-*.js URL that's no longer in the SW's
+            // precache (cleaned up by the new build) and no longer on
+            // disk on the server (replaced by the new hash). Surface
+            // the restart overlay so the user gets a single click to
+            // recover instead of a cryptic console error.
+            if (looksLikeStaleAssetError(msg)) {
+                requestRestart("the inference worker failed to load");
+            }
+        });
+        this.worker.addEventListener("messageerror", () => {
+            requestRestart("the inference worker failed to start");
         });
     }
 
