@@ -666,18 +666,32 @@ export function App() {
                     throw new Error("model exposes no <|image> sentinel — vision unavailable");
                 }
                 beginId = sent[0];
-                for (const im of turnImages) {
-                    if (!im.pixels) {
-                        // Reloaded-from-history image — no pixel data to
-                        // re-encode. Skip silently. The current send's
-                        // attachments always have pixels because they
-                        // come from preprocessImage in onAttachFiles.
-                        continue;
+                // Surface per-layer vision encode progress in the status
+                // line — the encode is ~2 min on slow GPUs, users need to
+                // know the app is alive.
+                let imgIdx = 0;
+                const totalImgs = turnImages.filter((x) => x.pixels).length;
+                const offProgress = client.subscribe("visionProgress", (p) => {
+                    const layer = Number(p.layer);
+                    const total = Number(p.total);
+                    const tag   = totalImgs > 1 ? `image ${imgIdx + 1}/${totalImgs} — ` : "";
+                    setStatusLine(`${tag}analyzing image (${layer}/${total})…`);
+                });
+                try {
+                    for (const im of turnImages) {
+                        if (!im.pixels) continue;
+                        setStatusLine(totalImgs > 1
+                            ? `image ${imgIdx + 1}/${totalImgs} — analyzing image…`
+                            : "analyzing image…");
+                        const softTokens = await client.encodeImage(im.pixels, im.h, im.w);
+                        const nSoft = await client.imageSoftTokenCount(im.h, im.w);
+                        const dText = softTokens.length / nSoft;
+                        softQueue.push({ nSoft, dText, softTokens });
+                        imgIdx++;
                     }
-                    const softTokens = await client.encodeImage(im.pixels, im.h, im.w);
-                    const nSoft = await client.imageSoftTokenCount(im.h, im.w);
-                    const dText = softTokens.length / nSoft;
-                    softQueue.push({ nSoft, dText, softTokens });
+                } finally {
+                    offProgress();
+                    setStatusLine(undefined);
                 }
             }
 

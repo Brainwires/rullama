@@ -50,7 +50,10 @@ interface ModelHandle {
     renderChat(messages: unknown, withBos: boolean): string;
     imageSoftTokenCount(h: number, w: number): number;
     decodeWav(bytes: Uint8Array): Float32Array;
-    encodeImage(pixels: Float32Array, h: number, w: number): Promise<Float32Array>;
+    encodeImage(
+        pixels: Float32Array, h: number, w: number,
+        progressCb?: ((layer: number, total: number) => void) | null,
+    ): Promise<Float32Array>;
     encodeAudio(pcm: Float32Array): Promise<Float32Array>;
 }
 interface ModelStatic {
@@ -435,7 +438,14 @@ const RPC: Record<string, Handler> = {
         const next = await m.step(Number(a.tokenId));
         return { next, isEos: m.isEos(next), str: m.tokenStr(next) ?? null };
     },
-    encodeImage: async (a) => await requireModel().encodeImage(a.pixels as Float32Array, Number(a.h), Number(a.w)),
+    encodeImage: async (a) => {
+        const cb = (layer: number, total: number) => {
+            notify("visionProgress", { layer, total });
+        };
+        return await requireModel().encodeImage(
+            a.pixels as Float32Array, Number(a.h), Number(a.w), cb,
+        );
+    },
     encodeAudio: async (a) => await requireModel().encodeAudio(a.pcm as Float32Array),
     reset:        (a) => { void a; return requireModel().reset(); },
     setSampling:  (a) => requireModel().setSampling(a.opts),
