@@ -1485,12 +1485,16 @@ dependencies = [
 name = "rullama-finetune"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
+ "pollster",
+ "rullama",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokenizers",
  "tracing",
+ "wgpu",
 ]
 
 [[package]]
