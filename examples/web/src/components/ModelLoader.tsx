@@ -4,7 +4,7 @@ import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { fmtBytes } from "@/lib/utils";
 import { type ModelEntry, isSupported, listModels } from "@/lib/api";
-import { RefreshCw, Download, Trash2 } from "lucide-react";
+import { RefreshCw, Download, Trash2, Unplug } from "lucide-react";
 
 export type ModelStatus = "idle" | "loading" | "ready" | "error";
 
@@ -15,6 +15,9 @@ interface Props {
     statusText: string;         // e.g. "ready: gemma4:e2b"
     onLoad: (model: ModelEntry) => void;
     onDelete?: (model: ModelEntry) => void;
+    /** Unload the active model. Persisted "last loaded" gets cleared,
+     *  so a page reload won't auto-resume. */
+    onEject?: () => void;
     onCancel?: () => void;
 }
 
@@ -94,10 +97,23 @@ export function ModelLoader(props: Props) {
                     <Trash2 />
                 </Button>
             )}
-            {props.status === "ready"   && (
-                <Badge tone="ok"   className="truncate max-w-[14rem]" title={props.statusText}>
-                    {props.statusText}
-                </Badge>
+            {props.status === "ready" && (
+                <>
+                    <Badge tone="ok" className="truncate max-w-[14rem]" title={props.statusText}>
+                        {props.statusText}
+                    </Badge>
+                    {props.onEject && (
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                            onClick={() => props.onEject?.()}
+                            title="Eject model (clears auto-load on reload)"
+                        >
+                            <Unplug />
+                        </Button>
+                    )}
+                </>
             )}
             {props.status === "error"   && <Badge tone="err">error</Badge>}
             {props.status === "loading" && (() => {

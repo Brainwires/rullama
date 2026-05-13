@@ -26,6 +26,7 @@ interface Props {
     statusText:     string;
     onLoadModel:    (m: ModelEntry) => void;
     onDeleteModel:  (m: ModelEntry) => void;
+    onEjectModel:   () => void;
 
     // System + sampling
     systemPrompt: string;
@@ -81,6 +82,7 @@ export function SettingsDialog(props: Props) {
                         statusText={props.statusText}
                         onLoad={props.onLoadModel}
                         onDelete={props.onDeleteModel}
+                        onEject={props.onEjectModel}
                     />
                 </section>
 

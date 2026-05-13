@@ -9,7 +9,7 @@ import { ConversationList } from "@/components/ConversationList";
 import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
 import { Button } from "@/components/ui/button";
 import { type ChatMessage, type ImageAttachment, type SamplingOptions, DEFAULT_SAMPLING, DEFAULT_SYSTEM_PROMPT } from "@/lib/types";
-import { type ModelEntry, blobUrl, beacon } from "@/lib/api";
+import { type ModelEntry, blobUrl, beacon, listModels } from "@/lib/api";
 import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel } from "@/lib/opfs";
 import { getNetworkHint } from "@/lib/network";
 import { getClient, type ConversationRow } from "@/lib/inference";
@@ -63,6 +63,12 @@ export function App() {
     const [sampling,     setSampling]     = usePersistedState<SamplingOptions>("sampling", DEFAULT_SAMPLING);
     const [maxTokens,    setMaxTokens]    = usePersistedState<number>("maxTokens", 1024);
     const [thinking,     setThinking]     = usePersistedState<boolean>("thinking", true);
+
+    // Digest of the model that was last successfully loaded. Set on
+    // onLoad success, cleared on eject or delete. Drives auto-load on
+    // page reload — empty string means "no model; show the picker".
+    const [lastLoadedDigest, setLastLoadedDigest] =
+        usePersistedState<string>("lastLoadedDigest", "");
 
     const cancelRef = useRef(false);
     const { showToast, dismissToast } = useToast();
@@ -148,6 +154,46 @@ export function App() {
             }
         })();
     }, [showToast]);
+
+    // Latest-onLoad ref so the auto-load effect doesn't need it as a dep
+    // (which would re-trigger whenever onLoad's closure changes).
+    const onLoadRef = useRef<((m: ModelEntry) => Promise<void>) | null>(null);
+
+    // Auto-load on mount: if a model was successfully loaded in a prior
+    // session, look it up in the catalog and call onLoad(entry). Skipped
+    // on first-ever visit (digest is empty) and after eject/delete (also
+    // cleared). Runs exactly once per mount via the ref gate.
+    const autoLoadAttempted = useRef(false);
+    useEffect(() => {
+        if (autoLoadAttempted.current) return;
+        if (!lastLoadedDigest) return;
+        autoLoadAttempted.current = true;
+        (async () => {
+            try {
+                const models = await listModels();
+                const target = models.find((m) => m.digest === lastLoadedDigest);
+                if (!target) {
+                    // Persisted digest doesn't match any catalog entry
+                    // (catalog changed, model removed). Quietly clear it
+                    // so we don't retry every reload.
+                    setLastLoadedDigest("");
+                    return;
+                }
+                // Wait for onLoad to be assigned (it is, by the time
+                // useCallback bodies have run during this render pass).
+                if (onLoadRef.current) {
+                    void onLoadRef.current(target);
+                }
+            } catch (e) {
+                showToast({
+                    level: "warn",
+                    title: "Auto-load failed",
+                    message: (e as Error).message,
+                });
+            }
+        })();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const refreshConversations = useCallback(async () => {
         try {
@@ -391,6 +437,9 @@ export function App() {
             setModelStatus("ready");
             setStatusText(`${m.name}${fromCache ? " ⚡" : ""}`);
             setLoadingLabel("");
+            // Remember which model was loaded so a page reload can resume
+            // automatically. Eject (or delete-while-loaded) clears this.
+            setLastLoadedDigest(m.digest);
             const capsLine = `vision ${client.hasVision ? "✓" : "✗"} · audio ${client.hasAudio ? "✓" : "✗"}`;
             beacon("chat", `loaded ${m.name} (${capsLine})`);
             showToast({
@@ -407,7 +456,12 @@ export function App() {
                 title: "Model load failed", message: err,
             });
         }
-    }, [dismissToast, showToast]);
+    }, [dismissToast, setLastLoadedDigest, showToast]);
+
+    // Keep the ref in sync so the mount-time auto-load effect can call
+    // the latest onLoad closure without listing it as a hook dep (which
+    // would re-fire the effect every time the closure identity changes).
+    useEffect(() => { onLoadRef.current = onLoad; }, [onLoad]);
 
     const onSend = useCallback(async () => {
         if (modelStatus !== "ready" || busy) return;
@@ -635,6 +689,7 @@ export function App() {
             setStatusLine(undefined);
             setHasVision(false);
             setPendingImages([]);
+            setLastLoadedDigest("");
         }
 
         const removed = await wipeModel(modelKey, filename);
@@ -644,7 +699,26 @@ export function App() {
         } else {
             showToast({ level: "info", title: `No cached copy of ${m.name}` });
         }
-    }, [busy, modelStatus, statusText, showToast]);
+    }, [busy, modelStatus, setLastLoadedDigest, statusText, showToast]);
+
+    /** Unload the active model, free its wasm-side buffers, and clear
+     *  the "last loaded" memory so a page reload won't auto-resume.
+     *  Past conversations stay in SQLite; OPFS-cached blobs stay on disk
+     *  (use Delete to evict those). */
+    const onEjectModel = useCallback(async () => {
+        if (busy) return;
+        if (modelStatus !== "ready") return;
+        try { await getClient().free(); } catch { /* */ }
+        const name = statusText.split(" ")[0] || "model";
+        setModelStatus("idle");
+        setStatusText("no model");
+        setMessages([]);
+        setStatusLine(undefined);
+        setHasVision(false);
+        setPendingImages([]);
+        setLastLoadedDigest("");
+        showToast({ level: "info", title: `Ejected ${name}` });
+    }, [busy, modelStatus, setLastLoadedDigest, statusText, showToast]);
 
     // Active conversation title for the header.
     const activeTitle = activeConvId
@@ -717,6 +791,7 @@ export function App() {
                         statusText={statusText}
                         onLoadModel={onLoad}
                         onDeleteModel={onDeleteModel}
+                        onEjectModel={onEjectModel}
                         systemPrompt={systemPrompt}
                         onSystemPromptChange={setSystemPrompt}
                         sampling={sampling}
