@@ -1,0 +1,18 @@
+[package]
+name = "rullama-training"
+version = "0.1.0"
+description = "Training-from-scratch primitives for the rullama Rust runtime. Currently a placeholder — no training-from-scratch code lives here yet. For LoRA/QLoRA/DoRA fine-tuning use `rullama-finetune`."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+keywords = ["model-training", "ml", "ai-agents", "framework"]
+categories = ["artificial-intelligence"]
+
+[lib]
+name = "rullama_training"
+path = "src/lib.rs"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

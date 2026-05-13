@@ -30,13 +30,16 @@ COPY rust-toolchain.toml ./
 RUN rustup target add wasm32-unknown-unknown
 
 COPY Cargo.toml Cargo.lock ./
-COPY src ./src
+COPY crates ./crates
 COPY examples ./examples
 
 # BuildKit cache mounts speed up rebuilds ~10x; harmless without BuildKit.
+# wasm-pack runs against the rullama package inside the workspace; --out-dir
+# is relative to the package, so `../../pkg` lands at /build/pkg/ which is
+# what the web stage and the nginx COPYs both expect.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    wasm-pack build --target web --release
+    wasm-pack build crates/rullama --target web --release --out-dir ../../pkg
 
 # -------------------- stage 2: vite + react PWA --------------------
 # Vite needs the wasm-pack output to resolve `/pkg/rullama.js` at build
