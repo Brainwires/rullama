@@ -210,16 +210,20 @@ export class WorkerClient {
     }
 
     // ── Model lifecycle (session-scoped) ───────────────────────────────
-    async load(modelKey: string, filename: string, opts: { maxContext?: number; textOnly?: boolean } = {}): Promise<ModelMeta> {
+    async load(
+        modelKey: string, filename: string,
+        opts: { maxContext?: number; textOnly?: boolean; name?: string } = {},
+    ): Promise<ModelMeta> {
         if (this.session == null) throw new Error("load requires an active session — call acquireSession first");
         const result = await this.rpc<{
-            modelKey: string; filename: string;
+            modelKey: string; filename: string; name?: string;
             vocabSize: number; hasVision: boolean; hasAudio: boolean;
             imageSentinelIds: [number, number] | null;
             audioSentinelIds: [number, number] | null;
         }>("load", {
             sid:       this.session,
             modelKey, filename,
+            name:       opts.name,
             maxContext: opts.maxContext ?? 0,
             textOnly:   !!opts.textOnly,
         });

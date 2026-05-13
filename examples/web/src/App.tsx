@@ -156,32 +156,82 @@ export function App() {
         })();
     }, [showToast]);
 
+    // Has the SharedWorker pushed at least one `meta` notification? Until
+    // it has, we don't know whether another tab already loaded a model,
+    // so auto-load is gated on this flag (see effect below).
+    const [metaInit, setMetaInit] = useState(false);
+
+    // Cross-tab state sync. The SharedWorker broadcasts notifications
+    // whenever shared state changes; each tab reflects them in React
+    // state so all tabs stay aligned.
+    useEffect(() => {
+        const client = getClient();
+        const applyLoaded = (loaded: {
+            name?: string | null;
+            modelKey?: string;
+            hasVision?: boolean;
+            hasAudio?: boolean;
+        } | null | undefined) => {
+            if (loaded) {
+                setModelStatus("ready");
+                setHasVision(!!loaded.hasVision);
+                setStatusText(String(loaded.name ?? loaded.modelKey ?? "loaded"));
+            } else {
+                setModelStatus("idle");
+                setStatusText("no model");
+                setHasVision(false);
+            }
+        };
+        const offs = [
+            client.subscribe("meta", (p) => {
+                setMetaInit(true);
+                applyLoaded(p.loaded as Parameters<typeof applyLoaded>[0]);
+            }),
+            client.subscribe("modelLoaded", (p) => {
+                applyLoaded(p as Parameters<typeof applyLoaded>[0]);
+            }),
+            client.subscribe("modelFreed", () => {
+                applyLoaded(null);
+            }),
+            client.subscribe("dbChanged", () => {
+                // Conversation list may have changed in another tab.
+                // Cheap to re-query; the broadcast is debounced upstream
+                // (only fires on conv* mutations, not per msgAppend).
+                void getClient().convList()
+                    .then(setConversations)
+                    .catch(() => { /* */ });
+            }),
+        ];
+        return () => { for (const o of offs) o(); };
+    }, []);
+
     // Latest-onLoad ref so the auto-load effect doesn't need it as a dep
     // (which would re-trigger whenever onLoad's closure changes).
     const onLoadRef = useRef<((m: ModelEntry) => Promise<void>) | null>(null);
 
-    // Auto-load on mount: if a model was successfully loaded in a prior
-    // session, look it up in the catalog and call onLoad(entry). Skipped
-    // on first-ever visit (digest is empty) and after eject/delete (also
-    // cleared). Runs exactly once per mount via the ref gate.
+    // Auto-load on mount. Now gated on the SharedWorker's initial `meta`
+    // notification — if another tab already loaded a model, we inherit
+    // that state via the meta payload and skip auto-load entirely. If
+    // not, fall through to the previous behaviour: look up
+    // `lastLoadedDigest` in the catalog and call onLoad.
     const autoLoadAttempted = useRef(false);
     useEffect(() => {
+        if (!metaInit) return;
         if (autoLoadAttempted.current) return;
-        if (!lastLoadedDigest) return;
         autoLoadAttempted.current = true;
+        // The meta subscriber already set modelStatus when a model is
+        // loaded worker-side; bail out so we don't gratuitously call
+        // load() and queue behind another tab.
+        if (modelStatus === "ready") return;
+        if (!lastLoadedDigest) return;
         (async () => {
             try {
                 const models = await listModels();
                 const target = models.find((m) => m.digest === lastLoadedDigest);
                 if (!target) {
-                    // Persisted digest doesn't match any catalog entry
-                    // (catalog changed, model removed). Quietly clear it
-                    // so we don't retry every reload.
                     setLastLoadedDigest("");
                     return;
                 }
-                // Wait for onLoad to be assigned (it is, by the time
-                // useCallback bodies have run during this render pass).
                 if (onLoadRef.current) {
                     void onLoadRef.current(target);
                 }
@@ -194,7 +244,7 @@ export function App() {
             }
         })();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    }, [metaInit, modelStatus]);
 
     const refreshConversations = useCallback(async () => {
         try {
@@ -454,6 +504,7 @@ export function App() {
                 await client.load(modelKey, filename, {
                     maxContext: mobile ? mobileMaxCtx : 0,
                     textOnly,
+                    name: m.name,
                 });
             });
             setHasVision(client.hasVision);

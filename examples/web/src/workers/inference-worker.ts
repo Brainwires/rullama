@@ -86,6 +86,10 @@ let syncHandle: FileSystemSyncAccessHandle | null = null;
 let dbReady: Promise<WasmDbHandle> | null = null;
 
 interface LoadedModelInfo {
+    /** Human-friendly identifier the tab passed in (e.g. "gemma4:e2b").
+     *  Worker keeps it solely for the modelLoaded / meta broadcasts so
+     *  the UI doesn't have to map modelKey back through the catalog. */
+    name: string | null;
     modelKey: string;
     filename: string;
     hasVision: boolean;
@@ -241,6 +245,7 @@ async function openSyncReadFn(modelKey: string, filename: string) {
 interface LoadArgs {
     modelKey:    string;
     filename:    string;
+    name?:       string;   // human-friendly, for broadcast UX only
     maxContext?: number;
     textOnly?:   boolean;
 }
@@ -273,6 +278,7 @@ async function handleLoad(args: LoadArgs): Promise<LoadedModelInfo> {
 
     log(`load: ready vocabSize=${model.vocabSize}`);
     loadedInfo = {
+        name:             args.name ?? null,
         modelKey:         args.modelKey,
         filename:         args.filename,
         vocabSize:        model.vocabSize,
