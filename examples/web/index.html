@@ -12,8 +12,12 @@
     <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
 
-    <!-- iOS-Safari "Add to Home Screen" needs the legacy apple-* meta tags
-         to render properly as a standalone PWA. -->
+    <!-- iOS-Safari "Add to Home Screen" needs the legacy apple-* meta
+         tags to render properly as a standalone PWA. Chromium has
+         deprecated `apple-mobile-web-app-capable` in favour of
+         `mobile-web-app-capable`; include both so iOS and Chromium are
+         happy and the deprecation warning stays out of devtools. -->
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="rullama" />

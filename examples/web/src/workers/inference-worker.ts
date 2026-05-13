@@ -94,19 +94,24 @@ const SCHEMA = [
         FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
      )`,
     `CREATE INDEX IF NOT EXISTS msg_conv_idx ON messages(conversation_id, created_at)`,
-    // Per-message image attachments. Display-only — the JPEG thumbnail is
-    // stored inline as a data URL (typically 10–30 KB each). Pixel arrays
-    // aren't persisted because the LM forward pass doesn't re-encode
-    // past-turn images anyway (see App.tsx's renderPriorTurns comment);
-    // adding full re-encode would be a separate feature requiring the
-    // original blob in OPFS.
+    // Per-message image attachments. Display-only — see image_store.ts
+    // for the OPFS-backed blob layout. The row carries only a small
+    // path (UUID + .jpg suffix); the actual JPEG bytes live in OPFS.
+    //
+    // Earlier (ecc4fdd) this column was `thumb_data_url TEXT NOT NULL`
+    // holding ~30 KB base64 data URLs inline, which tripped an
+    // rsqlite-wasm panic on overflow-page handling (single-row payload
+    // > 4 KB SQLite page hit a u32 underflow at btree_write.rs:336).
+    // The DROP IF EXISTS reset migrates any client that ran 9add3d3 →
+    // current. No production rows survived the panic so nothing is lost.
+    `DROP TABLE IF EXISTS message_images`,
     `CREATE TABLE IF NOT EXISTS message_images (
         conversation_id TEXT NOT NULL,
         message_id      TEXT NOT NULL,
         seq             INTEGER NOT NULL,
         width           INTEGER NOT NULL,
         height          INTEGER NOT NULL,
-        thumb_data_url  TEXT NOT NULL,
+        opfs_path       TEXT NOT NULL,
         PRIMARY KEY (conversation_id, message_id, seq),
         FOREIGN KEY (conversation_id, message_id)
             REFERENCES messages(conversation_id, message_id)
@@ -273,11 +278,22 @@ const RPC: Record<string, (a: Args) => unknown | Promise<unknown>> = {
     convDelete: async (a) => {
         const db = await ensureDb();
         const id = String(a.id);
-        // FK ON DELETE CASCADE removes messages too (PRAGMA foreign_keys=ON
-        // is set on open).
+        // Collect orphaned OPFS image paths BEFORE the cascade nukes the
+        // rows — caller (App.tsx) then sweeps the actual files. Wrapped
+        // in a try/catch so an empty/missing table never breaks delete.
+        let opfsPaths: string[] = [];
+        try {
+            const rows = db.queryParams(
+                `SELECT opfs_path FROM message_images WHERE conversation_id = ?`,
+                [id],
+            ) as Array<{ opfs_path: string }>;
+            opfsPaths = rows.map((r) => r.opfs_path).filter(Boolean);
+        } catch { /* table may not exist yet on a fresh DB */ }
+        // FK ON DELETE CASCADE removes messages + message_images too
+        // (PRAGMA foreign_keys=ON is set on open).
         db.execParams(`DELETE FROM conversations WHERE id = ?`, [id]);
         db.flush();
-        return true;
+        return { ok: true, opfsPaths };
     },
 
     convRename: async (a) => {
@@ -375,17 +391,17 @@ const RPC: Record<string, (a: Args) => unknown | Promise<unknown>> = {
 
     msgInsertImage: async (a) => {
         const db = await ensureDb();
-        const cid          = String(a.conversationId);
-        const mid          = String(a.messageId);
-        const seq          = Number(a.seq);
-        const width        = Number(a.width);
-        const height       = Number(a.height);
-        const thumbDataUrl = String(a.thumbDataUrl);
+        const cid       = String(a.conversationId);
+        const mid       = String(a.messageId);
+        const seq       = Number(a.seq);
+        const width     = Number(a.width);
+        const height    = Number(a.height);
+        const opfsPath  = String(a.opfsPath);
         db.execParams(
             `INSERT INTO message_images
-                 (conversation_id, message_id, seq, width, height, thumb_data_url)
+                 (conversation_id, message_id, seq, width, height, opfs_path)
              VALUES (?, ?, ?, ?, ?, ?)`,
-            [cid, mid, seq, width, height, thumbDataUrl],
+            [cid, mid, seq, width, height, opfsPath],
         );
         return true;
     },
@@ -394,7 +410,7 @@ const RPC: Record<string, (a: Args) => unknown | Promise<unknown>> = {
         const db = await ensureDb();
         const cid = String(a.conversationId);
         return db.queryParams(
-            `SELECT conversation_id, message_id, seq, width, height, thumb_data_url
+            `SELECT conversation_id, message_id, seq, width, height, opfs_path
              FROM message_images
              WHERE conversation_id = ?
              ORDER BY message_id, seq ASC`,

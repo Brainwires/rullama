@@ -18,6 +18,7 @@ import { usePersistedState } from "@/lib/persisted";
 import { useIOSKeyboard } from "@/lib/useIOSKeyboard";
 import { fmtBytes, fmtEta, clampInt, clampNum } from "@/lib/utils";
 import { preprocessImage } from "@/lib/image_preprocess";
+import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
 import { Settings, History } from "lucide-react";
 
 const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -215,19 +216,29 @@ export function App() {
                 client.msgListImages(id),
             ]);
             // Bucket images by message_id, preserving the `seq` order
-            // the table is already sorted by.
+            // the table is already sorted by. The thumbnail bytes live
+            // in OPFS keyed by opfs_path; we resolve each to a `blob:`
+            // URL the browser can render directly (no base64 decode,
+            // no DOM repaint cost compared to inline data URLs).
             const imagesByMsg = new Map<string, ImageAttachment[]>();
-            for (const r of imgRows) {
-                const arr = imagesByMsg.get(r.message_id) ?? [];
+            const resolved = await Promise.all(
+                imgRows.map(async (r) => ({
+                    row: r,
+                    url: await loadThumbBlobUrl(r.opfs_path),
+                })),
+            );
+            for (const { row, url } of resolved) {
+                if (!url) continue;   // file vanished; skip rather than show broken img
+                const arr = imagesByMsg.get(row.message_id) ?? [];
                 arr.push({
-                    h:       r.height,
-                    w:       r.width,
-                    dataUrl: r.thumb_data_url,
+                    h:       row.height,
+                    w:       row.width,
+                    dataUrl: url,
                     // pixels intentionally omitted — reloaded images are
                     // display-only. The LM doesn't re-encode past-turn
                     // images today (see renderPriorTurns in onSend).
                 });
-                imagesByMsg.set(r.message_id, arr);
+                imagesByMsg.set(row.message_id, arr);
             }
             const ms: ChatMessage[] = rows
                 .filter((r) => r.role === "user" || r.role === "model")
@@ -301,7 +312,13 @@ export function App() {
         const c = conversations.find((x) => x.id === id);
         if (!window.confirm(`Delete conversation "${c?.title ?? id}"?\n\nMessages cannot be recovered.`)) return;
         try {
-            await getClient().convDelete(id);
+            // convDelete returns the OPFS image paths it collected
+            // before the FK cascade nuked the rows; we sweep them
+            // here so the on-disk thumbnails don't orphan.
+            const { opfsPaths } = await getClient().convDelete(id);
+            if (opfsPaths.length > 0) {
+                void deleteThumbs(opfsPaths);
+            }
             await refreshConversations();
             if (id === activeConvId) {
                 setActiveConvId(null);
@@ -529,19 +546,21 @@ export function App() {
             }
             const userInsert = await client.msgInsert({ conversationId: convId, role: "user", content: text });
             // Persist image thumbnails alongside the user turn so reloading
-            // the conversation restores the bubble visuals. Only the
-            // dataUrl + dims go in; pixel arrays aren't useful at restore
-            // time because past-turn images aren't re-encoded.
+            // the conversation restores the bubble visuals. The JPEG bytes
+            // go to OPFS via saveThumb (random-UUID key); only that key
+            // lands in SQLite, keeping rows well under a page. Pixel
+            // arrays aren't persisted — past-turn images aren't re-encoded.
             for (let i = 0; i < turnImages.length; i++) {
                 const im = turnImages[i];
                 try {
+                    const opfsPath = await saveThumb(im.dataUrl);
                     await client.msgInsertImage({
                         conversationId: convId,
                         messageId:      userInsert.messageId,
                         seq:            i,
                         width:          im.w,
                         height:         im.h,
-                        thumbDataUrl:   im.dataUrl,
+                        opfsPath,
                     });
                 } catch (e) {
                     showToast({

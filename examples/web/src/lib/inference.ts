@@ -159,7 +159,9 @@ export class WorkerClient {
     convCreate(opts: { id?: string; title?: string; model?: string | null } = {}): Promise<ConversationRow> {
         return this.rpc("convCreate", opts as Record<string, unknown>);
     }
-    convDelete(id: string): Promise<boolean> { return this.rpc("convDelete", { id }); }
+    convDelete(id: string): Promise<{ ok: boolean; opfsPaths: string[] }> {
+        return this.rpc("convDelete", { id });
+    }
     convRename(id: string, title: string): Promise<boolean> { return this.rpc("convRename", { id, title }); }
     convTouch(id: string, titleIfBlank?: string): Promise<boolean> {
         return this.rpc("convTouch", { id, titleIfBlank });
@@ -183,7 +185,7 @@ export class WorkerClient {
         seq:            number;
         width:          number;
         height:         number;
-        thumbDataUrl:   string;
+        opfsPath:       string;
     }): Promise<boolean> {
         return this.rpc("msgInsertImage", opts as Record<string, unknown>);
     }
@@ -213,7 +215,7 @@ export interface MessageImageRow {
     seq:             number;
     width:           number;
     height:          number;
-    thumb_data_url:  string;
+    opfs_path:       string;
 }
 
 /** Singleton — one worker per page. */
