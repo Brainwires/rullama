@@ -1,11 +1,14 @@
-// rullama inference SharedWorker — *router*.
+// rullama inference SharedWorker — *router* with host election.
 //
-// One SharedWorker per origin. Holds the port table (one MessagePort per
-// tab), arbitrates the inference session FIFO across tabs, and fans out
-// notifications. All wasm / OPFS-sync-handle work lives in a single
-// child Dedicated Worker (`inference-core-worker.ts`) — sync access
-// handles are spec-restricted to Dedicated Workers, which is why the
-// previous "everything in the SharedWorker" shape blew up on `load`.
+// One SharedWorker per origin. Holds the port table (one MessagePort
+// per tab), arbitrates the inference session FIFO across tabs, and
+// fans out notifications. The wasm Model, OPFS sync handles, and chat
+// DB live in a *single* child Dedicated Worker — but SharedWorker
+// can't spawn workers in any browser, so the **host tab's main
+// thread** spawns the core Dedicated Worker for us and hands its
+// MessagePort to this router via `attachCore`. If the host tab
+// closes, the router picks the next connected tab and asks it to
+// spawn a fresh core (which then re-loads the model).
 //
 // Wire protocol (port → router), one message per RPC:
 //   { requestId, type, ...args }
@@ -15,8 +18,10 @@
 //   { requestId, ok: false, error }                      — RPC failure
 //   { type: "log",    args }                             — debug fanout
 //   { type: "notify", kind, ...payload }                 — cross-tab event
-
-import InferenceCoreWorker from "./inference-core-worker?worker";
+//
+// Special notify kinds:
+//   pleaseSpawnCore — sent to one tab when no core is attached
+//   coreReady       — fanned out once the router has a fresh corePort
 
 // ───────────────────────────────────────────────────────────────────────
 // Port table
@@ -35,7 +40,7 @@ interface LoadedModelInfo {
     imageSentinelIds: [number, number] | null;
     audioSentinelIds: [number, number] | null;
 }
-// Mirror of the core worker's loadedInfo, kept in sync via modelLoaded /
+// Mirror of the core worker's loadedInfo, updated via modelLoaded /
 // modelFreed notifications. Lets us hand fresh state to a newly
 // connecting tab without a round-trip.
 let loadedInfo: LoadedModelInfo | null = null;
@@ -111,24 +116,48 @@ function checkSession(port: MessagePort, sid: unknown): string | null {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// Child Dedicated Worker (wasm + sync handles live here)
+// Core election
 // ───────────────────────────────────────────────────────────────────────
 
-const child: Worker = new InferenceCoreWorker();
+let corePort: MessagePort | null = null;
+let coreHostPort: MessagePort | null = null;
+let electionInFlight: { tab: MessagePort; startedAt: number } | null = null;
 
-interface Pending {
+const ELECTION_TIMEOUT_MS = 15_000;
+
+interface PendingChild {
     port: MessagePort;
     originalRequestId: number;
 }
-const pendingChild = new Map<number, Pending>();
+const pendingChild = new Map<number, PendingChild>();
 let nextChildReqId = 1;
 
-child.addEventListener("message", (ev: MessageEvent) => {
+function electHost(tab: MessagePort) {
+    if (corePort || electionInFlight) return;
+    electionInFlight = { tab, startedAt: Date.now() };
+    try { tab.postMessage({ type: "notify", kind: "pleaseSpawnCore" }); } catch { /* */ }
+}
+
+function attachCore(hostPort: MessagePort, transferredPort: MessagePort) {
+    if (corePort) {
+        // Already attached; ignore stray attachCore from a tab that
+        // didn't get the memo yet.
+        try { transferredPort.close(); } catch { /* */ }
+        return;
+    }
+    corePort = transferredPort;
+    coreHostPort = hostPort;
+    electionInFlight = null;
+    corePort.addEventListener("message", onCoreMessage);
+    corePort.start();
+    log(`core: host attached via tab port`);
+    notifyAll({ type: "notify", kind: "coreReady" });
+}
+
+function onCoreMessage(ev: MessageEvent) {
     const msg = ev.data;
     if (!msg || typeof msg !== "object") return;
 
-    // Notifications / logs → fan out to every connected port and (for
-    // notifications) update the router's cached state.
     if (msg.type === "log") {
         for (const port of PORTS) {
             try { port.postMessage(msg); } catch { /* */ }
@@ -158,38 +187,79 @@ child.addEventListener("message", (ev: MessageEvent) => {
         return;
     }
 
-    // RPC reply → route back to the originating port, restoring its
-    // requestId.
+    // RPC reply
     if (typeof msg.requestId === "number") {
-        const pending = pendingChild.get(msg.requestId);
-        if (!pending) return;
+        const p = pendingChild.get(msg.requestId);
+        if (!p) return;
         pendingChild.delete(msg.requestId);
         try {
-            pending.port.postMessage({
-                requestId: pending.originalRequestId,
+            p.port.postMessage({
+                requestId: p.originalRequestId,
                 ok: msg.ok,
                 ...(msg.ok ? { result: msg.result } : { error: msg.error }),
             });
-        } catch { /* port gone */ }
+        } catch { /* */ }
     }
-});
-
-function forwardToChild(port: MessagePort, originalRequestId: number, type: string, args: Record<string, unknown>) {
-    const childReqId = nextChildReqId++;
-    pendingChild.set(childReqId, { port, originalRequestId });
-    // Strip `requestId` / `type` keys that came from the tab; we send a
-    // freshly-tagged message to the child. Any sid baggage is left in
-    // place — the router already validated it.
-    const { requestId: _r, type: _t, ...rest } = args as { requestId?: number; type?: string } & Record<string, unknown>;
-    void _r; void _t;
-    child.postMessage({ requestId: childReqId, type, ...rest });
 }
 
-// Drop pending child-reply mappings whose origin port has disconnected.
-// The reply will still come back from the child, but we'll have nowhere
-// to send it — already handled in the child listener by the `if
-// (!pending) return` guard, but we proactively clean up here so the map
-// doesn't leak.
+function loseCore(reason: string) {
+    if (!corePort && !coreHostPort) return;
+    log(`core: lost (${reason})`);
+    try { corePort?.close(); } catch { /* */ }
+    corePort = null;
+    coreHostPort = null;
+    electionInFlight = null;
+    // Reject all in-flight child requests; clients retry-once after coreReady.
+    for (const [, p] of pendingChild) {
+        try {
+            p.port.postMessage({
+                requestId: p.originalRequestId,
+                ok: false,
+                error: "core disconnected",
+            });
+        } catch { /* */ }
+    }
+    pendingChild.clear();
+    if (loadedInfo) {
+        loadedInfo = null;
+        notifyAll({ type: "notify", kind: "modelFreed" });
+    }
+    // Pick a successor.
+    const next = nextElectableTab();
+    if (next) electHost(next);
+}
+
+function nextElectableTab(): MessagePort | null {
+    for (const p of PORTS) return p;
+    return null;
+}
+
+function forwardToCore(port: MessagePort, originalRequestId: number, type: string, args: Record<string, unknown>) {
+    if (!corePort) {
+        // No core attached yet — reply with a transient error. The
+        // client retries on coreReady.
+        try {
+            port.postMessage({
+                requestId: originalRequestId,
+                ok: false,
+                error: "core disconnected",
+            });
+        } catch { /* */ }
+        return;
+    }
+    const childReqId = nextChildReqId++;
+    pendingChild.set(childReqId, { port, originalRequestId });
+    const { requestId: _r, type: _t, ...rest } =
+        args as { requestId?: number; type?: string } & Record<string, unknown>;
+    void _r; void _t;
+    try {
+        corePort.postMessage({ requestId: childReqId, type, ...rest });
+    } catch (e) {
+        pendingChild.delete(childReqId);
+        loseCore(`postMessage failed: ${(e as Error).message}`);
+    }
+}
+
 function dropPendingForPort(port: MessagePort) {
     for (const [id, p] of pendingChild) {
         if (p.port === port) pendingChild.delete(id);
@@ -199,6 +269,12 @@ function dropPendingForPort(port: MessagePort) {
 // ───────────────────────────────────────────────────────────────────────
 // Port lifecycle
 // ───────────────────────────────────────────────────────────────────────
+
+function notifyAll(msg: Record<string, unknown>) {
+    for (const port of PORTS) {
+        try { port.postMessage(msg); } catch { /* */ }
+    }
+}
 
 function disconnectPort(port: MessagePort, reason: string) {
     if (!PORTS.has(port)) return;
@@ -217,6 +293,17 @@ function disconnectPort(port: MessagePort, reason: string) {
         }
     }
     dropPendingForPort(port);
+
+    // If this was the core host, we lose the core too.
+    if (coreHostPort === port) {
+        loseCore("host tab disconnected");
+    }
+    // If this tab was mid-election, restart election with whatever's left.
+    if (electionInFlight && electionInFlight.tab === port) {
+        electionInFlight = null;
+        const next = nextElectableTab();
+        if (next) electHost(next);
+    }
     try { port.close(); } catch { /* */ }
 }
 
@@ -230,10 +317,21 @@ setInterval(() => {
             disconnectPort(port, "heartbeat timeout");
         }
     }
+    // Election timeout: if the elected tab hasn't called attachCore
+    // within the window, move on. (Mobile Safari can throttle tabs.)
+    if (electionInFlight
+        && Date.now() - electionInFlight.startedAt > ELECTION_TIMEOUT_MS) {
+        const stuck = electionInFlight.tab;
+        log(`election: tab did not attachCore within ${ELECTION_TIMEOUT_MS}ms`);
+        electionInFlight = null;
+        const next = nextElectableTab();
+        if (next && next !== stuck) electHost(next);
+        else if (next) electHost(next); // sole tab; try again anyway
+    }
 }, HEARTBEAT_GC_INTERVAL);
 
 // ───────────────────────────────────────────────────────────────────────
-// Logging (the router itself uses this too)
+// Logging
 // ───────────────────────────────────────────────────────────────────────
 
 function log(...args: unknown[]) {
@@ -252,6 +350,7 @@ type Args = Record<string, unknown>;
 async function handleRequest(
     port: MessagePort,
     raw: { requestId: number; type: string } & Args,
+    rawEvent?: MessageEvent,
 ) {
     if (!raw || typeof raw !== "object" || !raw.type) return;
     const { requestId, type } = raw;
@@ -289,9 +388,19 @@ async function handleRequest(
             case "currentMeta":
                 reply({ ok: true, result: { loaded: loadedInfo, activeSessionPortHeld: active != null } });
                 return;
+            case "attachCore": {
+                // Transferred MessagePort arrives on the event.ports array.
+                const transferred = rawEvent && rawEvent.ports && rawEvent.ports[0];
+                if (!transferred) {
+                    reply({ ok: false, error: "attachCore: no transferred port" });
+                    return;
+                }
+                attachCore(port, transferred);
+                reply({ ok: true, result: true });
+                return;
+            }
         }
 
-        // ── Stateful RPCs: enforce session ownership before forwarding ─
         if (STATEFUL_RPCS.has(type)) {
             const err = checkSession(port, raw.sid);
             if (err) {
@@ -300,8 +409,7 @@ async function handleRequest(
             }
         }
 
-        // ── Forward to child Dedicated Worker ───────────────────────────
-        forwardToChild(port, requestId, type, raw);
+        forwardToCore(port, requestId, type, raw);
     } catch (e) {
         const err = (e as Error)?.message ?? String(e);
         reply({ ok: false, error: err });
@@ -319,7 +427,7 @@ async function handleRequest(
     PORTS.add(port);
     PORT_LAST_SEEN.set(port, Date.now());
     port.addEventListener("message", (ev: MessageEvent) => {
-        void handleRequest(port, ev.data);
+        void handleRequest(port, ev.data, ev);
     });
     // Push initial state so the freshly connected tab can skip "Load a
     // model" if a model is already active in the core worker.
@@ -328,4 +436,13 @@ async function handleRequest(
         kind: "meta",
         loaded: loadedInfo,
     });
+    // If we already have a core, tell the new tab so its client can
+    // drop any "core disconnected" retry queue.
+    if (corePort) {
+        port.postMessage({ type: "notify", kind: "coreReady" });
+    } else if (!electionInFlight) {
+        // No core attached and no election running → this tab gets to
+        // spawn the core.
+        electHost(port);
+    }
 };

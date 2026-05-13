@@ -13,6 +13,7 @@
 
 import type { ChatMessage, SamplingOptions } from "@/lib/types";
 import InferenceWorker from "@/workers/inference-worker?sharedworker";
+import InferenceCoreWorker from "@/workers/inference-core-worker?worker";
 import { requestRestart } from "@/lib/restart";
 
 interface ModelMeta {
@@ -57,6 +58,16 @@ export class WorkerClient {
     private nextId  = 1;
     private subscribers = new Map<string, Set<NotifyHandler>>();
 
+    /** When this tab is the elected core host, holds a reference to the
+     *  spawned Dedicated Worker so we can terminate it on tab close. */
+    private coreWorker: Worker | null = null;
+
+    /** Resolved when the router signals `coreReady`. Reset to a new
+     *  pending Promise whenever core is lost. The retry-once path in
+     *  `rpc()` awaits this. */
+    private coreReady: Promise<void>;
+    private resolveCoreReady!: () => void;
+
     /** Last `notify: meta` payload from the worker (the currently-loaded
      *  model, or null when nothing is loaded). React state syncs to this
      *  via subscribe("meta", …). */
@@ -70,6 +81,7 @@ export class WorkerClient {
     public onLog?: (line: string) => void;
 
     constructor() {
+        this.coreReady = new Promise<void>((r) => { this.resolveCoreReady = r; });
         let sw: SharedWorker;
         try {
             sw = new InferenceWorker();
@@ -92,6 +104,19 @@ export class WorkerClient {
                 const n = m as NotifyMsg;
                 if (n.kind === "meta") {
                     this.lastMeta = { loaded: (n.loaded ?? null) as ModelMeta | null };
+                }
+                if (n.kind === "pleaseSpawnCore") {
+                    this.spawnCore();
+                }
+                if (n.kind === "coreReady") {
+                    this.resolveCoreReady();
+                }
+                if (n.kind === "modelFreed") {
+                    // The router emits modelFreed when it loses the core
+                    // (host tab closed) — at that point pending RPCs get
+                    // rejected with "core disconnected" and we'll need a
+                    // fresh coreReady before retrying.
+                    this.coreReady = new Promise<void>((r) => { this.resolveCoreReady = r; });
                 }
                 const subs = this.subscribers.get(n.kind);
                 if (subs) for (const h of subs) {
@@ -124,6 +149,8 @@ export class WorkerClient {
         // waiting for the heartbeat GC.
         const onLeave = () => {
             try { this.port.postMessage({ requestId: -1, type: "disconnect" }); } catch { /* */ }
+            try { this.coreWorker?.terminate(); } catch { /* */ }
+            this.coreWorker = null;
         };
         window.addEventListener("pagehide", onLeave);
         window.addEventListener("beforeunload", onLeave);
@@ -135,12 +162,73 @@ export class WorkerClient {
         }, 10_000);
     }
 
+    /**
+     * Spawn the core Dedicated Worker for this tab (called when the
+     * router elects this tab as host). The worker is spawned by the
+     * main thread because SharedWorker can't expose the `Worker`
+     * constructor in any browser. We then hand a MessageChannel port
+     * over to both the worker and the router so they can talk directly.
+     */
+    private spawnCore(): void {
+        if (this.coreWorker) return;
+        let dw: Worker;
+        try {
+            dw = new InferenceCoreWorker();
+        } catch (e) {
+            console.error("[inference] failed to spawn core worker:", e);
+            requestRestart("the inference core worker failed to construct");
+            return;
+        }
+        this.coreWorker = dw;
+        dw.addEventListener("error", (ev: ErrorEvent) => {
+            const msg = ev.message || String(ev);
+            console.error("[inference-core-worker] error:", msg);
+            if (looksLikeStaleAssetError(msg)) {
+                requestRestart("the inference core worker failed to load");
+            }
+        });
+        const channel = new MessageChannel();
+        // Hand port1 to the core worker. It listens for {type:'attach', port}.
+        dw.postMessage({ type: "attach", port: channel.port1 }, [channel.port1]);
+        // Hand port2 to the router via the attachCore RPC.
+        const requestId = this.nextId++;
+        this.pending.set(requestId, {
+            resolve: () => { /* router replied ok */ },
+            reject:  (e) => console.error("[inference] attachCore rejected:", e),
+        });
+        try {
+            this.port.postMessage({ requestId, type: "attachCore" }, [channel.port2]);
+        } catch (e) {
+            console.error("[inference] attachCore postMessage failed:", e);
+            this.pending.delete(requestId);
+        }
+    }
+
     private rpc<T = unknown>(type: string, args: Record<string, unknown> = {}): Promise<T> {
+        return this.rpcOnce<T>(type, args, false);
+    }
+
+    /**
+     * Send an RPC. If it fails with `core disconnected` and `retried`
+     * is false, wait for the next `coreReady` notification and retry
+     * the call exactly once. This covers the host-migration window
+     * cleanly without callers having to handle it.
+     */
+    private rpcOnce<T>(type: string, args: Record<string, unknown>, retried: boolean): Promise<T> {
         const requestId = this.nextId++;
         return new Promise<T>((resolve, reject) => {
             this.pending.set(requestId, {
                 resolve: (v) => resolve(v as T),
-                reject,
+                reject: (e) => {
+                    if (!retried && /core disconnected/.test(e.message)) {
+                        // Wait for fresh core, then retry once.
+                        this.coreReady
+                            .then(() => this.rpcOnce<T>(type, args, true))
+                            .then(resolve, reject);
+                        return;
+                    }
+                    reject(e);
+                },
             });
             this.port.postMessage({ requestId, type, ...args });
         });

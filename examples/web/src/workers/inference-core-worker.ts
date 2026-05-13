@@ -1,14 +1,17 @@
 // rullama inference *core* — Dedicated Worker.
 //
-// Spawned exactly once by the SharedWorker shell at
-// `inference-worker.ts`. Owns everything that touches OPFS via a
-// `FileSystemSyncAccessHandle` (which the OPFS spec restricts to
-// Dedicated Workers): the wasm Model, the loaded GGUF read handle, the
-// rsqlite-wasm chat DB, and the GGUF download write handle.
+// Spawned by the host tab's main thread (not by the SharedWorker —
+// SharedWorkerGlobalScope doesn't expose the `Worker` constructor in
+// any browser). The host tab creates a MessageChannel, posts one port
+// to this worker via {type:'attach', port}, and posts the other port
+// to the SharedWorker router via the `attachCore` RPC. Once attached,
+// all RPC traffic and notifications travel on that port. The wasm
+// Model, OPFS sync handles, and rsqlite-wasm DB all live here because
+// `createSyncAccessHandle` is restricted to DedicatedWorkerGlobalScope.
 //
-// Session arbitration, per-tab port plumbing, and notification fanout
-// live in the SharedWorker shell. This worker is single-tenant: one
-// caller (the shell), one request at a time per stateful RPC.
+// Session arbitration, port table, and notification fanout live in
+// the SharedWorker router. This worker is single-tenant: one caller
+// (the router), one request at a time per stateful RPC.
 
 // @ts-expect-error — generated bundle, no .d.ts
 import init, { Model, WasmDatabase } from "/pkg/rullama.js";
@@ -95,13 +98,18 @@ const inflight = new Map<string, DownloadInflight>();
 const RPC_TRACE = false;
 
 // ───────────────────────────────────────────────────────────────────────
-// Logging + notification (postMessage to the SharedWorker shell)
+// Logging + notification (postMessage to the SharedWorker router via the
+// attached MessagePort)
 // ───────────────────────────────────────────────────────────────────────
+
+let routerPort: MessagePort | null = null;
 
 function log(...args: unknown[]) {
     const argStrs = args.map((a) => String(a));
     const msg = argStrs.join(" ");
-    try { (self as unknown as DedicatedWorkerGlobalScope).postMessage({ type: "log", args: argStrs }); } catch { /* */ }
+    if (routerPort) {
+        try { routerPort.postMessage({ type: "log", args: argStrs }); } catch { /* */ }
+    }
     try {
         fetch("/api/log", {
             method: "POST",
@@ -113,9 +121,8 @@ function log(...args: unknown[]) {
 }
 
 function notify(kind: string, payload: Record<string, unknown> = {}) {
-    try {
-        (self as unknown as DedicatedWorkerGlobalScope).postMessage({ type: "notify", kind, ...payload });
-    } catch { /* */ }
+    if (!routerPort) return;
+    try { routerPort.postMessage({ type: "notify", kind, ...payload }); } catch { /* */ }
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -617,7 +624,10 @@ async function handleRequest(msg: { requestId: number; type: string } & Args) {
     if (!msg || typeof msg !== "object" || !msg.type) return;
     const { requestId, type } = msg;
     const handler = RPC[type];
-    const post = (self as unknown as DedicatedWorkerGlobalScope).postMessage.bind(self);
+    if (!routerPort) return;
+    const post = (payload: Record<string, unknown>) => {
+        try { routerPort!.postMessage(payload); } catch { /* */ }
+    };
     if (!handler) {
         post({ requestId, ok: false, error: `unknown RPC type: ${type}` });
         return;
@@ -634,6 +644,17 @@ async function handleRequest(msg: { requestId: number; type: string } & Args) {
     }
 }
 
+// Boot: wait for the host tab's `attach` message carrying the
+// MessagePort we'll use for all router traffic. Subsequent self.onmessage
+// fires are ignored — everything flows over the attached port.
 (self as unknown as DedicatedWorkerGlobalScope).onmessage = (ev: MessageEvent) => {
-    void handleRequest(ev.data);
+    const data = ev.data;
+    if (!data || typeof data !== "object" || data.type !== "attach" || !data.port) return;
+    if (routerPort) return; // already attached
+    routerPort = data.port as MessagePort;
+    routerPort.addEventListener("message", (e: MessageEvent) => {
+        void handleRequest(e.data);
+    });
+    routerPort.start();
+    log(`core: attached to router`);
 };
