@@ -3,7 +3,6 @@ resolver = "3"
 members = [
     "crates/rullama",
     "crates/rullama-finetune",
-    "crates/rullama-training",
 ]
 # The iOS bench tool is a separate cargo-target build (staticlib for an
 # Xcode project) and intentionally NOT a workspace member — keeping it
@@ -45,22 +44,13 @@ console_error_panic_hook = "0.1.7"
 console_log = "1.0.0"
 rsqlite-wasm = { git = "https://github.com/Brainwires/rsqlite-wasm", rev = "71b85b0b1232be32c15f58c1953bea83eb08b320" }
 
-# --- shared with rullama-finetune (Burn-backed PEFT training, native-only) ---
-# Burn individual crates to avoid the cubecl-cpu links conflict that the
-# umbrella `burn` crate would otherwise pull in.
-anyhow = "1"
+# --- shared with rullama-finetune (native LoRA, native-only) ---
+# The Burn-* / safetensors / anyhow / uuid / chrono / tokio entries that
+# lived here pre-teardown supported the broken Burn-backed trainer. They
+# are gone with it. `tokenizers` survives because the dataset loader
+# still parses HF tokenizer.json files for vocab-aligned token IDs.
 tracing = "0.1"
-uuid = { version = "1", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-tokio = { version = "1.43" }
-burn-core = { version = "0.20", default-features = false, features = ["std"] }
-burn-nn = { version = "0.20", default-features = false, features = ["std"] }
-burn-optim = { version = "0.20", default-features = false, features = ["std"] }
-burn-autodiff = { version = "0.20", default-features = false, features = ["std"] }
-burn-wgpu = { version = "0.20", default-features = false, features = ["std", "autotune"] }
-burn-ndarray = { version = "0.20", default-features = false, features = ["std"] }
 tokenizers = "0.22"
-safetensors = "0.7"
 tempfile = "3"
 
 [profile.release]
