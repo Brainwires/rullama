@@ -22,7 +22,7 @@ publish = false
 # --- shared with rullama (the wgpu inference engine) ---
 wgpu = "29.0.3"
 bytemuck = { version = "1.25", features = ["derive"] }
-half = "2.7"
+half = { version = "2.7", features = ["bytemuck"] }
 thiserror = "2.0.18"
 log = "0.4.29"
 serde = { version = "1.0.228", features = ["derive"] }
