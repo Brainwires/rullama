@@ -13,10 +13,17 @@ exclude = [
 ]
 
 [workspace.package]
-edition = "2024"
+edition      = "2024"
 rust-version = "1.91"
-license = "MIT OR Apache-2.0"
-publish = false
+license      = "MIT OR Apache-2.0"
+repository   = "https://github.com/Brainwires/rullama"
+homepage     = "https://github.com/Brainwires/rullama"
+authors      = ["Brainwires <brainwires.net@gmail.com>"]
+# Flipped to `true` so member crates inherit a publishable default once
+# their per-crate blockers are cleared. `rullama` currently stays at
+# `publish = false` in its own manifest because it has a git-sourced
+# `rsqlite-wasm` dependency (crates.io rejects non-crates.io deps).
+publish      = true
 
 [workspace.dependencies]
 # --- shared with rullama (the wgpu inference engine) ---
