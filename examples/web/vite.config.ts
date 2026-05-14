@@ -18,16 +18,20 @@ export default defineConfig({
             // Safari "Add to Home Screen" gets the icons we control. Tell the
             // plugin to leave manifest generation alone.
             manifest: false,
-            registerType: "autoUpdate",
+            // "prompt" — surface the update via our own dialog (RestartOverlay)
+            // and let the user trigger the swap. "autoUpdate" silently reloads
+            // the page in the background, which compounded with the dialog
+            // produced a confusing double-event when a deploy landed.
+            registerType: "prompt",
             // Only precache the small static shell — the 7 GB GGUF is *not*
             // precached, it lives in OPFS via our own writer worker.
             workbox: {
-                // Take over from any prior SW immediately on install — a
-                // soft refresh after a deploy otherwise keeps serving
-                // stale precached responses (we hit exactly this when an
-                // earlier deploy cached CSS with the wrong Content-Type;
-                // only a hard reload bypassed the SW and fixed the page).
-                skipWaiting:  true,
+                // Do NOT skipWaiting at install time. We want the new SW to
+                // stay in "waiting" until the user clicks the dialog button,
+                // which calls updateSW(true) — that messages skipWaiting and
+                // reloads as one user-driven event instead of two unrelated
+                // ones. clientsClaim is still useful so fresh tabs opened
+                // after activation pick up the new SW immediately.
                 clientsClaim: true,
                 // `cleanupOutdatedCaches` evicts cache buckets whose
                 // *prefix* no longer matches; bumping `cacheId` is what

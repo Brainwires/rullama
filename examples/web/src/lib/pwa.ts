@@ -2,18 +2,17 @@
 // (Workbox `generateSW` mode); this is the client-side hook.
 
 import { registerSW } from "virtual:pwa-register";
-import { requestRestart } from "@/lib/restart";
+import { requestRestart, setUpdateSW } from "@/lib/restart";
 
 export function registerPwa() {
     if (typeof window === "undefined") return;
     if (!("serviceWorker" in navigator)) return;
 
-    // A newer SW is waiting — surface the restart overlay rather than
-    // silently auto-reloading, because we want the user to see what's
-    // happening (and not lose mid-conversation state without warning).
-    // RestartOverlay's button calls window.location.reload(), which
-    // pulls the new index.html that references the new asset hashes.
-    registerSW({
+    // "prompt" mode (see vite.config.ts): a newer SW installs and parks in
+    // "waiting" — registerSW does NOT auto-reload. We surface the dialog
+    // via onNeedRefresh and hand `updateSW` to restart.ts so the dialog's
+    // button can drive skipWaiting + reload as one event.
+    const updateSW = registerSW({
         immediate: true,
         onNeedRefresh() {
             requestRestart("rullama was updated in the background");
@@ -22,13 +21,13 @@ export function registerPwa() {
             console.log("[rullama] ready to work offline (shell cached)");
         },
     });
+    setUpdateSW(updateSW);
 
-    // Defence in depth: if the controller swaps under us (a new SW
-    // activated and claimed clients via clientsClaim:true), and the
-    // tab's running JS still references hash-stamped asset URLs from
-    // the previous build, the next dynamic import (the inference
-    // worker, the wasm module) will fail. Catch the swap here so we
-    // can offer to restart *before* the user tries to load a model.
+    // Defence in depth: if the controller swaps under us anyway (e.g. an
+    // out-of-band activation from another tab, or a previously-deployed SW
+    // that still had skipWaiting baked in), the running tab's hash-stamped
+    // asset URLs may no longer resolve. Surface the same dialog so the
+    // user gets a controlled reload before the next dynamic import fails.
     navigator.serviceWorker.addEventListener("controllerchange", () => {
         requestRestart("a newer service worker took over this page");
     });

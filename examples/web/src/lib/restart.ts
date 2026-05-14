@@ -30,9 +30,25 @@ export function requestRestart(reason: string): void {
     console.warn("[rullama] restart required:", reason);
 }
 
-/** Hard reload the page. Caller hooks this to the overlay's button. */
+/** Updater function handed in by `pwa.ts` once `registerSW` has run.
+ *  When set, restartNow() routes through it so the waiting SW gets
+ *  skipWaiting + the reload as a single user-driven event. Falls back
+ *  to a plain reload if the SW path isn't available (dev, no SW, or
+ *  the restart was triggered by something other than a deploy). */
+let _updateSW: ((reload?: boolean) => Promise<void>) | null = null;
+
+export function setUpdateSW(fn: (reload?: boolean) => Promise<void>): void {
+    _updateSW = fn;
+}
+
+/** Reload the page, preferring the SW-aware updater when present. */
 export function restartNow(): void {
     if (typeof window === "undefined") return;
+    if (_updateSW) {
+        // updateSW handles skipWaiting → controllerchange → reload itself.
+        void _updateSW(true);
+        return;
+    }
     window.location.reload();
 }
 
