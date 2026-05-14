@@ -1401,12 +1401,13 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 [[package]]
 name = "rsqlite-core"
 version = "0.1.0"
-source = "git+https://github.com/Brainwires/rsqlite-wasm?rev=71b85b0b1232be32c15f58c1953bea83eb08b320#71b85b0b1232be32c15f58c1953bea83eb08b320"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "600be26eed1499266cac8add2a9d18032a5eb08698f049fc44554f90ef6499a2"
 dependencies = [
  "lru",
  "rsqlite-parser",
  "rsqlite-storage",
- "rsqlite-vfs",
+ "rsqlite-wasm-vfs",
  "sqlparser",
  "thiserror",
  "unicode-normalization",
@@ -1416,7 +1417,8 @@ dependencies = [
 [[package]]
 name = "rsqlite-parser"
 version = "0.1.0"
-source = "git+https://github.com/Brainwires/rsqlite-wasm?rev=71b85b0b1232be32c15f58c1953bea83eb08b320#71b85b0b1232be32c15f58c1953bea83eb08b320"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60743d38439640939556eab9561c06db50c24ffc6a49159dd1e8df401e62767b"
 dependencies = [
  "sqlparser",
  "thiserror",
@@ -1425,36 +1427,39 @@ dependencies = [
 [[package]]
 name = "rsqlite-storage"
 version = "0.1.0"
-source = "git+https://github.com/Brainwires/rsqlite-wasm?rev=71b85b0b1232be32c15f58c1953bea83eb08b320#71b85b0b1232be32c15f58c1953bea83eb08b320"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ced7fde48411c8e3255d29509a1678a6a22341d69421c74340c082580afb7ed"
 dependencies = [
  "lru",
- "rsqlite-vfs",
- "thiserror",
-]
-
-[[package]]
-name = "rsqlite-vfs"
-version = "0.1.0"
-source = "git+https://github.com/Brainwires/rsqlite-wasm?rev=71b85b0b1232be32c15f58c1953bea83eb08b320#71b85b0b1232be32c15f58c1953bea83eb08b320"
-dependencies = [
+ "rsqlite-wasm-vfs",
  "thiserror",
 ]
 
 [[package]]
 name = "rsqlite-wasm"
 version = "0.1.0"
-source = "git+https://github.com/Brainwires/rsqlite-wasm?rev=71b85b0b1232be32c15f58c1953bea83eb08b320#71b85b0b1232be32c15f58c1953bea83eb08b320"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "882958e760ebe555538b41d62abe3923b11383d5d7ff54b6fd43b5d858cb9f3c"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
  "rsqlite-core",
- "rsqlite-vfs",
+ "rsqlite-wasm-vfs",
  "serde",
  "serde-wasm-bindgen",
  "thiserror",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "rsqlite-wasm-vfs"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "086e999ef9cf6de7ef90baa40e8f81f7c0da26699ee8560bca7cfad6eb29225a"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]

@@ -49,7 +49,7 @@ js-sys = "0.3.98"
 web-sys = "0.3.98"
 console_error_panic_hook = "0.1.7"
 console_log = "1.0.0"
-rsqlite-wasm = { git = "https://github.com/Brainwires/rsqlite-wasm", rev = "71b85b0b1232be32c15f58c1953bea83eb08b320" }
+rsqlite-wasm = "0.1"
 
 # --- shared with rullama-finetune (native LoRA, native-only) ---
 # The Burn-* / safetensors / anyhow / uuid / chrono / tokio entries that
