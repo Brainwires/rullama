@@ -32,7 +32,7 @@ const R2_HOST = "models.brainwires.dev";
 /**
  * Baked-in catalog — what an offline-installed PWA sees. Mirrors the
  * server's huggingfaceModels() one-for-one. Each blob is hosted on
- * Cloudflare R2 with $0 egress, CORS allowed for `gemma.brainwires.dev`,
+ * Cloudflare R2 with $0 egress, CORS allowed for `rullama.com`,
  * and Range support — the same loader code path used in dev works
  * unchanged.
  */

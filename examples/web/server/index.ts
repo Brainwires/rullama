@@ -32,7 +32,7 @@ app.get("/api/health", (c) =>
 // ───── /api/models ─────────────────────────────────────────────────────
 // Local Ollama models first; fall back to the public HF list when the
 // local scan finds nothing OR `RULLAMA_REMOTE_ONLY=1` forces it. This is
-// how the public demo offloads model bandwidth to HF — `gemma.brainwires.dev`
+// how the public demo offloads model bandwidth to HF — `rullama.com`
 // sets the env var and serves only the HF entries, while devs running
 // locally with `~/.ollama/models` keep their multimodal blobs.
 app.get("/api/models", (c) => {

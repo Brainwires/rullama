@@ -1,7 +1,7 @@
 # Cloudflare R2 setup for the public demo
 
 Goal: host the multimodal Gemma 4 GGUF blobs on R2 so the rullama
-production server (`gemma.brainwires.dev`) doesn't have to serve
+production server (`rullama.com`) doesn't have to serve
 multi-gigabyte downloads. R2's killer feature is **$0 egress**, so the
 demo's bandwidth bill drops to literal zero.
 
@@ -108,7 +108,7 @@ text-only mode the way it does for HF-only text GGUFs.
 
 ```sh
 # CORS preflight
-curl -sI -H 'Origin: https://gemma.brainwires.dev' \
+curl -sI -H 'Origin: https://rullama.com' \
         -H 'Range: bytes=0-15' \
         https://models.brainwires.dev/gemma4-e2b.gguf \
     | grep -i access-control
