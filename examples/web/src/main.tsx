@@ -17,7 +17,19 @@ installGlobalRestartListeners();
 // a pending update wait (≤1.5 s) for the new SW to claim the page so the
 // first render is already against the fresh asset set. First-ever loads
 // fall through immediately. See `lib/pwa.ts` for the lifecycle details.
-await ensureFreshServiceWorker();
+//
+// Wrapped in try/catch as a safety net: a thrown error here would black-
+// screen the PWA (top-level await rejects → bundle never resolves →
+// React never mounts → static-HTML watchdog catches it after 8 s). We'd
+// rather render in degraded mode against possibly-stale assets than
+// trip the watchdog on a transient SW lifecycle hiccup.
+try {
+    await ensureFreshServiceWorker();
+} catch (e) {
+    // Surface to the console for diagnosis but DO NOT abort boot.
+    // eslint-disable-next-line no-console
+    console.warn("[rullama] ensureFreshServiceWorker threw:", e);
+}
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>

@@ -6,7 +6,8 @@ import { type SamplingOptions } from "@/lib/types";
 import { type ModelEntry } from "@/lib/api";
 import { clampInt, clampNum } from "@/lib/utils";
 import { VOICE_BOUNDS, type VoiceOptions } from "@/lib/voice";
-import { RotateCcw } from "lucide-react";
+import { hardResetAndReload } from "@/lib/restart";
+import { RotateCcw, RefreshCw } from "lucide-react";
 
 // Hard bounds — also used by App.tsx to normalize old persisted values on
 // boot. Keep these conservative; users with a real need can edit the JSON
@@ -218,6 +219,29 @@ export function SettingsDialog(props: Props) {
                         />
                     </section>
                 )}
+
+                <section className="flex flex-col gap-2 border-t border-border pt-3">
+                    <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+                        Trouble
+                    </span>
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 justify-start gap-2 text-xs"
+                        onClick={() => {
+                            if (window.confirm(
+                                "Unregister service worker, clear cached assets, and reload. "
+                                + "Cached models and settings are preserved. Continue?",
+                            )) {
+                                void hardResetAndReload();
+                            }
+                        }}
+                        title="Wipe service-worker cache and reload — recovery for stuck PWA states"
+                    >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        Reset app data
+                    </Button>
+                </section>
             </div>
         </div>
     );

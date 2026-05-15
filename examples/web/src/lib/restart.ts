@@ -38,6 +38,38 @@ export function restartNow(): void {
     window.location.reload();
 }
 
+/**
+ * Nuclear escape hatch for when the in-app state OR the service worker
+ * is wedged: unregister every SW, delete every Cache Storage entry,
+ * then force a network reload with a cache-busting query.
+ *
+ * The static-HTML watchdog (`index.html`) does this same thing
+ * autonomously when React fails to mount within 8 s. This export
+ * exposes the same recovery from inside the app (Settings → Reset
+ * app data) for when React did mount but the user wants to recover
+ * from a wedged worker / cache without uninstalling the PWA.
+ *
+ * OPFS-backed model storage is NOT touched — model blobs survive,
+ * sampling/voice settings in localStorage also survive. Only the
+ * service-worker precache + runtime cache are cleared.
+ */
+export async function hardResetAndReload(): Promise<void> {
+    if (typeof window === "undefined") return;
+    try {
+        if ("serviceWorker" in navigator) {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            await Promise.all(regs.map((r) => r.unregister()));
+        }
+    } catch { /* */ }
+    try {
+        if ("caches" in window) {
+            const keys = await caches.keys();
+            await Promise.all(keys.map((k) => caches.delete(k)));
+        }
+    } catch { /* */ }
+    window.location.replace(`${window.location.pathname}?_reset=${Date.now()}`);
+}
+
 /** Heuristic: does this error message look like the SW serving a stale
  *  reference to a hashed asset that no longer exists? Different browsers
  *  phrase the same failure differently. */

@@ -48,7 +48,13 @@ export async function ensureFreshServiceWorker(): Promise<void> {
     // "autoUpdate", the lifecycle (install → activate → claim) runs
     // automatically; we don't need any callback gymnastics, just have
     // to observe `controllerchange` when it lands.
-    registerSW({ immediate: true });
+    //
+    // Defensive: a throw here (e.g. iOS WebView in a broken state)
+    // must not reject the parent Promise — that would black-screen
+    // the app. Boot continues with whatever SW (if any) is already
+    // controlling; the watchdog in index.html catches the worst case.
+    try { registerSW({ immediate: true }); }
+    catch (e) { console.warn("[rullama] registerSW threw:", e); }
 
     // First-ever load (no controller yet) — don't block. The SW will
     // install in the background; we want first paint to be fast.
