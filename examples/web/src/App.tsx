@@ -72,6 +72,16 @@ export function App() {
     const [lastLoadedDigest, setLastLoadedDigest] =
         usePersistedState<string>("lastLoadedDigest", "");
 
+    // Digest of the model the user *intends* to load — persisted before
+    // the network fetch starts so that an iOS WebContent reap mid-
+    // download is auto-recovered on next boot. The existing Range-
+    // resume protocol in `inference-core-worker.ts` picks up from the
+    // partial OPFS file at byte N. Cleared on full success, on eject,
+    // and when the catalog lookup fails (so a deleted-from-server
+    // model doesn't keep retrying every boot).
+    const [pendingLoadDigest, setPendingLoadDigest] =
+        usePersistedState<string>("pendingLoadDigest", "");
+
     const cancelRef = useRef(false);
     const { showToast, dismissToast } = useToast();
 
@@ -218,9 +228,13 @@ export function App() {
 
     // Auto-load on mount. Now gated on the SharedWorker's initial `meta`
     // notification — if another tab already loaded a model, we inherit
-    // that state via the meta payload and skip auto-load entirely. If
-    // not, fall through to the previous behaviour: look up
-    // `lastLoadedDigest` in the catalog and call onLoad.
+    // that state via the meta payload and skip auto-load entirely.
+    //
+    // Resume priority: `pendingLoadDigest` first (the user kicked off a
+    // load that didn't finish — likely an iOS suspend mid-download;
+    // re-firing onLoad routes through ensureModel's Range-resume); then
+    // `lastLoadedDigest` (previously fully loaded, just rehydrate from
+    // OPFS cache). Both paths funnel through the same onLoad call.
     const autoLoadAttempted = useRef(false);
     useEffect(() => {
         if (!metaInit) return;
@@ -230,17 +244,22 @@ export function App() {
         // loaded worker-side; bail out so we don't gratuitously call
         // load() and queue behind another tab.
         if (modelStatus === "ready") return;
-        if (!lastLoadedDigest) return;
+        const target = pendingLoadDigest || lastLoadedDigest;
+        if (!target) return;
         (async () => {
             try {
                 const models = await listModels();
-                const target = models.find((m) => m.digest === lastLoadedDigest);
-                if (!target) {
+                const m = models.find((x) => x.digest === target);
+                if (!m) {
+                    // Model vanished from the catalog (server-side delete,
+                    // or stale localStorage). Clear both so we don't keep
+                    // retrying on every boot.
+                    setPendingLoadDigest("");
                     setLastLoadedDigest("");
                     return;
                 }
                 if (onLoadRef.current) {
-                    void onLoadRef.current(target);
+                    void onLoadRef.current(m);
                 }
             } catch (e) {
                 showToast({
@@ -393,6 +412,11 @@ export function App() {
         setLoadingPercent(0);
         setLoadingLabel("checking OPFS…");
         setStatusText("loading…");
+        // Persist *intent* before the network round-trip. If iOS reaps
+        // the WebContent process mid-download, the next page boot reads
+        // this and auto-fires onLoad again — ensureModel's Range-resume
+        // logic picks up from the partial OPFS file at byte N.
+        setPendingLoadDigest(m.digest);
 
         try {
             if (!(await opfsSupported())) throw new Error("OPFS not supported in this browser");
@@ -520,7 +544,10 @@ export function App() {
             setLoadingLabel("");
             // Remember which model was loaded so a page reload can resume
             // automatically. Eject (or delete-while-loaded) clears this.
+            // Clear pending — we're fully loaded, the boot-time auto-
+            // resume path no longer applies until next deliberate load.
             setLastLoadedDigest(m.digest);
+            setPendingLoadDigest("");
             const capsLine = `vision ${client.hasVision ? "✓" : "✗"} · audio ${client.hasAudio ? "✓" : "✗"}`;
             beacon("chat", `loaded ${m.name} (${capsLine})`);
             showToast({
@@ -537,7 +564,7 @@ export function App() {
                 title: "Model load failed", message: err,
             });
         }
-    }, [dismissToast, setLastLoadedDigest, showToast]);
+    }, [dismissToast, setLastLoadedDigest, setPendingLoadDigest, showToast]);
 
     // Keep the ref in sync so the mount-time auto-load effect can call
     // the latest onLoad closure without listing it as a hook dep (which
@@ -799,6 +826,9 @@ export function App() {
             setPendingImages([]);
             setLastLoadedDigest("");
         }
+        // Clear pending too — deleting the cached file removes the
+        // partial we'd otherwise auto-resume.
+        if (pendingLoadDigest === m.digest) setPendingLoadDigest("");
 
         const removed = await wipeModel(modelKey, filename);
         beacon("chat", removed ? `deleted ${m.name} (${sizeLabel})` : `delete ${m.name} no-op (not cached)`);
@@ -807,7 +837,7 @@ export function App() {
         } else {
             showToast({ level: "info", title: `No cached copy of ${m.name}` });
         }
-    }, [busy, modelStatus, setLastLoadedDigest, statusText, showToast]);
+    }, [busy, modelStatus, pendingLoadDigest, setLastLoadedDigest, setPendingLoadDigest, statusText, showToast]);
 
     /** Unload the active model, free its wasm-side buffers, and clear
      *  the "last loaded" memory so a page reload won't auto-resume.
@@ -825,8 +855,11 @@ export function App() {
         setHasVision(false);
         setPendingImages([]);
         setLastLoadedDigest("");
+        // Eject is a deliberate user gesture — they don't want the
+        // boot-time auto-resume to refire either.
+        setPendingLoadDigest("");
         showToast({ level: "info", title: `Ejected ${name}` });
-    }, [busy, modelStatus, setLastLoadedDigest, statusText, showToast]);
+    }, [busy, modelStatus, setLastLoadedDigest, setPendingLoadDigest, statusText, showToast]);
 
     // Active conversation title for the header.
     const activeTitle = activeConvId
