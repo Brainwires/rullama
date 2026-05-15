@@ -1,9 +1,7 @@
 [
     {
         "AllowedOrigins": [
-            "https://rullama.com",
-            "http://localhost:5173",
-            "http://localhost:8088"
+            "https://rullama.com"
         ],
         "AllowedMethods": [
             "GET",
