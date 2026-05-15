@@ -1,0 +1,16 @@
+# Cargo aliases. Each `cargo X` invocation here is rewritten to a real cargo
+# subcommand. Docker tasks are dispatched through the tiny `xtask` binary in
+# the workspace; first run compiles xtask (~1 s), subsequent runs reuse the
+# cached binary.
+#
+# Add new tasks by:
+#   1. adding a match arm in `xtask/src/main.rs`
+#   2. adding the alias line below
+
+[alias]
+"docker:build"   = "run -q -p xtask -- docker:build"
+"docker:start"   = "run -q -p xtask -- docker:start"
+"docker:stop"    = "run -q -p xtask -- docker:stop"
+"docker:restart" = "run -q -p xtask -- docker:restart"
+"docker:logs"    = "run -q -p xtask -- docker:logs"
+"docker:ps"      = "run -q -p xtask -- docker:ps"
