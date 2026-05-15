@@ -49,7 +49,13 @@ export function App() {
     // load (it's a property of the meta, only known post-load). Pending
     // images are session-only — cleared after each send.
     const [hasVision, setHasVision]   = useState(false);
+    const [hasAudio,  setHasAudio]    = useState(false);
     const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
+    // Voice clips attached to the next user turn. Mirrors `pendingImages`.
+    // PCM stays in-memory; we don't persist past sends (analogous to
+    // image pixels — only thumbs / transcripts would land in SQLite,
+    // and we don't have either yet for audio).
+    const [pendingAudio, setPendingAudio] = useState<{ pcm: Float32Array; durationMs: number }[]>([]);
 
     // Conversation persistence (rsqlite-wasm)
     const [conversations, setConversations] = useState<ConversationRow[]>([]);
@@ -192,11 +198,13 @@ export function App() {
             if (loaded) {
                 setModelStatus("ready");
                 setHasVision(!!loaded.hasVision);
+                setHasAudio(!!loaded.hasAudio);
                 setStatusText(String(loaded.name ?? loaded.modelKey ?? "loaded"));
             } else {
                 setModelStatus("idle");
                 setStatusText("no model");
                 setHasVision(false);
+                setHasAudio(false);
             }
         };
         const offs = [
@@ -539,6 +547,7 @@ export function App() {
                 });
             });
             setHasVision(client.hasVision);
+            setHasAudio(client.hasAudio);
             setModelStatus("ready");
             setStatusText(`${m.name}${fromCache ? " ⚡" : ""}`);
             setLoadingLabel("");
@@ -577,12 +586,14 @@ export function App() {
         // Snapshot attachments for this turn so the UI can clear them
         // while generation runs.
         const turnImages = pendingImages;
-        if (!text && turnImages.length === 0) return;
+        const turnAudio  = pendingAudio;
+        if (!text && turnImages.length === 0 && turnAudio.length === 0) return;
         const client = getClient();
         cancelRef.current = false;
         setBusy(true);
         setPrompt("");
         setPendingImages([]);
+        setPendingAudio([]);
         setStatusLine(undefined);
 
         const sysContent = thinking
@@ -610,8 +621,12 @@ export function App() {
             { role: "model", content: "" },
         ];
         setMessages(displayHistory);
+        // Audio markers go before image markers so the model "hears"
+        // attachments in input order; the image splice already established
+        // sentinel-pair-per-attachment as the prompt convention.
+        const audioMarkers = "<|audio><audio|>".repeat(turnAudio.length);
         const imageMarkers = "<|image><image|>".repeat(turnImages.length);
-        const userRenderContent = imageMarkers + text;
+        const userRenderContent = audioMarkers + imageMarkers + text;
         const renderPriorTurns = userTurns;   // assumed text-only for now
         const renderHistory: ChatMessage[] = sysContent
             ? [
@@ -729,6 +744,39 @@ export function App() {
                 }
             }
 
+            // Same idea for voice clips. The audio tower outputs one
+            // soft-token row per (downsampled) audio frame, dText wide;
+            // splicing is identical to images but keyed off the
+            // <|audio> sentinel id.
+            const audioQueue: SoftEntry[] = [];
+            let audioBeginId: number | null = null;
+            if (turnAudio.length > 0) {
+                const sent = client.audioSentinelIds();
+                if (!sent) {
+                    throw new Error("model exposes no <|audio> sentinel — audio unavailable");
+                }
+                audioBeginId = sent[0];
+                // Reuse softQueue's dText if we computed it above (image
+                // path); otherwise default to gemma4's d_text. The audio
+                // tower projects into the same text embedding space, so
+                // dText is a model constant.
+                const fallbackDText = softQueue[0]?.dText ?? 1536;
+                let audIdx = 0;
+                const totalAud = turnAudio.length;
+                for (const clip of turnAudio) {
+                    if (cancelRef.current) throw new Error("cancelled");
+                    setStatusLine(totalAud > 1
+                        ? `audio ${audIdx + 1}/${totalAud} — encoding…`
+                        : "encoding audio…");
+                    const softTokens = await client.encodeAudio(clip.pcm);
+                    const dText = fallbackDText;
+                    const nSoft = softTokens.length / dText;
+                    audioQueue.push({ nSoft, dText, softTokens });
+                    audIdx++;
+                }
+                setStatusLine(undefined);
+            }
+
             const t0 = performance.now();
             let next = 0;
             for (let i = 0; i < ids.length; i++) {
@@ -737,6 +785,13 @@ export function App() {
                 next = await client.step(id);
                 if (beginId !== null && id === beginId && softQueue.length > 0) {
                     const ent = softQueue.shift()!;
+                    for (let r = 0; r < ent.nSoft; r++) {
+                        if (cancelRef.current) throw new Error("cancelled");
+                        const row = ent.softTokens.subarray(r * ent.dText, (r + 1) * ent.dText);
+                        next = await client.stepWithEmbedding(row);
+                    }
+                } else if (audioBeginId !== null && id === audioBeginId && audioQueue.length > 0) {
+                    const ent = audioQueue.shift()!;
                     for (let r = 0; r < ent.nSoft; r++) {
                         if (cancelRef.current) throw new Error("cancelled");
                         const row = ent.softTokens.subarray(r * ent.dText, (r + 1) * ent.dText);
@@ -800,7 +855,22 @@ export function App() {
             try { await client.releaseSession(); } catch { /* */ }
             setBusy(false);
         }
-    }, [activeConvId, busy, maxTokens, messages, modelStatus, pendingImages, prompt, refreshConversations, sampling, statusText, systemPrompt, thinking, showToast]);
+    }, [activeConvId, busy, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, refreshConversations, sampling, statusText, systemPrompt, thinking, showToast]);
+
+    // VAD-driven mic capture wired into the existing pendingAudio queue.
+    // Each invocation produces one clip; user can stack multiple before
+    // sending. Encoding to soft tokens happens later in onSend so the
+    // tap-to-talk flow stays snappy (no inference under the hand).
+    const onCaptureAudio = useCallback((pcm: Float32Array) => {
+        const durationMs = (pcm.length / 16_000) * 1000;
+        setPendingAudio((prev) => [...prev, { pcm, durationMs }]);
+    }, []);
+    const onRemoveAudio = useCallback((idx: number) => {
+        setPendingAudio((prev) => prev.filter((_, i) => i !== idx));
+    }, []);
+    const onAudioError = useCallback((message: string) => {
+        showToast({ level: "warn", title: "Mic capture failed", message });
+    }, [showToast]);
 
     const onDeleteModel = useCallback(async (m: ModelEntry) => {
         if (busy) return;
@@ -823,7 +893,9 @@ export function App() {
             setMessages([]);
             setStatusLine(undefined);
             setHasVision(false);
+            setHasAudio(false);
             setPendingImages([]);
+            setPendingAudio([]);
             setLastLoadedDigest("");
         }
         // Clear pending too — deleting the cached file removes the
@@ -853,7 +925,9 @@ export function App() {
         setMessages([]);
         setStatusLine(undefined);
         setHasVision(false);
+        setHasAudio(false);
         setPendingImages([]);
+        setPendingAudio([]);
         setLastLoadedDigest("");
         // Eject is a deliberate user gesture — they don't want the
         // boot-time auto-resume to refire either.
@@ -983,17 +1057,22 @@ export function App() {
                     canSend={
                         modelStatus === "ready"
                         && !busy
-                        && (prompt.trim().length > 0 || pendingImages.length > 0)
+                        && (prompt.trim().length > 0 || pendingImages.length > 0 || pendingAudio.length > 0)
                     }
                     canStop={busy}
                     canAttach={modelStatus === "ready" && hasVision}
+                    canRecord={modelStatus === "ready" && hasAudio && !busy}
                     pendingImages={pendingImages}
+                    pendingAudio={pendingAudio.map((a) => ({ durationMs: a.durationMs }))}
                     prompt={prompt}
                     onPromptChange={setPrompt}
                     onSend={onSend}
                     onStop={() => { cancelRef.current = true; }}
                     onAttachFiles={(files) => { void onAttachFiles(files); }}
                     onRemoveImage={onRemoveImage}
+                    onCaptureAudio={onCaptureAudio}
+                    onRemoveAudio={onRemoveAudio}
+                    onAudioError={onAudioError}
                     statusLine={statusLine}
                 />
             </DualSidebarLayout>
