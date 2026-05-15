@@ -16,6 +16,7 @@ import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
 import { usePersistedState } from "@/lib/persisted";
 import { useIOSKeyboard } from "@/lib/useIOSKeyboard";
+import { useWakeLock } from "@/lib/wakeLock";
 import { fmtBytes, fmtEta, clampInt, clampNum } from "@/lib/utils";
 import { preprocessImage } from "@/lib/image_preprocess";
 import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
@@ -78,6 +79,12 @@ export function App() {
     // when the keyboard dismisses, so the page doesn't end up offset
     // a few px above the layout viewport (a classic iOS-Safari quirk).
     useIOSKeyboard(true);
+
+    // Hold the screen awake during the two long-running operations a
+    // user actually waits on — model download/load and token generation.
+    // No-op on platforms without `navigator.wakeLock` (older iOS, private
+    // mode). See `lib/wakeLock.ts` for the iOS hide-release dance.
+    useWakeLock(modelStatus === "loading" || busy);
 
     // One-time sanitization of persisted values. Catches localStorage
     // entries from older versions (or hand-edited values) that fall
