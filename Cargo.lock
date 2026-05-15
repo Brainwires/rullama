@@ -1472,6 +1472,7 @@ dependencies = [
  "console_log",
  "env_logger",
  "futures-channel",
+ "futures-util",
  "half",
  "js-sys",
  "log",

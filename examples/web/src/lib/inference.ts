@@ -367,6 +367,14 @@ export class WorkerClient {
     encodeAudio(pcm: Float32Array): Promise<Float32Array> {
         return this.rpc("encodeAudio", { sid: this.session, pcm });
     }
+    /** Cooperative cancel for in-flight `encodeImage` / `encodeAudio`.
+     *  The encode's promise rejects with a "cancelled" error on the
+     *  next transformer-layer boundary. Safe to call when no encode
+     *  is running. Intentionally session-less so it can fire while the
+     *  encode itself holds the session lock. */
+    cancelMultimodalEncode(): Promise<boolean> {
+        return this.rpc("cancelMultimodalEncode", {});
+    }
     reset(): Promise<void> { return this.rpc("reset", { sid: this.session }); }
     setSampling(opts: SamplingOptions): Promise<void> {
         return this.rpc("setSampling", { sid: this.session, opts });

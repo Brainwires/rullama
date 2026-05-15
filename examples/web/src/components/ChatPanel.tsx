@@ -8,6 +8,8 @@ import { parseModelContent } from "@/lib/parseModel";
 import { cn } from "@/lib/utils";
 import { Mic, Send, Square, Plus, X } from "lucide-react";
 import { MicButton } from "@/components/MicButton";
+import { VisionProgress, type VisionProgressState } from "@/components/VisionProgress";
+import type { VoiceOptions } from "@/lib/voice";
 
 // The think-token slips into the chat history when the user enables
 // thinking mode. It's a control signal for the model, not user content,
@@ -32,6 +34,9 @@ interface Props {
      *  Index in this array is the only identity — playback support
      *  comes later. */
     pendingAudio: { durationMs: number }[];
+    /** VAD tunables for the mic button (silence cutoff, RMS threshold,
+     *  etc.). Surfaced via the Voice section of Settings. */
+    voice: VoiceOptions;
     onPromptChange:  (s: string) => void;
     onSend:          () => void;
     onStop:          () => void;
@@ -40,6 +45,9 @@ interface Props {
     onCaptureAudio:  (pcm: Float32Array) => void | Promise<void>;
     onRemoveAudio:   (idx: number) => void;
     onAudioError?:   (msg: string) => void;
+    /** When non-null, a large progress strip mounts above the input row
+     *  showing per-layer vision-encode progress for the current image. */
+    visionProgress?: VisionProgressState | null;
     statusLine?: string;
     /** Optional drop-in for the empty chat history pane (e.g. a
      *  no-model-loaded card). Falls back to a plain hint when omitted. */
@@ -210,6 +218,8 @@ export function ChatPanel(props: Props) {
                 </p>
             )}
 
+            {props.visionProgress && <VisionProgress state={props.visionProgress} />}
+
             {/* Pending-attachment preview strip, only when there's at
                 least one image or voice clip queued. */}
             {(props.pendingImages.length + props.pendingAudio.length) > 0 && (
@@ -287,6 +297,7 @@ export function ChatPanel(props: Props) {
                 {props.canRecord && (
                     <MicButton
                         disabled={!props.canType}
+                        voice={props.voice}
                         onCapture={props.onCaptureAudio}
                         onError={props.onAudioError}
                         title="Record voice"

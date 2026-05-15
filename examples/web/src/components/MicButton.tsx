@@ -1,9 +1,13 @@
 import { Loader2, Mic, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useMicCapture } from "@/lib/useMicCapture";
+import type { VoiceOptions } from "@/lib/voice";
 
 interface Props {
     disabled?: boolean;
+    /** VAD tunables (silence cutoff, RMS threshold, etc.) — driven by
+     *  the Voice section of Settings. */
+    voice: VoiceOptions;
     /** Called with 16 kHz mono f32 PCM once VAD auto-stops. The caller
      *  decides what to do with it (attach to next message, transcribe,
      *  etc.). */
@@ -21,8 +25,9 @@ interface Props {
  *
  * VAD-driven auto-stop on silence is handled by `useMicCapture`.
  */
-export function MicButton({ disabled, onCapture, onError, title }: Props) {
+export function MicButton({ disabled, voice, onCapture, onError, title }: Props) {
     const { state, rmsDb, start, cancel } = useMicCapture({
+        voice,
         onComplete: onCapture,
         onError: (e) => onError?.(e.message),
     });

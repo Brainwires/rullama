@@ -5,6 +5,7 @@ import { ModelLoader, type ModelStatus } from "@/components/ModelLoader";
 import { type SamplingOptions } from "@/lib/types";
 import { type ModelEntry } from "@/lib/api";
 import { clampInt, clampNum } from "@/lib/utils";
+import { VOICE_BOUNDS, type VoiceOptions } from "@/lib/voice";
 import { RotateCcw } from "lucide-react";
 
 // Hard bounds — also used by App.tsx to normalize old persisted values on
@@ -38,15 +39,25 @@ interface Props {
     thinking: boolean;
     onThinkingChange: (b: boolean) => void;
 
-    /** Reset systemPrompt + sampling + maxTokens + thinking to defaults. */
+    // Voice (VAD) — only shown when the loaded model has an audio tower.
+    voice: VoiceOptions;
+    onVoiceChange: (v: VoiceOptions) => void;
+    /** Audio tower available on the loaded model. The Voice section is
+     *  hidden on text/vision-only models to avoid useless knobs. */
+    canRecord: boolean;
+
+    /** Reset systemPrompt + sampling + maxTokens + thinking + voice to defaults. */
     onResetDefaults: () => void;
 }
 
 /** Full-height sidebar: Model + Generation settings, sections scroll. */
 export function SettingsDialog(props: Props) {
     const B = SETTINGS_BOUNDS;
+    const V = VOICE_BOUNDS;
     const setS = (patch: Partial<SamplingOptions>) =>
         props.onSamplingChange({ ...props.sampling, ...patch });
+    const setV = (patch: Partial<VoiceOptions>) =>
+        props.onVoiceChange({ ...props.voice, ...patch });
 
     return (
         <div className="flex h-full min-h-0 flex-col">
@@ -159,6 +170,54 @@ export function SettingsDialog(props: Props) {
                         </span>
                     </label>
                 </section>
+
+                {props.canRecord && (
+                    <section className="flex flex-col gap-3 border-t border-border pt-3">
+                        <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+                            Voice
+                        </span>
+                        <Slider
+                            label="silence cutoff (ms)"
+                            value={props.voice.silenceMs}
+                            min={V.silenceMs.min} max={V.silenceMs.max} step={V.silenceMs.step}
+                            onChange={(v) => setV({
+                                silenceMs: clampInt(v, V.silenceMs.min, V.silenceMs.max, V.silenceMs.fallback),
+                            })}
+                        />
+                        <Slider
+                            label="speech threshold (dBFS)"
+                            value={props.voice.rmsDbThreshold}
+                            min={V.rmsDbThreshold.min} max={V.rmsDbThreshold.max} step={V.rmsDbThreshold.step}
+                            onChange={(v) => setV({
+                                rmsDbThreshold: clampInt(v, V.rmsDbThreshold.min, V.rmsDbThreshold.max, V.rmsDbThreshold.fallback),
+                            })}
+                        />
+                        <Slider
+                            label="pre-roll (ms)"
+                            value={props.voice.prerollMs}
+                            min={V.prerollMs.min} max={V.prerollMs.max} step={V.prerollMs.step}
+                            onChange={(v) => setV({
+                                prerollMs: clampInt(v, V.prerollMs.min, V.prerollMs.max, V.prerollMs.fallback),
+                            })}
+                        />
+                        <Slider
+                            label="min speech frames"
+                            value={props.voice.minSpeechFrames}
+                            min={V.minSpeechFrames.min} max={V.minSpeechFrames.max} step={V.minSpeechFrames.step}
+                            onChange={(v) => setV({
+                                minSpeechFrames: clampInt(v, V.minSpeechFrames.min, V.minSpeechFrames.max, V.minSpeechFrames.fallback),
+                            })}
+                        />
+                        <Slider
+                            label="max recording (ms)"
+                            value={props.voice.maxRecordMs}
+                            min={V.maxRecordMs.min} max={V.maxRecordMs.max} step={V.maxRecordMs.step}
+                            onChange={(v) => setV({
+                                maxRecordMs: clampInt(v, V.maxRecordMs.min, V.maxRecordMs.max, V.maxRecordMs.fallback),
+                            })}
+                        />
+                    </section>
+                )}
             </div>
         </div>
     );

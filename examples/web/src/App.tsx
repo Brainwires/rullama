@@ -3,6 +3,7 @@ import { ModelLoader, ModelLoadProgress, type ModelStatus } from "@/components/M
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChatPanel } from "@/components/ChatPanel";
+import type { VisionProgressState } from "@/components/VisionProgress";
 import { RestartOverlay } from "@/components/RestartOverlay";
 import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
 import { ConversationList } from "@/components/ConversationList";
@@ -20,6 +21,7 @@ import { useWakeLock } from "@/lib/wakeLock";
 import { fmtBytes, fmtEta, clampInt, clampNum } from "@/lib/utils";
 import { preprocessImage } from "@/lib/image_preprocess";
 import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
+import { DEFAULT_VOICE_OPTIONS, VOICE_BOUNDS, type VoiceOptions } from "@/lib/voice";
 import { Settings, History } from "lucide-react";
 
 const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -44,6 +46,7 @@ export function App() {
     const [prompt, setPrompt]     = useState("");
     const [busy, setBusy]         = useState(false);
     const [statusLine, setStatusLine] = useState<string | undefined>();
+    const [visionEncodeState, setVisionEncodeState] = useState<VisionProgressState | null>(null);
 
     // Multimodal: vision availability latches on after a successful model
     // load (it's a property of the meta, only known post-load). Pending
@@ -71,6 +74,7 @@ export function App() {
     const [sampling,     setSampling]     = usePersistedState<SamplingOptions>("sampling", DEFAULT_SAMPLING);
     const [maxTokens,    setMaxTokens]    = usePersistedState<number>("maxTokens", 1024);
     const [thinking,     setThinking]     = usePersistedState<boolean>("thinking", true);
+    const [voice,        setVoice]        = usePersistedState<VoiceOptions>("voice", DEFAULT_VOICE_OPTIONS);
 
     // Digest of the model that was last successfully loaded. Set on
     // onLoad success, cleared on eject or delete. Drives auto-load on
@@ -123,6 +127,22 @@ export function App() {
         }
         const mt = clampInt(maxTokens, B.maxTokens.min, B.maxTokens.max, B.maxTokens.fallback);
         if (mt !== maxTokens) setMaxTokens(mt);
+
+        const VB = VOICE_BOUNDS;
+        const nextVoice: VoiceOptions = {
+            silenceMs:       clampInt(voice.silenceMs,       VB.silenceMs.min,       VB.silenceMs.max,       VB.silenceMs.fallback),
+            rmsDbThreshold:  clampInt(voice.rmsDbThreshold,  VB.rmsDbThreshold.min,  VB.rmsDbThreshold.max,  VB.rmsDbThreshold.fallback),
+            prerollMs:       clampInt(voice.prerollMs,       VB.prerollMs.min,       VB.prerollMs.max,       VB.prerollMs.fallback),
+            minSpeechFrames: clampInt(voice.minSpeechFrames, VB.minSpeechFrames.min, VB.minSpeechFrames.max, VB.minSpeechFrames.fallback),
+            maxRecordMs:     clampInt(voice.maxRecordMs,     VB.maxRecordMs.min,     VB.maxRecordMs.max,     VB.maxRecordMs.fallback),
+        };
+        if (nextVoice.silenceMs !== voice.silenceMs
+            || nextVoice.rmsDbThreshold !== voice.rmsDbThreshold
+            || nextVoice.prerollMs !== voice.prerollMs
+            || nextVoice.minSpeechFrames !== voice.minSpeechFrames
+            || nextVoice.maxRecordMs !== voice.maxRecordMs) {
+            setVoice(nextVoice);
+        }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
@@ -347,11 +367,12 @@ export function App() {
         setSampling(DEFAULT_SAMPLING);
         setMaxTokens(SETTINGS_BOUNDS.maxTokens.fallback);
         setThinking(true);
+        setVoice(DEFAULT_VOICE_OPTIONS);
         showToast({
             level: "success",
             title: "Settings reset to defaults",
         });
-    }, [setSystemPrompt, setSampling, setMaxTokens, setThinking, showToast]);
+    }, [setSystemPrompt, setSampling, setMaxTokens, setThinking, setVoice, showToast]);
 
     const onCreateConversation = useCallback(() => {
         if (busy) return;
@@ -715,23 +736,31 @@ export function App() {
                     throw new Error("model exposes no <|image> sentinel — vision unavailable");
                 }
                 beginId = sent[0];
-                // Surface per-layer vision encode progress in the status
-                // line — the encode is ~2 min on slow GPUs, users need to
-                // know the app is alive.
+                // Surface per-layer vision encode progress as a sticky
+                // strip above the input row (see VisionProgress). The
+                // encode can be ~2 min on slow GPUs; users need clear
+                // feedback that the app is alive.
                 let imgIdx = 0;
                 const totalImgs = turnImages.filter((x) => x.pixels).length;
                 const offProgress = client.subscribe("visionProgress", (p) => {
                     const layer = Number(p.layer);
                     const total = Number(p.total);
-                    const tag   = totalImgs > 1 ? `image ${imgIdx + 1}/${totalImgs} — ` : "";
-                    setStatusLine(`${tag}analyzing image (${layer}/${total})…`);
+                    setVisionEncodeState({
+                        imageIdx: imgIdx + 1,
+                        nImages:  totalImgs,
+                        layer,
+                        nLayers:  total,
+                    });
                 });
                 try {
                     for (const im of turnImages) {
                         if (!im.pixels) continue;
-                        setStatusLine(totalImgs > 1
-                            ? `image ${imgIdx + 1}/${totalImgs} — analyzing image…`
-                            : "analyzing image…");
+                        setVisionEncodeState({
+                            imageIdx: imgIdx + 1,
+                            nImages:  totalImgs,
+                            layer:    0,
+                            nLayers:  1,  // updated on the first progress event
+                        });
                         const softTokens = await client.encodeImage(im.pixels, im.h, im.w);
                         const nSoft = await client.imageSoftTokenCount(im.h, im.w);
                         const dText = softTokens.length / nSoft;
@@ -740,7 +769,7 @@ export function App() {
                     }
                 } finally {
                     offProgress();
-                    setStatusLine(undefined);
+                    setVisionEncodeState(null);
                 }
             }
 
@@ -845,8 +874,9 @@ export function App() {
             beacon("chat", `gen ${emitted} tok in ${dt.toFixed(0)} ms (${tps.toFixed(2)} tok/s)`);
         } catch (e) {
             const msg = (e as Error).message;
-            setStatusLine(`error: ${msg}`);
-            if (msg !== "cancelled") {
+            const isCancel = msg === "cancelled" || msg.includes("cancelled by caller");
+            setStatusLine(isCancel ? "cancelled" : `error: ${msg}`);
+            if (!isCancel) {
                 showToast({ level: "error", title: "Generation failed", message: msg });
             }
         } finally {
@@ -1015,6 +1045,9 @@ export function App() {
                         onMaxTokensChange={setMaxTokens}
                         thinking={thinking}
                         onThinkingChange={setThinking}
+                        voice={voice}
+                        onVoiceChange={setVoice}
+                        canRecord={modelStatus === "ready" && hasAudio}
                         onResetDefaults={onResetDefaults}
                     />
                 }
@@ -1064,15 +1097,24 @@ export function App() {
                     canRecord={modelStatus === "ready" && hasAudio && !busy}
                     pendingImages={pendingImages}
                     pendingAudio={pendingAudio.map((a) => ({ durationMs: a.durationMs }))}
+                    voice={voice}
                     prompt={prompt}
                     onPromptChange={setPrompt}
                     onSend={onSend}
-                    onStop={() => { cancelRef.current = true; }}
+                    onStop={() => {
+                        cancelRef.current = true;
+                        // Also break in on any in-flight multimodal encode.
+                        // The flag is cleared at the start of the next
+                        // encode, so calling unconditionally here doesn't
+                        // poison subsequent runs.
+                        void getClient().cancelMultimodalEncode().catch(() => { /* */ });
+                    }}
                     onAttachFiles={(files) => { void onAttachFiles(files); }}
                     onRemoveImage={onRemoveImage}
                     onCaptureAudio={onCaptureAudio}
                     onRemoveAudio={onRemoveAudio}
                     onAudioError={onAudioError}
+                    visionProgress={visionEncodeState}
                     statusLine={statusLine}
                 />
             </DualSidebarLayout>

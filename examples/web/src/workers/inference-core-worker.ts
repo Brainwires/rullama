@@ -55,6 +55,7 @@ interface ModelHandle {
         progressCb?: ((layer: number, total: number) => void) | null,
     ): Promise<Float32Array>;
     encodeAudio(pcm: Float32Array): Promise<Float32Array>;
+    cancelMultimodalEncode(): void;
 }
 interface ModelStatic {
     loadFromOpfsTextOnly(
@@ -446,7 +447,8 @@ const RPC: Record<string, Handler> = {
             a.pixels as Float32Array, Number(a.h), Number(a.w), cb,
         );
     },
-    encodeAudio: async (a) => await requireModel().encodeAudio(a.pcm as Float32Array),
+    encodeAudio: async (a) => { void a; return await requireModel().encodeAudio(a.pcm as Float32Array); },
+    cancelMultimodalEncode: (a) => { void a; requireModel().cancelMultimodalEncode(); return true; },
     reset:        (a) => { void a; return requireModel().reset(); },
     setSampling:  (a) => requireModel().setSampling(a.opts),
 

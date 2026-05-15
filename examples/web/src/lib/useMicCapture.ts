@@ -5,36 +5,38 @@
 //
 //   idle ── start() ──▶ recording (preroll)
 //                          │
-//                  speech-frame run ≥ MIN_SPEECH_FRAMES
+//                  speech-frame run ≥ minSpeechFrames
 //                          ▼
-//                       recording (capturing) ── silence ≥ SILENCE_LIMIT_MS ──▶ encoding
+//                       recording (capturing) ── silence ≥ silenceMs ──▶ encoding
 //                          │                                                       │
-//                  elapsed > MAX_RECORD_MS                                          ▼
+//                  elapsed > maxRecordMs                                            ▼
 //                          ▼                                                      idle
 //                       encoding ──▶ idle (after onComplete resolves)
 //
-// Pre-roll: we hold the last PREROLL_MS of audio while we wait for the
+// Pre-roll: we hold the last `prerollMs` of audio while we wait for the
 // first speech frame. When speech kicks in, those frames get prepended
 // to the recording so the first syllable isn't clipped. Without this,
 // the VAD reacting to the *first* loud frame means the leading edge
 // of the word never makes it into the buffer.
 //
-// Algorithm parameters mirror brainwires-framework's EnergyVad
-// (threshold -40 dBFS, 800 ms silence cutoff). Tune here, not in the
-// worklet.
+// All knobs come from the caller-supplied `voice: VoiceOptions` — see
+// `lib/voice.ts`. The 20 ms frame size is the only constant kept here;
+// it's a worklet protocol constant tuned to give one syllable's RMS a
+// stable signal while still detecting end-of-utterance within the
+// silence budget.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { VoiceOptions } from "./voice";
 
 const FRAME_MS = 20;
-const SILENCE_LIMIT_MS = 800;
-const RMS_DB_THRESHOLD = -40;
-const PREROLL_MS = 300;
-const MIN_SPEECH_FRAMES = 4;   // 80 ms — guards against single-click spikes
-const MAX_RECORD_MS = 30_000;
 
 export type MicState = "idle" | "recording" | "encoding";
 
 export interface UseMicCaptureOpts {
+    /** Tunables — silence cutoff, RMS threshold, preroll, etc. Read live
+     *  inside the frame handler so changes from a settings UI take
+     *  effect for the next recording without remounting. */
+    voice: VoiceOptions;
     /** Called once VAD auto-stops or the user manually stops (with at
      *  least one speech frame captured). PCM is 16 kHz mono f32 in
      *  [-1, 1] — the format `Model.encodeAudio` consumes. */
@@ -103,7 +105,11 @@ export function useMicCapture(opts: UseMicCaptureOpts): CaptureHandle {
             const src = ctx.createMediaStreamSource(stream);
             const node = new AudioWorkletNode(ctx, "vad-worklet");
 
-            const prerollMax = Math.ceil(PREROLL_MS / FRAME_MS);
+            // Snapshot of the preroll budget at session start. The other
+            // knobs are read live from optsRef inside the frame handler
+            // so a settings change mid-recording still applies on the
+            // next frame.
+            const prerollMax = Math.ceil(optsRef.current.voice.prerollMs / FRAME_MS);
             let preroll: Float32Array[] = [];
             const recorded: Float32Array[] = [];
             let started = false;
@@ -147,18 +153,19 @@ export function useMicCapture(opts: UseMicCaptureOpts): CaptureHandle {
 
             node.port.onmessage = (e) => {
                 if (teardownRef.current !== teardown) return;
+                const v = optsRef.current.voice;
                 const { rmsDb: r, samples } = e.data as { rmsDb: number; samples: Float32Array };
                 setRmsDb(r);
                 elapsedMs += FRAME_MS;
 
-                const isSpeech = r > RMS_DB_THRESHOLD;
+                const isSpeech = r > v.rmsDbThreshold;
 
                 if (!started) {
                     preroll.push(samples);
                     if (preroll.length > prerollMax) preroll.shift();
                     if (isSpeech) {
                         speechRun++;
-                        if (speechRun >= MIN_SPEECH_FRAMES) {
+                        if (speechRun >= v.minSpeechFrames) {
                             // Promote: dump preroll into the recording so
                             // the first syllable isn't clipped, then keep
                             // accumulating.
@@ -176,14 +183,14 @@ export function useMicCapture(opts: UseMicCaptureOpts): CaptureHandle {
                         silenceMs = 0;
                     } else {
                         silenceMs += FRAME_MS;
-                        if (silenceMs >= SILENCE_LIMIT_MS) {
+                        if (silenceMs >= v.silenceMs) {
                             finish(true);
                             return;
                         }
                     }
                 }
 
-                if (elapsedMs >= MAX_RECORD_MS) {
+                if (elapsedMs >= v.maxRecordMs) {
                     // Hard cap. Deliver whatever we have if we ever
                     // detected speech; drop the recording otherwise.
                     finish(started);
