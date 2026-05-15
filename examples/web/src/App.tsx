@@ -441,6 +441,16 @@ export function App() {
         setLoadingPercent(0);
         setLoadingLabel("checking OPFS…");
         setStatusText("loading…");
+        // Prime capability flags from the catalog so the mic / image
+        // buttons can appear in the same render that flips modelStatus
+        // to "ready" — no perceptible lag between "loaded" and "audio
+        // available". The wasm-side `hasAudio` getter overwrites these
+        // post-load (the worker is the source of truth); the optimistic
+        // prime just avoids a one-render gap if there's any latency
+        // between the modelLoaded notification reaching this tab and
+        // the meta payload reflecting `hasAudio`.
+        setHasVision(!!m.multimodal);
+        setHasAudio(!!m.multimodal);
         // Persist *intent* before the network round-trip. If iOS reaps
         // the WebContent process mid-download, the next page boot reads
         // this and auto-fires onLoad again — ensureModel's Range-resume
