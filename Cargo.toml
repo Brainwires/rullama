@@ -3,7 +3,6 @@ resolver = "3"
 members = [
     "crates/rullama",
     "crates/rullama-finetune",
-    "xtask",
 ]
 # The iOS bench tool is a separate cargo-target build (staticlib for an
 # Xcode project) and intentionally NOT a workspace member — keeping it
