@@ -33,8 +33,12 @@ const INFLIGHT_KEY = "rullama:inflight";
 
 // Per-step timeout for stepAndDecode. iOS suspension can leave the
 // awaited Promise hanging if the dedicated worker was killed; this
-// gives us a deterministic detection point.
-const STEP_TIMEOUT_MS = 30_000;
+// gives us a deterministic detection point. setTimeout is paused
+// while JS is suspended, so on foreground-after-kill the timer is
+// already past-due and fires immediately — recovery kicks in within
+// one task. 8 s sits ~40× a normal iPhone step (~200 ms @ 5 tok/s)
+// and ~8× a slow-Mac step, well clear of normal variance.
+const STEP_TIMEOUT_MS = 8_000;
 
 // Persisted snapshot of the currently-running generation. On
 // visibilitychange→hidden we mirror this into localStorage; on boot
@@ -49,6 +53,15 @@ interface InflightGen {
     priorMessages: ChatMessage[];
     sampling: SamplingOptions;
     maxTokens: number;
+    /** Tokenized prompt — full sequence the gen loop runs against.
+     *  Persisted so a pre-encode-phase resume can replay only the
+     *  prompt tokens that hadn't been fed yet at suspension time.
+     *  Empty until the prompt has been tokenized in onSend. */
+    promptIds: number[];
+    /** Number of `promptIds[i]` already fed via `step()` at snapshot
+     *  time. 0 means pre-encode hasn't started; equals `promptIds.length`
+     *  once pre-encode completes and the gen loop is running. */
+    preEncodePosition: number;
     emittedSoFar: string;
     emittedTokenCount: number;
     lastSampledNext: number;
@@ -741,6 +754,37 @@ export function App() {
         try {
             setStatusLine("resuming…");
             await client.acquireSession();
+
+            // Cross-tab race: a sibling tab may have already done the
+            // resume (its completion cleared localStorage + OPFS).
+            // After acquireSession serialized us, recheck localStorage
+            // for a still-live inflight entry that matches our
+            // captured meta. If it's gone or now refers to a different
+            // generation, the sibling already handled it — bail
+            // cleanly instead of mangling state.
+            let raw: string | null = null;
+            try { raw = localStorage.getItem(INFLIGHT_KEY); } catch { /* */ }
+            let stillOurs = true;
+            if (!raw) {
+                stillOurs = false;
+            } else {
+                try {
+                    const live = JSON.parse(raw) as InflightGen;
+                    if (live.convId !== meta.convId
+                        || live.modelMsgId !== meta.modelMsgId
+                        || live.startedAt !== meta.startedAt) {
+                        stillOurs = false;
+                    }
+                } catch { stillOurs = false; }
+            }
+            if (!stillOurs) {
+                setStatusLine(undefined);
+                try { await client.releaseSession(); } catch { /* */ }
+                inflightRef.current = null;
+                setBusy(false);
+                return;
+            }
+
             await client.setSampling(meta.sampling);
 
             // Fast path: KV snapshot from OPFS.
@@ -775,6 +819,26 @@ export function App() {
                 for (const id of ids) {
                     if (cancelRef.current) throw new Error("cancelled");
                     n = await client.step(id);
+                }
+                nextToken = n;
+            } else if (meta.preEncodePosition < meta.promptIds.length) {
+                // Fast-path pre-encode catchup: KV restore landed us
+                // at `preEncodePosition`; feed the remaining prompt
+                // tokens before entering the gen loop. Update
+                // inflightRef per iter so a re-suspension during
+                // catchup is itself resumable.
+                setStatusLine("resuming pre-encode…");
+                let n = meta.lastSampledNext;
+                for (let i = meta.preEncodePosition; i < meta.promptIds.length; i++) {
+                    if (cancelRef.current) throw new Error("cancelled");
+                    n = await client.step(meta.promptIds[i]);
+                    if (inflightRef.current) {
+                        inflightRef.current = {
+                            ...inflightRef.current,
+                            preEncodePosition: i + 1,
+                            lastSampledNext: n,
+                        };
+                    }
                 }
                 nextToken = n;
             }
@@ -905,6 +969,10 @@ export function App() {
         if (!text && turnImages.length === 0 && turnAudio.length === 0) return;
         const client = getClient();
         cancelRef.current = false;
+        // Flagged by the catch when a recoverable hang is detected so
+        // the finally block can hand off to resumeInflightGeneration
+        // instead of clearing inflight state.
+        let liveRecovery: InflightGen | null = null;
         setBusy(true);
         setPrompt("");
         setPendingImages([]);
@@ -1010,6 +1078,33 @@ export function App() {
             await client.reset();
             const rendered = await client.renderChat(renderHistory, false);
             const ids = await client.encode(rendered);
+
+            // ── Initialize inflight tracking BEFORE the prompt-feed
+            // loop so a backgrounding during pre-encode (which is most
+            // of the wall-clock cost on long conversations) still has
+            // a resumable snapshot. `preEncodePosition` ticks up per
+            // prompt-feed iteration; resume replays only the remaining
+            // tokens.
+            if (convId && modelMsgId) {
+                inflightRef.current = {
+                    convId,
+                    modelMsgId,
+                    modelDigest: lastLoadedDigest,
+                    userText: text,
+                    sysContent,
+                    priorMessages: userTurns,
+                    sampling,
+                    maxTokens,
+                    promptIds: Array.from(ids),
+                    preEncodePosition: 0,
+                    emittedSoFar: "",
+                    emittedTokenCount: 0,
+                    lastSampledNext: 0,
+                    hadImages: turnImages.length > 0,
+                    hadAudio:  turnAudio.length > 0,
+                    startedAt: Date.now(),
+                };
+            }
 
             // Encode each attached image once per send. Result lives in
             // softMap keyed by the begin-sentinel token id — the feed
@@ -1121,33 +1216,21 @@ export function App() {
                         next = await client.stepWithEmbedding(row);
                     }
                 }
+                // Track pre-encode progress so a visibilitychange→hidden
+                // mid-prompt-feed has a resumable snapshot. `next` at
+                // this point is the model's predicted next token AFTER
+                // ids[0..=i] (and any soft-token splices) — exactly
+                // what the gen loop would feed first if pre-encode
+                // completes here.
+                if (inflightRef.current) {
+                    inflightRef.current = {
+                        ...inflightRef.current,
+                        preEncodePosition: i + 1,
+                        lastSampledNext: next,
+                    };
+                }
             }
             const peMs = performance.now() - t0;
-
-            // ── Initialize inflight tracking for suspend/resume ────────
-            // Captures everything needed to either restore KV (fast
-            // path) or replay-rebuild it (slow path) if the user
-            // backgrounds the app mid-generation. Updated per-token
-            // below; serialized to localStorage by the visibilitychange
-            // handler.
-            if (convId && modelMsgId) {
-                inflightRef.current = {
-                    convId,
-                    modelMsgId,
-                    modelDigest: lastLoadedDigest,
-                    userText: text,
-                    sysContent,
-                    priorMessages: userTurns,
-                    sampling,
-                    maxTokens,
-                    emittedSoFar: "",
-                    emittedTokenCount: 0,
-                    lastSampledNext: next,
-                    hadImages: turnImages.length > 0,
-                    hadAudio:  turnAudio.length > 0,
-                    startedAt: Date.now(),
-                };
-            }
 
             const tg0 = performance.now();
             let emitted = 0;
@@ -1206,26 +1289,49 @@ export function App() {
         } catch (e) {
             const msg = (e as Error).message;
             const isCancel = msg === "cancelled" || msg.includes("cancelled by caller");
-            setStatusLine(isCancel ? "cancelled" : `error: ${msg}`);
-            if (!isCancel) {
-                showToast({ level: "error", title: "Generation failed", message: msg });
+            const isStepTimeout = msg.includes("step-timeout");
+            // Live-tab recovery: a step that hangs past STEP_TIMEOUT_MS
+            // almost always means the dedicated worker died (iOS jetsam
+            // mid-generation, GPU device-lost, etc.). Instead of asking
+            // the user to reload, hand the inflight metadata off to
+            // resumeInflightGeneration on the next tick — it acquires
+            // its own session and tries restoreKvState first, then the
+            // slow-path replay. Same machinery the boot path uses.
+            if (isStepTimeout && inflightRef.current) {
+                liveRecovery = inflightRef.current;
+                setStatusLine("worker hung — recovering session…");
+            } else {
+                setStatusLine(isCancel ? "cancelled" : `error: ${msg}`);
+                if (!isCancel) {
+                    showToast({ level: "error", title: "Generation failed", message: msg });
+                }
             }
         } finally {
-            // Generation finished (cleanly, by cancel, by error, or by
-            // timeout). Discard inflight state — a future
-            // backgrounding has nothing to resume. The OPFS file is
-            // best-effort: a failed delete just leaves a stale snapshot
-            // that the next resume attempt will reject by layout_hash
-            // or modelDigest mismatch.
-            inflightRef.current = null;
-            try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
-            void clearInflightState();
-            // Release the session so the next tab in the queue (or this
-            // tab's next send) can proceed.
-            try { await client.releaseSession(); } catch { /* */ }
-            setBusy(false);
+            if (liveRecovery) {
+                // Hand off without clearing — resumeInflightGeneration
+                // owns the metadata + OPFS state from here. Mirror to
+                // localStorage so a page-reload-during-recovery still
+                // resumes via the boot path.
+                try { localStorage.setItem(INFLIGHT_KEY, JSON.stringify(liveRecovery)); } catch { /* */ }
+                try { await client.releaseSession(); } catch { /* */ }
+                setBusy(false);
+                const meta = liveRecovery;
+                setTimeout(() => { void resumeInflightGeneration(meta); }, 0);
+            } else {
+                // Generation finished (cleanly, by cancel, or by a
+                // non-recoverable error). Discard inflight state — a
+                // future backgrounding has nothing to resume. The OPFS
+                // file is best-effort: a failed delete just leaves a
+                // stale snapshot that the next resume attempt will
+                // reject by layout_hash or modelDigest mismatch.
+                inflightRef.current = null;
+                try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
+                void clearInflightState();
+                try { await client.releaseSession(); } catch { /* */ }
+                setBusy(false);
+            }
         }
-    }, [activeConvId, busy, lastLoadedDigest, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, refreshConversations, sampling, statusText, systemPrompt, thinking, showToast]);
+    }, [activeConvId, busy, lastLoadedDigest, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, refreshConversations, resumeInflightGeneration, sampling, statusText, systemPrompt, thinking, showToast]);
 
     // VAD-driven mic capture wired into the existing pendingAudio queue.
     // Each invocation produces one clip; user can stack multiple before
