@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { type ChatMessage, type ImageAttachment, type SamplingOptions, DEFAULT_SAMPLING, DEFAULT_SYSTEM_PROMPT } from "@/lib/types";
 import { type ModelEntry, blobUrl, beacon, listModels } from "@/lib/api";
 import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel, readInflightState, writeInflightState, clearInflightState } from "@/lib/opfs";
+import { saveInflightImage, saveInflightAudio, readInflightImages, readInflightAudio, clearInflightMedia } from "@/lib/inflight_media";
 import { getNetworkHint } from "@/lib/network";
 import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
@@ -67,6 +68,11 @@ interface InflightGen {
     lastSampledNext: number;
     hadImages: boolean;
     hadAudio: boolean;
+    /** True once turnImages + turnAudio have been written to OPFS
+     *  successfully. False means a kill-and-resume on this turn can't
+     *  re-encode multimodal media — we surface the "interrupted"
+     *  toast in that narrow case rather than producing wrong output. */
+    mediaPersisted: boolean;
     startedAt: number;
 }
 
@@ -782,43 +788,129 @@ export function App() {
                 try { await client.releaseSession(); } catch { /* */ }
                 inflightRef.current = null;
                 setBusy(false);
+                // No media cleanup — sibling tab's finally will handle it.
                 return;
             }
 
             await client.setSampling(meta.sampling);
 
+            const isMultimodal = meta.hadImages || meta.hadAudio;
+            // For a multimodal turn that hadn't yet finished pre-encode,
+            // the fast-path catchup can't replay correctly (it would
+            // feed sentinel tokens as plain text). Force slow path,
+            // which renders + re-encodes media + splices soft tokens.
+            const forceSlowPath = isMultimodal
+                && meta.emittedTokenCount === 0
+                && meta.preEncodePosition < meta.promptIds.length;
+
             // Fast path: KV snapshot from OPFS.
             let kvIntact = false;
-            const snapshotBytes = await readInflightState();
-            if (snapshotBytes && snapshotBytes.length > 0) {
-                try {
-                    await client.restoreKvState(snapshotBytes);
-                    kvIntact = true;
-                } catch (e) {
-                    // eslint-disable-next-line no-console
-                    console.warn("[rullama] KV restore failed; falling back to replay:", e);
+            if (!forceSlowPath) {
+                const snapshotBytes = await readInflightState();
+                if (snapshotBytes && snapshotBytes.length > 0) {
+                    try {
+                        await client.restoreKvState(snapshotBytes);
+                        kvIntact = true;
+                    } catch (e) {
+                        // eslint-disable-next-line no-console
+                        console.warn("[rullama] KV restore failed; falling back to replay:", e);
+                    }
                 }
             }
 
-            // Slow path: rebuild KV from a continuation render.
+            // Slow path: rebuild KV from a continuation render. For
+            // multimodal we re-encode the images/audio from the OPFS
+            // inflight-media store, then splice soft tokens at the
+            // matching sentinel positions — same protocol onSend uses
+            // on first-pass.
             let nextToken = meta.lastSampledNext;
             if (!kvIntact) {
                 setStatusLine("rebuilding session…");
                 await client.reset();
+
+                type SoftEntry = { nSoft: number; dText: number; softTokens: Float32Array };
+                const softQueue: SoftEntry[] = [];
+                const audioQueue: SoftEntry[] = [];
+                let beginId: number | null = null;
+                let audioBeginId: number | null = null;
+                let nImages = 0;
+                let nAudio = 0;
+
+                if (isMultimodal) {
+                    const images = meta.hadImages ? await readInflightImages() : [];
+                    const audio  = meta.hadAudio  ? await readInflightAudio()  : [];
+                    nImages = images.length;
+                    nAudio  = audio.length;
+
+                    if (images.length > 0) {
+                        const sent = client.imageSentinelIds();
+                        if (!sent) throw new Error("model exposes no <|image> sentinel");
+                        beginId = sent[0];
+                        setStatusLine("re-encoding images…");
+                        for (const im of images) {
+                            if (cancelRef.current) throw new Error("cancelled");
+                            if (!im.pixels) continue;
+                            const softTokens = await client.encodeImage(im.pixels, im.h, im.w);
+                            const nSoft = await client.imageSoftTokenCount(im.h, im.w);
+                            const dText = softTokens.length / nSoft;
+                            softQueue.push({ nSoft, dText, softTokens });
+                        }
+                    }
+                    if (audio.length > 0) {
+                        const sent = client.audioSentinelIds();
+                        if (!sent) throw new Error("model exposes no <|audio> sentinel");
+                        audioBeginId = sent[0];
+                        const fallbackDText = softQueue[0]?.dText ?? 1536;
+                        setStatusLine("re-encoding audio…");
+                        for (const clip of audio) {
+                            if (cancelRef.current) throw new Error("cancelled");
+                            const softTokens = await client.encodeAudio(clip.pcm);
+                            const dText = fallbackDText;
+                            const nSoft = softTokens.length / dText;
+                            audioQueue.push({ nSoft, dText, softTokens });
+                        }
+                    }
+                }
+
+                // Reconstruct the user content with the same sentinel
+                // markers `onSend` originally prepended (audio first,
+                // then images, then the user text).
+                const audioMarkers = "<|audio><audio|>".repeat(nAudio);
+                const imageMarkers = "<|image><image|>".repeat(nImages);
+                const userContent = audioMarkers + imageMarkers + meta.userText;
+
                 const renderMsgs: ChatMessage[] = [
                     ...(meta.sysContent
                         ? [{ role: "system", content: meta.sysContent } as ChatMessage]
                         : []),
                     ...meta.priorMessages,
-                    { role: "user",  content: meta.userText },
+                    { role: "user",  content: userContent },
                     { role: "model", content: meta.emittedSoFar },
                 ];
                 const rendered = await client.renderChatForContinuation(renderMsgs, false);
                 const ids = await client.encode(rendered);
+
+                setStatusLine("rebuilding session…");
                 let n = 0;
-                for (const id of ids) {
+                for (let i = 0; i < ids.length; i++) {
                     if (cancelRef.current) throw new Error("cancelled");
+                    const id = ids[i];
                     n = await client.step(id);
+                    if (beginId !== null && id === beginId && softQueue.length > 0) {
+                        const ent = softQueue.shift()!;
+                        for (let r = 0; r < ent.nSoft; r++) {
+                            if (cancelRef.current) throw new Error("cancelled");
+                            const row = ent.softTokens.subarray(r * ent.dText, (r + 1) * ent.dText);
+                            n = await client.stepWithEmbedding(row);
+                        }
+                    } else if (audioBeginId !== null && id === audioBeginId && audioQueue.length > 0) {
+                        const ent = audioQueue.shift()!;
+                        for (let r = 0; r < ent.nSoft; r++) {
+                            if (cancelRef.current) throw new Error("cancelled");
+                            const row = ent.softTokens.subarray(r * ent.dText, (r + 1) * ent.dText);
+                            n = await client.stepWithEmbedding(row);
+                        }
+                    }
                 }
                 nextToken = n;
             } else if (meta.preEncodePosition < meta.promptIds.length) {
@@ -902,6 +994,7 @@ export function App() {
             inflightRef.current = null;
             try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
             void clearInflightState();
+            void clearInflightMedia();
             try { await client.releaseSession(); } catch { /* */ }
             setBusy(false);
         }
@@ -923,6 +1016,7 @@ export function App() {
         catch {
             try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
             void clearInflightState();
+            void clearInflightMedia();
             return;
         }
 
@@ -931,14 +1025,18 @@ export function App() {
         if (lastLoadedDigest && meta.modelDigest && meta.modelDigest !== lastLoadedDigest) {
             try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
             void clearInflightState();
+            void clearInflightMedia();
             return;
         }
 
-        // Phase G: don't auto-resume multimodal turns — the image /
-        // audio bytes live in memory-only Float32Arrays that don't
-        // survive a process kill. Surface the partial response (already
-        // in the DB) and let the user re-send.
-        if (meta.hadImages || meta.hadAudio) {
+        // Multimodal: resume only when the media was persisted to OPFS
+        // before suspension. If the media-persist race lost (iOS
+        // suspended us mid-write or before mediaPersisted=true), fall
+        // back to surfacing the partial response with the
+        // "interrupted" toast and let the user re-send — we can't
+        // re-encode media we don't have.
+        const isMultimodal = meta.hadImages || meta.hadAudio;
+        if (isMultimodal && !meta.mediaPersisted) {
             const display: ChatMessage[] = [
                 ...meta.priorMessages,
                 { role: "user",  content: meta.userText },
@@ -953,6 +1051,7 @@ export function App() {
             });
             try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
             void clearInflightState();
+            void clearInflightMedia();
             return;
         }
 
@@ -1102,8 +1201,38 @@ export function App() {
                     lastSampledNext: 0,
                     hadImages: turnImages.length > 0,
                     hadAudio:  turnAudio.length > 0,
+                    mediaPersisted: false,
                     startedAt: Date.now(),
                 };
+            }
+
+            // Persist image pixels + audio PCM to OPFS so a
+            // kill-and-resume can re-encode them through the vision /
+            // audio towers and continue from the partial response. Skip
+            // entirely for text-only turns. Best-effort: a write
+            // failure flips mediaPersisted back to false and resume
+            // will surface the existing "interrupted" toast for this
+            // turn only.
+            if (turnImages.length > 0 || turnAudio.length > 0) {
+                try {
+                    for (let i = 0; i < turnImages.length; i++) {
+                        const im = turnImages[i];
+                        if (!im.pixels) continue;
+                        await saveInflightImage(i, im.pixels, im.h, im.w, im.dataUrl);
+                    }
+                    for (let i = 0; i < turnAudio.length; i++) {
+                        const a = turnAudio[i];
+                        await saveInflightAudio(i, a.pcm, a.durationMs);
+                    }
+                    if (inflightRef.current) {
+                        inflightRef.current = { ...inflightRef.current, mediaPersisted: true };
+                    }
+                } catch (e) {
+                    // eslint-disable-next-line no-console
+                    console.warn("[rullama] inflight media persist failed:", e);
+                    // Leave mediaPersisted=false; resume falls back to
+                    // the interrupted-turn toast if a kill happens.
+                }
             }
 
             // Encode each attached image once per send. Result lives in
@@ -1321,12 +1450,13 @@ export function App() {
                 // Generation finished (cleanly, by cancel, or by a
                 // non-recoverable error). Discard inflight state — a
                 // future backgrounding has nothing to resume. The OPFS
-                // file is best-effort: a failed delete just leaves a
-                // stale snapshot that the next resume attempt will
+                // files are best-effort: a failed delete just leaves
+                // stale snapshots that the next resume attempt will
                 // reject by layout_hash or modelDigest mismatch.
                 inflightRef.current = null;
                 try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
                 void clearInflightState();
+                void clearInflightMedia();
                 try { await client.releaseSession(); } catch { /* */ }
                 setBusy(false);
             }
