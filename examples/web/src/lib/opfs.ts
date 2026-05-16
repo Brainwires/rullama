@@ -142,6 +142,75 @@ export async function ensureModel(
     }
 }
 
+// ── Suspend/resume snapshot storage ────────────────────────────────────
+//
+// One file at the OPFS root (NOT under OPFS_DIR — that subtree gets
+// wiped by `wipeAllOpfs` and we want resume to survive a "Clear cached
+// models" action). On a clean generation finish / EOS the file is
+// deleted; on suspension we write it; on boot we read it.
+
+const INFLIGHT_STATE_FILENAME = "rullama-inflight-gen-state.bin";
+
+/**
+ * Write the wasm-side `saveKvState()` bytes to OPFS. ~100 ms for a 100 MB
+ * KV at 1 GB/s flash. Sync handle is used so the write completes before
+ * the `visibilitychange` callback returns control to the browser (and
+ * thus before iOS can suspend us mid-write).
+ */
+export async function writeInflightState(bytes: Uint8Array): Promise<void> {
+    const root = await navigator.storage.getDirectory();
+    const fh = await root.getFileHandle(INFLIGHT_STATE_FILENAME, { create: true });
+    // FileSystemSyncAccessHandle is only available inside Workers in
+    // some browsers; fall back to the async writable stream otherwise.
+    const fhAny = fh as unknown as {
+        createSyncAccessHandle?(): Promise<FileSystemSyncAccessHandle>;
+        createWritable(): Promise<FileSystemWritableFileStream>;
+    };
+    if (typeof fhAny.createSyncAccessHandle === "function") {
+        const h = await fhAny.createSyncAccessHandle();
+        try {
+            h.truncate(0);
+            h.write(bytes, { at: 0 });
+            h.flush();
+        } finally {
+            h.close();
+        }
+        return;
+    }
+    const w = await fhAny.createWritable();
+    await w.truncate(0);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await w.write(bytes as any);
+    await w.close();
+}
+
+/**
+ * Read back the inflight-state file, or `null` if not present.
+ */
+export async function readInflightState(): Promise<Uint8Array | null> {
+    try {
+        const root = await navigator.storage.getDirectory();
+        const fh = await root.getFileHandle(INFLIGHT_STATE_FILENAME, { create: false });
+        const file = await fh.getFile();
+        const ab = await file.arrayBuffer();
+        return new Uint8Array(ab);
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Remove the inflight-state file. Called on clean generation completion
+ * (EOS / maxTokens / explicit user cancel) so a future boot doesn't try
+ * to resume a finished generation.
+ */
+export async function clearInflightState(): Promise<void> {
+    try {
+        const root = await navigator.storage.getDirectory();
+        await root.removeEntry(INFLIGHT_STATE_FILENAME);
+    } catch { /* */ }
+}
+
 export async function wipeAllOpfs(): Promise<boolean> {
     try {
         const root = await navigator.storage.getDirectory();

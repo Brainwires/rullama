@@ -71,7 +71,11 @@ const STATEFUL_RPCS = new Set([
     "encodeAudio",
     "reset",
     "setSampling",
+    "saveKvState",
+    "restoreKvState",
 ]);
+// renderChatForContinuation + position are stateless reads — no session
+// gating needed; they can interleave with another tab's generation.
 
 function acquireSession(abortToken: string, port: MessagePort): Promise<number> {
     return new Promise<number>((resolve, reject) => {

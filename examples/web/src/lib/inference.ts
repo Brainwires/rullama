@@ -380,6 +380,31 @@ export class WorkerClient {
         return this.rpc("setSampling", { sid: this.session, opts });
     }
 
+    // ── Suspend / resume ───────────────────────────────────────────────
+    /** Snapshot the wasm Model's KV cache + sampler RNG + position into
+     *  a single byte blob. Caller writes the result to OPFS for later
+     *  restore. Session-locked because the snapshot reads from the same
+     *  wgpu buffers that step() writes. */
+    saveKvState(): Promise<Uint8Array> {
+        return this.rpc("saveKvState", { sid: this.session });
+    }
+    /** Inverse of saveKvState. The wasm side validates the snapshot's
+     *  layout_hash against the currently-loaded model; on mismatch the
+     *  RPC rejects and caller falls back to token-replay rebuild. */
+    restoreKvState(bytes: Uint8Array): Promise<boolean> {
+        return this.rpc("restoreKvState", { sid: this.session, bytes });
+    }
+    /** Render a conversation for *continuation* — if the last message
+     *  has role "model", its content renders without the trailing
+     *  close marker so the model continues that response on the next
+     *  step() rather than starting a new turn. Stateless (no session). */
+    renderChatForContinuation(messages: unknown, withBos: boolean): Promise<string> {
+        return this.rpc("renderChatForContinuation", { messages, withBos });
+    }
+    /** Current wasm Model.position. Stateless, mostly for diagnostics
+     *  (e.g. confirming KV intactness after a backgrounding event). */
+    position(): Promise<number> { return this.rpc("position", {}); }
+
     // ── ensureModel (download — coalesces across tabs in the worker) ───
     ensureModel(args: {
         url: string; modelKey: string; filename: string; expectedSize: number;
