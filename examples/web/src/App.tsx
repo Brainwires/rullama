@@ -11,7 +11,7 @@ import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
 import { Button } from "@/components/ui/button";
 import { type ChatMessage, type ImageAttachment, type SamplingOptions, DEFAULT_SAMPLING, DEFAULT_SYSTEM_PROMPT } from "@/lib/types";
 import { type ModelEntry, blobUrl, beacon, listModels } from "@/lib/api";
-import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel } from "@/lib/opfs";
+import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel, readInflightState, writeInflightState, clearInflightState } from "@/lib/opfs";
 import { getNetworkHint } from "@/lib/network";
 import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
@@ -28,6 +28,55 @@ const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
 const THINK_TOKEN = "<|think|>";
 const TITLE_MAX_LEN = 40;
+
+const INFLIGHT_KEY = "rullama:inflight";
+
+// Per-step timeout for stepAndDecode. iOS suspension can leave the
+// awaited Promise hanging if the dedicated worker was killed; this
+// gives us a deterministic detection point.
+const STEP_TIMEOUT_MS = 30_000;
+
+// Persisted snapshot of the currently-running generation. On
+// visibilitychange→hidden we mirror this into localStorage; on boot
+// (or live-tab timeout recovery) we read it back and use it together
+// with the OPFS-stored KV snapshot to resume.
+interface InflightGen {
+    convId: string;
+    modelMsgId: string;
+    modelDigest: string;
+    userText: string;
+    sysContent: string;
+    priorMessages: ChatMessage[];
+    sampling: SamplingOptions;
+    maxTokens: number;
+    emittedSoFar: string;
+    emittedTokenCount: number;
+    lastSampledNext: number;
+    hadImages: boolean;
+    hadAudio: boolean;
+    startedAt: number;
+}
+
+/** Promise.race wrapper that aborts a single step() call if it hangs.
+ *  iOS suspension can kill the dedicated worker while leaving its
+ *  Promise unresolved on the tab; STEP_TIMEOUT_MS is the threshold past
+ *  which we declare the worker dead and fall through to the resume
+ *  path. Set to 30 s — generous enough that iPhone @ ~5 tok/s never
+ *  trips it normally. */
+function stepWithTimeout(
+    client: ReturnType<typeof getClient>,
+    tokenId: number,
+): Promise<{ next: number; isEos: boolean; str: string | null }> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return new Promise((resolve, reject) => {
+        const timeoutErr = new Error("step-timeout: generation hung (worker may be dead)");
+        timer = setTimeout(() => reject(timeoutErr), STEP_TIMEOUT_MS);
+        client.stepAndDecode(tokenId).then(
+            (r) => { if (timer) clearTimeout(timer); resolve(r); },
+            (e) => { if (timer) clearTimeout(timer); reject(e); },
+        );
+    });
+}
 
 function suggestTitle(text: string): string {
     const t = text.trim().replace(/\s+/g, " ");
@@ -93,6 +142,14 @@ export function App() {
         usePersistedState<string>("pendingLoadDigest", "");
 
     const cancelRef = useRef(false);
+    // Tracks the currently-running generation for suspend/resume. Mutated
+    // per-token in the gen loop; serialized to localStorage on
+    // visibilitychange→hidden so a kill-and-resume can pick up where we
+    // left off. Cleared on clean completion / explicit cancel.
+    const inflightRef = useRef<InflightGen | null>(null);
+    // Resume-on-boot is single-shot; the effect can fire multiple times
+    // as model state changes, but we want to attempt resume at most once.
+    const resumeAttemptedRef = useRef(false);
     const { showToast, dismissToast } = useToast();
 
     // iOS keyboard handling — snaps the visual viewport back to the top
@@ -183,6 +240,43 @@ export function App() {
         };
         window.addEventListener("keydown", onKeyDown);
         return () => window.removeEventListener("keydown", onKeyDown);
+    }, [busy]);
+
+    // Suspend-on-background. iOS Safari fires visibilitychange→hidden
+    // before suspending the WebContent process; we use that window to
+    // (a) sync the inflight metadata to localStorage and (b) kick off
+    // a GPU-state snapshot to OPFS. If iOS yanks us mid-write the
+    // boot-resume fast path will be unavailable and the slow-path
+    // replay (Phase F) picks up the slack via the partial response
+    // already in the DB.
+    useEffect(() => {
+        if (!busy) return;
+        const onVis = () => {
+            if (document.visibilityState !== "hidden") return;
+            const meta = inflightRef.current;
+            if (!meta) return;
+            try { localStorage.setItem(INFLIGHT_KEY, JSON.stringify(meta)); } catch { /* */ }
+            // KV snapshot is async (GPU readback + OPFS write). Fire-and-
+            // forget: a failure here just means we fall back to replay
+            // on resume. The setTimeout(0) yields to the browser so the
+            // visibilitychange callback returns quickly, letting iOS
+            // begin its suspension countdown with our metadata already
+            // persisted.
+            setTimeout(() => {
+                void (async () => {
+                    try {
+                        const client = getClient();
+                        const bytes = await client.saveKvState();
+                        await writeInflightState(bytes);
+                    } catch (e) {
+                        // eslint-disable-next-line no-console
+                        console.warn("[rullama] inflight KV snapshot failed:", e);
+                    }
+                })();
+            }, 0);
+        };
+        document.addEventListener("visibilitychange", onVis);
+        return () => document.removeEventListener("visibilitychange", onVis);
     }, [busy]);
 
     // Bootstrap DB + conversation list on mount.
@@ -611,6 +705,196 @@ export function App() {
     // would re-fire the effect every time the closure identity changes).
     useEffect(() => { onLoadRef.current = onLoad; }, [onLoad]);
 
+    // ── Suspend / resume: pick up an interrupted generation ────────────
+    //
+    // Resume flow on detection (boot, or live-tab post-timeout):
+    //   1. Restore displayHistory from metadata so the user sees the
+    //      partial response immediately.
+    //   2. Try the fast path: read the OPFS KV snapshot and
+    //      restoreKvState() — Model.position lands on the saved value
+    //      and we step from there.
+    //   3. If the snapshot is missing / corrupt / from a different
+    //      architecture, fall back to slow-path replay: render the
+    //      conversation (including partial assistant text) via
+    //      renderChatForContinuation, tokenize, reset, and step
+    //      through every token to rebuild KV. Slower (a few seconds)
+    //      but always correct.
+    //   4. Enter the gen loop continuing from `lastSampledNext`,
+    //      appending into the existing assistant bubble.
+    //   5. On clean completion: clear localStorage + OPFS file.
+    const resumeInflightGeneration = useCallback(async (meta: InflightGen) => {
+        const client = getClient();
+        cancelRef.current = false;
+        setBusy(true);
+
+        // Reconstruct the visible chat so the user sees the partial
+        // response while we work to continue it.
+        const display: ChatMessage[] = [
+            ...meta.priorMessages,
+            { role: "user",  content: meta.userText },
+            { role: "model", content: meta.emittedSoFar },
+        ];
+        setMessages(display);
+        setActiveConvId(meta.convId);
+        inflightRef.current = meta;
+
+        try {
+            setStatusLine("resuming…");
+            await client.acquireSession();
+            await client.setSampling(meta.sampling);
+
+            // Fast path: KV snapshot from OPFS.
+            let kvIntact = false;
+            const snapshotBytes = await readInflightState();
+            if (snapshotBytes && snapshotBytes.length > 0) {
+                try {
+                    await client.restoreKvState(snapshotBytes);
+                    kvIntact = true;
+                } catch (e) {
+                    // eslint-disable-next-line no-console
+                    console.warn("[rullama] KV restore failed; falling back to replay:", e);
+                }
+            }
+
+            // Slow path: rebuild KV from a continuation render.
+            let nextToken = meta.lastSampledNext;
+            if (!kvIntact) {
+                setStatusLine("rebuilding session…");
+                await client.reset();
+                const renderMsgs: ChatMessage[] = [
+                    ...(meta.sysContent
+                        ? [{ role: "system", content: meta.sysContent } as ChatMessage]
+                        : []),
+                    ...meta.priorMessages,
+                    { role: "user",  content: meta.userText },
+                    { role: "model", content: meta.emittedSoFar },
+                ];
+                const rendered = await client.renderChatForContinuation(renderMsgs, false);
+                const ids = await client.encode(rendered);
+                let n = 0;
+                for (const id of ids) {
+                    if (cancelRef.current) throw new Error("cancelled");
+                    n = await client.step(id);
+                }
+                nextToken = n;
+            }
+            setStatusLine(undefined);
+
+            // ── Generation loop, resumed from the saved `next` token ──
+            const remaining = Math.max(0, meta.maxTokens - meta.emittedTokenCount);
+            let emitted = meta.emittedTokenCount;
+            let curStr   = (await client.tokenStr(nextToken)) ?? "";
+            let curIsEos = await client.isEos(nextToken);
+            let pendingDelta = "";
+            let lastFlushAt  = performance.now();
+            const flushPending = async () => {
+                if (pendingDelta.length === 0) return;
+                const delta = pendingDelta;
+                pendingDelta = "";
+                try { await client.msgAppend(meta.convId, meta.modelMsgId, delta); } catch { /* */ }
+            };
+
+            for (let i = 0; i < remaining; i++) {
+                if (cancelRef.current) break;
+                if (curIsEos) break;
+                const piece = curStr.replaceAll("▁", " ");
+                display[display.length - 1].content += piece;
+                pendingDelta += piece;
+                setMessages([...display]);
+                emitted++;
+                if ((emitted % 16 === 0) || (performance.now() - lastFlushAt > 750)) {
+                    await flushPending();
+                    lastFlushAt = performance.now();
+                }
+                const r = await stepWithTimeout(client, nextToken);
+                nextToken = r.next;
+                curStr    = r.str ?? "";
+                curIsEos  = r.isEos;
+                if (inflightRef.current) {
+                    inflightRef.current = {
+                        ...inflightRef.current,
+                        emittedSoFar: display[display.length - 1].content,
+                        emittedTokenCount: emitted,
+                        lastSampledNext: nextToken,
+                    };
+                }
+            }
+            await flushPending();
+
+            try {
+                await client.convTouch(meta.convId, suggestTitle(meta.userText));
+                await client.dbFlush();
+            } catch { /* */ }
+            void refreshConversations();
+            setStatusLine("resumed");
+        } catch (e) {
+            const msg = (e as Error).message;
+            const isCancel = msg === "cancelled" || msg.includes("cancelled by caller");
+            setStatusLine(isCancel ? "cancelled" : `resume error: ${msg}`);
+            if (!isCancel) {
+                showToast({ level: "warn", title: "Resume failed", message: msg });
+            }
+        } finally {
+            inflightRef.current = null;
+            try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
+            void clearInflightState();
+            try { await client.releaseSession(); } catch { /* */ }
+            setBusy(false);
+        }
+    }, [refreshConversations, showToast]);
+
+    // Boot-resume: once the model is ready, check for a stashed
+    // inflight generation and pick it up where it left off.
+    useEffect(() => {
+        if (modelStatus !== "ready") return;
+        if (resumeAttemptedRef.current) return;
+        resumeAttemptedRef.current = true;
+
+        let raw: string | null = null;
+        try { raw = localStorage.getItem(INFLIGHT_KEY); } catch { return; }
+        if (!raw) return;
+
+        let meta: InflightGen;
+        try { meta = JSON.parse(raw) as InflightGen; }
+        catch {
+            try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
+            void clearInflightState();
+            return;
+        }
+
+        // Discard mismatched-model resumes (the catalog auto-load
+        // policy might have picked a different model on boot).
+        if (lastLoadedDigest && meta.modelDigest && meta.modelDigest !== lastLoadedDigest) {
+            try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
+            void clearInflightState();
+            return;
+        }
+
+        // Phase G: don't auto-resume multimodal turns — the image /
+        // audio bytes live in memory-only Float32Arrays that don't
+        // survive a process kill. Surface the partial response (already
+        // in the DB) and let the user re-send.
+        if (meta.hadImages || meta.hadAudio) {
+            const display: ChatMessage[] = [
+                ...meta.priorMessages,
+                { role: "user",  content: meta.userText },
+                { role: "model", content: meta.emittedSoFar },
+            ];
+            setMessages(display);
+            setActiveConvId(meta.convId);
+            showToast({
+                level: "info",
+                title: "Multimodal generation interrupted",
+                message: "Partial response is preserved. Re-send the message to get a full reply.",
+            });
+            try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
+            void clearInflightState();
+            return;
+        }
+
+        void resumeInflightGeneration(meta);
+    }, [modelStatus, lastLoadedDigest, resumeInflightGeneration, showToast]);
+
     const onSend = useCallback(async () => {
         if (modelStatus !== "ready" || busy) return;
         const text = prompt.trim();
@@ -840,6 +1124,31 @@ export function App() {
             }
             const peMs = performance.now() - t0;
 
+            // ── Initialize inflight tracking for suspend/resume ────────
+            // Captures everything needed to either restore KV (fast
+            // path) or replay-rebuild it (slow path) if the user
+            // backgrounds the app mid-generation. Updated per-token
+            // below; serialized to localStorage by the visibilitychange
+            // handler.
+            if (convId && modelMsgId) {
+                inflightRef.current = {
+                    convId,
+                    modelMsgId,
+                    modelDigest: lastLoadedDigest,
+                    userText: text,
+                    sysContent,
+                    priorMessages: userTurns,
+                    sampling,
+                    maxTokens,
+                    emittedSoFar: "",
+                    emittedTokenCount: 0,
+                    lastSampledNext: next,
+                    hadImages: turnImages.length > 0,
+                    hadAudio:  turnAudio.length > 0,
+                    startedAt: Date.now(),
+                };
+            }
+
             const tg0 = performance.now();
             let emitted = 0;
             let curStr   = (await client.tokenStr(next)) ?? "";
@@ -865,10 +1174,22 @@ export function App() {
                     await flushPending();
                     lastFlushAt = performance.now();
                 }
-                const r = await client.stepAndDecode(next);
+                const r = await stepWithTimeout(client, next);
                 next     = r.next;
                 curStr   = r.str ?? "";
                 curIsEos = r.isEos;
+                // Keep the inflight ref fresh so a visibilitychange
+                // handler can persist current state without coordinating
+                // with this loop. In-memory only — no localStorage write
+                // per token (too costly).
+                if (inflightRef.current) {
+                    inflightRef.current = {
+                        ...inflightRef.current,
+                        emittedSoFar: displayHistory[displayHistory.length - 1].content,
+                        emittedTokenCount: emitted,
+                        lastSampledNext: next,
+                    };
+                }
             }
             await flushPending();
             if (convId) {
@@ -890,12 +1211,21 @@ export function App() {
                 showToast({ level: "error", title: "Generation failed", message: msg });
             }
         } finally {
+            // Generation finished (cleanly, by cancel, by error, or by
+            // timeout). Discard inflight state — a future
+            // backgrounding has nothing to resume. The OPFS file is
+            // best-effort: a failed delete just leaves a stale snapshot
+            // that the next resume attempt will reject by layout_hash
+            // or modelDigest mismatch.
+            inflightRef.current = null;
+            try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
+            void clearInflightState();
             // Release the session so the next tab in the queue (or this
             // tab's next send) can proceed.
             try { await client.releaseSession(); } catch { /* */ }
             setBusy(false);
         }
-    }, [activeConvId, busy, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, refreshConversations, sampling, statusText, systemPrompt, thinking, showToast]);
+    }, [activeConvId, busy, lastLoadedDigest, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, refreshConversations, sampling, statusText, systemPrompt, thinking, showToast]);
 
     // VAD-driven mic capture wired into the existing pendingAudio queue.
     // Each invocation produces one clip; user can stack multiple before
