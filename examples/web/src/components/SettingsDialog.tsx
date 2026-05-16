@@ -8,7 +8,7 @@ import { type ModelEntry } from "@/lib/api";
 import { clampInt, clampNum, cn } from "@/lib/utils";
 import { VOICE_BOUNDS, type VoiceOptions } from "@/lib/voice";
 import { hardResetAndReload } from "@/lib/restart";
-import { RotateCcw, RefreshCw } from "lucide-react";
+import { Undo2, RefreshCw } from "lucide-react";
 
 // Hard bounds — also used by App.tsx to normalize old persisted values on
 // boot. Keep these conservative; users with a real need can edit the JSON
@@ -87,7 +87,7 @@ export function SettingsDialog(props: Props) {
                     }}
                     title="Reset all generation settings to defaults"
                 >
-                    <RotateCcw />
+                    <Undo2 />
                     Defaults
                 </Button>
             </header>
