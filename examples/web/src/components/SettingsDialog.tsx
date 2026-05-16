@@ -52,7 +52,7 @@ interface Props {
     onResetDefaults: () => void;
 }
 
-type TabKey = "general" | "voice";
+type TabKey = "general" | "sampling" | "voice";
 
 /** Full-height sidebar: Model + Generation settings, sections scroll. */
 export function SettingsDialog(props: Props) {
@@ -103,6 +103,11 @@ export function SettingsDialog(props: Props) {
                     onClick={() => setTab("general")}
                 />
                 <TabButton
+                    label="Sampling"
+                    active={activeTab === "sampling"}
+                    onClick={() => setTab("sampling")}
+                />
+                <TabButton
                     label="Voice"
                     active={activeTab === "voice"}
                     onClick={() => setTab("voice")}
@@ -138,46 +143,6 @@ export function SettingsDialog(props: Props) {
                                 onChange={(e) => props.onSystemPromptChange(e.target.value)}
                                 placeholder='Optional. e.g. "You are a pirate."'
                                 className="min-h-[3rem] text-xs"
-                            />
-                        </section>
-
-                        <section className="flex flex-col gap-3 border-t border-border pt-3">
-                            <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">
-                                Sampling
-                            </span>
-                            <Slider
-                                label="temperature"
-                                value={props.sampling.temperature}
-                                min={B.temperature.min} max={B.temperature.max} step={B.temperature.step}
-                                fmt={(v) => v.toFixed(2)}
-                                onChange={(v) => setS({
-                                    temperature: clampNum(v, B.temperature.min, B.temperature.max, B.temperature.fallback),
-                                })}
-                            />
-                            <Slider
-                                label="top_p"
-                                value={props.sampling.top_p}
-                                min={B.top_p.min} max={B.top_p.max} step={B.top_p.step}
-                                fmt={(v) => v.toFixed(2)}
-                                onChange={(v) => setS({
-                                    top_p: clampNum(v, B.top_p.min, B.top_p.max, B.top_p.fallback),
-                                })}
-                            />
-                            <Slider
-                                label="top_k"
-                                value={props.sampling.top_k}
-                                min={B.top_k.min} max={B.top_k.max} step={B.top_k.step}
-                                onChange={(v) => setS({
-                                    top_k: clampInt(v, B.top_k.min, B.top_k.max, B.top_k.fallback),
-                                })}
-                            />
-                            <Slider
-                                label="max tokens"
-                                value={props.maxTokens}
-                                min={B.maxTokens.min} max={B.maxTokens.max} step={B.maxTokens.step}
-                                onChange={(v) => props.onMaxTokensChange(
-                                    clampInt(v, B.maxTokens.min, B.maxTokens.max, B.maxTokens.fallback),
-                                )}
                             />
                         </section>
 
@@ -226,6 +191,45 @@ export function SettingsDialog(props: Props) {
                             </Button>
                         </section>
                     </>
+                )}
+
+                {activeTab === "sampling" && (
+                    <section className="flex flex-col gap-3">
+                        <Slider
+                            label="temperature"
+                            value={props.sampling.temperature}
+                            min={B.temperature.min} max={B.temperature.max} step={B.temperature.step}
+                            fmt={(v) => v.toFixed(2)}
+                            onChange={(v) => setS({
+                                temperature: clampNum(v, B.temperature.min, B.temperature.max, B.temperature.fallback),
+                            })}
+                        />
+                        <Slider
+                            label="top_p"
+                            value={props.sampling.top_p}
+                            min={B.top_p.min} max={B.top_p.max} step={B.top_p.step}
+                            fmt={(v) => v.toFixed(2)}
+                            onChange={(v) => setS({
+                                top_p: clampNum(v, B.top_p.min, B.top_p.max, B.top_p.fallback),
+                            })}
+                        />
+                        <Slider
+                            label="top_k"
+                            value={props.sampling.top_k}
+                            min={B.top_k.min} max={B.top_k.max} step={B.top_k.step}
+                            onChange={(v) => setS({
+                                top_k: clampInt(v, B.top_k.min, B.top_k.max, B.top_k.fallback),
+                            })}
+                        />
+                        <Slider
+                            label="max tokens"
+                            value={props.maxTokens}
+                            min={B.maxTokens.min} max={B.maxTokens.max} step={B.maxTokens.step}
+                            onChange={(v) => props.onMaxTokensChange(
+                                clampInt(v, B.maxTokens.min, B.maxTokens.max, B.maxTokens.fallback),
+                            )}
+                        />
+                    </section>
                 )}
 
                 {activeTab === "voice" && props.canRecord && (
