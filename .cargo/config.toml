@@ -14,3 +14,4 @@
 "docker:restart" = "run -q -p xtask -- docker:restart"
 "docker:logs"    = "run -q -p xtask -- docker:logs"
 "docker:ps"      = "run -q -p xtask -- docker:ps"
+"bump"           = "run -q -p xtask -- bump"
