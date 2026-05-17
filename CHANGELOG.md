@@ -11,6 +11,80 @@ may move in any patch release.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-17
+
+### Public API (semver-covered modules)
+
+- `api::Model` — additive: `cancel_multimodal_encode_native()` (+ JS
+  `cancelMultimodalEncode`), `release_vision_weights_native()`,
+  `release_audio_weights_native()`, `cached_weight_bytes_native()`,
+  `save_kv_state_native()` (+ JS `saveKvState`),
+  `restore_kv_state_native()` (+ JS `restoreKvState`),
+  `render_chat_for_continuation_native()`.
+- `sampling::Sampler` — additive: `dump_state()` / `load_state()` for
+  RNG + options + history snapshotting.
+- `error::RullamaError` — **breaking**: new `Cancelled` variant. The
+  enum is not `#[non_exhaustive]`; downstream exhaustive matches need
+  to be updated. This is why this release is `0.2.0` rather than a
+  patch.
+
+### Inference engine
+
+- KV cache + sampler suspend/resume — single byte blob (`RLMS` magic,
+  versioned) that round-trips position, history, RNG cursor, and 26
+  GPU layer pairs. Enables continuation of a partial assistant turn
+  after the runtime is killed.
+- Continuation chat template — re-renders a conversation so the model
+  keeps writing the last assistant turn rather than starting a new one.
+- Multimodal cooperative cancel — vision/audio encoders check a shared
+  flag between transformer layers and bail with `RullamaError::Cancelled`.
+- Multimodal encode progress callback + cached weights + chained
+  encoder for vision and audio (matches the text-path M7 pattern).
+- Weight-cache eviction by prefix — explicit hooks so the iPhone path
+  can release vision/audio weights between turns.
+- GeGLU uses tanh approximation, matching ggml's `geglu_split` (text
+  parity tightening).
+
+### Example PWAs
+
+- Settings sidebar split into General / Sampling / Voice tabs (the
+  Voice tab is disabled with a tooltip on text/vision-only models).
+- Voice (VAD) capture wired through the audio tower, with adjustable
+  silence cutoff / threshold / pre-roll / min-frames / max-record.
+- Mid-generation auto-suspend on iOS backgrounding, with auto-resume
+  on next boot — covers the live-tab recovery, pre-encode resume,
+  and cross-tab race paths. Multimodal generations survive an iOS
+  kill via OPFS-persisted pixels / PCM.
+- Auto-resume of interrupted GGUF downloads on next boot.
+- Screen wake lock held during download + generation so iOS doesn't
+  sleep the device mid-token.
+- Self-healing boot watchdog + "Reset app data" escape hatch for
+  stuck PWA states.
+- Service-worker render gating: drops the update-dialog round-trip;
+  the page renders against fresh assets directly.
+- `hasVision` / `hasAudio` primed from the catalog so the mic /
+  image buttons appear at `modelStatus=ready` instead of after the
+  first probe.
+- Loader badge shows percent done, not percent remaining.
+- `Defaults` button uses `Undo2` (revert-style) instead of `RotateCcw`
+  (refresh-style) to disambiguate it from the `Reset app data` button.
+
+### Tooling / deploy
+
+- `cargo docker:*` aliases dispatched through a tiny std-only `xtask`
+  binary (`docker:build` / `start` / `stop` / `restart` / `logs` / `ps`).
+- Dockerfile now `COPY`s `xtask/` so the workspace parses cleanly
+  during the wasm-pack build inside the container.
+- R2 CORS allowlist no longer includes `localhost` origins.
+
+### Docs
+
+- `CLAUDE.md` at the repo root — workspace layout, architectural
+  invariants (Worker isolation, per-tile fetches, one encoder per
+  layer), and the small-public-API rule.
+- README section for the docker/deploy flow and `cargo docker:*`
+  aliases.
+
 ## [0.1.0] — 2026-05-14
 
 Initial public release. Two crates published to crates.io:
@@ -50,5 +124,6 @@ Initial public release. Two crates published to crates.io:
 - Greedy text output is *not* bit-identical to Ollama on every prompt — diverges on out-of-distribution inputs (e.g. "Once upon a time, there was a"). CPU↔GPU consistency within rullama is clean (≤8e-5 max abs).
 - MoE `gemma4:26b` / `gemma4:31b` and non-Gemma architectures are out of scope.
 
-[Unreleased]: https://github.com/Brainwires/rullama/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Brainwires/rullama/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Brainwires/rullama/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Brainwires/rullama/releases/tag/v0.1.0
