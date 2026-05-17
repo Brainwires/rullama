@@ -3,6 +3,7 @@ import { ModelLoader, ModelLoadProgress, type ModelStatus } from "@/components/M
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChatPanel } from "@/components/ChatPanel";
+import type { VisionProgressState } from "@/components/VisionProgress";
 import { RestartOverlay } from "@/components/RestartOverlay";
 import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
 import { ConversationList } from "@/components/ConversationList";
@@ -10,21 +11,91 @@ import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
 import { Button } from "@/components/ui/button";
 import { type ChatMessage, type ImageAttachment, type SamplingOptions, DEFAULT_SAMPLING, DEFAULT_SYSTEM_PROMPT } from "@/lib/types";
 import { type ModelEntry, blobUrl, beacon, listModels } from "@/lib/api";
-import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel } from "@/lib/opfs";
+import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel, readInflightState, writeInflightState, clearInflightState } from "@/lib/opfs";
+import { saveInflightImage, saveInflightAudio, readInflightImages, readInflightAudio, clearInflightMedia } from "@/lib/inflight_media";
 import { getNetworkHint } from "@/lib/network";
 import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
 import { usePersistedState } from "@/lib/persisted";
 import { useIOSKeyboard } from "@/lib/useIOSKeyboard";
+import { useWakeLock } from "@/lib/wakeLock";
 import { fmtBytes, fmtEta, clampInt, clampNum } from "@/lib/utils";
 import { preprocessImage } from "@/lib/image_preprocess";
 import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
+import { DEFAULT_VOICE_OPTIONS, VOICE_BOUNDS, type VoiceOptions } from "@/lib/voice";
 import { Settings, History } from "lucide-react";
 
 const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
 const THINK_TOKEN = "<|think|>";
 const TITLE_MAX_LEN = 40;
+
+const INFLIGHT_KEY = "rullama:inflight";
+
+// Per-step timeout for stepAndDecode. iOS suspension can leave the
+// awaited Promise hanging if the dedicated worker was killed; this
+// gives us a deterministic detection point. setTimeout is paused
+// while JS is suspended, so on foreground-after-kill the timer is
+// already past-due and fires immediately — recovery kicks in within
+// one task. 8 s sits ~40× a normal iPhone step (~200 ms @ 5 tok/s)
+// and ~8× a slow-Mac step, well clear of normal variance.
+const STEP_TIMEOUT_MS = 8_000;
+
+// Persisted snapshot of the currently-running generation. On
+// visibilitychange→hidden we mirror this into localStorage; on boot
+// (or live-tab timeout recovery) we read it back and use it together
+// with the OPFS-stored KV snapshot to resume.
+interface InflightGen {
+    convId: string;
+    modelMsgId: string;
+    modelDigest: string;
+    userText: string;
+    sysContent: string;
+    priorMessages: ChatMessage[];
+    sampling: SamplingOptions;
+    maxTokens: number;
+    /** Tokenized prompt — full sequence the gen loop runs against.
+     *  Persisted so a pre-encode-phase resume can replay only the
+     *  prompt tokens that hadn't been fed yet at suspension time.
+     *  Empty until the prompt has been tokenized in onSend. */
+    promptIds: number[];
+    /** Number of `promptIds[i]` already fed via `step()` at snapshot
+     *  time. 0 means pre-encode hasn't started; equals `promptIds.length`
+     *  once pre-encode completes and the gen loop is running. */
+    preEncodePosition: number;
+    emittedSoFar: string;
+    emittedTokenCount: number;
+    lastSampledNext: number;
+    hadImages: boolean;
+    hadAudio: boolean;
+    /** True once turnImages + turnAudio have been written to OPFS
+     *  successfully. False means a kill-and-resume on this turn can't
+     *  re-encode multimodal media — we surface the "interrupted"
+     *  toast in that narrow case rather than producing wrong output. */
+    mediaPersisted: boolean;
+    startedAt: number;
+}
+
+/** Promise.race wrapper that aborts a single step() call if it hangs.
+ *  iOS suspension can kill the dedicated worker while leaving its
+ *  Promise unresolved on the tab; STEP_TIMEOUT_MS is the threshold past
+ *  which we declare the worker dead and fall through to the resume
+ *  path. Set to 30 s — generous enough that iPhone @ ~5 tok/s never
+ *  trips it normally. */
+function stepWithTimeout(
+    client: ReturnType<typeof getClient>,
+    tokenId: number,
+): Promise<{ next: number; isEos: boolean; str: string | null }> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return new Promise((resolve, reject) => {
+        const timeoutErr = new Error("step-timeout: generation hung (worker may be dead)");
+        timer = setTimeout(() => reject(timeoutErr), STEP_TIMEOUT_MS);
+        client.stepAndDecode(tokenId).then(
+            (r) => { if (timer) clearTimeout(timer); resolve(r); },
+            (e) => { if (timer) clearTimeout(timer); reject(e); },
+        );
+    });
+}
 
 function suggestTitle(text: string): string {
     const t = text.trim().replace(/\s+/g, " ");
@@ -43,12 +114,19 @@ export function App() {
     const [prompt, setPrompt]     = useState("");
     const [busy, setBusy]         = useState(false);
     const [statusLine, setStatusLine] = useState<string | undefined>();
+    const [visionEncodeState, setVisionEncodeState] = useState<VisionProgressState | null>(null);
 
     // Multimodal: vision availability latches on after a successful model
     // load (it's a property of the meta, only known post-load). Pending
     // images are session-only — cleared after each send.
     const [hasVision, setHasVision]   = useState(false);
+    const [hasAudio,  setHasAudio]    = useState(false);
     const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
+    // Voice clips attached to the next user turn. Mirrors `pendingImages`.
+    // PCM stays in-memory; we don't persist past sends (analogous to
+    // image pixels — only thumbs / transcripts would land in SQLite,
+    // and we don't have either yet for audio).
+    const [pendingAudio, setPendingAudio] = useState<{ pcm: Float32Array; durationMs: number }[]>([]);
 
     // Conversation persistence (rsqlite-wasm)
     const [conversations, setConversations] = useState<ConversationRow[]>([]);
@@ -64,6 +142,7 @@ export function App() {
     const [sampling,     setSampling]     = usePersistedState<SamplingOptions>("sampling", DEFAULT_SAMPLING);
     const [maxTokens,    setMaxTokens]    = usePersistedState<number>("maxTokens", 1024);
     const [thinking,     setThinking]     = usePersistedState<boolean>("thinking", true);
+    const [voice,        setVoice]        = usePersistedState<VoiceOptions>("voice", DEFAULT_VOICE_OPTIONS);
 
     // Digest of the model that was last successfully loaded. Set on
     // onLoad success, cleared on eject or delete. Drives auto-load on
@@ -71,13 +150,37 @@ export function App() {
     const [lastLoadedDigest, setLastLoadedDigest] =
         usePersistedState<string>("lastLoadedDigest", "");
 
+    // Digest of the model the user *intends* to load — persisted before
+    // the network fetch starts so that an iOS WebContent reap mid-
+    // download is auto-recovered on next boot. The existing Range-
+    // resume protocol in `inference-core-worker.ts` picks up from the
+    // partial OPFS file at byte N. Cleared on full success, on eject,
+    // and when the catalog lookup fails (so a deleted-from-server
+    // model doesn't keep retrying every boot).
+    const [pendingLoadDigest, setPendingLoadDigest] =
+        usePersistedState<string>("pendingLoadDigest", "");
+
     const cancelRef = useRef(false);
+    // Tracks the currently-running generation for suspend/resume. Mutated
+    // per-token in the gen loop; serialized to localStorage on
+    // visibilitychange→hidden so a kill-and-resume can pick up where we
+    // left off. Cleared on clean completion / explicit cancel.
+    const inflightRef = useRef<InflightGen | null>(null);
+    // Resume-on-boot is single-shot; the effect can fire multiple times
+    // as model state changes, but we want to attempt resume at most once.
+    const resumeAttemptedRef = useRef(false);
     const { showToast, dismissToast } = useToast();
 
     // iOS keyboard handling — snaps the visual viewport back to the top
     // when the keyboard dismisses, so the page doesn't end up offset
     // a few px above the layout viewport (a classic iOS-Safari quirk).
     useIOSKeyboard(true);
+
+    // Hold the screen awake during the two long-running operations a
+    // user actually waits on — model download/load and token generation.
+    // No-op on platforms without `navigator.wakeLock` (older iOS, private
+    // mode). See `lib/wakeLock.ts` for the iOS hide-release dance.
+    useWakeLock(modelStatus === "loading" || busy);
 
     // One-time sanitization of persisted values. Catches localStorage
     // entries from older versions (or hand-edited values) that fall
@@ -100,6 +203,22 @@ export function App() {
         }
         const mt = clampInt(maxTokens, B.maxTokens.min, B.maxTokens.max, B.maxTokens.fallback);
         if (mt !== maxTokens) setMaxTokens(mt);
+
+        const VB = VOICE_BOUNDS;
+        const nextVoice: VoiceOptions = {
+            silenceMs:       clampInt(voice.silenceMs,       VB.silenceMs.min,       VB.silenceMs.max,       VB.silenceMs.fallback),
+            rmsDbThreshold:  clampInt(voice.rmsDbThreshold,  VB.rmsDbThreshold.min,  VB.rmsDbThreshold.max,  VB.rmsDbThreshold.fallback),
+            prerollMs:       clampInt(voice.prerollMs,       VB.prerollMs.min,       VB.prerollMs.max,       VB.prerollMs.fallback),
+            minSpeechFrames: clampInt(voice.minSpeechFrames, VB.minSpeechFrames.min, VB.minSpeechFrames.max, VB.minSpeechFrames.fallback),
+            maxRecordMs:     clampInt(voice.maxRecordMs,     VB.maxRecordMs.min,     VB.maxRecordMs.max,     VB.maxRecordMs.fallback),
+        };
+        if (nextVoice.silenceMs !== voice.silenceMs
+            || nextVoice.rmsDbThreshold !== voice.rmsDbThreshold
+            || nextVoice.prerollMs !== voice.prerollMs
+            || nextVoice.minSpeechFrames !== voice.minSpeechFrames
+            || nextVoice.maxRecordMs !== voice.maxRecordMs) {
+            setVoice(nextVoice);
+        }
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
@@ -142,6 +261,43 @@ export function App() {
         return () => window.removeEventListener("keydown", onKeyDown);
     }, [busy]);
 
+    // Suspend-on-background. iOS Safari fires visibilitychange→hidden
+    // before suspending the WebContent process; we use that window to
+    // (a) sync the inflight metadata to localStorage and (b) kick off
+    // a GPU-state snapshot to OPFS. If iOS yanks us mid-write the
+    // boot-resume fast path will be unavailable and the slow-path
+    // replay (Phase F) picks up the slack via the partial response
+    // already in the DB.
+    useEffect(() => {
+        if (!busy) return;
+        const onVis = () => {
+            if (document.visibilityState !== "hidden") return;
+            const meta = inflightRef.current;
+            if (!meta) return;
+            try { localStorage.setItem(INFLIGHT_KEY, JSON.stringify(meta)); } catch { /* */ }
+            // KV snapshot is async (GPU readback + OPFS write). Fire-and-
+            // forget: a failure here just means we fall back to replay
+            // on resume. The setTimeout(0) yields to the browser so the
+            // visibilitychange callback returns quickly, letting iOS
+            // begin its suspension countdown with our metadata already
+            // persisted.
+            setTimeout(() => {
+                void (async () => {
+                    try {
+                        const client = getClient();
+                        const bytes = await client.saveKvState();
+                        await writeInflightState(bytes);
+                    } catch (e) {
+                        // eslint-disable-next-line no-console
+                        console.warn("[rullama] inflight KV snapshot failed:", e);
+                    }
+                })();
+            }, 0);
+        };
+        document.addEventListener("visibilitychange", onVis);
+        return () => document.removeEventListener("visibilitychange", onVis);
+    }, [busy]);
+
     // Bootstrap DB + conversation list on mount.
     useEffect(() => {
         const client = getClient();
@@ -175,11 +331,13 @@ export function App() {
             if (loaded) {
                 setModelStatus("ready");
                 setHasVision(!!loaded.hasVision);
+                setHasAudio(!!loaded.hasAudio);
                 setStatusText(String(loaded.name ?? loaded.modelKey ?? "loaded"));
             } else {
                 setModelStatus("idle");
                 setStatusText("no model");
                 setHasVision(false);
+                setHasAudio(false);
             }
         };
         const offs = [
@@ -211,9 +369,13 @@ export function App() {
 
     // Auto-load on mount. Now gated on the SharedWorker's initial `meta`
     // notification — if another tab already loaded a model, we inherit
-    // that state via the meta payload and skip auto-load entirely. If
-    // not, fall through to the previous behaviour: look up
-    // `lastLoadedDigest` in the catalog and call onLoad.
+    // that state via the meta payload and skip auto-load entirely.
+    //
+    // Resume priority: `pendingLoadDigest` first (the user kicked off a
+    // load that didn't finish — likely an iOS suspend mid-download;
+    // re-firing onLoad routes through ensureModel's Range-resume); then
+    // `lastLoadedDigest` (previously fully loaded, just rehydrate from
+    // OPFS cache). Both paths funnel through the same onLoad call.
     const autoLoadAttempted = useRef(false);
     useEffect(() => {
         if (!metaInit) return;
@@ -223,17 +385,22 @@ export function App() {
         // loaded worker-side; bail out so we don't gratuitously call
         // load() and queue behind another tab.
         if (modelStatus === "ready") return;
-        if (!lastLoadedDigest) return;
+        const target = pendingLoadDigest || lastLoadedDigest;
+        if (!target) return;
         (async () => {
             try {
                 const models = await listModels();
-                const target = models.find((m) => m.digest === lastLoadedDigest);
-                if (!target) {
+                const m = models.find((x) => x.digest === target);
+                if (!m) {
+                    // Model vanished from the catalog (server-side delete,
+                    // or stale localStorage). Clear both so we don't keep
+                    // retrying on every boot.
+                    setPendingLoadDigest("");
                     setLastLoadedDigest("");
                     return;
                 }
                 if (onLoadRef.current) {
-                    void onLoadRef.current(target);
+                    void onLoadRef.current(m);
                 }
             } catch (e) {
                 showToast({
@@ -313,11 +480,12 @@ export function App() {
         setSampling(DEFAULT_SAMPLING);
         setMaxTokens(SETTINGS_BOUNDS.maxTokens.fallback);
         setThinking(true);
+        setVoice(DEFAULT_VOICE_OPTIONS);
         showToast({
             level: "success",
             title: "Settings reset to defaults",
         });
-    }, [setSystemPrompt, setSampling, setMaxTokens, setThinking, showToast]);
+    }, [setSystemPrompt, setSampling, setMaxTokens, setThinking, setVoice, showToast]);
 
     const onCreateConversation = useCallback(() => {
         if (busy) return;
@@ -386,6 +554,21 @@ export function App() {
         setLoadingPercent(0);
         setLoadingLabel("checking OPFS…");
         setStatusText("loading…");
+        // Prime capability flags from the catalog so the mic / image
+        // buttons can appear in the same render that flips modelStatus
+        // to "ready" — no perceptible lag between "loaded" and "audio
+        // available". The wasm-side `hasAudio` getter overwrites these
+        // post-load (the worker is the source of truth); the optimistic
+        // prime just avoids a one-render gap if there's any latency
+        // between the modelLoaded notification reaching this tab and
+        // the meta payload reflecting `hasAudio`.
+        setHasVision(!!m.multimodal);
+        setHasAudio(!!m.multimodal);
+        // Persist *intent* before the network round-trip. If iOS reaps
+        // the WebContent process mid-download, the next page boot reads
+        // this and auto-fires onLoad again — ensureModel's Range-resume
+        // logic picks up from the partial OPFS file at byte N.
+        setPendingLoadDigest(m.digest);
 
         try {
             if (!(await opfsSupported())) throw new Error("OPFS not supported in this browser");
@@ -508,12 +691,16 @@ export function App() {
                 });
             });
             setHasVision(client.hasVision);
+            setHasAudio(client.hasAudio);
             setModelStatus("ready");
             setStatusText(`${m.name}${fromCache ? " ⚡" : ""}`);
             setLoadingLabel("");
             // Remember which model was loaded so a page reload can resume
             // automatically. Eject (or delete-while-loaded) clears this.
+            // Clear pending — we're fully loaded, the boot-time auto-
+            // resume path no longer applies until next deliberate load.
             setLastLoadedDigest(m.digest);
+            setPendingLoadDigest("");
             const capsLine = `vision ${client.hasVision ? "✓" : "✗"} · audio ${client.hasAudio ? "✓" : "✗"}`;
             beacon("chat", `loaded ${m.name} (${capsLine})`);
             showToast({
@@ -530,12 +717,346 @@ export function App() {
                 title: "Model load failed", message: err,
             });
         }
-    }, [dismissToast, setLastLoadedDigest, showToast]);
+    }, [dismissToast, setLastLoadedDigest, setPendingLoadDigest, showToast]);
 
     // Keep the ref in sync so the mount-time auto-load effect can call
     // the latest onLoad closure without listing it as a hook dep (which
     // would re-fire the effect every time the closure identity changes).
     useEffect(() => { onLoadRef.current = onLoad; }, [onLoad]);
+
+    // ── Suspend / resume: pick up an interrupted generation ────────────
+    //
+    // Resume flow on detection (boot, or live-tab post-timeout):
+    //   1. Restore displayHistory from metadata so the user sees the
+    //      partial response immediately.
+    //   2. Try the fast path: read the OPFS KV snapshot and
+    //      restoreKvState() — Model.position lands on the saved value
+    //      and we step from there.
+    //   3. If the snapshot is missing / corrupt / from a different
+    //      architecture, fall back to slow-path replay: render the
+    //      conversation (including partial assistant text) via
+    //      renderChatForContinuation, tokenize, reset, and step
+    //      through every token to rebuild KV. Slower (a few seconds)
+    //      but always correct.
+    //   4. Enter the gen loop continuing from `lastSampledNext`,
+    //      appending into the existing assistant bubble.
+    //   5. On clean completion: clear localStorage + OPFS file.
+    const resumeInflightGeneration = useCallback(async (meta: InflightGen) => {
+        const client = getClient();
+        cancelRef.current = false;
+        setBusy(true);
+
+        // Reconstruct the visible chat so the user sees the partial
+        // response while we work to continue it.
+        const display: ChatMessage[] = [
+            ...meta.priorMessages,
+            { role: "user",  content: meta.userText },
+            { role: "model", content: meta.emittedSoFar },
+        ];
+        setMessages(display);
+        setActiveConvId(meta.convId);
+        inflightRef.current = meta;
+
+        try {
+            setStatusLine("resuming…");
+            await client.acquireSession();
+
+            // Cross-tab race: a sibling tab may have already done the
+            // resume (its completion cleared localStorage + OPFS).
+            // After acquireSession serialized us, recheck localStorage
+            // for a still-live inflight entry that matches our
+            // captured meta. If it's gone or now refers to a different
+            // generation, the sibling already handled it — bail
+            // cleanly instead of mangling state.
+            let raw: string | null = null;
+            try { raw = localStorage.getItem(INFLIGHT_KEY); } catch { /* */ }
+            let stillOurs = true;
+            if (!raw) {
+                stillOurs = false;
+            } else {
+                try {
+                    const live = JSON.parse(raw) as InflightGen;
+                    if (live.convId !== meta.convId
+                        || live.modelMsgId !== meta.modelMsgId
+                        || live.startedAt !== meta.startedAt) {
+                        stillOurs = false;
+                    }
+                } catch { stillOurs = false; }
+            }
+            if (!stillOurs) {
+                setStatusLine(undefined);
+                try { await client.releaseSession(); } catch { /* */ }
+                inflightRef.current = null;
+                setBusy(false);
+                // No media cleanup — sibling tab's finally will handle it.
+                return;
+            }
+
+            await client.setSampling(meta.sampling);
+
+            const isMultimodal = meta.hadImages || meta.hadAudio;
+            // For a multimodal turn that hadn't yet finished pre-encode,
+            // the fast-path catchup can't replay correctly (it would
+            // feed sentinel tokens as plain text). Force slow path,
+            // which renders + re-encodes media + splices soft tokens.
+            const forceSlowPath = isMultimodal
+                && meta.emittedTokenCount === 0
+                && meta.preEncodePosition < meta.promptIds.length;
+
+            // Fast path: KV snapshot from OPFS.
+            let kvIntact = false;
+            if (!forceSlowPath) {
+                const snapshotBytes = await readInflightState();
+                if (snapshotBytes && snapshotBytes.length > 0) {
+                    try {
+                        await client.restoreKvState(snapshotBytes);
+                        kvIntact = true;
+                    } catch (e) {
+                        // eslint-disable-next-line no-console
+                        console.warn("[rullama] KV restore failed; falling back to replay:", e);
+                    }
+                }
+            }
+
+            // Slow path: rebuild KV from a continuation render. For
+            // multimodal we re-encode the images/audio from the OPFS
+            // inflight-media store, then splice soft tokens at the
+            // matching sentinel positions — same protocol onSend uses
+            // on first-pass.
+            let nextToken = meta.lastSampledNext;
+            if (!kvIntact) {
+                setStatusLine("rebuilding session…");
+                await client.reset();
+
+                type SoftEntry = { nSoft: number; dText: number; softTokens: Float32Array };
+                const softQueue: SoftEntry[] = [];
+                const audioQueue: SoftEntry[] = [];
+                let beginId: number | null = null;
+                let audioBeginId: number | null = null;
+                let nImages = 0;
+                let nAudio = 0;
+
+                if (isMultimodal) {
+                    const images = meta.hadImages ? await readInflightImages() : [];
+                    const audio  = meta.hadAudio  ? await readInflightAudio()  : [];
+                    nImages = images.length;
+                    nAudio  = audio.length;
+
+                    if (images.length > 0) {
+                        const sent = client.imageSentinelIds();
+                        if (!sent) throw new Error("model exposes no <|image> sentinel");
+                        beginId = sent[0];
+                        setStatusLine("re-encoding images…");
+                        for (const im of images) {
+                            if (cancelRef.current) throw new Error("cancelled");
+                            if (!im.pixels) continue;
+                            const softTokens = await client.encodeImage(im.pixels, im.h, im.w);
+                            const nSoft = await client.imageSoftTokenCount(im.h, im.w);
+                            const dText = softTokens.length / nSoft;
+                            softQueue.push({ nSoft, dText, softTokens });
+                        }
+                    }
+                    if (audio.length > 0) {
+                        const sent = client.audioSentinelIds();
+                        if (!sent) throw new Error("model exposes no <|audio> sentinel");
+                        audioBeginId = sent[0];
+                        const fallbackDText = softQueue[0]?.dText ?? 1536;
+                        setStatusLine("re-encoding audio…");
+                        for (const clip of audio) {
+                            if (cancelRef.current) throw new Error("cancelled");
+                            const softTokens = await client.encodeAudio(clip.pcm);
+                            const dText = fallbackDText;
+                            const nSoft = softTokens.length / dText;
+                            audioQueue.push({ nSoft, dText, softTokens });
+                        }
+                    }
+                }
+
+                // Reconstruct the user content with the same sentinel
+                // markers `onSend` originally prepended (audio first,
+                // then images, then the user text).
+                const audioMarkers = "<|audio><audio|>".repeat(nAudio);
+                const imageMarkers = "<|image><image|>".repeat(nImages);
+                const userContent = audioMarkers + imageMarkers + meta.userText;
+
+                const renderMsgs: ChatMessage[] = [
+                    ...(meta.sysContent
+                        ? [{ role: "system", content: meta.sysContent } as ChatMessage]
+                        : []),
+                    ...meta.priorMessages,
+                    { role: "user",  content: userContent },
+                    { role: "model", content: meta.emittedSoFar },
+                ];
+                const rendered = await client.renderChatForContinuation(renderMsgs, false);
+                const ids = await client.encode(rendered);
+
+                setStatusLine("rebuilding session…");
+                let n = 0;
+                for (let i = 0; i < ids.length; i++) {
+                    if (cancelRef.current) throw new Error("cancelled");
+                    const id = ids[i];
+                    n = await client.step(id);
+                    if (beginId !== null && id === beginId && softQueue.length > 0) {
+                        const ent = softQueue.shift()!;
+                        for (let r = 0; r < ent.nSoft; r++) {
+                            if (cancelRef.current) throw new Error("cancelled");
+                            const row = ent.softTokens.subarray(r * ent.dText, (r + 1) * ent.dText);
+                            n = await client.stepWithEmbedding(row);
+                        }
+                    } else if (audioBeginId !== null && id === audioBeginId && audioQueue.length > 0) {
+                        const ent = audioQueue.shift()!;
+                        for (let r = 0; r < ent.nSoft; r++) {
+                            if (cancelRef.current) throw new Error("cancelled");
+                            const row = ent.softTokens.subarray(r * ent.dText, (r + 1) * ent.dText);
+                            n = await client.stepWithEmbedding(row);
+                        }
+                    }
+                }
+                nextToken = n;
+            } else if (meta.preEncodePosition < meta.promptIds.length) {
+                // Fast-path pre-encode catchup: KV restore landed us
+                // at `preEncodePosition`; feed the remaining prompt
+                // tokens before entering the gen loop. Update
+                // inflightRef per iter so a re-suspension during
+                // catchup is itself resumable.
+                setStatusLine("resuming pre-encode…");
+                let n = meta.lastSampledNext;
+                for (let i = meta.preEncodePosition; i < meta.promptIds.length; i++) {
+                    if (cancelRef.current) throw new Error("cancelled");
+                    n = await client.step(meta.promptIds[i]);
+                    if (inflightRef.current) {
+                        inflightRef.current = {
+                            ...inflightRef.current,
+                            preEncodePosition: i + 1,
+                            lastSampledNext: n,
+                        };
+                    }
+                }
+                nextToken = n;
+            }
+            setStatusLine(undefined);
+
+            // ── Generation loop, resumed from the saved `next` token ──
+            const remaining = Math.max(0, meta.maxTokens - meta.emittedTokenCount);
+            let emitted = meta.emittedTokenCount;
+            let curStr   = (await client.tokenStr(nextToken)) ?? "";
+            let curIsEos = await client.isEos(nextToken);
+            let pendingDelta = "";
+            let lastFlushAt  = performance.now();
+            const flushPending = async () => {
+                if (pendingDelta.length === 0) return;
+                const delta = pendingDelta;
+                pendingDelta = "";
+                try { await client.msgAppend(meta.convId, meta.modelMsgId, delta); } catch { /* */ }
+            };
+
+            for (let i = 0; i < remaining; i++) {
+                if (cancelRef.current) break;
+                if (curIsEos) break;
+                const piece = curStr.replaceAll("▁", " ");
+                display[display.length - 1].content += piece;
+                pendingDelta += piece;
+                setMessages([...display]);
+                emitted++;
+                if ((emitted % 16 === 0) || (performance.now() - lastFlushAt > 750)) {
+                    await flushPending();
+                    lastFlushAt = performance.now();
+                }
+                const r = await stepWithTimeout(client, nextToken);
+                nextToken = r.next;
+                curStr    = r.str ?? "";
+                curIsEos  = r.isEos;
+                if (inflightRef.current) {
+                    inflightRef.current = {
+                        ...inflightRef.current,
+                        emittedSoFar: display[display.length - 1].content,
+                        emittedTokenCount: emitted,
+                        lastSampledNext: nextToken,
+                    };
+                }
+            }
+            await flushPending();
+
+            try {
+                await client.convTouch(meta.convId, suggestTitle(meta.userText));
+                await client.dbFlush();
+            } catch { /* */ }
+            void refreshConversations();
+            setStatusLine("resumed");
+        } catch (e) {
+            const msg = (e as Error).message;
+            const isCancel = msg === "cancelled" || msg.includes("cancelled by caller");
+            setStatusLine(isCancel ? "cancelled" : `resume error: ${msg}`);
+            if (!isCancel) {
+                showToast({ level: "warn", title: "Resume failed", message: msg });
+            }
+        } finally {
+            inflightRef.current = null;
+            try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
+            void clearInflightState();
+            void clearInflightMedia();
+            try { await client.releaseSession(); } catch { /* */ }
+            setBusy(false);
+        }
+    }, [refreshConversations, showToast]);
+
+    // Boot-resume: once the model is ready, check for a stashed
+    // inflight generation and pick it up where it left off.
+    useEffect(() => {
+        if (modelStatus !== "ready") return;
+        if (resumeAttemptedRef.current) return;
+        resumeAttemptedRef.current = true;
+
+        let raw: string | null = null;
+        try { raw = localStorage.getItem(INFLIGHT_KEY); } catch { return; }
+        if (!raw) return;
+
+        let meta: InflightGen;
+        try { meta = JSON.parse(raw) as InflightGen; }
+        catch {
+            try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
+            void clearInflightState();
+            void clearInflightMedia();
+            return;
+        }
+
+        // Discard mismatched-model resumes (the catalog auto-load
+        // policy might have picked a different model on boot).
+        if (lastLoadedDigest && meta.modelDigest && meta.modelDigest !== lastLoadedDigest) {
+            try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
+            void clearInflightState();
+            void clearInflightMedia();
+            return;
+        }
+
+        // Multimodal: resume only when the media was persisted to OPFS
+        // before suspension. If the media-persist race lost (iOS
+        // suspended us mid-write or before mediaPersisted=true), fall
+        // back to surfacing the partial response with the
+        // "interrupted" toast and let the user re-send — we can't
+        // re-encode media we don't have.
+        const isMultimodal = meta.hadImages || meta.hadAudio;
+        if (isMultimodal && !meta.mediaPersisted) {
+            const display: ChatMessage[] = [
+                ...meta.priorMessages,
+                { role: "user",  content: meta.userText },
+                { role: "model", content: meta.emittedSoFar },
+            ];
+            setMessages(display);
+            setActiveConvId(meta.convId);
+            showToast({
+                level: "info",
+                title: "Multimodal generation interrupted",
+                message: "Partial response is preserved. Re-send the message to get a full reply.",
+            });
+            try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
+            void clearInflightState();
+            void clearInflightMedia();
+            return;
+        }
+
+        void resumeInflightGeneration(meta);
+    }, [modelStatus, lastLoadedDigest, resumeInflightGeneration, showToast]);
 
     const onSend = useCallback(async () => {
         if (modelStatus !== "ready" || busy) return;
@@ -543,12 +1064,18 @@ export function App() {
         // Snapshot attachments for this turn so the UI can clear them
         // while generation runs.
         const turnImages = pendingImages;
-        if (!text && turnImages.length === 0) return;
+        const turnAudio  = pendingAudio;
+        if (!text && turnImages.length === 0 && turnAudio.length === 0) return;
         const client = getClient();
         cancelRef.current = false;
+        // Flagged by the catch when a recoverable hang is detected so
+        // the finally block can hand off to resumeInflightGeneration
+        // instead of clearing inflight state.
+        let liveRecovery: InflightGen | null = null;
         setBusy(true);
         setPrompt("");
         setPendingImages([]);
+        setPendingAudio([]);
         setStatusLine(undefined);
 
         const sysContent = thinking
@@ -576,8 +1103,12 @@ export function App() {
             { role: "model", content: "" },
         ];
         setMessages(displayHistory);
+        // Audio markers go before image markers so the model "hears"
+        // attachments in input order; the image splice already established
+        // sentinel-pair-per-attachment as the prompt convention.
+        const audioMarkers = "<|audio><audio|>".repeat(turnAudio.length);
         const imageMarkers = "<|image><image|>".repeat(turnImages.length);
-        const userRenderContent = imageMarkers + text;
+        const userRenderContent = audioMarkers + imageMarkers + text;
         const renderPriorTurns = userTurns;   // assumed text-only for now
         const renderHistory: ChatMessage[] = sysContent
             ? [
@@ -647,6 +1178,63 @@ export function App() {
             const rendered = await client.renderChat(renderHistory, false);
             const ids = await client.encode(rendered);
 
+            // ── Initialize inflight tracking BEFORE the prompt-feed
+            // loop so a backgrounding during pre-encode (which is most
+            // of the wall-clock cost on long conversations) still has
+            // a resumable snapshot. `preEncodePosition` ticks up per
+            // prompt-feed iteration; resume replays only the remaining
+            // tokens.
+            if (convId && modelMsgId) {
+                inflightRef.current = {
+                    convId,
+                    modelMsgId,
+                    modelDigest: lastLoadedDigest,
+                    userText: text,
+                    sysContent,
+                    priorMessages: userTurns,
+                    sampling,
+                    maxTokens,
+                    promptIds: Array.from(ids),
+                    preEncodePosition: 0,
+                    emittedSoFar: "",
+                    emittedTokenCount: 0,
+                    lastSampledNext: 0,
+                    hadImages: turnImages.length > 0,
+                    hadAudio:  turnAudio.length > 0,
+                    mediaPersisted: false,
+                    startedAt: Date.now(),
+                };
+            }
+
+            // Persist image pixels + audio PCM to OPFS so a
+            // kill-and-resume can re-encode them through the vision /
+            // audio towers and continue from the partial response. Skip
+            // entirely for text-only turns. Best-effort: a write
+            // failure flips mediaPersisted back to false and resume
+            // will surface the existing "interrupted" toast for this
+            // turn only.
+            if (turnImages.length > 0 || turnAudio.length > 0) {
+                try {
+                    for (let i = 0; i < turnImages.length; i++) {
+                        const im = turnImages[i];
+                        if (!im.pixels) continue;
+                        await saveInflightImage(i, im.pixels, im.h, im.w, im.dataUrl);
+                    }
+                    for (let i = 0; i < turnAudio.length; i++) {
+                        const a = turnAudio[i];
+                        await saveInflightAudio(i, a.pcm, a.durationMs);
+                    }
+                    if (inflightRef.current) {
+                        inflightRef.current = { ...inflightRef.current, mediaPersisted: true };
+                    }
+                } catch (e) {
+                    // eslint-disable-next-line no-console
+                    console.warn("[rullama] inflight media persist failed:", e);
+                    // Leave mediaPersisted=false; resume falls back to
+                    // the interrupted-turn toast if a kill happens.
+                }
+            }
+
             // Encode each attached image once per send. Result lives in
             // softMap keyed by the begin-sentinel token id — the feed
             // loop checks the map after every step() and splices in
@@ -666,23 +1254,31 @@ export function App() {
                     throw new Error("model exposes no <|image> sentinel — vision unavailable");
                 }
                 beginId = sent[0];
-                // Surface per-layer vision encode progress in the status
-                // line — the encode is ~2 min on slow GPUs, users need to
-                // know the app is alive.
+                // Surface per-layer vision encode progress as a sticky
+                // strip above the input row (see VisionProgress). The
+                // encode can be ~2 min on slow GPUs; users need clear
+                // feedback that the app is alive.
                 let imgIdx = 0;
                 const totalImgs = turnImages.filter((x) => x.pixels).length;
                 const offProgress = client.subscribe("visionProgress", (p) => {
                     const layer = Number(p.layer);
                     const total = Number(p.total);
-                    const tag   = totalImgs > 1 ? `image ${imgIdx + 1}/${totalImgs} — ` : "";
-                    setStatusLine(`${tag}analyzing image (${layer}/${total})…`);
+                    setVisionEncodeState({
+                        imageIdx: imgIdx + 1,
+                        nImages:  totalImgs,
+                        layer,
+                        nLayers:  total,
+                    });
                 });
                 try {
                     for (const im of turnImages) {
                         if (!im.pixels) continue;
-                        setStatusLine(totalImgs > 1
-                            ? `image ${imgIdx + 1}/${totalImgs} — analyzing image…`
-                            : "analyzing image…");
+                        setVisionEncodeState({
+                            imageIdx: imgIdx + 1,
+                            nImages:  totalImgs,
+                            layer:    0,
+                            nLayers:  1,  // updated on the first progress event
+                        });
                         const softTokens = await client.encodeImage(im.pixels, im.h, im.w);
                         const nSoft = await client.imageSoftTokenCount(im.h, im.w);
                         const dText = softTokens.length / nSoft;
@@ -691,8 +1287,41 @@ export function App() {
                     }
                 } finally {
                     offProgress();
-                    setStatusLine(undefined);
+                    setVisionEncodeState(null);
                 }
+            }
+
+            // Same idea for voice clips. The audio tower outputs one
+            // soft-token row per (downsampled) audio frame, dText wide;
+            // splicing is identical to images but keyed off the
+            // <|audio> sentinel id.
+            const audioQueue: SoftEntry[] = [];
+            let audioBeginId: number | null = null;
+            if (turnAudio.length > 0) {
+                const sent = client.audioSentinelIds();
+                if (!sent) {
+                    throw new Error("model exposes no <|audio> sentinel — audio unavailable");
+                }
+                audioBeginId = sent[0];
+                // Reuse softQueue's dText if we computed it above (image
+                // path); otherwise default to gemma4's d_text. The audio
+                // tower projects into the same text embedding space, so
+                // dText is a model constant.
+                const fallbackDText = softQueue[0]?.dText ?? 1536;
+                let audIdx = 0;
+                const totalAud = turnAudio.length;
+                for (const clip of turnAudio) {
+                    if (cancelRef.current) throw new Error("cancelled");
+                    setStatusLine(totalAud > 1
+                        ? `audio ${audIdx + 1}/${totalAud} — encoding…`
+                        : "encoding audio…");
+                    const softTokens = await client.encodeAudio(clip.pcm);
+                    const dText = fallbackDText;
+                    const nSoft = softTokens.length / dText;
+                    audioQueue.push({ nSoft, dText, softTokens });
+                    audIdx++;
+                }
+                setStatusLine(undefined);
             }
 
             const t0 = performance.now();
@@ -708,6 +1337,26 @@ export function App() {
                         const row = ent.softTokens.subarray(r * ent.dText, (r + 1) * ent.dText);
                         next = await client.stepWithEmbedding(row);
                     }
+                } else if (audioBeginId !== null && id === audioBeginId && audioQueue.length > 0) {
+                    const ent = audioQueue.shift()!;
+                    for (let r = 0; r < ent.nSoft; r++) {
+                        if (cancelRef.current) throw new Error("cancelled");
+                        const row = ent.softTokens.subarray(r * ent.dText, (r + 1) * ent.dText);
+                        next = await client.stepWithEmbedding(row);
+                    }
+                }
+                // Track pre-encode progress so a visibilitychange→hidden
+                // mid-prompt-feed has a resumable snapshot. `next` at
+                // this point is the model's predicted next token AFTER
+                // ids[0..=i] (and any soft-token splices) — exactly
+                // what the gen loop would feed first if pre-encode
+                // completes here.
+                if (inflightRef.current) {
+                    inflightRef.current = {
+                        ...inflightRef.current,
+                        preEncodePosition: i + 1,
+                        lastSampledNext: next,
+                    };
                 }
             }
             const peMs = performance.now() - t0;
@@ -737,10 +1386,22 @@ export function App() {
                     await flushPending();
                     lastFlushAt = performance.now();
                 }
-                const r = await client.stepAndDecode(next);
+                const r = await stepWithTimeout(client, next);
                 next     = r.next;
                 curStr   = r.str ?? "";
                 curIsEos = r.isEos;
+                // Keep the inflight ref fresh so a visibilitychange
+                // handler can persist current state without coordinating
+                // with this loop. In-memory only — no localStorage write
+                // per token (too costly).
+                if (inflightRef.current) {
+                    inflightRef.current = {
+                        ...inflightRef.current,
+                        emittedSoFar: displayHistory[displayHistory.length - 1].content,
+                        emittedTokenCount: emitted,
+                        lastSampledNext: next,
+                    };
+                }
             }
             await flushPending();
             if (convId) {
@@ -756,17 +1417,66 @@ export function App() {
             beacon("chat", `gen ${emitted} tok in ${dt.toFixed(0)} ms (${tps.toFixed(2)} tok/s)`);
         } catch (e) {
             const msg = (e as Error).message;
-            setStatusLine(`error: ${msg}`);
-            if (msg !== "cancelled") {
-                showToast({ level: "error", title: "Generation failed", message: msg });
+            const isCancel = msg === "cancelled" || msg.includes("cancelled by caller");
+            const isStepTimeout = msg.includes("step-timeout");
+            // Live-tab recovery: a step that hangs past STEP_TIMEOUT_MS
+            // almost always means the dedicated worker died (iOS jetsam
+            // mid-generation, GPU device-lost, etc.). Instead of asking
+            // the user to reload, hand the inflight metadata off to
+            // resumeInflightGeneration on the next tick — it acquires
+            // its own session and tries restoreKvState first, then the
+            // slow-path replay. Same machinery the boot path uses.
+            if (isStepTimeout && inflightRef.current) {
+                liveRecovery = inflightRef.current;
+                setStatusLine("worker hung — recovering session…");
+            } else {
+                setStatusLine(isCancel ? "cancelled" : `error: ${msg}`);
+                if (!isCancel) {
+                    showToast({ level: "error", title: "Generation failed", message: msg });
+                }
             }
         } finally {
-            // Release the session so the next tab in the queue (or this
-            // tab's next send) can proceed.
-            try { await client.releaseSession(); } catch { /* */ }
-            setBusy(false);
+            if (liveRecovery) {
+                // Hand off without clearing — resumeInflightGeneration
+                // owns the metadata + OPFS state from here. Mirror to
+                // localStorage so a page-reload-during-recovery still
+                // resumes via the boot path.
+                try { localStorage.setItem(INFLIGHT_KEY, JSON.stringify(liveRecovery)); } catch { /* */ }
+                try { await client.releaseSession(); } catch { /* */ }
+                setBusy(false);
+                const meta = liveRecovery;
+                setTimeout(() => { void resumeInflightGeneration(meta); }, 0);
+            } else {
+                // Generation finished (cleanly, by cancel, or by a
+                // non-recoverable error). Discard inflight state — a
+                // future backgrounding has nothing to resume. The OPFS
+                // files are best-effort: a failed delete just leaves
+                // stale snapshots that the next resume attempt will
+                // reject by layout_hash or modelDigest mismatch.
+                inflightRef.current = null;
+                try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
+                void clearInflightState();
+                void clearInflightMedia();
+                try { await client.releaseSession(); } catch { /* */ }
+                setBusy(false);
+            }
         }
-    }, [activeConvId, busy, maxTokens, messages, modelStatus, pendingImages, prompt, refreshConversations, sampling, statusText, systemPrompt, thinking, showToast]);
+    }, [activeConvId, busy, lastLoadedDigest, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, refreshConversations, resumeInflightGeneration, sampling, statusText, systemPrompt, thinking, showToast]);
+
+    // VAD-driven mic capture wired into the existing pendingAudio queue.
+    // Each invocation produces one clip; user can stack multiple before
+    // sending. Encoding to soft tokens happens later in onSend so the
+    // tap-to-talk flow stays snappy (no inference under the hand).
+    const onCaptureAudio = useCallback((pcm: Float32Array) => {
+        const durationMs = (pcm.length / 16_000) * 1000;
+        setPendingAudio((prev) => [...prev, { pcm, durationMs }]);
+    }, []);
+    const onRemoveAudio = useCallback((idx: number) => {
+        setPendingAudio((prev) => prev.filter((_, i) => i !== idx));
+    }, []);
+    const onAudioError = useCallback((message: string) => {
+        showToast({ level: "warn", title: "Mic capture failed", message });
+    }, [showToast]);
 
     const onDeleteModel = useCallback(async (m: ModelEntry) => {
         if (busy) return;
@@ -789,9 +1499,14 @@ export function App() {
             setMessages([]);
             setStatusLine(undefined);
             setHasVision(false);
+            setHasAudio(false);
             setPendingImages([]);
+            setPendingAudio([]);
             setLastLoadedDigest("");
         }
+        // Clear pending too — deleting the cached file removes the
+        // partial we'd otherwise auto-resume.
+        if (pendingLoadDigest === m.digest) setPendingLoadDigest("");
 
         const removed = await wipeModel(modelKey, filename);
         beacon("chat", removed ? `deleted ${m.name} (${sizeLabel})` : `delete ${m.name} no-op (not cached)`);
@@ -800,7 +1515,7 @@ export function App() {
         } else {
             showToast({ level: "info", title: `No cached copy of ${m.name}` });
         }
-    }, [busy, modelStatus, setLastLoadedDigest, statusText, showToast]);
+    }, [busy, modelStatus, pendingLoadDigest, setLastLoadedDigest, setPendingLoadDigest, statusText, showToast]);
 
     /** Unload the active model, free its wasm-side buffers, and clear
      *  the "last loaded" memory so a page reload won't auto-resume.
@@ -816,10 +1531,15 @@ export function App() {
         setMessages([]);
         setStatusLine(undefined);
         setHasVision(false);
+        setHasAudio(false);
         setPendingImages([]);
+        setPendingAudio([]);
         setLastLoadedDigest("");
+        // Eject is a deliberate user gesture — they don't want the
+        // boot-time auto-resume to refire either.
+        setPendingLoadDigest("");
         showToast({ level: "info", title: `Ejected ${name}` });
-    }, [busy, modelStatus, setLastLoadedDigest, statusText, showToast]);
+    }, [busy, modelStatus, setLastLoadedDigest, setPendingLoadDigest, statusText, showToast]);
 
     // Active conversation title for the header.
     const activeTitle = activeConvId
@@ -901,6 +1621,9 @@ export function App() {
                         onMaxTokensChange={setMaxTokens}
                         thinking={thinking}
                         onThinkingChange={setThinking}
+                        voice={voice}
+                        onVoiceChange={setVoice}
+                        canRecord={modelStatus === "ready" && hasAudio}
                         onResetDefaults={onResetDefaults}
                     />
                 }
@@ -943,17 +1666,31 @@ export function App() {
                     canSend={
                         modelStatus === "ready"
                         && !busy
-                        && (prompt.trim().length > 0 || pendingImages.length > 0)
+                        && (prompt.trim().length > 0 || pendingImages.length > 0 || pendingAudio.length > 0)
                     }
                     canStop={busy}
                     canAttach={modelStatus === "ready" && hasVision}
+                    canRecord={modelStatus === "ready" && hasAudio && !busy}
                     pendingImages={pendingImages}
+                    pendingAudio={pendingAudio.map((a) => ({ durationMs: a.durationMs }))}
+                    voice={voice}
                     prompt={prompt}
                     onPromptChange={setPrompt}
                     onSend={onSend}
-                    onStop={() => { cancelRef.current = true; }}
+                    onStop={() => {
+                        cancelRef.current = true;
+                        // Also break in on any in-flight multimodal encode.
+                        // The flag is cleared at the start of the next
+                        // encode, so calling unconditionally here doesn't
+                        // poison subsequent runs.
+                        void getClient().cancelMultimodalEncode().catch(() => { /* */ });
+                    }}
                     onAttachFiles={(files) => { void onAttachFiles(files); }}
                     onRemoveImage={onRemoveImage}
+                    onCaptureAudio={onCaptureAudio}
+                    onRemoveAudio={onRemoveAudio}
+                    onAudioError={onAudioError}
+                    visionProgress={visionEncodeState}
                     statusLine={statusLine}
                 />
             </DualSidebarLayout>

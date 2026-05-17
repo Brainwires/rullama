@@ -55,6 +55,11 @@ interface ModelHandle {
         progressCb?: ((layer: number, total: number) => void) | null,
     ): Promise<Float32Array>;
     encodeAudio(pcm: Float32Array): Promise<Float32Array>;
+    cancelMultimodalEncode(): void;
+    saveKvState(): Promise<Uint8Array>;
+    restoreKvState(bytes: Uint8Array): void;
+    renderChatForContinuation(messages: unknown, withBos: boolean): string;
+    readonly position: number;
 }
 interface ModelStatic {
     loadFromOpfsTextOnly(
@@ -446,9 +451,15 @@ const RPC: Record<string, Handler> = {
             a.pixels as Float32Array, Number(a.h), Number(a.w), cb,
         );
     },
-    encodeAudio: async (a) => await requireModel().encodeAudio(a.pcm as Float32Array),
+    encodeAudio: async (a) => { void a; return await requireModel().encodeAudio(a.pcm as Float32Array); },
+    cancelMultimodalEncode: (a) => { void a; requireModel().cancelMultimodalEncode(); return true; },
     reset:        (a) => { void a; return requireModel().reset(); },
     setSampling:  (a) => requireModel().setSampling(a.opts),
+    saveKvState:  async (a) => { void a; return await requireModel().saveKvState(); },
+    restoreKvState: (a) => { requireModel().restoreKvState(a.bytes as Uint8Array); return true; },
+    renderChatForContinuation: (a) =>
+        requireModel().renderChatForContinuation(a.messages, !!a.withBos),
+    position: (a) => { void a; return requireModel().position; },
 
     // ── Worker meta ─────────────────────────────────────────────────────
     currentMeta: () => ({ loaded: loadedInfo }),

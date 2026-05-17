@@ -25,9 +25,102 @@
     <link rel="apple-touch-icon" sizes="512x512" href="/icons/icon-512.png" />
 
     <title>rullama — Gemma 4 in the browser</title>
+
+    <!-- Boot-watchdog styles. Inline so the recovery UI renders even when
+         the hashed CSS bundle is unreachable (the exact failure mode the
+         watchdog exists to recover from). -->
+    <style>
+        #boot-recovery {
+            position: fixed; inset: 0;
+            display: none;
+            background: #0f1115; color: #e5e7eb;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            padding: 2rem; box-sizing: border-box;
+            align-items: center; justify-content: center;
+            flex-direction: column; text-align: center;
+            z-index: 99999;
+        }
+        #boot-recovery h1 { font-size: 1.05rem; margin: 0 0 0.5rem; font-weight: 600; }
+        #boot-recovery p { font-size: 0.85rem; color: #9ca3af; margin: 0 0 1.25rem; max-width: 22rem; line-height: 1.4; }
+        #boot-recovery button {
+            padding: 0.5rem 1.1rem; border-radius: 0.5rem; border: 1px solid #374151;
+            background: #1f2937; color: #e5e7eb; font: inherit; cursor: pointer;
+        }
+        #boot-recovery button:active { background: #374151; }
+        #boot-recovery .small { font-size: 0.75rem; color: #6b7280; margin-top: 0.75rem; }
+    </style>
 </head>
 <body class="bg-background text-foreground antialiased">
     <div id="root"></div>
+
+    <!-- Boot-recovery UI: hidden until the watchdog gives up on mount.
+         Sits in the static HTML so it doesn't depend on the bundle. -->
+    <div id="boot-recovery" role="alert" aria-live="assertive">
+        <h1>App failed to start</h1>
+        <p>
+            The service worker may be holding a broken state from a previous
+            update. Reset clears cached files + worker, then reloads.
+        </p>
+        <button id="boot-recovery-btn" type="button">Reset app data</button>
+        <p class="small">If this keeps happening, reinstall the app.</p>
+    </div>
+
+    <!-- Inline boot watchdog. If #root has no children 8 s after parse,
+         show the recovery UI. Recovery wipes all SW registrations and
+         caches, then forces a fresh reload bypassing the SW. Lives in
+         the static HTML so it survives any bundle / chunk-load failure
+         (the exact failure that the recovery is for). -->
+    <script>
+        (function () {
+            var BOOT_TIMEOUT_MS = 8000;
+            var rec = document.getElementById('boot-recovery');
+            var btn = document.getElementById('boot-recovery-btn');
+            if (!rec || !btn) return;
+
+            var armed = true;
+            var watchdog = setTimeout(function () {
+                if (!armed) return;
+                var root = document.getElementById('root');
+                if (root && root.children.length > 0) return;  // mounted, false alarm
+                rec.style.display = 'flex';
+            }, BOOT_TIMEOUT_MS);
+
+            // Disarm as soon as the React tree appears.
+            var mo = new MutationObserver(function () {
+                var root = document.getElementById('root');
+                if (root && root.children.length > 0) {
+                    armed = false;
+                    clearTimeout(watchdog);
+                    mo.disconnect();
+                }
+            });
+            mo.observe(document.documentElement, { childList: true, subtree: true });
+
+            btn.addEventListener('click', function () {
+                btn.disabled = true;
+                btn.textContent = 'Resetting…';
+                (async function () {
+                    try {
+                        if ('serviceWorker' in navigator) {
+                            var regs = await navigator.serviceWorker.getRegistrations();
+                            await Promise.all(regs.map(function (r) { return r.unregister(); }));
+                        }
+                    } catch (e) { /* */ }
+                    try {
+                        if ('caches' in window) {
+                            var keys = await caches.keys();
+                            await Promise.all(keys.map(function (k) { return caches.delete(k); }));
+                        }
+                    } catch (e) { /* */ }
+                    // Cache-bust the URL so the next load is a forced fetch
+                    // against the origin, not a cached response.
+                    var u = location.pathname + '?_reset=' + Date.now();
+                    location.replace(u);
+                })();
+            });
+        })();
+    </script>
+
     <script type="module" src="/src/main.tsx"></script>
 </body>
 </html>

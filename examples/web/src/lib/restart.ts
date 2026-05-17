@@ -1,21 +1,21 @@
 // Restart-required signal.
 //
-// Fires when the running tab's JS or WASM has become inconsistent with the
-// service worker's precache — typically after a deploy that changed the wasm
-// hash. The current tab references asset URLs that no longer exist; trying
-// to dynamic-import the inference worker (which pulls the wasm) fails with
-// a "Failed to fetch dynamically imported module" / chunk-load error.
+// Fires only when the running tab's JS or WASM has gotten genuinely
+// stuck — the inference worker failed to boot, or a dynamic import
+// blew up because the SW served a stale hashed asset that no longer
+// exists. The service-worker-update path is handled separately by
+// `lib/pwa.ts::ensureFreshServiceWorker`, which gates React mount on
+// SW freshness, so a clean deploy never reaches this code.
 //
-// Two callers hook into this:
-//   1. `lib/pwa.ts` — `onNeedRefresh` and the `controllerchange` event mark
-//      a restart as available (a new SW is waiting / has activated).
-//   2. `lib/inference.ts` — the WorkerClient's error handler calls
-//      `requestRestart()` when the inference worker fails to boot, which
-//      is the unambiguous symptom the user is seeing.
+// One caller hooks into this:
+//   - `lib/inference.ts` — the WorkerClient's error handler calls
+//     `requestRestart()` when the inference worker fails to boot.
+//   (Plus the window-level error/unhandledrejection listeners installed
+//   by `installGlobalRestartListeners()`, which catch the chunk-load
+//   failures we still want to recover from gracefully.)
 //
-// One component (`RestartOverlay`) subscribes via the React hook and
-// renders the full-page "Restart required" card with a button that
-// hard-reloads the tab.
+// `RestartOverlay` subscribes via the React hook and renders the
+// full-page "Restart required" card with a button that hard-reloads.
 
 const EVT = "rullama:needs-restart";
 
@@ -30,26 +30,44 @@ export function requestRestart(reason: string): void {
     console.warn("[rullama] restart required:", reason);
 }
 
-/** Updater function handed in by `pwa.ts` once `registerSW` has run.
- *  When set, restartNow() routes through it so the waiting SW gets
- *  skipWaiting + the reload as a single user-driven event. Falls back
- *  to a plain reload if the SW path isn't available (dev, no SW, or
- *  the restart was triggered by something other than a deploy). */
-let _updateSW: ((reload?: boolean) => Promise<void>) | null = null;
-
-export function setUpdateSW(fn: (reload?: boolean) => Promise<void>): void {
-    _updateSW = fn;
-}
-
-/** Reload the page, preferring the SW-aware updater when present. */
+/** Reload the page. SW lifecycle is driven by `pwa.ts` at boot, so a
+ *  plain reload is all we need here — the next boot's
+ *  `ensureFreshServiceWorker()` will pick up whatever's current. */
 export function restartNow(): void {
     if (typeof window === "undefined") return;
-    if (_updateSW) {
-        // updateSW handles skipWaiting → controllerchange → reload itself.
-        void _updateSW(true);
-        return;
-    }
     window.location.reload();
+}
+
+/**
+ * Nuclear escape hatch for when the in-app state OR the service worker
+ * is wedged: unregister every SW, delete every Cache Storage entry,
+ * then force a network reload with a cache-busting query.
+ *
+ * The static-HTML watchdog (`index.html`) does this same thing
+ * autonomously when React fails to mount within 8 s. This export
+ * exposes the same recovery from inside the app (Settings → Reset
+ * app data) for when React did mount but the user wants to recover
+ * from a wedged worker / cache without uninstalling the PWA.
+ *
+ * OPFS-backed model storage is NOT touched — model blobs survive,
+ * sampling/voice settings in localStorage also survive. Only the
+ * service-worker precache + runtime cache are cleared.
+ */
+export async function hardResetAndReload(): Promise<void> {
+    if (typeof window === "undefined") return;
+    try {
+        if ("serviceWorker" in navigator) {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            await Promise.all(regs.map((r) => r.unregister()));
+        }
+    } catch { /* */ }
+    try {
+        if ("caches" in window) {
+            const keys = await caches.keys();
+            await Promise.all(keys.map((k) => caches.delete(k)));
+        }
+    } catch { /* */ }
+    window.location.replace(`${window.location.pathname}?_reset=${Date.now()}`);
 }
 
 /** Heuristic: does this error message look like the SW serving a stale

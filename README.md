@@ -129,6 +129,28 @@ safaridriver -p 4444 &
 `[pe]`, `[tg]`, `[gen]`, `[wkr]`, `[rs]`) so any regression in a phone
 run leaves a server-side trail even after a WebContent crash.
 
+## Docker / deploy
+
+`compose.yaml` packages the built PWA + a model-blob HTTP service behind
+nginx, designed to sit behind Cloudflare. The Cargo workspace ships
+`cargo docker:*` aliases (dispatched through the `xtask` crate) so the
+deploy loop doesn't need shell aliases:
+
+| Alias                  | Effective command                                                              |
+|------------------------|--------------------------------------------------------------------------------|
+| `cargo docker:build`   | `docker compose build`                                                         |
+| `cargo docker:start`   | `docker compose up -d`                                                         |
+| `cargo docker:stop`    | `docker compose down`                                                          |
+| `cargo docker:restart` | `docker compose build --no-cache` then `docker compose up -d --force-recreate` |
+| `cargo docker:logs`    | `docker compose logs -f --tail=200`                                            |
+| `cargo docker:ps`      | `docker compose ps`                                                            |
+
+First run compiles `xtask` (~1 s); subsequent invocations reuse the cached
+binary. Add new tasks by appending a match arm in `xtask/src/main.rs` and
+a corresponding line in `.cargo/config.toml`. The compose file's
+`OLLAMA_MODELS_DIR` env var picks the host's model store; defaults to
+`/usr/share/ollama/.ollama/models`.
+
 ## Native sanity checks
 
 The same code paths run natively against host wgpu (Metal on macOS, Vulkan on

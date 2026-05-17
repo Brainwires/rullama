@@ -6,7 +6,10 @@ import { type ChatMessage, type ImageAttachment } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
 import { parseModelContent } from "@/lib/parseModel";
 import { cn } from "@/lib/utils";
-import { Send, Square, Plus, X } from "lucide-react";
+import { Mic, Send, Square, Plus, X } from "lucide-react";
+import { MicButton } from "@/components/MicButton";
+import { VisionProgress, type VisionProgressState } from "@/components/VisionProgress";
+import type { VoiceOptions } from "@/lib/voice";
 
 // The think-token slips into the chat history when the user enables
 // thinking mode. It's a control signal for the model, not user content,
@@ -21,14 +24,30 @@ interface Props {
     /** Set when the loaded model has the vision tower wired up. Drives
      *  whether the "+" button surfaces an image picker. */
     canAttach:   boolean;
+    /** Set when the loaded model has the audio tower wired up.
+     *  Drives whether the mic button is shown / enabled. */
+    canRecord:   boolean;
     prompt:      string;
     /** Images attached to the next user turn (cleared after send). */
     pendingImages: ImageAttachment[];
+    /** Voice clips attached to the next user turn (cleared after send).
+     *  Index in this array is the only identity — playback support
+     *  comes later. */
+    pendingAudio: { durationMs: number }[];
+    /** VAD tunables for the mic button (silence cutoff, RMS threshold,
+     *  etc.). Surfaced via the Voice section of Settings. */
+    voice: VoiceOptions;
     onPromptChange:  (s: string) => void;
     onSend:          () => void;
     onStop:          () => void;
     onAttachFiles:   (files: FileList) => void;
     onRemoveImage:   (idx: number) => void;
+    onCaptureAudio:  (pcm: Float32Array) => void | Promise<void>;
+    onRemoveAudio:   (idx: number) => void;
+    onAudioError?:   (msg: string) => void;
+    /** When non-null, a large progress strip mounts above the input row
+     *  showing per-layer vision-encode progress for the current image. */
+    visionProgress?: VisionProgressState | null;
     statusLine?: string;
     /** Optional drop-in for the empty chat history pane (e.g. a
      *  no-model-loaded card). Falls back to a plain hint when omitted. */
@@ -199,13 +218,15 @@ export function ChatPanel(props: Props) {
                 </p>
             )}
 
+            {props.visionProgress && <VisionProgress state={props.visionProgress} />}
+
             {/* Pending-attachment preview strip, only when there's at
-                least one image queued. */}
-            {props.pendingImages.length > 0 && (
+                least one image or voice clip queued. */}
+            {(props.pendingImages.length + props.pendingAudio.length) > 0 && (
                 <div className="flex flex-wrap gap-1.5 border-t border-border bg-background/60 px-2 py-2 sm:px-3">
                     {props.pendingImages.map((im, i) => (
                         <div
-                            key={i}
+                            key={`img-${i}`}
                             className="relative h-16 w-16 overflow-hidden rounded-md border border-border"
                         >
                             <img src={im.dataUrl} alt={`pending ${i + 1}`} className="h-full w-full object-cover" />
@@ -214,6 +235,26 @@ export function ChatPanel(props: Props) {
                                 onClick={() => props.onRemoveImage(i)}
                                 className="absolute right-0.5 top-0.5 rounded-full bg-black/60 p-0.5 text-white hover:bg-black/80"
                                 aria-label={`Remove attachment ${i + 1}`}
+                                title="Remove"
+                            >
+                                <X className="h-3 w-3" />
+                            </button>
+                        </div>
+                    ))}
+                    {props.pendingAudio.map((a, i) => (
+                        <div
+                            key={`aud-${i}`}
+                            className="relative flex h-16 items-center gap-2 rounded-md border border-border bg-card/60 px-2 text-xs"
+                        >
+                            <Mic className="h-4 w-4 text-muted-foreground" />
+                            <span className="font-mono tabular-nums text-muted-foreground">
+                                {(a.durationMs / 1000).toFixed(1)}s
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => props.onRemoveAudio(i)}
+                                className="absolute right-0.5 top-0.5 rounded-full bg-black/60 p-0.5 text-white hover:bg-black/80"
+                                aria-label={`Remove voice clip ${i + 1}`}
                                 title="Remove"
                             >
                                 <X className="h-3 w-3" />
@@ -253,6 +294,15 @@ export function ChatPanel(props: Props) {
                 >
                     <Plus />
                 </Button>
+                {props.canRecord && (
+                    <MicButton
+                        disabled={!props.canType}
+                        voice={props.voice}
+                        onCapture={props.onCaptureAudio}
+                        onError={props.onAudioError}
+                        title="Record voice"
+                    />
+                )}
             </div>
         </div>
     );
