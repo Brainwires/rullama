@@ -26,6 +26,21 @@ import { registerSW } from "virtual:pwa-register";
 
 const TIMEOUT_MS = 1500;
 
+// The static-HTML splash (index.html) exposes a tiny global so the JS
+// bundle can swap its status text during the SW lifecycle without
+// pulling in any React. Typed loosely because the bundle is allowed to
+// reach the splash phase even if the splash markup is missing (e.g. a
+// stripped-down index.html in tests).
+declare global {
+    interface Window {
+        __rullamaBootStatus?: (title?: string, detail?: string) => void;
+    }
+}
+
+function setBootStatus(title?: string, detail?: string) {
+    try { window.__rullamaBootStatus?.(title, detail); } catch { /* */ }
+}
+
 /**
  * Block until the latest service worker has taken over (or the timeout
  * elapses). Safe to await before `ReactDOM.createRoot(...).render(...)`.
@@ -74,6 +89,10 @@ export async function ensureFreshServiceWorker(): Promise<void> {
     // No pending install/waiting SW → we're already on the latest. Done.
     if (!reg.installing && !reg.waiting) return;
 
+    // Tell the user what's happening — otherwise they're staring at the
+    // generic splash for up to 1.5 s wondering why startup is slow.
+    setBootStatus("Updating rullama…", "Installing the latest version.");
+
     // Wait for the new SW to claim the page. With `clientsClaim: true`
     // this fires as soon as the new SW activates. Bounded by TIMEOUT_MS
     // so a slow install / stuck lifecycle doesn't strand us.
@@ -103,6 +122,7 @@ export async function ensureFreshServiceWorker(): Promise<void> {
     });
     if (swapped) {
         console.warn("[rullama] service worker swapped during boot — reloading to pick up fresh assets");
+        setBootStatus("Updating rullama…", "Reloading on the new version.");
         // Block on a never-resolving Promise so React never mounts and
         // no asset fetches kick off between here and the reload.
         window.location.reload();

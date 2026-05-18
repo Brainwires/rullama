@@ -1189,12 +1189,62 @@ async function handleRequest(msg: { requestId: number; type: string } & Args) {
     }
 }
 
+/** Synchronously release every OS handle the core worker holds. Called
+ *  from the shutdown signal on `pagehide`/`beforeunload`, plus as a
+ *  belt-and-suspenders cleanup before `self.close()`. Closing the
+ *  `FileSystemSyncAccessHandle` is the load-bearing bit — it's
+ *  *exclusive*, so leaking it across a PWA update means the next boot
+ *  can't open the GGUF blob and hangs the load path forever. iOS Safari
+ *  in particular is slow to GC dead workers, so we cannot rely on the
+ *  browser to release the handle for us. */
+function releaseAllHandles() {
+    try {
+        if (syncHandle) {
+            try { syncHandle.close(); } catch { /* */ }
+            syncHandle = null;
+        }
+    } catch { /* */ }
+    try {
+        if (model) {
+            try { model.free?.(); } catch { /* */ }
+            model = null;
+        }
+    } catch { /* */ }
+    try {
+        // dbReady may be a pending Promise; if so, settle it best-effort
+        // by no-op (the worker is about to exit). If resolved, close().
+        if (dbReady) {
+            void dbReady.then((db) => {
+                try { (db as unknown as { close?: () => void }).close?.(); } catch { /* */ }
+            }).catch(() => {});
+            dbReady = null;
+        }
+    } catch { /* */ }
+    loadedInfo = null;
+}
+
 // Boot: wait for the host tab's `attach` message carrying the
-// MessagePort we'll use for all router traffic. Subsequent self.onmessage
-// fires are ignored — everything flows over the attached port.
+// MessagePort we'll use for all router traffic. The same channel also
+// carries the `{type: "shutdown"}` signal posted by `WorkerClient` on
+// `pagehide` — we cleanly release OPFS / DB handles + the wasm Model
+// before `self.close()`, so the next boot's `createSyncAccessHandle`
+// doesn't collide with a leaked handle from this worker. (Browser GC of
+// dead workers is slow on iOS Safari, so a plain `terminate()` from the
+// main thread can otherwise leave the model file locked for minutes.)
 (self as unknown as DedicatedWorkerGlobalScope).onmessage = (ev: MessageEvent) => {
     const data = ev.data;
-    if (!data || typeof data !== "object" || data.type !== "attach" || !data.port) return;
+    if (!data || typeof data !== "object") return;
+
+    if (data.type === "shutdown") {
+        try { log("core: shutdown received — releasing handles"); } catch { /* */ }
+        releaseAllHandles();
+        try {
+            (self as unknown as DedicatedWorkerGlobalScope).close();
+        } catch { /* */ }
+        return;
+    }
+
+    if (data.type !== "attach" || !data.port) return;
     if (routerPort) return; // already attached
     routerPort = data.port as MessagePort;
     routerPort.addEventListener("message", (e: MessageEvent) => {

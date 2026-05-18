@@ -26,10 +26,35 @@
 
     <title>rullama — Gemma 4 in the browser</title>
 
-    <!-- Boot-watchdog styles. Inline so the recovery UI renders even when
-         the hashed CSS bundle is unreachable (the exact failure mode the
-         watchdog exists to recover from). -->
+    <!-- Boot-watchdog + boot-splash styles. Inline so the splash renders on
+         first paint and the recovery UI renders even when the hashed CSS
+         bundle is unreachable (the exact failure mode the watchdog is for). -->
     <style>
+        #boot-splash {
+            position: fixed; inset: 0;
+            display: flex;
+            background: #0f1115; color: #e5e7eb;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            padding: 2rem; box-sizing: border-box;
+            align-items: center; justify-content: center;
+            flex-direction: column; text-align: center;
+            z-index: 99998;
+            transition: opacity 200ms ease-out;
+        }
+        #boot-splash .icon {
+            width: 128px; height: 128px;
+            border-radius: 24px;
+            margin-bottom: 1.25rem;
+            box-shadow: 0 12px 32px rgba(0,0,0,0.4);
+            animation: bpulse 2.4s ease-in-out infinite;
+        }
+        @keyframes bpulse {
+            0%, 100% { opacity: 0.85; transform: scale(1.00); }
+            50%      { opacity: 1.00; transform: scale(1.03); }
+        }
+        #boot-splash h1 { font-size: 0.95rem; margin: 0 0 0.25rem; font-weight: 600; }
+        #boot-splash p { font-size: 0.8rem; color: #9ca3af; margin: 0; max-width: 22rem; line-height: 1.4; }
+
         #boot-recovery {
             position: fixed; inset: 0;
             display: none;
@@ -53,11 +78,21 @@
 <body class="bg-background text-foreground antialiased">
     <div id="root"></div>
 
+    <!-- Boot splash: visible on first paint so the user never sees a black
+         screen during bundle download / SW boot. main.tsx can update the
+         status text via window.__rullamaBootStatus(msg), and it self-hides
+         as soon as React mounts (MutationObserver below). -->
+    <div id="boot-splash" role="status" aria-live="polite">
+        <img class="icon" src="/icons/icon-512.png" alt="rullama" aria-hidden="true" />
+        <h1 id="boot-splash-title">Loading rullama…</h1>
+        <p id="boot-splash-detail">Starting up.</p>
+    </div>
+
     <!-- Boot-recovery UI: hidden until the watchdog gives up on mount.
          Sits in the static HTML so it doesn't depend on the bundle. -->
     <div id="boot-recovery" role="alert" aria-live="assertive">
         <h1>App failed to start</h1>
-        <p>
+        <p id="boot-recovery-detail">
             The service worker may be holding a broken state from a previous
             update. Reset clears cached files + worker, then reloads.
         </p>
@@ -65,33 +100,128 @@
         <p class="small">If this keeps happening, reinstall the app.</p>
     </div>
 
-    <!-- Inline boot watchdog. If #root has no children 8 s after parse,
-         show the recovery UI. Recovery wipes all SW registrations and
-         caches, then forces a fresh reload bypassing the SW. Lives in
-         the static HTML so it survives any bundle / chunk-load failure
-         (the exact failure that the recovery is for). -->
+    <!-- Inline boot watchdog + splash controller. If #root has no children
+         after BOOT_TIMEOUT_MS, automatically try a soft reset (clear SW +
+         caches, reload with a `?_reset=…&_attempt=1` sentinel). On the
+         next boot, if the sentinel is present and React STILL hasn't
+         mounted in time, escalate to the manual recovery UI — so we
+         never loop, but we also try to self-heal once before bothering
+         the user. Lives in the static HTML so it survives any bundle /
+         chunk-load failure (the exact failure that the recovery is for). -->
     <script>
         (function () {
             var BOOT_TIMEOUT_MS = 8000;
+            var splash = document.getElementById('boot-splash');
+            var splashTitle  = document.getElementById('boot-splash-title');
+            var splashDetail = document.getElementById('boot-splash-detail');
             var rec = document.getElementById('boot-recovery');
             var btn = document.getElementById('boot-recovery-btn');
-            if (!rec || !btn) return;
+            if (!splash || !rec || !btn) return;
+
+            // Expose a tiny API so the JS bundle (pwa.ts) can update the
+            // splash text during SW boot/swap, instead of users staring
+            // at "Starting up." while a 1.5 s update gate runs.
+            window.__rullamaBootStatus = function (title, detail) {
+                try {
+                    if (title  !== undefined && splashTitle)  splashTitle.textContent  = String(title);
+                    if (detail !== undefined && splashDetail) splashDetail.textContent = String(detail);
+                } catch (e) { /* */ }
+            };
+
+            // Hide the splash. Fade out so the React tree doesn't pop in.
+            function hideSplash() {
+                if (!splash || splash.dataset.hidden === '1') return;
+                splash.dataset.hidden = '1';
+                splash.style.opacity = '0';
+                setTimeout(function () {
+                    if (splash) splash.style.display = 'none';
+                }, 250);
+            }
+
+            // Has the previous boot already tried a soft auto-recovery?
+            // The query-string sentinel survives the reload; we read it
+            // here, then strip it so it doesn't pollute subsequent reloads
+            // initiated by the React app itself.
+            function alreadyAttemptedAutoRecovery() {
+                try {
+                    var sp = new URLSearchParams(location.search);
+                    return sp.get('_attempt') === '1';
+                } catch (e) { return false; }
+            }
+            var wasAutoRecoveryAttempt = alreadyAttemptedAutoRecovery();
+            if (wasAutoRecoveryAttempt) {
+                try {
+                    var url = new URL(location.href);
+                    url.searchParams.delete('_attempt');
+                    url.searchParams.delete('_reset');
+                    history.replaceState(null, '', url.toString());
+                } catch (e) { /* */ }
+            }
+
+            // Soft auto-recovery: unregister SW + clear caches + reload
+            // with the sentinel set. Same as the manual button but fires
+            // automatically the first time a boot exceeds the watchdog.
+            async function attemptAutoRecovery() {
+                try {
+                    if (splashTitle)  splashTitle.textContent  = 'Recovering…';
+                    if (splashDetail) splashDetail.textContent = 'Clearing stale cache and reloading.';
+                } catch (e) { /* */ }
+                try {
+                    if ('serviceWorker' in navigator) {
+                        var regs = await navigator.serviceWorker.getRegistrations();
+                        await Promise.all(regs.map(function (r) { return r.unregister(); }));
+                    }
+                } catch (e) { /* */ }
+                try {
+                    if ('caches' in window) {
+                        var keys = await caches.keys();
+                        await Promise.all(keys.map(function (k) { return caches.delete(k); }));
+                    }
+                } catch (e) { /* */ }
+                var u = location.pathname + '?_reset=' + Date.now() + '&_attempt=1';
+                location.replace(u);
+            }
+
+            // Escalation: show the manual recovery UI. Used when the
+            // auto-recovery attempt has already happened on the previous
+            // boot and React still won't mount — at that point we're
+            // looking at a stuck SharedWorker / OPFS lock that survives
+            // unregister, and the user probably needs to fully close the
+            // PWA (or in the worst case, reinstall).
+            function showRecoveryUI() {
+                if (splash) splash.style.display = 'none';
+                if (rec)    rec.style.display    = 'flex';
+                // If we got here, the auto-recovery already ran and failed
+                // — give the user better guidance.
+                var detail = document.getElementById('boot-recovery-detail');
+                if (detail && wasAutoRecoveryAttempt) {
+                    detail.textContent =
+                        'Tried clearing the service worker once already and the app still won’t start. ' +
+                        'Force-quit the app (swipe it away from the recents view) and reopen. ' +
+                        'If that doesn’t help, reinstall the PWA.';
+                }
+            }
 
             var armed = true;
             var watchdog = setTimeout(function () {
                 if (!armed) return;
                 var root = document.getElementById('root');
                 if (root && root.children.length > 0) return;  // mounted, false alarm
-                rec.style.display = 'flex';
+                if (wasAutoRecoveryAttempt) {
+                    showRecoveryUI();
+                } else {
+                    attemptAutoRecovery();
+                }
             }, BOOT_TIMEOUT_MS);
 
-            // Disarm as soon as the React tree appears.
+            // Disarm + hide splash as soon as the React tree appears.
             var mo = new MutationObserver(function () {
                 var root = document.getElementById('root');
                 if (root && root.children.length > 0) {
                     armed = false;
                     clearTimeout(watchdog);
                     mo.disconnect();
+                    hideSplash();
                 }
             });
             mo.observe(document.documentElement, { childList: true, subtree: true });

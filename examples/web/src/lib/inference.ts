@@ -144,13 +144,28 @@ export class WorkerClient {
             }
         });
 
-        // Send a final `disconnect` on tab close so the worker can
+        // Send a final `disconnect` on tab close so the router can
         // immediately release any held session + drop the port without
-        // waiting for the heartbeat GC.
+        // waiting for the heartbeat GC. If we're the elected core host,
+        // also post a `shutdown` to the dedicated worker so it closes
+        // its FileSystemSyncAccessHandle / DB / Model BEFORE we
+        // terminate — leaking the sync handle is the prime cause of
+        // "hangs on OPFS load after an update," because the handle is
+        // exclusive and iOS Safari is slow to GC dead workers. We
+        // microtask-delay `terminate()` to give the worker's onmessage
+        // loop a chance to drain the shutdown message; if the browser
+        // kills the worker before it processes the message anyway, the
+        // explicit terminate is the safety net.
         const onLeave = () => {
             try { this.port.postMessage({ requestId: -1, type: "disconnect" }); } catch { /* */ }
-            try { this.coreWorker?.terminate(); } catch { /* */ }
+            const w = this.coreWorker;
             this.coreWorker = null;
+            if (w) {
+                try { w.postMessage({ type: "shutdown" }); } catch { /* */ }
+                Promise.resolve().then(() => {
+                    try { w.terminate(); } catch { /* */ }
+                });
+            }
         };
         window.addEventListener("pagehide", onLeave);
         window.addEventListener("beforeunload", onLeave);
