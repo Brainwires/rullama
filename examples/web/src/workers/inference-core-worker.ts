@@ -1325,23 +1325,44 @@ async function handleRequest(msg: { requestId: number; type: string } & Args) {
 
 /** Synchronously release every OS handle the core worker holds. Called
  *  from the shutdown signal on `pagehide`/`beforeunload`, plus as a
- *  belt-and-suspenders cleanup before `self.close()`. Closing the
- *  `FileSystemSyncAccessHandle` is the load-bearing bit — it's
- *  *exclusive*, so leaking it across a PWA update means the next boot
- *  can't open the GGUF blob and hangs the load path forever. iOS Safari
- *  in particular is slow to GC dead workers, so we cannot rely on the
- *  browser to release the handle for us. */
+ *  belt-and-suspenders cleanup before `self.close()`.
+ *
+ *  Order matters here:
+ *
+ *  1. **GPU towers first.** `releaseVisionWeights()` + `releaseAudioWeights()`
+ *     synchronously drop the per-block weight buffers (~3 GB audio,
+ *     ~3 GB vision on gemma4:e2b). These are the largest GPU residents;
+ *     `model.free?.()` would *eventually* free them via Rust Drop, but
+ *     iOS Safari can take a noticeable moment before the wgpu queue
+ *     actually surrenders the memory — and during that window the NEW
+ *     core worker is already booting, allocating its own audio tower,
+ *     and OOMing the GPU. This was the "audio crashing on iPhone after
+ *     a reload" symptom: the data and code were fine, the previous
+ *     worker's GPU surface just hadn't been handed back yet.
+ *  2. **wasm Model.** Drops the text tower, KV cache, sampler state,
+ *     pipeline cache. Rust Drop handles the rest.
+ *  3. **OPFS sync handle.** Releases the exclusive lock so the next
+ *     worker can open the GGUF.
+ *  4. **DB.** Best-effort close (may be a pending Promise).
+ */
 function releaseAllHandles() {
+    try {
+        if (model) {
+            try {
+                const freedV = model.releaseVisionWeights?.() ?? 0;
+                const freedA = model.releaseAudioWeights?.() ?? 0;
+                if (freedV > 0 || freedA > 0) {
+                    log(`shutdown: released ${(freedV / (1024 * 1024)).toFixed(0)}MB vision + ${(freedA / (1024 * 1024)).toFixed(0)}MB audio GPU weights before free()`);
+                }
+            } catch { /* */ }
+            try { model.free?.(); } catch { /* */ }
+            model = null;
+        }
+    } catch { /* */ }
     try {
         if (syncHandle) {
             try { syncHandle.close(); } catch { /* */ }
             syncHandle = null;
-        }
-    } catch { /* */ }
-    try {
-        if (model) {
-            try { model.free?.(); } catch { /* */ }
-            model = null;
         }
     } catch { /* */ }
     try {

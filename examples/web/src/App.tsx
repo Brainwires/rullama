@@ -308,6 +308,7 @@ export function App() {
         return () => document.removeEventListener("visibilitychange", onVis);
     }, [busy]);
 
+
     // Bootstrap DB + conversation list on mount.
     useEffect(() => {
         const client = getClient();
