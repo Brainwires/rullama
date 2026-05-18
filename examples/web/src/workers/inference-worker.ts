@@ -73,9 +73,23 @@ const STATEFUL_RPCS = new Set([
     "setSampling",
     "saveKvState",
     "restoreKvState",
+    // Training RPCs all mutate the Model handle (TrainingSession owns
+    // it for the session's lifetime) — same session-locking pattern as
+    // the chat-side step/encode RPCs.
+    "trainingStart",
+    "trainingStep",
+    "trainingZeroGrads",
+    "trainingForwardBackward",
+    "trainingOptimizerStep",
+    "trainingSaveAdapter",
+    "trainingFinish",
+    "trainingApplyAdapter",
+    "trainingClearAdapter",
+    "trainingDeleteAdapter",
 ]);
-// renderChatForContinuation + position are stateless reads — no session
-// gating needed; they can interleave with another tab's generation.
+// renderChatForContinuation + position + trainingStatus + trainingListAdapters
+// are stateless reads — no session gating needed; they can interleave with
+// another tab's generation.
 
 function acquireSession(abortToken: string, port: MessagePort): Promise<number> {
     return new Promise<number>((resolve, reject) => {

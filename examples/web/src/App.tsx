@@ -19,11 +19,13 @@ import { useToast } from "@/lib/toast";
 import { usePersistedState } from "@/lib/persisted";
 import { useIOSKeyboard } from "@/lib/useIOSKeyboard";
 import { useWakeLock } from "@/lib/wakeLock";
-import { fmtBytes, fmtEta, clampInt, clampNum } from "@/lib/utils";
+import { fmtBytes, fmtEta, clampInt, clampNum, cn } from "@/lib/utils";
 import { preprocessImage } from "@/lib/image_preprocess";
 import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
 import { DEFAULT_VOICE_OPTIONS, VOICE_BOUNDS, type VoiceOptions } from "@/lib/voice";
-import { Settings, History } from "lucide-react";
+import { FineTunePanel } from "@/components/FineTunePanel";
+import { Badge } from "@/components/ui/badge";
+import { Settings, History, MessageSquare, Sparkles } from "lucide-react";
 
 const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
@@ -108,6 +110,13 @@ export function App() {
     const [loadingPercent, setLoadingPercent] = useState(0);
     const [loadingLabel, setLoadingLabel]     = useState("");
     const [statusText, setStatusText]         = useState("no model");
+
+    // View routing — Chat tab vs Fine-tune tab. Persisted so a reload
+    // doesn't bounce the user out of the tab they were in.
+    const [view, setView] = usePersistedState<"chat" | "finetune">("rullama:view", "chat");
+    // Adapter currently active in chat. Kept here (not just inside
+    // FineTunePanel) so the header badge stays in sync.
+    const [activeAdapter, setActiveAdapter] = useState<string | null>(null);
 
     // Chat state
     const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -359,7 +368,15 @@ export function App() {
                     .then(setConversations)
                     .catch(() => { /* */ });
             }),
+            client.subscribe("adapterChanged", (p) => {
+                setActiveAdapter((p.active as string | null | undefined) ?? null);
+            }),
         ];
+        // Probe initial adapter state once the model is ready (worker
+        // remembers what was applied across page reloads).
+        void getClient().trainingListAdapters()
+            .then((r) => setActiveAdapter(r.active))
+            .catch(() => { /* */ });
         return () => { for (const o of offs) o(); };
     }, []);
 
@@ -1554,23 +1571,63 @@ export function App() {
                 Dynamic Island — fixed h-12 was stuffing all content
                 under the status bar in standalone PWA mode. */}
             <header className="flex min-h-12 shrink-0 items-center gap-2 border-b border-border bg-card/50 px-3 safe-top">
-                <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8"
-                    onClick={() => setHistoryOpen(!historyOpen)}
-                    title="Toggle conversation history"
-                    aria-pressed={historyOpen}
-                >
-                    <History />
-                </Button>
+                {view === "chat" && (
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => setHistoryOpen(!historyOpen)}
+                        title="Toggle conversation history"
+                        aria-pressed={historyOpen}
+                    >
+                        <History />
+                    </Button>
+                )}
                 <span className="font-semibold tracking-tight">rullama</span>
-                {activeTitle && (
+                {view === "chat" && activeTitle && (
                     <span className="hidden truncate text-xs text-muted-foreground sm:inline">
                         / {activeTitle}
                     </span>
                 )}
-                <div className="ml-auto flex items-center gap-2">
+                {activeAdapter && (
+                    <Badge tone="info" className="hidden text-[10px] sm:inline-flex">
+                        adapter: {activeAdapter}
+                    </Badge>
+                )}
+                <div className="ml-auto flex items-center gap-1">
+                    {/* Tab switcher — segmented control. */}
+                    <div className="flex gap-0.5 rounded-md border border-border bg-muted/30 p-0.5">
+                        <button
+                            type="button"
+                            onClick={() => setView("chat")}
+                            aria-pressed={view === "chat"}
+                            className={cn(
+                                "flex h-7 items-center gap-1 rounded px-2 text-xs transition-colors",
+                                view === "chat"
+                                    ? "bg-background text-foreground shadow-sm"
+                                    : "text-muted-foreground hover:bg-background/50",
+                            )}
+                            title="Chat"
+                        >
+                            <MessageSquare className="size-3.5" />
+                            <span className="hidden sm:inline">Chat</span>
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setView("finetune")}
+                            aria-pressed={view === "finetune"}
+                            className={cn(
+                                "flex h-7 items-center gap-1 rounded px-2 text-xs transition-colors",
+                                view === "finetune"
+                                    ? "bg-background text-foreground shadow-sm"
+                                    : "text-muted-foreground hover:bg-background/50",
+                            )}
+                            title="Fine-tune"
+                        >
+                            <Sparkles className="size-3.5" />
+                            <span className="hidden sm:inline">Fine-tune</span>
+                        </button>
+                    </div>
                     <Button
                         variant="ghost"
                         size="icon"
@@ -1628,6 +1685,13 @@ export function App() {
                     />
                 }
             >
+                {view === "finetune" ? (
+                    <FineTunePanel
+                        modelStatus={modelStatus}
+                        activeAdapter={activeAdapter}
+                        onAdapterChanged={setActiveAdapter}
+                    />
+                ) : (
                 <ChatPanel
                     messages={messages}
                     emptyState={
@@ -1693,6 +1757,7 @@ export function App() {
                     visionProgress={visionEncodeState}
                     statusLine={statusLine}
                 />
+                )}
             </DualSidebarLayout>
             <RestartOverlay />
         </div>

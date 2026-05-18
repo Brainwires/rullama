@@ -452,6 +452,107 @@ export class WorkerClient {
         return this.rpc("msgListImages", { conversationId });
     }
     dbFlush(): Promise<boolean> { return this.rpc("dbFlush"); }
+
+    // ── LoRA fine-tuning ───────────────────────────────────────────────
+    /** Start a training session. Consumes the Model — chat-side RPCs
+     *  will throw until `trainingFinish()` returns the Model. */
+    trainingStart(args: {
+        loraConfig: TrainingLoraConfig;
+        hparams:    TrainingHyperparams;
+        totalSteps?: number;
+    }): Promise<TrainingSessionInfo> {
+        return this.rpc("trainingStart", { sid: this.session, ...args } as Record<string, unknown>);
+    }
+    trainingStep(args: {
+        inputIds:  Uint32Array;
+        targetId?: number;
+        targets?:  Uint32Array;
+        lossMode?: "next_token" | "per_position";
+    }): Promise<TrainingStepReport> {
+        return this.rpc("trainingStep", { sid: this.session, ...args } as Record<string, unknown>);
+    }
+    trainingZeroGrads(): Promise<boolean> {
+        return this.rpc("trainingZeroGrads", { sid: this.session });
+    }
+    trainingForwardBackward(args: {
+        inputIds:  Uint32Array;
+        targetId?: number;
+        targets?:  Uint32Array;
+        lossMode?: "next_token" | "per_position";
+    }): Promise<{ loss: number; step: number; lr: number }> {
+        return this.rpc("trainingForwardBackward", { sid: this.session, ...args } as Record<string, unknown>);
+    }
+    trainingOptimizerStep(): Promise<{ step: number; lr: number }> {
+        return this.rpc("trainingOptimizerStep", { sid: this.session });
+    }
+    trainingSaveAdapter(name: string): Promise<{ name: string; size: number }> {
+        return this.rpc("trainingSaveAdapter", { sid: this.session, name });
+    }
+    trainingFinish(): Promise<boolean> {
+        return this.rpc("trainingFinish", { sid: this.session });
+    }
+    trainingApplyAdapter(name: string): Promise<{ name: string; slots: number }> {
+        return this.rpc("trainingApplyAdapter", { sid: this.session, name });
+    }
+    trainingClearAdapter(): Promise<boolean> {
+        return this.rpc("trainingClearAdapter", { sid: this.session });
+    }
+    trainingDeleteAdapter(name: string): Promise<boolean> {
+        return this.rpc("trainingDeleteAdapter", { sid: this.session, name });
+    }
+    trainingListAdapters(): Promise<{ entries: AdapterListEntry[]; active: string | null }> {
+        return this.rpc("trainingListAdapters", {});
+    }
+    trainingStatus(): Promise<TrainingStatusInfo> {
+        return this.rpc("trainingStatus", {});
+    }
+}
+
+export interface TrainingLoraConfig {
+    rank:           number;
+    alpha:          number;
+    dropout:        number;
+    target_modules: string[];
+}
+export interface TrainingHyperparams {
+    epochs:                       number;
+    batch_size:                   number;
+    learning_rate:                number;
+    warmup_steps:                 number;
+    weight_decay:                 number;
+    lr_scheduler:                 "constant" | "linear" | "cosine" | "cosine_warm_restarts";
+    seed:                         number;
+    max_seq_len:                  number;
+    gradient_accumulation_steps:  number;
+    max_grad_norm:                number;
+    loss_mode:                    "next_token" | "per_position";
+    gradient_checkpointing:       boolean;
+    mixed_precision:              boolean;
+}
+export interface TrainingStepReport {
+    loss: number;
+    lr:   number;
+    step: number;
+}
+export interface TrainingSessionInfo {
+    parameterCount:        number;
+    gradientCheckpointing: boolean;
+    mixedPrecision:        boolean;
+}
+export type TrainingStatusInfo =
+    | { active: false }
+    | {
+        active: true;
+        step: number;
+        lr: number;
+        parameterCount: number;
+        gradientCheckpointing: boolean;
+        mixedPrecision: boolean;
+    };
+export interface AdapterListEntry {
+    name:         string;
+    size:         number;
+    lastModified: number;
 }
 
 export interface ConversationRow {

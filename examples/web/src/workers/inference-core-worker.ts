@@ -14,7 +14,7 @@
 // (the router), one request at a time per stateful RPC.
 
 // @ts-expect-error — generated bundle, no .d.ts
-import init, { Model, WasmDatabase } from "/pkg/rullama.js";
+import init, { Model, TrainingSession, WasmDatabase } from "/pkg/rullama.js";
 
 interface WasmDbHandle {
     exec(sql: string): bigint;
@@ -38,6 +38,7 @@ interface ModelHandle {
     vocabSize: number;
     hasVision: boolean;
     hasAudio: boolean;
+    hasAdapter: boolean;
     imageSentinelIds(): [number, number] | null | undefined;
     audioSentinelIds(): [number, number] | null | undefined;
     encode(text: string): Uint32Array;
@@ -60,7 +61,36 @@ interface ModelHandle {
     restoreKvState(bytes: Uint8Array): void;
     renderChatForContinuation(messages: unknown, withBos: boolean): string;
     readonly position: number;
+    loadAdapter(bytes: Uint8Array): number;
+    clearAdapter(): void;
 }
+
+// Wasm-bindgen `TrainingSession` (from rullama-finetune). All async
+// methods return a Promise. The session *consumes* the Model on
+// construction (move semantics from JS' perspective): no Model RPC
+// can run while training is live. `finish()` returns the Model back
+// to JS so chat can resume against the same loaded weights.
+interface TrainingSessionHandle {
+    free?(): void;
+    readonly stepNum: number;
+    readonly lr: number;
+    readonly parameterCount: number;
+    readonly gradientCheckpointing: boolean;
+    readonly mixedPrecision: boolean;
+    step(inputIds: Uint32Array, targetId: number): Promise<{ loss: number; lr: number; step: number }>;
+    stepPerPosition(inputIds: Uint32Array, targets: Uint32Array): Promise<{ loss: number; lr: number; step: number }>;
+    zeroGrads(): void;
+    forwardBackward(inputIds: Uint32Array, targetId: number): Promise<number>;
+    forwardBackwardPerPosition(inputIds: Uint32Array, targets: Uint32Array): Promise<number>;
+    optimizerStep(): void;
+    saveAdapter(): Promise<Uint8Array>;
+    setLrSchedule(totalSteps: number): void;
+    finish(): ModelHandle;
+}
+interface TrainingSessionStatic {
+    new(model: ModelHandle, loraConfigJson: string, hparamsJson: string): TrainingSessionHandle;
+}
+const TrainingSessionClass = TrainingSession as unknown as TrainingSessionStatic;
 interface ModelStatic {
     loadFromOpfsTextOnly(
         readFn: (offset: number, length: number) => Uint8Array | Promise<Uint8Array>,
@@ -79,12 +109,19 @@ const ModelClass = Model as unknown as ModelStatic;
 // ───────────────────────────────────────────────────────────────────────
 
 const OPFS_DIR = "rullama-models";
+const ADAPTERS_DIR = "rullama-adapters";
 const DB_NAME  = "rullama-chat.db";
 
 let wasmReady: Promise<unknown> | null = null;
 let model: ModelHandle | null = null;
 let syncHandle: FileSystemSyncAccessHandle | null = null;
 let dbReady: Promise<WasmDbHandle> | null = null;
+// When non-null, a training session owns the Model. All Model-mutating
+// RPCs (step, encodeImage, reset, etc.) refuse to run; the chat UI
+// gates this at the surface level.
+let trainingSession: TrainingSessionHandle | null = null;
+/** Name of the adapter currently loaded into Model, if any. */
+let activeAdapterName: string | null = null;
 
 interface LoadedModelInfo {
     name: string | null;
@@ -271,7 +308,65 @@ async function handleLoad(args: LoadArgs): Promise<LoadedModelInfo> {
 
 function requireModel(): ModelHandle {
     if (!model) throw new Error("no model loaded — call load() first");
+    if (trainingSession) throw new Error(
+        "model is owned by an active training session — call trainingFinish() first");
     return model;
+}
+
+function requireTraining(): TrainingSessionHandle {
+    if (!trainingSession) throw new Error("no training session active — call trainingStart() first");
+    return trainingSession;
+}
+
+async function getAdaptersDir(create: boolean): Promise<FileSystemDirectoryHandle> {
+    const root = await navigator.storage.getDirectory();
+    return await root.getDirectoryHandle(ADAPTERS_DIR, { create });
+}
+
+async function writeAdapterBytes(name: string, bytes: Uint8Array): Promise<number> {
+    const dir = await getAdaptersDir(true);
+    const fh = await dir.getFileHandle(`${name}.bin`, { create: true });
+    const handle = await fh.createSyncAccessHandle();
+    try {
+        handle.truncate(0);
+        handle.write(bytes, { at: 0 });
+        handle.flush();
+        return handle.getSize();
+    } finally {
+        try { handle.close(); } catch { /* */ }
+    }
+}
+
+async function readAdapterBytes(name: string): Promise<Uint8Array> {
+    const dir = await getAdaptersDir(false);
+    const fh = await dir.getFileHandle(`${name}.bin`, { create: false });
+    const f = await fh.getFile();
+    return new Uint8Array(await f.arrayBuffer());
+}
+
+async function listAdapterEntries(): Promise<Array<{name: string; size: number; lastModified: number}>> {
+    try {
+        const dir = await getAdaptersDir(false);
+        const out: Array<{name: string; size: number; lastModified: number}> = [];
+        const anyDir = dir as unknown as {
+            entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
+        };
+        for await (const [name, h] of anyDir.entries()) {
+            if (h.kind !== "file" || !name.endsWith(".bin")) continue;
+            try {
+                const f = await (h as FileSystemFileHandle).getFile();
+                out.push({
+                    name: name.replace(/\.bin$/, ""),
+                    size: f.size,
+                    lastModified: f.lastModified,
+                });
+            } catch { /* */ }
+        }
+        out.sort((a, b) => b.lastModified - a.lastModified);
+        return out;
+    } catch {
+        return [];
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -634,6 +729,164 @@ const RPC: Record<string, Handler> = {
         const db = await ensureDb();
         db.flush();
         return true;
+    },
+
+    // ── LoRA fine-tuning ────────────────────────────────────────────────
+    // Training consumes the Model handle for its lifetime; chat-side RPCs
+    // (step, encode, reset, etc.) all throw via `requireModel()` while a
+    // session is live. UI must mode-gate to avoid the throw.
+
+    trainingStart: async (a) => {
+        if (!model) throw new Error("load a model before starting training");
+        if (trainingSession) throw new Error(
+            "training already active — call trainingFinish() first");
+        // If there's an active adapter loaded into Model from a previous
+        // session, clear it — training initialises fresh LoRA state.
+        if (activeAdapterName) {
+            try { model.clearAdapter(); } catch { /* */ }
+            activeAdapterName = null;
+            notify("adapterChanged", { active: null });
+        }
+        const loraCfgJson = JSON.stringify(a.loraConfig ?? {});
+        const hpJson      = JSON.stringify(a.hparams ?? {});
+        const moved = model;
+        model = null; // Model is moved into TrainingSession.
+        try {
+            trainingSession = new TrainingSessionClass(moved, loraCfgJson, hpJson);
+        } catch (e) {
+            // Constructor failed — Model was already moved, JS handle is invalid.
+            // Drop loadedInfo so the next chat session re-loads.
+            loadedInfo = null;
+            notify("modelFreed", {});
+            throw e;
+        }
+        const totalSteps = Number(a.totalSteps ?? 0);
+        if (totalSteps > 0) trainingSession.setLrSchedule(totalSteps);
+        const info = {
+            parameterCount: trainingSession.parameterCount,
+            gradientCheckpointing: trainingSession.gradientCheckpointing,
+            mixedPrecision: trainingSession.mixedPrecision,
+        };
+        notify("trainingStarted", info);
+        log(`training: started, params=${info.parameterCount} ckpt=${info.gradientCheckpointing} mp=${info.mixedPrecision}`);
+        return info;
+    },
+
+    trainingStep: async (a) => {
+        const s = requireTraining();
+        const inputIds = a.inputIds as Uint32Array;
+        const lossMode = String(a.lossMode ?? "next_token");
+        const report = lossMode === "per_position"
+            ? await s.stepPerPosition(inputIds, a.targets as Uint32Array)
+            : await s.step(inputIds, Number(a.targetId));
+        return report;
+    },
+
+    trainingZeroGrads: async (a) => { void a; requireTraining().zeroGrads(); return true; },
+
+    trainingForwardBackward: async (a) => {
+        const s = requireTraining();
+        const inputIds = a.inputIds as Uint32Array;
+        const lossMode = String(a.lossMode ?? "next_token");
+        const loss = lossMode === "per_position"
+            ? await s.forwardBackwardPerPosition(inputIds, a.targets as Uint32Array)
+            : await s.forwardBackward(inputIds, Number(a.targetId));
+        return { loss, step: s.stepNum, lr: s.lr };
+    },
+
+    trainingOptimizerStep: async (a) => {
+        void a;
+        const s = requireTraining();
+        s.optimizerStep();
+        return { step: s.stepNum, lr: s.lr };
+    },
+
+    trainingSaveAdapter: async (a) => {
+        const s = requireTraining();
+        const name = String(a.name ?? "").trim();
+        if (!name) throw new Error("trainingSaveAdapter: 'name' must be a non-empty string");
+        if (!/^[\w\-. ]+$/.test(name)) {
+            throw new Error("trainingSaveAdapter: 'name' must match [\\w\\-. ]+");
+        }
+        const bytes = await s.saveAdapter();
+        const written = await writeAdapterBytes(name, bytes);
+        log(`training: saved adapter '${name}' (${written} bytes) → OPFS:${ADAPTERS_DIR}/${name}.bin`);
+        notify("adapterSaved", { name, size: written });
+        return { name, size: written };
+    },
+
+    trainingFinish: async (a) => {
+        void a;
+        if (!trainingSession) throw new Error("no training session to finish");
+        try {
+            model = trainingSession.finish();
+        } finally {
+            trainingSession = null;
+        }
+        notify("trainingFinished", {});
+        log(`training: finished, Model returned to chat`);
+        return true;
+    },
+
+    trainingApplyAdapter: async (a) => {
+        if (!model) throw new Error("load a model before applying an adapter");
+        if (trainingSession) throw new Error(
+            "active training session owns the model — finish it first");
+        const name = String(a.name ?? "").trim();
+        if (!name) throw new Error("trainingApplyAdapter: 'name' required");
+        const bytes = await readAdapterBytes(name);
+        const slots = model.loadAdapter(bytes);
+        activeAdapterName = name;
+        notify("adapterChanged", { active: name, slots });
+        log(`training: applied adapter '${name}' (${slots} slots)`);
+        return { name, slots };
+    },
+
+    trainingClearAdapter: async (a) => {
+        void a;
+        if (!model) return false;
+        if (trainingSession) throw new Error(
+            "active training session owns the model — finish it first");
+        model.clearAdapter();
+        const was = activeAdapterName;
+        activeAdapterName = null;
+        notify("adapterChanged", { active: null, was });
+        return true;
+    },
+
+    trainingListAdapters: async (a) => {
+        void a;
+        const entries = await listAdapterEntries();
+        return { entries, active: activeAdapterName };
+    },
+
+    trainingDeleteAdapter: async (a) => {
+        const name = String(a.name ?? "").trim();
+        if (!name) throw new Error("trainingDeleteAdapter: 'name' required");
+        if (activeAdapterName === name && model) {
+            try { model.clearAdapter(); } catch { /* */ }
+            activeAdapterName = null;
+            notify("adapterChanged", { active: null });
+        }
+        try {
+            const dir = await getAdaptersDir(false);
+            await dir.removeEntry(`${name}.bin`);
+        } catch { /* */ }
+        notify("adapterDeleted", { name });
+        return true;
+    },
+
+    trainingStatus: async (a) => {
+        void a;
+        if (!trainingSession) return { active: false };
+        return {
+            active: true,
+            step: trainingSession.stepNum,
+            lr: trainingSession.lr,
+            parameterCount: trainingSession.parameterCount,
+            gradientCheckpointing: trainingSession.gradientCheckpointing,
+            mixedPrecision: trainingSession.mixedPrecision,
+        };
     },
 };
 
