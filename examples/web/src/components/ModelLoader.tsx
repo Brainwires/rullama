@@ -4,7 +4,7 @@ import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { fmtBytes } from "@/lib/utils";
 import { type ModelEntry, isSupported, listModels } from "@/lib/api";
-import { RefreshCw, Download, Trash2, Unplug } from "lucide-react";
+import { Download, Trash2, Unplug } from "lucide-react";
 
 export type ModelStatus = "idle" | "loading" | "ready" | "error";
 
@@ -66,16 +66,6 @@ export function ModelLoader(props: Props) {
                     </option>
                 ))}
             </select>
-            <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7"
-                onClick={refresh}
-                disabled={refreshing}
-                title="Refresh model list"
-            >
-                <RefreshCw className={refreshing ? "animate-spin" : ""} />
-            </Button>
             <Button
                 size="sm"
                 className="h-7 px-2 text-xs"
