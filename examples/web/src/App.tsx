@@ -1631,7 +1631,6 @@ export function App() {
             const phase = String(p.phase ?? "encoding");
             const layer = Number(p.layer ?? 0);
             const total = Number(p.total ?? 1);
-            console.log("[pipelineProgress audio]", phase, layer, "/", total);
             setVisionEncodeState({
                 imageIdx: 1,
                 nImages:  1,
