@@ -166,6 +166,12 @@ export function SettingsDialog(props: Props) {
                                     silently before the system message
                                 </span>
                             </label>
+                            <p className="ml-6 text-[10px] leading-tight text-muted-foreground">
+                                Tip: combining thinking with temperature &gt; 0.3 on attached
+                                images or audio can produce wandering chain-of-thought that
+                                reads like garbled text. Lower both for crisp multimodal
+                                analysis.
+                            </p>
                         </section>
 
                         <section className="flex flex-col gap-2 border-t border-border pt-3">
