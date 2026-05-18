@@ -6,7 +6,7 @@ import { type ChatMessage, type ImageAttachment } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
 import { parseModelContent } from "@/lib/parseModel";
 import { cn } from "@/lib/utils";
-import { Mic, Send, Square, Plus, X } from "lucide-react";
+import { Mic, Send, Square, Paperclip, X } from "lucide-react";
 import { MicButton } from "@/components/MicButton";
 import { VisionProgress, type VisionProgressState } from "@/components/VisionProgress";
 import type { VoiceOptions } from "@/lib/voice";
@@ -292,7 +292,7 @@ export function ChatPanel(props: Props) {
                     variant="outline"
                     title={props.canAttach ? "Attach image" : "Vision tower unavailable for this model"}
                 >
-                    <Plus />
+                    <Paperclip />
                 </Button>
                 {props.canRecord && (
                     <MicButton
