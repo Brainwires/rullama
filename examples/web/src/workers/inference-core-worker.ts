@@ -96,8 +96,16 @@ interface TrainingSessionHandle {
     readonly parameterCount: number;
     readonly gradientCheckpointing: boolean;
     readonly mixedPrecision: boolean;
-    step(inputIds: Uint32Array, targetId: number): Promise<{ loss: number; lr: number; step: number }>;
-    stepPerPosition(inputIds: Uint32Array, targets: Uint32Array): Promise<{ loss: number; lr: number; step: number }>;
+    step(
+        inputIds: Uint32Array,
+        targetId: number,
+        progressCb?: (phase: string, current: number, total: number) => void,
+    ): Promise<{ loss: number; lr: number; step: number }>;
+    stepPerPosition(
+        inputIds: Uint32Array,
+        targets: Uint32Array,
+        progressCb?: (phase: string, current: number, total: number) => void,
+    ): Promise<{ loss: number; lr: number; step: number }>;
     zeroGrads(): void;
     forwardBackward(inputIds: Uint32Array, targetId: number): Promise<number>;
     forwardBackwardPerPosition(inputIds: Uint32Array, targets: Uint32Array): Promise<number>;
@@ -837,10 +845,19 @@ const RPC: Record<string, Handler> = {
         const s = requireTraining();
         const inputIds = a.inputIds as Uint32Array;
         const lossMode = String(a.lossMode ?? "next_token");
+        // Progress beacons: every per-layer + per-token tick fans out
+        // via the `trainingProgress` notify so the UI's
+        // TrainingProgress strip (modelled on VisionProgress) updates
+        // mid-step. Fast (~3-5 Hz worth of postMessage traffic on
+        // browser); the strip prevents the "is it frozen?" panic
+        // during slow first steps.
+        const onProgress = (phase: string, current: number, total: number) => {
+            notify("trainingProgress", { phase, current, total, step: s.stepNum, lr: s.lr });
+        };
         try {
             return lossMode === "per_position"
-                ? await s.stepPerPosition(inputIds, a.targets as Uint32Array)
-                : await s.step(inputIds, Number(a.targetId));
+                ? await s.stepPerPosition(inputIds, a.targets as Uint32Array, onProgress)
+                : await s.step(inputIds, Number(a.targetId), onProgress);
         } catch (e) {
             // Log + rethrow. The session stays alive (the wasm side
             // doesn't drop on a kernel error), so the UI can choose

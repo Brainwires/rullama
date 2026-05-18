@@ -22,6 +22,7 @@ import {
 } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
 import type { ModelStatus } from "@/components/ModelLoader";
+import { TrainingProgress, type TrainingProgressState } from "@/components/TrainingProgress";
 
 // Thin wrappers around the toast context so the rest of the file reads
 // like `toast.success(...)` without leaking the `showToast({level,...})`
@@ -150,6 +151,29 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
     const [errorMsg, setErrorMsg] = useState<string | null>(null);
     const cancelRef = useRef(false);
 
+    // Live mid-step progress fed by the worker's `trainingProgress`
+    // notify. Mirrors how Chat renders VisionProgress for vision
+    // encode. `coldHint` flips on after 5 s in the `starting` phase
+    // to explain the WGSL-compile pause on first step.
+    const [progress, setProgress] = useState<TrainingProgressState | null>(null);
+    const [coldHint, setColdHint] = useState<string | null>(null);
+    useEffect(() => {
+        const off = client.subscribe("trainingProgress", (p) => {
+            const phase = String(p.phase ?? "");
+            // Once any progress beacon lands, the cold-start window
+            // is over — clear the hint.
+            setColdHint(null);
+            setProgress({
+                phase: phase as TrainingProgressState["phase"],
+                current: Number(p.current ?? 0),
+                total: Number(p.total ?? 0),
+                step: Number(p.step ?? 0) || undefined,
+                lr: typeof p.lr === "number" ? p.lr : undefined,
+            });
+        });
+        return off;
+    }, [client]);
+
     // Adapter library.
     const [adapters, setAdapters] = useState<AdapterListEntry[]>([]);
     const refreshAdapters = useCallback(async () => {
@@ -233,6 +257,15 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
         setRecent([]);
         setErrorMsg(null);
         setPhase("training");
+        // Cold-start affordance — show the `starting` progress phase
+        // before the first beacon arrives. The 5 s watchdog flips on
+        // a "compiling WGSL" hint, which is the actual reason the
+        // first step is slow (pipeline cache cold on first dispatch).
+        setProgress({ phase: "starting", current: 0, total: 0 });
+        setColdHint(null);
+        const coldTimer = window.setTimeout(() => {
+            setColdHint("Compiling WGSL shaders — first step is slow on this device");
+        }, 5000);
 
         let sessionStarted = false;
         let sessionAcquired = false;
@@ -324,6 +357,10 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                 setPhase("error");
                 toast.error(`Training stopped: ${msg}`);
             }
+        } finally {
+            window.clearTimeout(coldTimer);
+            setColdHint(null);
+            setProgress(null);
         }
     }, [activeAdapter, client, examples, hp, lora, modelStatus, onAdapterChanged, recent.length, stepsBudget, toast]);
 
@@ -462,6 +499,8 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                             lossDirection={lossDirection}
                             progressPct={progressPct}
                             errorMsg={errorMsg}
+                            progress={isTraining ? progress : null}
+                            coldHint={isTraining ? coldHint : null}
                         />
                     )}
                 </div>
@@ -910,6 +949,8 @@ function LivePanel(props: {
     lossDirection: number;
     progressPct: number;
     errorMsg: string | null;
+    progress: TrainingProgressState | null;
+    coldHint: string | null;
 }) {
     const dropPct = (props.firstLoss && props.lastLoss != null)
         ? ((props.firstLoss - props.lastLoss) / Math.max(props.firstLoss, 1e-6)) * 100
@@ -937,6 +978,18 @@ function LivePanel(props: {
                         <AlertTriangle className="mt-0.5 size-3 shrink-0" />
                         <span className="break-words">{props.errorMsg}</span>
                     </div>
+                )}
+                {/* Mirrors VisionProgress for chat: real-time beacon
+                    from inside the wasm trainer — phase + per-layer or
+                    per-token tick — so the user can see exactly what
+                    the GPU is doing during the otherwise-silent
+                    multi-second step. */}
+                {props.progress && (
+                    <TrainingProgress
+                        state={props.progress}
+                        stepBudget={props.stepsBudget}
+                        coldHint={props.coldHint ?? undefined}
+                    />
                 )}
                 <div className="flex items-baseline gap-3">
                     <span
