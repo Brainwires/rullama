@@ -268,7 +268,7 @@ export function ChatPanel(props: Props) {
                 <input
                     ref={fileInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="image/*,audio/*"
                     multiple
                     className="hidden"
                     onChange={onFilesPicked}
@@ -290,7 +290,9 @@ export function ChatPanel(props: Props) {
                     onClick={onAttachClick}
                     disabled={!props.canAttach || !props.canType}
                     variant="outline"
-                    title={props.canAttach ? "Attach image" : "Vision tower unavailable for this model"}
+                    title={props.canAttach
+                        ? "Attach image or audio file for analysis"
+                        : "Multimodal tower unavailable for this model"}
                 >
                     <Paperclip />
                 </Button>

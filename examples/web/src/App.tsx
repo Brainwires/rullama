@@ -21,6 +21,7 @@ import { useIOSKeyboard } from "@/lib/useIOSKeyboard";
 import { useWakeLock } from "@/lib/wakeLock";
 import { fmtBytes, fmtEta, clampInt, clampNum, cn } from "@/lib/utils";
 import { preprocessImage } from "@/lib/image_preprocess";
+import { decodeAudioFile } from "@/lib/audio_decode";
 import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
 import { DEFAULT_VOICE_OPTIONS, VOICE_BOUNDS, type VoiceOptions } from "@/lib/voice";
 import { FineTunePanel } from "@/components/FineTunePanel";
@@ -541,26 +542,50 @@ export function App() {
     }, [busy]);
 
     const onAttachFiles = useCallback(async (files: FileList) => {
-        // Reject silently when vision is unavailable — the UI gating
-        // should already prevent the click, but a stale handler still
-        // could fire mid-unload.
-        if (!hasVision) return;
-        const next: ImageAttachment[] = [];
+        // Two attach paths: images route through the vision tower,
+        // audio files route through the audio tower (analyse-this-clip
+        // use-case; mic-button transcription is now a separate flow,
+        // see `onCaptureAudio`). UI gating should prevent attaching
+        // capability-mismatched files but a stale handler can still
+        // fire mid-unload — silently drop in that case.
+        const nextImages: ImageAttachment[] = [];
+        const nextAudio: { pcm: Float32Array; durationMs: number }[] = [];
         for (let i = 0; i < files.length; i++) {
             const f = files[i];
-            if (!f.type.startsWith("image/")) continue;
-            try {
-                const p = await preprocessImage(f);
-                next.push(p);
-            } catch (e) {
-                showToast({
-                    level: "error", title: `Couldn't load ${f.name}`,
-                    message: (e as Error).message,
-                });
+            if (f.type.startsWith("image/")) {
+                if (!hasVision) continue;
+                try {
+                    const p = await preprocessImage(f);
+                    nextImages.push(p);
+                } catch (e) {
+                    showToast({
+                        level: "error", title: `Couldn't load ${f.name}`,
+                        message: (e as Error).message,
+                    });
+                }
+            } else if (f.type.startsWith("audio/")) {
+                if (!hasAudio) continue;
+                try {
+                    const decoded = await decodeAudioFile(f);
+                    if (decoded) {
+                        nextAudio.push({ pcm: decoded.pcm, durationMs: decoded.durationMs });
+                    } else {
+                        showToast({
+                            level: "warn", title: `Couldn't decode ${f.name}`,
+                            message: "This browser doesn't support that audio format. Try MP3 or WAV.",
+                        });
+                    }
+                } catch (e) {
+                    showToast({
+                        level: "error", title: `Couldn't load ${f.name}`,
+                        message: (e as Error).message,
+                    });
+                }
             }
         }
-        if (next.length) setPendingImages((prev) => [...prev, ...next]);
-    }, [hasVision, showToast]);
+        if (nextImages.length) setPendingImages((prev) => [...prev, ...nextImages]);
+        if (nextAudio.length) setPendingAudio((prev) => [...prev, ...nextAudio]);
+    }, [hasVision, hasAudio, showToast]);
 
     const onRemoveImage = useCallback((idx: number) => {
         setPendingImages((prev) => prev.filter((_, i) => i !== idx));
@@ -1881,7 +1906,7 @@ export function App() {
                         && (prompt.trim().length > 0 || pendingImages.length > 0 || pendingAudio.length > 0)
                     }
                     canStop={busy}
-                    canAttach={modelStatus === "ready" && hasVision}
+                    canAttach={modelStatus === "ready" && (hasVision || hasAudio)}
                     canRecord={modelStatus === "ready" && hasAudio && !busy}
                     pendingImages={pendingImages}
                     pendingAudio={pendingAudio.map((a) => ({ durationMs: a.durationMs }))}
