@@ -607,6 +607,82 @@ const RPC: Record<string, Handler> = {
         }
     },
     cancelMultimodalEncode: (a) => { void a; requireModel().cancelMultimodalEncode(); return true; },
+
+    transcribeAudio: async (a) => {
+        // In-engine speech-to-text driven by the audio tower + a fixed
+        // instruction prompt + greedy decode. Streams per-token deltas
+        // out via `notify("transcribeChunk", {delta, done})` so the UI
+        // can fill the input box as the transcript arrives.
+        //
+        // Sampling is forced to greedy (temperature=0, top_k=1)
+        // regardless of the user's chat sampling settings — transcription
+        // needs determinism. Settings restored on exit.
+        const m = requireModel();
+        const pcm = a.pcm as Float32Array;
+        const maxTokens = Number(a.maxTokens ?? 512);
+
+        const sent = m.audioSentinelIds();
+        if (!sent) throw new Error("transcribeAudio: model has no <|audio> sentinel");
+        const [audioBeginId] = sent;
+
+        // 1. Save sampling, switch to greedy.
+        const userSampling = a.sampling as Record<string, unknown> | undefined;
+        m.setSampling({ temperature: 0, top_k: 1, top_p: 1, repetition_penalty: 1, seed: 0 });
+
+        // 2. Encode audio → soft tokens.
+        log(`transcribe: encode start (samples=${pcm.length})`);
+        const softTokens = await m.encodeAudio(pcm);
+        // Gemma 4's text d_model is 1536 for both e2b and e4b; the
+        // audio tower's projector outputs soft tokens in that same
+        // embedding space. Same fallback the chat-attach path uses.
+        const dText = 1536;
+        const nSoft = softTokens.length / dText;
+        log(`transcribe: encoded ${nSoft} soft tokens × ${dText} dim`);
+
+        // 3. Render prompt with audio sentinel + transcription instruction.
+        const messages = [{
+            role: "user",
+            content: "<|audio><audio|>Transcribe the audio above word-for-word. Reply with only the transcription, no commentary.",
+        }];
+        const promptText = m.renderChat(messages, true);
+        const ids = m.encode(promptText);
+
+        // 4. Reset KV cache, drive feed loop (splice soft tokens at sentinel).
+        m.reset();
+        let next = 0;
+        for (let i = 0; i < ids.length; i++) {
+            const id = ids[i];
+            next = await m.step(id);
+            if (id === audioBeginId) {
+                for (let r = 0; r < nSoft; r++) {
+                    const row = softTokens.subarray(r * dText, (r + 1) * dText);
+                    next = await m.stepWithEmbedding(row);
+                }
+            }
+        }
+
+        // 5. Greedy generate, streaming deltas.
+        let transcript = "";
+        for (let gen = 0; gen < maxTokens; gen++) {
+            if (m.isEos(next)) break;
+            const tok = m.tokenStr(next);
+            if (tok) {
+                const delta = tok.replace(/▁/g, " ");
+                transcript += delta;
+                notify("transcribeChunk", { delta, done: false });
+            }
+            next = await m.step(next);
+        }
+
+        // 6. Restore sampling.
+        if (userSampling) {
+            try { m.setSampling(userSampling); } catch { /* */ }
+        }
+
+        log(`transcribe: done (${transcript.length} chars)`);
+        notify("transcribeChunk", { delta: "", done: true, transcript });
+        return { transcript };
+    },
     releaseVisionWeights: (a) => {
         void a;
         const freed = requireModel().releaseVisionWeights();

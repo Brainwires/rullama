@@ -1591,14 +1591,51 @@ export function App() {
         }
     }, [activeConvId, busy, lastLoadedDigest, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, refreshConversations, resumeInflightGeneration, sampling, statusText, systemPrompt, thinking, showToast]);
 
-    // VAD-driven mic capture wired into the existing pendingAudio queue.
-    // Each invocation produces one clip; user can stack multiple before
-    // sending. Encoding to soft tokens happens later in onSend so the
-    // tap-to-talk flow stays snappy (no inference under the hand).
-    const onCaptureAudio = useCallback((pcm: Float32Array) => {
-        const durationMs = (pcm.length / 16_000) * 1000;
-        setPendingAudio((prev) => [...prev, { pcm, durationMs }]);
-    }, []);
+    // VAD-driven mic capture → in-engine transcription → fill the chat
+    // input box. Mic press is "speak my next message" — text fills the
+    // prompt and the user can edit/send like any typed message.
+    //
+    // The audio-clip-attachment path is reserved for file uploads (mp3/
+    // wav via the paperclip), where the user explicitly wants the model
+    // to *analyse* the audio rather than transcribe it.
+    //
+    // Greedy decode is enforced worker-side regardless of chat sampling.
+    // Streams deltas into `prompt` so the user sees the transcript fill
+    // in real time while the audio tower + LM are still running.
+    const onCaptureAudio = useCallback(async (pcm: Float32Array) => {
+        if (pcm.length === 0) return;
+        const client = getClient();
+        try {
+            // Append-on-stream: each delta extends the current prompt
+            // value so the user sees it fill in. If the prompt already
+            // had content, add a leading space before the first delta.
+            let leadingPad: string | null = null;
+            setPrompt((cur) => {
+                leadingPad = cur.length > 0 && !cur.endsWith(" ") ? " " : "";
+                return cur;
+            });
+            const transcript = await client.transcribeAudio(pcm, (delta) => {
+                setPrompt((cur) => {
+                    const pad = leadingPad ?? "";
+                    leadingPad = ""; // only insert pad once
+                    return cur + pad + delta;
+                });
+            });
+            if (!transcript.trim()) {
+                showToast({
+                    level: "warn",
+                    title: "Didn't catch that",
+                    message: "Try speaking again, or use the paperclip to attach an audio file for analysis.",
+                });
+            }
+        } catch (e) {
+            showToast({
+                level: "error",
+                title: "Transcription failed",
+                message: (e as Error).message,
+            });
+        }
+    }, [showToast]);
     const onRemoveAudio = useCallback((idx: number) => {
         setPendingAudio((prev) => prev.filter((_, i) => i !== idx));
     }, []);

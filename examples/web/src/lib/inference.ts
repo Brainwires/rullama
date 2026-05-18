@@ -375,6 +375,32 @@ export class WorkerClient {
     cancelMultimodalEncode(): Promise<boolean> {
         return this.rpc("cancelMultimodalEncode", {});
     }
+    /** In-engine speech-to-text via the audio tower + greedy decode.
+     *  Streams per-token deltas to `onChunk` if provided; resolves with
+     *  the final transcript. Worker forces greedy sampling (temperature
+     *  0) for the duration of the call regardless of the chat-side
+     *  sampling settings. */
+    async transcribeAudio(
+        pcm: Float32Array,
+        onChunk?: (delta: string) => void,
+    ): Promise<string> {
+        const off = onChunk
+            ? this.subscribe("transcribeChunk", (p) => {
+                if (p.done) return;
+                const delta = String(p.delta ?? "");
+                if (delta) onChunk(delta);
+            })
+            : null;
+        try {
+            const { transcript } = await this.rpc<{ transcript: string }>(
+                "transcribeAudio",
+                { sid: this.session, pcm } as Record<string, unknown>,
+            );
+            return transcript;
+        } finally {
+            off?.();
+        }
+    }
     /** Drop vision tower weights from GPU memory. Returns approx bytes
      *  freed. Re-encoding an image re-uploads. Call between encode and
      *  prefill on memory-tight devices (iPhone) so the prefill step

@@ -71,6 +71,7 @@ const STATEFUL_RPCS = new Set([
     "stepAndDecode",
     "encodeImage",
     "encodeAudio",
+    "transcribeAudio",
     "reset",
     "setSampling",
     "saveKvState",
