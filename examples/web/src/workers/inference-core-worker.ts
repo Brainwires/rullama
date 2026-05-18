@@ -279,7 +279,56 @@ async function openSyncReadFn(modelKey: string, filename: string) {
     const dlDir    = await root.getDirectoryHandle(OPFS_DIR, { create: false });
     const modelDir = await dlDir.getDirectoryHandle(modelKey, { create: false });
     const fh       = await modelDir.getFileHandle(filename,    { create: false });
-    syncHandle     = await fh.createSyncAccessHandle();
+
+    // createSyncAccessHandle is *exclusive*. After a PWA-update reload
+    // the previous page's core worker may still be holding the handle:
+    // the new page's main thread sent a `shutdown` message and the old
+    // worker is in the middle of running releaseAllHandles() +
+    // self.close(), but iOS Safari can take a noticeable moment to GC
+    // the dead worker and unlock the OPFS entry. A bare single attempt
+    // fails with NoModificationAllowedError and the load aborts even
+    // though the GGUF is sitting right there in OPFS — exactly the
+    // "data is fucking there but locked up" symptom.
+    //
+    // Retry with backoff. Total budget ~15 s, past the empirically-
+    // observed iOS GC window for an orphaned worker handle but short
+    // enough to surface a real problem instead of spinning forever.
+    // Each attempt notifies the UI so the splash/status can say
+    // "waiting for previous session to release the model" instead of
+    // looking frozen.
+    const startMs = Date.now();
+    const BUDGET_MS = 15_000;
+    let attempt = 0;
+    while (true) {
+        try {
+            syncHandle = await fh.createSyncAccessHandle();
+            break;
+        } catch (e) {
+            attempt += 1;
+            const elapsed = Date.now() - startMs;
+            if (elapsed >= BUDGET_MS) {
+                throw new Error(
+                    `OPFS file ${modelKey}/${filename} is locked by a previous worker ` +
+                    `(${attempt} attempts over ${elapsed}ms). The data is intact — ` +
+                    `force-quit the tab/app and reopen to release the lock. ` +
+                    `Underlying: ${(e as Error)?.message ?? e}`,
+                );
+            }
+            const delay = Math.min(1500, 100 * Math.pow(2, attempt - 1));
+            notify("modelLoadWaiting", {
+                reason: "opfs-locked",
+                attempt,
+                elapsedMs: elapsed,
+                nextDelayMs: delay,
+            });
+            log(`opfs: ${modelKey}/${filename} still locked (attempt ${attempt}, ${elapsed}ms elapsed) — retrying in ${delay}ms`);
+            await new Promise((r) => setTimeout(r, delay));
+        }
+    }
+    if (attempt > 0) {
+        log(`opfs: ${modelKey}/${filename} sync handle acquired after ${attempt} retries (${Date.now() - startMs}ms)`);
+    }
+
     const size = syncHandle.getSize();
     if (size === 0) {
         try { syncHandle.close(); } catch { /* */ }

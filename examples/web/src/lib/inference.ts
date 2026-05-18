@@ -147,24 +147,29 @@ export class WorkerClient {
         // Send a final `disconnect` on tab close so the router can
         // immediately release any held session + drop the port without
         // waiting for the heartbeat GC. If we're the elected core host,
-        // also post a `shutdown` to the dedicated worker so it closes
-        // its FileSystemSyncAccessHandle / DB / Model BEFORE we
-        // terminate — leaking the sync handle is the prime cause of
-        // "hangs on OPFS load after an update," because the handle is
-        // exclusive and iOS Safari is slow to GC dead workers. We
-        // microtask-delay `terminate()` to give the worker's onmessage
-        // loop a chance to drain the shutdown message; if the browser
-        // kills the worker before it processes the message anyway, the
-        // explicit terminate is the safety net.
+        // also post `{type:"shutdown"}` to the dedicated worker so it
+        // closes its FileSystemSyncAccessHandle / DB / Model and then
+        // self.close()s on its own time.
+        //
+        // CRITICAL: do NOT call worker.terminate() here. terminate() is
+        // synchronous and kills the worker before its onmessage loop has
+        // a chance to process the shutdown message — which means
+        // releaseAllHandles() never runs, the FileSystemSyncAccessHandle
+        // stays held by the dead worker until iOS Safari finally GCs it,
+        // and the next page load can't open the same OPFS file. The
+        // 7 GB GGUF is sitting right there but the new core worker
+        // races a lingering exclusive lock and the load fails. The whole
+        // point of the shutdown message is to let the worker close
+        // handles BEFORE exiting; terminate() defeats that.
         const onLeave = () => {
             try { this.port.postMessage({ requestId: -1, type: "disconnect" }); } catch { /* */ }
             const w = this.coreWorker;
             this.coreWorker = null;
             if (w) {
                 try { w.postMessage({ type: "shutdown" }); } catch { /* */ }
-                Promise.resolve().then(() => {
-                    try { w.terminate(); } catch { /* */ }
-                });
+                // Intentionally no terminate(). The worker calls
+                // self.close() after releaseAllHandles() — see the
+                // shutdown handler in inference-core-worker.ts.
             }
         };
         window.addEventListener("pagehide", onLeave);
