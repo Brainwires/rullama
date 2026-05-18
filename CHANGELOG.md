@@ -6,10 +6,96 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the version stays in the 0.x series, only the modules listed in the
 [stability section of `lib.rs`](crates/rullama/src/lib.rs) (`api`, `error`,
-`sampling`) are covered by semver. Everything else is `#[doc(hidden)]` and
-may move in any patch release.
+`sampling`, `lora`) are covered by semver. Everything else is `#[doc(hidden)]`
+and may move in any patch release.
 
 ## [Unreleased]
+
+## [0.3.0] — 2026-05-18
+
+In-browser fine-tuning shipped. Same `Model` you've been running inference
+on can now consume a LoRA adapter the PWA trained in the foreground tab
+— no native build, no separate inference engine, no round-trip through
+disk. Vision-encode progress strip stays alive through the soft-token
+splice and prompt prefill so the user isn't staring at a blank screen
+for 2-3 min per image. Bumped to `0.3.0` because of the new `lora`
+module and the scope of the fine-tune surface; the existing public API
+is preserved (no signature changes, no removals).
+
+### Public API (semver-covered modules)
+
+- New `lora` module — `InferenceAdapter::parse_safetensors(bytes)` decodes
+  the safetensors blob `TrainingSession::saveAdapter()` writes. `Model`
+  owns the active adapter; consumers don't construct it directly.
+- `api::Model` — additive: `has_adapter_native()` (+ JS `hasAdapter`),
+  `adapter_slot_count_native()`, `load_adapter_native(bytes)` (+ JS
+  `loadAdapter`), `clear_adapter_native()` (+ JS `clearAdapter`).
+- `error`, `sampling` — unchanged.
+
+### Fine-tuning (`rullama-finetune`)
+
+- **wasm32 port.** The crate now compiles to wasm32-unknown-unknown
+  (was native-only). On wasm builds the whole crate is gated off so it
+  remains empty; on wasm-bindgen builds (`crate-type = ["cdylib"]`) it
+  exposes a `TrainingSession` surface.
+- **`TrainingSession` wasm-bindgen surface** — JS callers can run a
+  forward → loss → backward → Adam step entirely in the foreground tab
+  against the same wgpu kernels the inference path uses. Save trained
+  weights as a safetensors `Uint8Array` and load them back into
+  `Model.loadAdapter` for inference.
+- **GeGLU backward clamp** — `geglu_backward.wgsl` was missing the
+  [-10, 10] tanh-input clamp the forward got; surfaced as all-NaN
+  gradients at layer 33+ of the backward pass on Metal. Fix matches
+  the forward formula bit-identically.
+- **`overfit_one_smoke` + `per_position_smoke` integration tests** —
+  CI now gates on a 200-step overfit (17.72 → 0.00 loss) and a 3-step
+  PerPosition micro-batch (89 % loss drop) so backward regressions
+  fail loud.
+- **`eval_adapter` example** — loads a trained safetensors blob,
+  decodes it back through `InferenceAdapter`, and runs a generation
+  smoke against a real GGUF.
+
+### Inference engine (`rullama`)
+
+- **Vision encode is now one CommandEncoder per ViT block** + a GPU
+  fence between blocks (`queue.on_submitted_work_done` + `device.poll`
+  + oneshot). The per-layer progress callback now fires at real GPU
+  pace rather than at record-time, killing the "frozen at 16/16"
+  warm-cache freeze. Matches the text path's M7 pattern and CLAUDE.md's
+  "one CommandEncoder per transformer layer" rule.
+
+### Example PWAs
+
+- **Fine-tune tab.** New first-class panel that owns a `TrainingSession`,
+  runs in the foreground over the loaded model, and writes
+  the resulting safetensors blob to OPFS. Adapter list, train/eval
+  controls, loss chart, and one-click `Model.loadAdapter` are wired in.
+- **Progress strip spans encode + splice + prefill.** Previously the
+  strip vanished the moment `encodeImage()` resolved, leaving the user
+  staring at 2-3 min of silence while the JS loop ran ~256
+  `stepWithEmbedding` calls per image. The strip now carries a
+  `phase` discriminator (`encoding` / `embedding` / `prefill`) and
+  ticks through every phase, only clearing when the gen loop starts.
+- **Service-worker swap reload (both mid-session and boot-time).**
+  `clientsClaim: true` hands the new SW to live tabs silently; the
+  old JS bundle still references hashed asset URLs the new precache
+  no longer has, so any worker spawned after the swap 404s and
+  surfaces as "checking OPFS…" hanging until the user hard-reloads.
+  We now reload on `controllerchange` both during boot
+  (inside `ensureFreshServiceWorker`) and after (`installPostBootSwReloadListener`).
+- **`ModelLoader` polish** — kept the controls on a single row with
+  status on its own line; dropped the redundant refresh-list button.
+
+### Tooling / deploy
+
+- `Dockerfile` builds the wasm bundle from `rullama-finetune` so the
+  shipped `pkg/` exports both the inference (`Model`) and training
+  (`TrainingSession`) wasm-bindgen surfaces.
+- `cargo bump <version>` (`xtask`) updates both crate manifests AND
+  the `rullama = { path, version = "MAJOR.MINOR" }` constraint in
+  `rullama-finetune` so the next `cargo publish` resolves cleanly.
+- `scripts/publish.sh` orchestrates the two-stage publish (rullama
+  → wait for crates.io index → rullama-finetune).
 
 ## [0.2.0] — 2026-05-17
 

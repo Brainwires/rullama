@@ -70,3 +70,12 @@ strip = "debuginfo"
 
 [profile.dev]
 opt-level = 1
+
+# Workspace-wide lint config. Most of these silence categories where the lint's
+# recommendation doesn't fit the codebase, with a one-line reason each.
+[workspace.lints.clippy]
+# Many of our Arc<T> are `Arc<GgufReader>` / `Arc<WeightCache>` containing trait
+# objects that aren't Send+Sync because their TensorFetcher impls (OPFS,
+# HttpRange) are intentionally single-threaded. Rc isn't a drop-in because some
+# call sites later hand the Arc into wgpu APIs that take `Arc<T>` by convention.
+arc_with_non_send_sync = "allow"

@@ -11,23 +11,30 @@ use std::process::{Command, ExitCode};
 fn main() -> ExitCode {
     let task = match std::env::args().nth(1) {
         Some(t) => t,
-        None => { eprintln!("usage: cargo <task> (e.g. docker:start, bump 0.3.0)"); return ExitCode::from(2); }
+        None => {
+            eprintln!("usage: cargo <task> (e.g. docker:start, bump 0.3.0)");
+            return ExitCode::from(2);
+        }
     };
     match task.as_str() {
-        "docker:build"   => compose(&["build"]),
-        "docker:start"   => compose(&["up", "-d"]),
-        "docker:stop"    => compose(&["down"]),
+        "docker:build" => compose(&["build"]),
+        "docker:start" => compose(&["up", "-d"]),
+        "docker:stop" => compose(&["down"]),
         "docker:restart" => {
             let r = compose(&["build", "--no-cache"]);
-            if r != ExitCode::SUCCESS { return r; }
+            if r != ExitCode::SUCCESS {
+                return r;
+            }
             compose(&["up", "-d", "--force-recreate"])
         }
-        "docker:logs"    => compose(&["logs", "-f", "--tail=200"]),
-        "docker:ps"      => compose(&["ps"]),
-        "bump"           => bump(),
+        "docker:logs" => compose(&["logs", "-f", "--tail=200"]),
+        "docker:ps" => compose(&["ps"]),
+        "bump" => bump(),
         other => {
             eprintln!("xtask: unknown task `{other}`");
-            eprintln!("tasks: docker:build, docker:start, docker:stop, docker:restart, docker:logs, docker:ps, bump");
+            eprintln!(
+                "tasks: docker:build, docker:start, docker:stop, docker:restart, docker:logs, docker:ps, bump"
+            );
             ExitCode::from(2)
         }
     }
@@ -37,9 +44,12 @@ fn compose(args: &[&str]) -> ExitCode {
     eprintln!("$ docker compose {}", args.join(" "));
     let status = Command::new("docker").arg("compose").args(args).status();
     match status {
-        Ok(s) if s.success()           => ExitCode::SUCCESS,
-        Ok(s)                          => ExitCode::from(s.code().unwrap_or(1) as u8),
-        Err(e)                         => { eprintln!("xtask: failed to spawn docker: {e}"); ExitCode::from(127) }
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
+        Err(e) => {
+            eprintln!("xtask: failed to spawn docker: {e}");
+            ExitCode::from(127)
+        }
     }
 }
 
@@ -64,12 +74,15 @@ fn bump() -> ExitCode {
     };
     let new_mm = format!("{nmaj}.{nmin}");
 
-    let rullama_path  = Path::new("crates/rullama/Cargo.toml");
+    let rullama_path = Path::new("crates/rullama/Cargo.toml");
     let finetune_path = Path::new("crates/rullama-finetune/Cargo.toml");
 
     let old_version = match read_version(rullama_path) {
         Ok(v) => v,
-        Err(e) => { eprintln!("bump: {e}"); return ExitCode::from(1); }
+        Err(e) => {
+            eprintln!("bump: {e}");
+            return ExitCode::from(1);
+        }
     };
     if old_version == new_version {
         eprintln!("bump: version already at {new_version}, nothing to do");
@@ -92,7 +105,10 @@ fn bump() -> ExitCode {
         &format!("version          = \"{old_version}\""),
         &format!("version          = \"{new_version}\""),
         1,
-    ) { eprintln!("bump: {e}"); return ExitCode::from(1); }
+    ) {
+        eprintln!("bump: {e}");
+        return ExitCode::from(1);
+    }
 
     // 2) crates/rullama-finetune/Cargo.toml — its own `version = "<X>"` AND
     //    the path-dep constraint on rullama (MAJOR.MINOR only).
@@ -101,7 +117,10 @@ fn bump() -> ExitCode {
         &format!("version     = \"{old_version}\""),
         &format!("version     = \"{new_version}\""),
         1,
-    ) { eprintln!("bump: {e}"); return ExitCode::from(1); }
+    ) {
+        eprintln!("bump: {e}");
+        return ExitCode::from(1);
+    }
 
     if old_mm != new_mm {
         if let Err(e) = replace_in_file(
@@ -109,7 +128,10 @@ fn bump() -> ExitCode {
             &format!("rullama = {{ path = \"../rullama\", version = \"{old_mm}\" }}"),
             &format!("rullama = {{ path = \"../rullama\", version = \"{new_mm}\" }}"),
             1,
-        ) { eprintln!("bump: {e}"); return ExitCode::from(1); }
+        ) {
+            eprintln!("bump: {e}");
+            return ExitCode::from(1);
+        }
         eprintln!("  ↳ rullama-finetune path-dep constraint: {old_mm} → {new_mm}");
     }
 
@@ -120,14 +142,19 @@ fn bump() -> ExitCode {
 /// Parse "MAJOR.MINOR.PATCH" into integers. No prerelease / build metadata.
 fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
     let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 3 { return None; }
-    Some((parts[0].parse().ok()?, parts[1].parse().ok()?, parts[2].parse().ok()?))
+    if parts.len() != 3 {
+        return None;
+    }
+    Some((
+        parts[0].parse().ok()?,
+        parts[1].parse().ok()?,
+        parts[2].parse().ok()?,
+    ))
 }
 
 /// Read the first top-level `version = "..."` line from a Cargo.toml.
 fn read_version(path: &Path) -> Result<String, String> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let content = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     for line in content.lines() {
         let t = line.trim_start();
         if let Some(rest) = t.strip_prefix("version") {
@@ -135,20 +162,26 @@ fn read_version(path: &Path) -> Result<String, String> {
             if let Some(after_eq) = r.strip_prefix("=") {
                 let v = after_eq.trim().trim_matches('"');
                 // Skip `version.workspace = true` and similar.
-                if !v.contains('.') && v != "true" { continue; }
-                if v == "true" { continue; }
+                if !v.contains('.') && v != "true" {
+                    continue;
+                }
+                if v == "true" {
+                    continue;
+                }
                 return Ok(v.to_string());
             }
         }
     }
-    Err(format!("no `version = \"...\"` line found in {}", path.display()))
+    Err(format!(
+        "no `version = \"...\"` line found in {}",
+        path.display()
+    ))
 }
 
 /// Exact string replace, with an `expected` match-count guard so we don't
 /// silently no-op or over-replace if the manifest layout changes.
 fn replace_in_file(path: &Path, from: &str, to: &str, expected: usize) -> Result<(), String> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let content = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let actual = content.matches(from).count();
     if actual != expected {
         return Err(format!(
@@ -157,6 +190,5 @@ fn replace_in_file(path: &Path, from: &str, to: &str, expected: usize) -> Result
         ));
     }
     let new_content = content.replace(from, to);
-    fs::write(path, new_content)
-        .map_err(|e| format!("write {}: {e}", path.display()))
+    fs::write(path, new_content).map_err(|e| format!("write {}: {e}", path.display()))
 }

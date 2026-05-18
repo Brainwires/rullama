@@ -8,3 +8,6 @@ description = "Workspace tasks invoked via cargo aliases (cargo docker:start, et
 [[bin]]
 name = "xtask"
 path = "src/main.rs"
+
+[lints]
+workspace = true

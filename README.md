@@ -17,7 +17,7 @@ A two-crate Cargo workspace:
 | Crate              | Path                       | Target       | Status   |
 |--------------------|----------------------------|--------------|----------|
 | `rullama`          | `crates/rullama`           | wasm + native | release-track |
-| `rullama-finetune` | `crates/rullama-finetune`  | native only  | experimental (M3 skeleton — see below) |
+| `rullama-finetune` | `crates/rullama-finetune`  | wasm + native | LoRA SGD over the same wgpu kernels; PWA exposes `TrainingSession` in the Fine-tune tab |
 
 The iOS bench harness (`tools/ios-bench`) is a sibling crate excluded from the
 workspace so `cargo build --workspace --target wasm32-unknown-unknown` doesn't
@@ -48,12 +48,13 @@ try to compile its staticlib for wasm.
 - ✅ **Encoder chained + per-layer submits** (M7 + M15) — one CommandEncoder
   spans each transformer layer, submitted incrementally so the GPU drains
   smoothly even on tight-RAM phones.
-- 🧪 **Local LoRA fine-tuning (`rullama-finetune`, native-only)** — backward
-  kernels for matmul Q4_K / Q6_K, rmsnorm, rope, geglu, attention,
+- ✅ **In-browser LoRA fine-tuning (`rullama-finetune`, wasm + native).**
+  Backward kernels for matmul Q4_K / Q6_K, rmsnorm, rope, geglu, attention,
   cross-entropy; Adam optimizer over GPU buffers; rank-r LoRA on attention
-  + FFN projections. M3 acceptance: 200-step overfit-one drops loss from
-  ~12.5 → 0 on the dev fixture. Per-position CE (single-forward variant)
-  shipped in M3. Wasm32 trainer is **not** in scope.
+  + FFN projections. 200-step overfit-one drops loss from ~17.7 → 0 on the
+  dev fixture. Trained adapters export as safetensors and load back into
+  the inference `Model` via `loadAdapter` — no roundtrip through native.
+  The PWA's Fine-tune tab drives all of this in the foreground tab.
 - ❌ MoE `gemma4:26b` / `gemma4:31b` — out of scope.
 - ❌ Other architectures (llama, mistral, qwen, phi).
 - 🛠️ **Mobile multimodal** — desktop multimodal works; the iPhone loader
@@ -71,8 +72,15 @@ You need:
 ### Build the wasm bundle
 
 ```sh
-# wasm-pack runs against the rullama crate inside the workspace; the
-# output lands at `<repo>/pkg/` so both example PWAs share one bundle.
+# Unified bundle — exposes both inference (`Model`) and training
+# (`TrainingSession`) wasm-bindgen surfaces. Built from `rullama-finetune`
+# because that's the crate that re-exports both. `--out-name rullama` keeps
+# the JS entry at `pkg/rullama.js` for PWA import compatibility.
+wasm-pack build crates/rullama-finetune --target web --release \
+    --out-dir ../../pkg --out-name rullama
+
+# Inference-only variant (smaller bundle, no TrainingSession). Use when
+# shipping a chat-only deployment.
 wasm-pack build crates/rullama --target web --release --out-dir ../../pkg
 ```
 
@@ -173,14 +181,23 @@ cargo run -p rullama --release --features cpu-reference --example chained_smoke 
 `--features cpu-reference` is now a no-op (the f32 oracle is always built); the
 flag is kept so existing scripts keep working.
 
-## Fine-tuning (preview)
+## Fine-tuning
 
 `rullama-finetune` runs LoRA SGD against the live wgpu kernels — no Burn, no
-PyTorch, no separate runtime. M3 scope: rank-r LoRAs on
+PyTorch, no separate runtime. Scope: rank-r LoRAs on
 `attn_q` / `attn_k` / `attn_v` / `attn_o` and the FFN projections, Adam, global
 L2 grad clipping, gradient accumulation, mixed precision, gradient
 checkpointing. PerPosition CE is a single-forward variant with a ~C/2 speedup
-vs. the multi-forward path. Wasm32 builds compile to an empty crate.
+vs. the multi-forward path.
+
+**In the browser:** the unified wasm bundle (see [Build](#build-the-wasm-bundle))
+exposes `TrainingSession` to JS alongside `Model`. The Fine-tune tab in
+`examples/web/` drives a full session — dataset upload, hyperparam UI, live
+loss chart, save adapter to OPFS as safetensors. The same `Model` that's
+loaded for inference accepts the trained adapter via `Model.loadAdapter(bytes)`
+(re-runs in the chat tab against the adapted weights).
+
+**Native:**
 
 ```sh
 # Overfit a single (prompt, target) pair — acceptance test that the
@@ -193,11 +210,12 @@ cargo run -p rullama-finetune --release --example overfit_one -- \
 cargo run -p rullama-finetune --release --example train_jsonl -- \
     ~/.ollama/models/blobs/sha256-<digest> \
     crates/rullama-finetune/examples/data/echo.jsonl
-```
 
-Currently the trainer **mutates LoRAs in place against the loaded model** —
-there is no on-disk checkpoint format yet, no adapter export, no inference
-hand-off back to the wasm runtime. That is the next milestone.
+# End-to-end smoke: train an adapter, save safetensors, reload via the
+# public Model API, run a generation against the adapted weights.
+cargo run -p rullama-finetune --release --example eval_adapter -- \
+    ~/.ollama/models/blobs/sha256-<digest> /path/to/adapter.safetensors
+```
 
 ## Architecture
 
@@ -282,7 +300,8 @@ Other capability notes captured during iPhone validation:
 ```
 crates/rullama/
 ├── src/
-│   ├── api.rs                    # JS-facing Model: load / loadFromUrl / loadFromOpfs[TextOnly]
+│   ├── api.rs                    # JS-facing Model: load / loadFromUrl / loadFromOpfs[TextOnly] / loadAdapter / clearAdapter
+│   ├── lora.rs                   # InferenceAdapter — parses the safetensors blob TrainingSession writes
 │   ├── backend/
 │   │   ├── context.rs            # WgpuCtx (device, queue, adapter limits)
 │   │   ├── dispatch.rs           # cached + chained kernel dispatchers (incl. backward + Adam)
@@ -324,14 +343,17 @@ crates/rullama-finetune/
 │   ├── lr_schedule.rs            # warmup + linear / cosine / cosine-warm-restarts
 │   ├── lora.rs                   # per-LoRA GPU state (A / B), grad buffers
 │   ├── scratch.rs                # per-step GPU scratch buffers for backward
+│   ├── wasm_bindgen_api.rs       # JS-facing TrainingSession (wasm32 only)
 │   └── session.rs                # TrainingSession — forward → loss → backward → Adam
 └── examples/
-    ├── overfit_one.rs            # M3 acceptance test
+    ├── overfit_one.rs            # single-pair acceptance test
     ├── train_jsonl.rs            # JSONL dataset trainer
+    ├── eval_adapter.rs           # load a trained safetensors blob and generate
     └── data/echo.jsonl
 
 examples/
 ├── web/                          # React + Vite + Tailwind + Workbox SW production demo
+│   └── src/components/FineTunePanel.tsx  # in-browser LoRA training tab over the loaded Model
 └── pwa/                          # Vanilla JS bench harness + safaridriver scripts
     ├── index.html / bench.html
     ├── inference-worker.js       # Dedicated Worker — owns Model + sync OPFS handle
