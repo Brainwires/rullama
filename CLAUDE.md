@@ -37,6 +37,13 @@ deps.
 
 ```sh
 # WASM bundle — output lands at <repo>/pkg/ and is shared by BOTH example PWAs
+# Build via the finetune crate so the unified bundle exposes both inference
+# (Model) and training (TrainingSession) wasm-bindgen surfaces; --out-name
+# keeps the JS entry at pkg/rullama.js for PWA import compat.
+wasm-pack build crates/rullama-finetune --target web --release --out-dir ../../pkg --out-name rullama
+
+# Inference-only variant (smaller bundle, no TrainingSession). Use when
+# shipping a chat-only deployment.
 wasm-pack build crates/rullama --target web --release --out-dir ../../pkg
 
 # Native parity / smoke tests against a local Ollama GGUF blob
