@@ -371,6 +371,30 @@ export function App() {
             client.subscribe("adapterChanged", (p) => {
                 setActiveAdapter((p.active as string | null | undefined) ?? null);
             }),
+            client.subscribe("gpuFault", (p) => {
+                // Typed GPU fault surfaced by the inference core worker
+                // when wgpu returns device-lost / OOM / WebGPU validation
+                // error. Without this banner the tab just looks frozen.
+                const kind = String(p.kind ?? "unknown");
+                const during = String(p.during ?? "an inference call");
+                const message = String(p.message ?? "");
+                const title = kind === "oom"
+                    ? "GPU is out of memory"
+                    : kind === "device-lost"
+                        ? "GPU device was lost"
+                        : "GPU error";
+                const hint = kind === "oom"
+                    ? "Close other browser tabs or reload to free GPU memory, then try again."
+                    : kind === "device-lost"
+                        ? "Reload the page to restart the GPU context."
+                        : "Reload and check the dev console for details.";
+                showToast({
+                    level: "error",
+                    title,
+                    message: `${hint} (during: ${during})\n${message}`,
+                    persist: true,
+                });
+            }),
         ];
         // Probe initial adapter state once the model is ready (worker
         // remembers what was applied across page reloads).

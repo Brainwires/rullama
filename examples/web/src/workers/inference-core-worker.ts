@@ -120,6 +120,7 @@ interface ModelStatic {
     loadFromOpfs(
         readFn: (offset: number, length: number) => Uint8Array | Promise<Uint8Array>,
         totalBytes: number,
+        maxContext: number,
     ): Promise<ModelHandle>;
 }
 const ModelClass = Model as unknown as ModelStatic;
@@ -309,7 +310,7 @@ async function handleLoad(args: LoadArgs): Promise<LoadedModelInfo> {
 
     model = args.textOnly
         ? await ModelClass.loadFromOpfsTextOnly(readFn, size, args.maxContext ?? 0)
-        : await ModelClass.loadFromOpfs(readFn, size);
+        : await ModelClass.loadFromOpfs(readFn, size, args.maxContext ?? 0);
 
     log(`load: ready vocabSize=${model.vocabSize}`);
     loadedInfo = {
@@ -978,6 +979,19 @@ const RPC: Record<string, Handler> = {
 // Dispatch
 // ───────────────────────────────────────────────────────────────────────
 
+/** Classify a thrown error as a GPU fault (device-lost, OOM, WebGPU
+ *  validation) so the UI can show a typed banner instead of letting
+ *  the worker look "frozen." Pattern-matches the error message; wgpu
+ *  surfaces these as plain `Error` instances with descriptive strings,
+ *  so message-matching is the only available hook. */
+function classifyGpuFault(msg: string): "device-lost" | "oom" | "validation" | null {
+    const m = msg.toLowerCase();
+    if (m.includes("device") && m.includes("lost")) return "device-lost";
+    if (m.includes("out of memory") || m.includes("oom") || m.includes("memory allocation")) return "oom";
+    if (m.includes("webgpu") && (m.includes("error") || m.includes("invalid"))) return "validation";
+    return null;
+}
+
 async function handleRequest(msg: { requestId: number; type: string } & Args) {
     if (!msg || typeof msg !== "object" || !msg.type) return;
     const { requestId, type } = msg;
@@ -998,6 +1012,16 @@ async function handleRequest(msg: { requestId: number; type: string } & Args) {
     } catch (e) {
         const err = (e as Error)?.message ?? String(e);
         log(`rpc ${type} failed: ${err}`);
+        // Typed GPU-fault diagnostic — the UI subscribes to this
+        // separately so a device-lost / OOM surfaces as a banner
+        // ("the GPU bailed — try reloading or freeing other tabs")
+        // instead of the generic error path that just looks like a
+        // hung worker.
+        const fault = classifyGpuFault(err);
+        if (fault) {
+            log(`rpc ${type} GPU fault: ${fault}`);
+            notify("gpuFault", { kind: fault, message: err, during: type });
+        }
         post({ requestId, ok: false, error: err });
     }
 }
