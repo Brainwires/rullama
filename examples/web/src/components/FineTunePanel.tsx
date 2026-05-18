@@ -159,7 +159,7 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
     const cancelRef = useRef(false);
 
     // Live mid-step progress fed by the worker's `trainingProgress`
-    // notify. Mirrors how Chat renders VisionProgress for vision
+    // notify. Mirrors how Chat renders PipelineProgress for vision
     // encode. `coldHint` flips on after 5 s in the `starting` phase
     // to explain the WGSL-compile pause on first step.
     const [progress, setProgress] = useState<TrainingProgressState | null>(null);
@@ -986,7 +986,7 @@ function LivePanel(props: {
                         <span className="break-words">{props.errorMsg}</span>
                     </div>
                 )}
-                {/* Mirrors VisionProgress for chat: real-time beacon
+                {/* Mirrors PipelineProgress for chat: real-time beacon
                     from inside the wasm trainer — phase + per-layer or
                     per-token tick — so the user can see exactly what
                     the GPU is doing during the otherwise-silent

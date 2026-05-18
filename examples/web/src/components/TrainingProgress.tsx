@@ -61,7 +61,7 @@ interface Props {
     coldHint?:     string;
 }
 
-/** VisionProgress-shaped status strip rendered inside the live
+/** PipelineProgress-shaped status strip rendered inside the live
  *  training panel. Same layout: spinner, label, progress bar,
  *  fraction. The trainer fires phase changes between encoder submits
  *  in `forward_chained.rs` so this bar advances smoothly through

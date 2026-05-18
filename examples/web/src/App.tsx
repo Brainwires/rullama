@@ -3,7 +3,7 @@ import { ModelLoader, ModelLoadProgress, type ModelStatus } from "@/components/M
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChatPanel } from "@/components/ChatPanel";
-import type { VisionProgressState } from "@/components/VisionProgress";
+import type { PipelineProgressState } from "@/components/PipelineProgress";
 import { RestartOverlay } from "@/components/RestartOverlay";
 import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
 import { ConversationList } from "@/components/ConversationList";
@@ -124,7 +124,7 @@ export function App() {
     const [prompt, setPrompt]     = useState("");
     const [busy, setBusy]         = useState(false);
     const [statusLine, setStatusLine] = useState<string | undefined>();
-    const [visionEncodeState, setVisionEncodeState] = useState<VisionProgressState | null>(null);
+    const [visionEncodeState, setVisionEncodeState] = useState<PipelineProgressState | null>(null);
 
     // Multimodal: vision availability latches on after a successful model
     // load (it's a property of the meta, only known post-load). Pending
@@ -1324,7 +1324,7 @@ export function App() {
                 }
                 beginId = sent[0];
                 // Surface per-layer vision encode progress as a sticky
-                // strip above the input row (see VisionProgress). The
+                // strip above the input row (see PipelineProgress). The
                 // strip stays alive across three phases — encoding (vision
                 // tower) → embedding (soft-token splice through the text
                 // model) → prefill (prompt-token feed). Without all three
@@ -1332,7 +1332,7 @@ export function App() {
                 // 2-3 min in silence while the JS prefill loop chews on
                 // 256 soft tokens per image at ~870 ms each.
                 let imgIdx = 0;
-                const offProgress = client.subscribe("visionProgress", (p) => {
+                const offProgress = client.subscribe("pipelineProgress", (p) => {
                     const layer = Number(p.layer);
                     const total = Number(p.total);
                     setVisionEncodeState({
@@ -1616,6 +1616,33 @@ export function App() {
         }
     }, [activeConvId, busy, lastLoadedDigest, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, refreshConversations, resumeInflightGeneration, sampling, statusText, systemPrompt, thinking, showToast]);
 
+    // Top-level pipelineProgress subscription. The chat-send flow has
+    // its own scoped subscription (around image encode + prefill) but
+    // the mic-transcribe pipeline runs OUTSIDE that scope and needs
+    // its own. Audio-kind beacons drive the same `visionEncodeState`
+    // so the same status strip above the chat input shows
+    // "Transcribing — encoding/splicing/reading/generating" phases.
+    // Without this the user has no visibility into where a long-running
+    // transcribe is — on mobile, that's the difference between
+    // "looks frozen, reload" and "I can see it's at splice step 14/31."
+    useEffect(() => {
+        const off = getClient().subscribe("pipelineProgress", (p) => {
+            if (p.kind !== "audio") return; // image events handled scoped, below
+            const phase = String(p.phase ?? "encoding");
+            const layer = Number(p.layer ?? 0);
+            const total = Number(p.total ?? 1);
+            setVisionEncodeState({
+                imageIdx: 1,
+                nImages:  1,
+                phase:    phase as PipelineProgressState["phase"],
+                done:     layer,
+                total,
+                kind:     "audio",
+            });
+        });
+        return off;
+    }, []);
+
     // VAD-driven mic capture → in-engine transcription → fill the chat
     // input box. Mic press is "speak my next message" — text fills the
     // prompt and the user can edit/send like any typed message.
@@ -1659,6 +1686,10 @@ export function App() {
                 title: "Transcription failed",
                 message: (e as Error).message,
             });
+        } finally {
+            // Clear the audio-kind status strip; image-kind strips are
+            // managed by the chat-send flow's own scoped subscription.
+            setVisionEncodeState((cur) => cur?.kind === "audio" ? null : cur);
         }
     }, [showToast]);
     const onRemoveAudio = useCallback((idx: number) => {
@@ -1927,7 +1958,7 @@ export function App() {
                     onCaptureAudio={onCaptureAudio}
                     onRemoveAudio={onRemoveAudio}
                     onAudioError={onAudioError}
-                    visionProgress={visionEncodeState}
+                    pipelineProgress={visionEncodeState}
                     statusLine={statusLine}
                 />
                 )}

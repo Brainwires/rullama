@@ -579,7 +579,7 @@ const RPC: Record<string, Handler> = {
     },
     encodeImage: async (a) => {
         const cb = (layer: number, total: number) => {
-            notify("visionProgress", { layer, total });
+            notify("pipelineProgress", { layer, total });
         };
         return await requireModel().encodeImage(
             a.pixels as Float32Array, Number(a.h), Number(a.w), cb,
@@ -612,7 +612,10 @@ const RPC: Record<string, Handler> = {
         // In-engine speech-to-text driven by the audio tower + a fixed
         // instruction prompt + greedy decode. Streams per-token deltas
         // out via `notify("transcribeChunk", {delta, done})` so the UI
-        // can fill the input box as the transcript arrives.
+        // can fill the input box as the transcript arrives, and reuses
+        // the existing `pipelineProgress` notify channel to drive the
+        // status strip just above the chat input — same phase pill the
+        // user sees for image encode + prefill.
         //
         // Sampling is forced to greedy (temperature=0, top_k=1)
         // regardless of the user's chat sampling settings — transcription
@@ -630,6 +633,7 @@ const RPC: Record<string, Handler> = {
         m.setSampling({ temperature: 0, top_k: 1, top_p: 1, repetition_penalty: 1, seed: 0 });
 
         // 2. Encode audio → soft tokens.
+        notify("pipelineProgress", { phase: "encoding", layer: 0, total: 1, kind: "audio" });
         log(`transcribe: encode start (samples=${pcm.length})`);
         const softTokens = await m.encodeAudio(pcm);
         // Gemma 4's text d_model is 1536 for both e2b and e4b; the
@@ -638,13 +642,26 @@ const RPC: Record<string, Handler> = {
         const dText = 1536;
         const nSoft = softTokens.length / dText;
         log(`transcribe: encoded ${nSoft} soft tokens × ${dText} dim`);
+        notify("pipelineProgress", { phase: "encoding", layer: 1, total: 1, kind: "audio" });
 
-        // 3. Render prompt with audio sentinel + transcription instruction.
-        const messages = [{
-            role: "user",
-            content: "<|audio><audio|>Transcribe the audio above word-for-word. Reply with only the transcription, no commentary.",
-        }];
-        const promptText = m.renderChat(messages, true);
+        // 3. Render prompt — system + user split with withBos=false.
+        //    audio_parity.rs (the proven-working harness) uses exactly
+        //    this structure and produces clean output; an earlier
+        //    single-user-message + withBos=true variant produced
+        //    garbage like "wosredit" on the same input. Per
+        //    `gemma4_small.rs:16` Gemma 4's chat template does NOT
+        //    want a leading BOS.
+        const messages = [
+            {
+                role: "system",
+                content: "Transcribe the following audio exactly as spoken. Output only the transcription text, nothing else.",
+            },
+            {
+                role: "user",
+                content: "<|audio><audio|>Transcribe this audio.",
+            },
+        ];
+        const promptText = m.renderChat(messages, false);
         const ids = m.encode(promptText);
 
         // 4. Reset KV cache, drive feed loop (splice soft tokens at sentinel).
@@ -654,15 +671,24 @@ const RPC: Record<string, Handler> = {
             const id = ids[i];
             next = await m.step(id);
             if (id === audioBeginId) {
+                // Splice soft tokens. This is the long phase — emit
+                // per-row progress so the strip moves visibly while
+                // we're walking through ~30+ stepWithEmbedding calls.
                 for (let r = 0; r < nSoft; r++) {
+                    notify("pipelineProgress", { phase: "embedding", layer: r, total: nSoft, kind: "audio" });
                     const row = softTokens.subarray(r * dText, (r + 1) * dText);
                     next = await m.stepWithEmbedding(row);
                 }
             }
+            // Per-token prefill progress.
+            notify("pipelineProgress", { phase: "prefill", layer: i + 1, total: ids.length, kind: "audio" });
         }
 
-        // 5. Greedy generate, streaming deltas.
+        // 5. Greedy generate, streaming deltas. Reuse the
+        //    pipelineProgress channel with a final phase so the strip
+        //    stays alive while the model emits the transcript.
         let transcript = "";
+        let genCount = 0;
         for (let gen = 0; gen < maxTokens; gen++) {
             if (m.isEos(next)) break;
             const tok = m.tokenStr(next);
@@ -671,6 +697,8 @@ const RPC: Record<string, Handler> = {
                 transcript += delta;
                 notify("transcribeChunk", { delta, done: false });
             }
+            genCount++;
+            notify("pipelineProgress", { phase: "generating", layer: genCount, total: maxTokens, kind: "audio" });
             next = await m.step(next);
         }
 
@@ -679,7 +707,7 @@ const RPC: Record<string, Handler> = {
             try { m.setSampling(userSampling); } catch { /* */ }
         }
 
-        log(`transcribe: done (${transcript.length} chars)`);
+        log(`transcribe: done (${transcript.length} chars, ${genCount} tokens)`);
         notify("transcribeChunk", { delta: "", done: true, transcript });
         return { transcript };
     },
@@ -953,7 +981,7 @@ const RPC: Record<string, Handler> = {
         const lossMode = String(a.lossMode ?? "next_token");
         // Progress beacons: every per-layer + per-token tick fans out
         // via the `trainingProgress` notify so the UI's
-        // TrainingProgress strip (modelled on VisionProgress) updates
+        // TrainingProgress strip (modelled on PipelineProgress) updates
         // mid-step. Fast (~3-5 Hz worth of postMessage traffic on
         // browser); the strip prevents the "is it frozen?" panic
         // during slow first steps.

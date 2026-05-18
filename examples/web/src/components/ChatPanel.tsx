@@ -8,7 +8,7 @@ import { parseModelContent } from "@/lib/parseModel";
 import { cn } from "@/lib/utils";
 import { Mic, Send, Square, Paperclip, X } from "lucide-react";
 import { MicButton } from "@/components/MicButton";
-import { VisionProgress, type VisionProgressState } from "@/components/VisionProgress";
+import { PipelineProgress, type PipelineProgressState } from "@/components/PipelineProgress";
 import type { VoiceOptions } from "@/lib/voice";
 
 // The think-token slips into the chat history when the user enables
@@ -47,7 +47,7 @@ interface Props {
     onAudioError?:   (msg: string) => void;
     /** When non-null, a large progress strip mounts above the input row
      *  showing per-layer vision-encode progress for the current image. */
-    visionProgress?: VisionProgressState | null;
+    pipelineProgress?: PipelineProgressState | null;
     statusLine?: string;
     /** Optional drop-in for the empty chat history pane (e.g. a
      *  no-model-loaded card). Falls back to a plain hint when omitted. */
@@ -218,7 +218,7 @@ export function ChatPanel(props: Props) {
                 </p>
             )}
 
-            {props.visionProgress && <VisionProgress state={props.visionProgress} />}
+            {props.pipelineProgress && <PipelineProgress state={props.pipelineProgress} />}
 
             {/* Pending-attachment preview strip, only when there's at
                 least one image or voice clip queued. */}
