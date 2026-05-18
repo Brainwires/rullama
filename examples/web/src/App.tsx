@@ -699,11 +699,13 @@ export function App() {
 
             setLoadingLabel("loading into wasm…");
             const mobile = isMobileUA();
-            // KV-cache cap on mobile only — the original 512 was a
-            // crash-avoidance number from the iPhone-load-path work, but
-            // since the worker + sync-OPFS + per-tile range-fetch combo
-            // stabilised, 2048 ctx (≈ 144 MB GPU on A18) is comfortable.
-            const mobileMaxCtx = 2048;
+            // KV-cache cap on mobile. Was 2048 (~530 MB KV); dropped to
+            // 1024 (~265 MB) for multimodal-capable checkpoints because
+            // iPhone Safari WebContent peaks during text-prefill +
+            // resident multimodal scratch were tipping over jetsam on
+            // audio-attached Send. Text-only loads keep the 2048 ceiling
+            // since there's no multimodal tower competing for budget.
+            const mobileMaxCtx = m.multimodal ? 1024 : 2048;
             // textOnly policy:
             //   Catalog drives it everywhere — `multimodal: true` on a
             //   BAKED_IN_MODELS / R2 entry means the blob carries the
@@ -1393,9 +1395,28 @@ export function App() {
                 try { await client.releaseAudioWeights(); }
                 catch (e) { console.warn("[multimodal] releaseAudioWeights failed", e); }
             }
+            if (totalImgs > 0 || turnAudio.length > 0) {
+                // Yield one rAF tick before prefill so iOS Safari's wgpu
+                // device finishes reclaiming the just-dropped Vision/Audio
+                // scratch buffers (~250 MB / ~110 MB) BEFORE the text-
+                // weight upload barrage starts. Without this, the
+                // released buffers can linger in the device's "pending
+                // drop" queue until the next vsync, and the prefill
+                // peak resident set briefly includes both — enough to
+                // tip iPhone over jetsam. Cost on desktop is one
+                // frame (~16 ms), unmeasurable in human time.
+                await new Promise<void>((r) => requestAnimationFrame(() => r()));
+            }
 
             const t0 = performance.now();
             let next = 0;
+            // Breadcrumb so a jetsam kill mid-prefill leaves something
+            // in /tmp/rullama-page.log on the iPhone harness. If this
+            // beacon is the last line before silence, the crash is
+            // during the first text-prefill step (W7a-equivalent OOM);
+            // if it never lands, the crash is earlier (encode or
+            // release).
+            beacon("pe", `prefill start (n_tokens=${ids.length}, imgs=${totalImgs}, audio=${turnAudio.length})`);
             // Drive the progress strip through the rest of pre-encode.
             // The outer loop is the prompt-token feed (~50 tokens) and
             // each `<|image>` / `<|audio>` sentinel triggers an inner

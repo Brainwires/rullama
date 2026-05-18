@@ -76,6 +76,11 @@ interface ModelHandle {
      *  fit under the WebContent jetsam cap. */
     releaseVisionWeights(): number;
     releaseAudioWeights(): number;
+    /** Total bytes resident in the shared GPU WeightCache. Useful as
+     *  a coarse memory-pressure signal at phase boundaries
+     *  (encode → release → prefill) so a jetsam kill can be localised
+     *  to the right phase on next run. */
+    readonly cachedWeightBytes: bigint;
     saveKvState(): Promise<Uint8Array>;
     restoreKvState(bytes: Uint8Array): void;
     renderChatForContinuation(messages: unknown, withBos: boolean): string;
@@ -580,7 +585,27 @@ const RPC: Record<string, Handler> = {
             a.pixels as Float32Array, Number(a.h), Number(a.w), cb,
         );
     },
-    encodeAudio: async (a) => { void a; return await requireModel().encodeAudio(a.pcm as Float32Array); },
+    encodeAudio: async (a) => {
+        const m = requireModel();
+        const pcm = a.pcm as Float32Array;
+        // Diagnostic beacons so a mobile jetsam-kill can be localised
+        // on the next iPhone run. iOS Safari may kill WebContent
+        // without surfacing a JS error; if we see "audio: encode start"
+        // in the log but no "encode done", we know the encode itself
+        // is the trigger. The cachedWeightBytes snapshot identifies
+        // whether weight memory pressure is the culprit.
+        const beforeBytes = Number(m.cachedWeightBytes ?? 0);
+        log(`audio: encode start (samples=${pcm.length}, cached=${(beforeBytes / (1024 * 1024)).toFixed(0)}MB)`);
+        try {
+            const soft = await m.encodeAudio(pcm);
+            const afterBytes = Number(m.cachedWeightBytes ?? 0);
+            log(`audio: encode done (soft_dims=${soft.length}, cached=${(afterBytes / (1024 * 1024)).toFixed(0)}MB, Δ=${((afterBytes - beforeBytes) / (1024 * 1024)).toFixed(0)}MB)`);
+            return soft;
+        } catch (e) {
+            log(`audio: encode FAILED: ${(e as Error).message}`);
+            throw e;
+        }
+    },
     cancelMultimodalEncode: (a) => { void a; requireModel().cancelMultimodalEncode(); return true; },
     releaseVisionWeights: (a) => {
         void a;
