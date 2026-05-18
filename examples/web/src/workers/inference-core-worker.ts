@@ -644,6 +644,18 @@ const RPC: Record<string, Handler> = {
         log(`transcribe: encoded ${nSoft} soft tokens × ${dText} dim`);
         notify("pipelineProgress", { phase: "encoding", layer: 1, total: 1, modality: "audio" });
 
+        // Free the Conformer tower (~3 GB GPU resident) before the text
+        // prefill+splice+gen runs. On iPhone Safari WebGPU, keeping the
+        // audio weights cached alongside the text tower's prefill scratch
+        // tips the WebContent process over the GPU memory budget mid-
+        // prefill and the worker dies silently. Audio tower isn't needed
+        // again in this transcribe — soft tokens are already in CPU
+        // memory; the next encodeAudio call will rebuild lazily.
+        try {
+            const freed = m.releaseAudioWeights();
+            if (freed > 0) log(`transcribe: released ${(freed / (1024 * 1024)).toFixed(1)} MB audio weights`);
+        } catch { /* */ }
+
         // 3. Render prompt — system + user split with withBos=false.
         //    audio_parity.rs (the proven-working harness) uses exactly
         //    this structure and produces clean output; an earlier
