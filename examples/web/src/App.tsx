@@ -1265,6 +1265,7 @@ export function App() {
             type SoftEntry = { nSoft: number; dText: number; softTokens: Float32Array };
             const softQueue: SoftEntry[] = [];
             let beginId: number | null = null;
+            const totalImgs = turnImages.filter((x) => x.pixels).length;
             if (turnImages.length > 0) {
                 const sent = client.imageSentinelIds();
                 if (!sent) {
@@ -1273,18 +1274,22 @@ export function App() {
                 beginId = sent[0];
                 // Surface per-layer vision encode progress as a sticky
                 // strip above the input row (see VisionProgress). The
-                // encode can be ~2 min on slow GPUs; users need clear
-                // feedback that the app is alive.
+                // strip stays alive across three phases — encoding (vision
+                // tower) → embedding (soft-token splice through the text
+                // model) → prefill (prompt-token feed). Without all three
+                // the user sees the bar disappear at 16/16 and then sits
+                // 2-3 min in silence while the JS prefill loop chews on
+                // 256 soft tokens per image at ~870 ms each.
                 let imgIdx = 0;
-                const totalImgs = turnImages.filter((x) => x.pixels).length;
                 const offProgress = client.subscribe("visionProgress", (p) => {
                     const layer = Number(p.layer);
                     const total = Number(p.total);
                     setVisionEncodeState({
                         imageIdx: imgIdx + 1,
                         nImages:  totalImgs,
-                        layer,
-                        nLayers:  total,
+                        phase:    "encoding",
+                        done:     layer,
+                        total,
                     });
                 });
                 try {
@@ -1293,8 +1298,9 @@ export function App() {
                         setVisionEncodeState({
                             imageIdx: imgIdx + 1,
                             nImages:  totalImgs,
-                            layer:    0,
-                            nLayers:  1,  // updated on the first progress event
+                            phase:    "encoding",
+                            done:     0,
+                            total:    1,  // updated on the first progress event
                         });
                         const softTokens = await client.encodeImage(im.pixels, im.h, im.w);
                         const nSoft = await client.imageSoftTokenCount(im.h, im.w);
@@ -1304,7 +1310,9 @@ export function App() {
                     }
                 } finally {
                     offProgress();
-                    setVisionEncodeState(null);
+                    // Don't null the strip here — the embedding + prefill
+                    // phases below take it over for the next 2-3 min of
+                    // otherwise-silent work.
                 }
             }
 
@@ -1343,16 +1351,40 @@ export function App() {
 
             const t0 = performance.now();
             let next = 0;
+            // Drive the progress strip through the rest of pre-encode.
+            // The outer loop is the prompt-token feed (~50 tokens) and
+            // each `<|image>` / `<|audio>` sentinel triggers an inner
+            // splice loop of ~256 stepWithEmbedding calls (~870 ms each).
+            // Without these per-iteration updates the strip would freeze
+            // for 2-3 min per image attachment.
+            setVisionEncodeState({
+                imageIdx: totalImgs,
+                nImages:  totalImgs,
+                phase:    "prefill",
+                done:     0,
+                total:    ids.length,
+            });
             for (let i = 0; i < ids.length; i++) {
                 if (cancelRef.current) throw new Error("cancelled");
                 const id = ids[i];
                 next = await client.step(id);
                 if (beginId !== null && id === beginId && softQueue.length > 0) {
                     const ent = softQueue.shift()!;
+                    // softQueue.shift() already removed this entry, so the
+                    // currently-embedding image is the (totalImgs -
+                    // softQueue.length)-th — 1-based.
+                    const embedImgIdx = totalImgs - softQueue.length;
                     for (let r = 0; r < ent.nSoft; r++) {
                         if (cancelRef.current) throw new Error("cancelled");
                         const row = ent.softTokens.subarray(r * ent.dText, (r + 1) * ent.dText);
                         next = await client.stepWithEmbedding(row);
+                        setVisionEncodeState({
+                            imageIdx: embedImgIdx,
+                            nImages:  totalImgs,
+                            phase:    "embedding",
+                            done:     r + 1,
+                            total:    ent.nSoft,
+                        });
                     }
                 } else if (audioBeginId !== null && id === audioBeginId && audioQueue.length > 0) {
                     const ent = audioQueue.shift()!;
@@ -1362,6 +1394,13 @@ export function App() {
                         next = await client.stepWithEmbedding(row);
                     }
                 }
+                setVisionEncodeState({
+                    imageIdx: totalImgs,
+                    nImages:  totalImgs,
+                    phase:    "prefill",
+                    done:     i + 1,
+                    total:    ids.length,
+                });
                 // Track pre-encode progress so a visibilitychange→hidden
                 // mid-prompt-feed has a resumable snapshot. `next` at
                 // this point is the model's predicted next token AFTER
@@ -1376,6 +1415,7 @@ export function App() {
                     };
                 }
             }
+            setVisionEncodeState(null);
             const peMs = performance.now() - t0;
 
             const tg0 = performance.now();
@@ -1453,6 +1493,11 @@ export function App() {
                 }
             }
         } finally {
+            // Strip is normally cleared just before the gen loop, but
+            // an error/cancel during encode, splice, or prefill skips
+            // that point — make sure it's gone here so the chat input
+            // isn't stuck behind a stale progress bar.
+            setVisionEncodeState(null);
             if (liveRecovery) {
                 // Hand off without clearing — resumeInflightGeneration
                 // owns the metadata + OPFS state from here. Mirror to
