@@ -14,7 +14,19 @@
 // (the router), one request at a time per stateful RPC.
 
 // @ts-expect-error — generated bundle, no .d.ts
-import init, { Model, TrainingSession, WasmDatabase } from "/pkg/rullama.js";
+import init, { Model, TrainingSession, probeTrainingFit, WasmDatabase } from "/pkg/rullama.js";
+
+interface ProbeReport {
+    ok:             boolean;
+    estimatedBytes: number;
+    reason?:        string;
+}
+type ProbeFn = (
+    model:          ModelHandle,
+    loraConfigJson: string,
+    hparamsJson:    string,
+) => Promise<ProbeReport>;
+const probeFit = probeTrainingFit as unknown as ProbeFn;
 
 interface WasmDbHandle {
     exec(sql: string): bigint;
@@ -740,6 +752,25 @@ const RPC: Record<string, Handler> = {
         if (!model) throw new Error("load a model before starting training");
         if (trainingSession) throw new Error(
             "training already active — call trainingFinish() first");
+        const loraCfgJson = JSON.stringify(a.loraConfig ?? {});
+        const hpJson      = JSON.stringify(a.hparams ?? {});
+
+        // Probe first — try the scratch + LoRA allocations against a
+        // BORROWED Model. If the device can't fit them, surface a
+        // typed error WITHOUT consuming the Model handle. The chat
+        // path stays alive; the user can lower rank / seq_len and
+        // retry without re-loading the multi-GB GGUF.
+        const probe = await probeFit(model, loraCfgJson, hpJson);
+        log(`training: probe ok=${probe.ok} estimated=${(probe.estimatedBytes / (1024 * 1024)).toFixed(1)}MB ${probe.reason ?? ""}`);
+        if (!probe.ok) {
+            const mb = (probe.estimatedBytes / (1024 * 1024)).toFixed(0);
+            throw new Error(
+                `Training would need ~${mb} MB GPU memory and this device rejected the allocation. ` +
+                `Lower the rank, shorten max_seq_len, or drop FFN targets and try again. ` +
+                `(GPU said: ${probe.reason ?? "unknown"})`
+            );
+        }
+
         // If there's an active adapter loaded into Model from a previous
         // session, clear it — training initialises fresh LoRA state.
         if (activeAdapterName) {
@@ -747,15 +778,15 @@ const RPC: Record<string, Handler> = {
             activeAdapterName = null;
             notify("adapterChanged", { active: null });
         }
-        const loraCfgJson = JSON.stringify(a.loraConfig ?? {});
-        const hpJson      = JSON.stringify(a.hparams ?? {});
         const moved = model;
         model = null; // Model is moved into TrainingSession.
         try {
             trainingSession = new TrainingSessionClass(moved, loraCfgJson, hpJson);
         } catch (e) {
-            // Constructor failed — Model was already moved, JS handle is invalid.
-            // Drop loadedInfo so the next chat session re-loads.
+            // Probe said ok but the constructor still threw — likely a
+            // device-loss race. Drop loadedInfo so chat re-loads
+            // cleanly on next attempt rather than wedging on a
+            // half-consumed Model handle.
             loadedInfo = null;
             notify("modelFreed", {});
             throw e;
@@ -766,20 +797,36 @@ const RPC: Record<string, Handler> = {
             parameterCount: trainingSession.parameterCount,
             gradientCheckpointing: trainingSession.gradientCheckpointing,
             mixedPrecision: trainingSession.mixedPrecision,
+            estimatedBytes: probe.estimatedBytes,
         };
         notify("trainingStarted", info);
         log(`training: started, params=${info.parameterCount} ckpt=${info.gradientCheckpointing} mp=${info.mixedPrecision}`);
         return info;
     },
 
+    trainingProbeFit: async (a) => {
+        if (!model) throw new Error("load a model before probing fit");
+        if (trainingSession) throw new Error("training already active — can't probe");
+        const loraCfgJson = JSON.stringify(a.loraConfig ?? {});
+        const hpJson      = JSON.stringify(a.hparams ?? {});
+        return await probeFit(model, loraCfgJson, hpJson);
+    },
+
     trainingStep: async (a) => {
         const s = requireTraining();
         const inputIds = a.inputIds as Uint32Array;
         const lossMode = String(a.lossMode ?? "next_token");
-        const report = lossMode === "per_position"
-            ? await s.stepPerPosition(inputIds, a.targets as Uint32Array)
-            : await s.step(inputIds, Number(a.targetId));
-        return report;
+        try {
+            return lossMode === "per_position"
+                ? await s.stepPerPosition(inputIds, a.targets as Uint32Array)
+                : await s.step(inputIds, Number(a.targetId));
+        } catch (e) {
+            // Log + rethrow. The session stays alive (the wasm side
+            // doesn't drop on a kernel error), so the UI can choose
+            // Discard to release the Model cleanly.
+            log(`training: step ${s.stepNum} failed (lossMode=${lossMode}, inputLen=${inputIds.length}): ${(e as Error).message}`);
+            throw e;
+        }
     },
 
     trainingZeroGrads: async (a) => { void a; requireTraining().zeroGrads(); return true; },
@@ -788,10 +835,15 @@ const RPC: Record<string, Handler> = {
         const s = requireTraining();
         const inputIds = a.inputIds as Uint32Array;
         const lossMode = String(a.lossMode ?? "next_token");
-        const loss = lossMode === "per_position"
-            ? await s.forwardBackwardPerPosition(inputIds, a.targets as Uint32Array)
-            : await s.forwardBackward(inputIds, Number(a.targetId));
-        return { loss, step: s.stepNum, lr: s.lr };
+        try {
+            const loss = lossMode === "per_position"
+                ? await s.forwardBackwardPerPosition(inputIds, a.targets as Uint32Array)
+                : await s.forwardBackward(inputIds, Number(a.targetId));
+            return { loss, step: s.stepNum, lr: s.lr };
+        } catch (e) {
+            log(`training: forwardBackward step ${s.stepNum} failed (lossMode=${lossMode}, inputLen=${inputIds.length}): ${(e as Error).message}`);
+            throw e;
+        }
     },
 
     trainingOptimizerStep: async (a) => {

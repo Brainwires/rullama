@@ -76,6 +76,7 @@ const STATEFUL_RPCS = new Set([
     // Training RPCs all mutate the Model handle (TrainingSession owns
     // it for the session's lifetime) — same session-locking pattern as
     // the chat-side step/encode RPCs.
+    "trainingProbeFit",
     "trainingStart",
     "trainingStep",
     "trainingZeroGrads",

@@ -463,6 +463,18 @@ export class WorkerClient {
     }): Promise<TrainingSessionInfo> {
         return this.rpc("trainingStart", { sid: this.session, ...args } as Record<string, unknown>);
     }
+    /** Run the scratch+LoRA allocation trial against a borrowed Model
+     *  without consuming it. Returns `{ok, estimatedBytes, reason?}`;
+     *  caller can use this to grey out Start if the device can't fit
+     *  the requested config. The worker also runs this automatically
+     *  inside `trainingStart` and refuses to consume the Model on
+     *  probe failure, so explicit pre-flight is optional. */
+    trainingProbeFit(args: {
+        loraConfig: TrainingLoraConfig;
+        hparams:    TrainingHyperparams;
+    }): Promise<{ ok: boolean; estimatedBytes: number; reason?: string }> {
+        return this.rpc("trainingProbeFit", { sid: this.session, ...args } as Record<string, unknown>);
+    }
     trainingStep(args: {
         inputIds:  Uint32Array;
         targetId?: number;
@@ -538,6 +550,9 @@ export interface TrainingSessionInfo {
     parameterCount:        number;
     gradientCheckpointing: boolean;
     mixedPrecision:        boolean;
+    /** GPU bytes the trainer is expected to occupy — surfaced by the
+     *  probe that runs at the top of `trainingStart`. */
+    estimatedBytes?:       number;
 }
 export type TrainingStatusInfo =
     | { active: false }
