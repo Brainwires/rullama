@@ -54,6 +54,13 @@ const ALL_TARGETS = ["attn_q", "attn_k", "attn_v", "attn_o", "ffn_gate", "ffn_up
 // Device-aware defaults computed once at mount. Phones get a tighter
 // rank + shorter seq + gradient checkpointing on by default; desktops
 // get the headroom for richer adapters.
+//
+// Default `max_seq_len` is intentionally conservative. The trainer
+// allocates per-layer activation captures sized as seq * per_position,
+// summed across 17 buffers per layer × n_layers — for gemma4-e2b
+// that's roughly `seq * 40 MB` of GPU memory total. Desktop 128 → ~5 GB
+// budget hit, mobile 32 → ~1.3 GB. These are safe starting points;
+// users with headroom can crank seq via the form.
 function deviceDefaults(): { hp: TrainingHyperparams; lora: TrainingLoraConfig } {
     const nav = navigator as Navigator & { deviceMemory?: number };
     const memGB = nav.deviceMemory ?? 8;
@@ -74,7 +81,7 @@ function deviceDefaults(): { hp: TrainingHyperparams; lora: TrainingLoraConfig }
             weight_decay: 0,
             lr_scheduler: "constant",
             seed: 0xC0FFEE,
-            max_seq_len: tight ? 64 : 256,
+            max_seq_len: tight ? 32 : 128,
             gradient_accumulation_steps: 1,
             max_grad_norm: 0,
             loss_mode: "next_token",
@@ -227,19 +234,27 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
         setErrorMsg(null);
         setPhase("training");
 
+        let sessionStarted = false;
+        let sessionAcquired = false;
         try {
             await client.acquireSession();
+            sessionAcquired = true;
             // Clear any active adapter first so chat doesn't see stale weights
             // post-finish (training writes to a fresh LoraState).
             if (activeAdapter) {
                 try { await client.trainingClearAdapter(); } catch { /* */ }
                 onAdapterChanged?.(null);
             }
+            // The worker probes the scratch+LoRA fit before consuming the
+            // Model. If the device can't fit the requested config, this
+            // throws with a "Training would need ~X MB…" message and the
+            // Model stays alive in chat.
             await client.trainingStart({
                 loraConfig: lora,
                 hparams: hp,
                 totalSteps: stepsBudget,
             });
+            sessionStarted = true;
 
             for (let i = 0; i < stepsBudget; i++) {
                 if (cancelRef.current) break;
@@ -279,9 +294,24 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
             setPhase(cancelRef.current ? "ready" : "done");
         } catch (e) {
             const msg = (e as Error).message ?? String(e);
-            setErrorMsg(msg);
-            setPhase("error");
-            toast.error(`Training stopped: ${msg}`);
+            // Probe-failure recovery: if `trainingStart` threw before
+            // consuming the Model, drop straight back to "ready" so
+            // the form stays editable and the user can adjust knobs
+            // without going through Reset. Mid-training failures
+            // (sessionStarted=true) keep "error" so the user has a
+            // clear stop point.
+            if (!sessionStarted) {
+                setErrorMsg(msg);
+                setPhase("ready");
+                if (sessionAcquired) {
+                    try { await client.releaseSession(); } catch { /* */ }
+                }
+                toast.error(msg);
+            } else {
+                setErrorMsg(msg);
+                setPhase("error");
+                toast.error(`Training stopped: ${msg}`);
+            }
         }
     }, [activeAdapter, client, examples, hp, lora, modelStatus, onAdapterChanged, stepsBudget, toast]);
 
@@ -330,14 +360,20 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
     }, [adapterName, client, onAdapterChanged, refreshAdapters, toast]);
 
     const onDiscard = useCallback(async () => {
-        try {
-            await client.trainingFinish();
-            try { await client.releaseSession(); } catch { /* */ }
-        } catch { /* */ }
-        setPhase("idle");
+        // Best-effort: release any active training session + session
+        // lock. Both can throw if there isn't one (e.g. probe-failure
+        // path where Model was never consumed); swallow.
+        try { await client.trainingFinish(); } catch { /* */ }
+        try { await client.releaseSession(); } catch { /* */ }
+        // Preserve the loaded dataset if there is one — user just hit
+        // an error mid-training or wants to retry. Going all the way
+        // back to "idle" forces them to re-pick the file, which is
+        // exactly the kind of friction the W4 hardening is supposed
+        // to avoid.
+        setPhase(examples.length > 0 ? "ready" : "idle");
         setRecent([]);
         setErrorMsg(null);
-    }, [client]);
+    }, [client, examples.length]);
 
     // ─── Render ────────────────────────────────────────────────────────
 
@@ -436,9 +472,14 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                         <Button onClick={runTraining} className="gap-1">
                             <Play className="size-4" /> Start training
                         </Button>
-                        <Button variant="ghost" size="sm" onClick={() => { setExamples([]); setDatasetName(null); setPhase("idle"); }}>
+                        <Button variant="ghost" size="sm" onClick={() => { setExamples([]); setDatasetName(null); setPhase("idle"); setErrorMsg(null); }}>
                             Discard dataset
                         </Button>
+                        {errorMsg && (
+                            <span className="ml-2 flex-1 text-xs text-destructive">
+                                {errorMsg}
+                            </span>
+                        )}
                     </>
                 )}
                 {phase === "idle" && examples.length === 0 && (
@@ -477,10 +518,10 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                 )}
                 {phase === "error" && (
                     <>
-                        <Button onClick={onDiscard} variant="secondary" size="sm">
-                            Reset
+                        <Button onClick={onDiscard} variant="secondary" size="sm" className="gap-1">
+                            <RefreshCw className="size-3.5" /> Reset to retry
                         </Button>
-                        <span className="text-xs text-destructive">{errorMsg}</span>
+                        <span className="ml-2 flex-1 text-xs text-destructive">{errorMsg}</span>
                     </>
                 )}
             </div>
@@ -688,10 +729,10 @@ function ObjectiveCard(props: {
                 />
                 <LabeledInput
                     label="Max seq_len"
-                    description="examples beyond this are truncated"
+                    description={`~${Math.round(props.hp.max_seq_len * 1.4)} MB GPU per layer × 35 layers`}
                     value={props.hp.max_seq_len}
                     min={16} max={2048} step={16}
-                    onChange={(n) => props.setHp({ ...props.hp, max_seq_len: clampInt(n, 16, 2048, 256) })}
+                    onChange={(n) => props.setHp({ ...props.hp, max_seq_len: clampInt(n, 16, 2048, 128) })}
                     disabled={props.disabled}
                 />
             </CardContent>
