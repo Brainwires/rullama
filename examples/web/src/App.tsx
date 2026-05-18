@@ -372,6 +372,39 @@ export function App() {
             client.subscribe("adapterChanged", (p) => {
                 setActiveAdapter((p.active as string | null | undefined) ?? null);
             }),
+            // Worker is waiting on the OPFS read-syncHandle while the
+            // previous worker's exclusive lock GCs. Surface to the boot
+            // splash AND the in-app loading label so the user knows
+            // something is happening (this matters most on iPhone where
+            // there's no easy dev console).
+            client.subscribe("modelLoadWaiting", (p) => {
+                const attempt = Number(p.attempt ?? 0);
+                const elapsed = Number(p.elapsedMs ?? 0);
+                const msg = `Waiting for previous session to release the model… (${(elapsed / 1000).toFixed(1)}s, attempt ${attempt})`;
+                setLoadingLabel(msg);
+                try {
+                    window.__rullamaBootStatus?.("Almost there…", msg);
+                } catch { /* */ }
+            }),
+            // Worker is waiting on the WRITE syncHandle for a resumed
+            // download. Same situation, different operation.
+            client.subscribe("downloadWaiting", (p) => {
+                const attempt = Number(p.attempt ?? 0);
+                const elapsed = Number(p.elapsedMs ?? 0);
+                setLoadingLabel(
+                    `Waiting for previous session to release the download… (${(elapsed / 1000).toFixed(1)}s, attempt ${attempt})`,
+                );
+            }),
+            // Download stream broke (network drop / iOS screen-lock
+            // socket sever); worker is retrying with Range resume.
+            client.subscribe("downloadRetrying", (p) => {
+                const attempt = Number(p.attempt ?? 0);
+                const max = Number(p.maxAttempts ?? 0);
+                const delay = Number(p.nextDelayMs ?? 0);
+                setLoadingLabel(
+                    `Connection dropped — retrying in ${(delay / 1000).toFixed(1)}s (attempt ${attempt}/${max})`,
+                );
+            }),
             client.subscribe("gpuFault", (p) => {
                 // Typed GPU fault surfaced by the inference core worker
                 // when wgpu returns device-lost / OOM / WebGPU validation
@@ -413,19 +446,24 @@ export function App() {
     // notification — if another tab already loaded a model, we inherit
     // that state via the meta payload and skip auto-load entirely.
     //
-    // Resume priority: `pendingLoadDigest` first (the user kicked off a
-    // load that didn't finish — likely an iOS suspend mid-download;
-    // re-firing onLoad routes through ensureModel's Range-resume); then
-    // `lastLoadedDigest` (previously fully loaded, just rehydrate from
-    // OPFS cache). Both paths funnel through the same onLoad call.
+    // Auto-rehydrate ONLY when the model is fully present in OPFS — that
+    // means a previous session completed a download and just wants to
+    // reopen the file. We deliberately do NOT auto-trigger a download
+    // here, even when `pendingLoadDigest` says one was in flight before
+    // the tab died: that auto-download path was the source of the
+    // "every PWA reload after a screen lock tries to redownload the
+    // model and fails" pain (the failure path on iOS is the
+    // syncHandle / fetch race against an old worker that hasn't GC'd
+    // yet, and it's much more reliable when the user clicks Load
+    // explicitly because by then everything has settled).
+    //
+    // For partially-downloaded models, the ModelLoader UI shows the
+    // resume option and the user can decide when to fire it.
     const autoLoadAttempted = useRef(false);
     useEffect(() => {
         if (!metaInit) return;
         if (autoLoadAttempted.current) return;
         autoLoadAttempted.current = true;
-        // The meta subscriber already set modelStatus when a model is
-        // loaded worker-side; bail out so we don't gratuitously call
-        // load() and queue behind another tab.
         if (modelStatus === "ready") return;
         const target = pendingLoadDigest || lastLoadedDigest;
         if (!target) return;
@@ -434,11 +472,21 @@ export function App() {
                 const models = await listModels();
                 const m = models.find((x) => x.digest === target);
                 if (!m) {
-                    // Model vanished from the catalog (server-side delete,
-                    // or stale localStorage). Clear both so we don't keep
-                    // retrying on every boot.
                     setPendingLoadDigest("");
                     setLastLoadedDigest("");
+                    return;
+                }
+                // Gate on OPFS: only auto-fire onLoad if the cached file
+                // already matches the expected size. existingSize is
+                // tolerant of the sync-handle read race (returns f.size
+                // on transient failures), so a momentary lock conflict
+                // doesn't push us into the download path.
+                const modelKey = m.digest.replace(/[^A-Za-z0-9_.-]/g, "_");
+                const filename = m.name.replace(/[^A-Za-z0-9_.-]/g, "_") + ".gguf";
+                const cachedBytes = await existingSize(modelKey, filename);
+                if (cachedBytes < m.size) {
+                    // Not fully cached — bail. The ModelLoader UI will
+                    // render and the user can tap Load to resume.
                     return;
                 }
                 if (onLoadRef.current) {

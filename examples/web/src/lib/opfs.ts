@@ -104,10 +104,15 @@ export async function existingSize(modelKey: string, filename: string): Promise<
             await removeFile(modelKey, filename);
             return 0;
         }
-        // read_failed — leave the file alone. The caller treats 0 as
-        // "not present in OPFS"; on the next reload the check is retried.
-        console.warn("[opfs] first-bytes read failed (likely sync-handle race) — preserving file", modelKey, filename);
-        return 0;
+        // read_failed — almost certainly a transient sync-handle race on
+        // iOS Safari (previous worker's exclusive lock hasn't GC'd yet).
+        // Return f.size so callers that compare "cachedBytes vs expected
+        // size" can still see the file as potentially-complete and avoid
+        // auto-triggering a redownload. Downstream load via the worker's
+        // openSyncReadFn will succeed once the lock releases (it has its
+        // own retry).
+        console.warn("[opfs] first-bytes read failed (likely sync-handle race) — preserving file at size=", f.size, modelKey, filename);
+        return f.size;
     } catch { return 0; }
 }
 

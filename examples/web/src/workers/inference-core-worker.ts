@@ -204,6 +204,60 @@ function notify(kind: string, payload: Record<string, unknown> = {}) {
     try { routerPort.postMessage({ type: "notify", kind, ...payload }); } catch { /* */ }
 }
 
+/** Open `FileSystemSyncAccessHandle` with backoff retry.
+ *
+ *  iOS Safari can take several seconds to GC a previous worker that's
+ *  still holding an exclusive lock — this is the root of every
+ *  "PWA-update reload can't open the OPFS file" report. Retry instead
+ *  of failing on the first attempt, and notify the UI each pass so it
+ *  can show "waiting for previous session to release …" instead of
+ *  looking frozen.
+ *
+ *  Total budget defaults to 15 s, well past the empirically-observed
+ *  iOS GC window for an orphaned worker handle. After the budget,
+ *  throw with a message that says the data is intact and instructs
+ *  the user to force-quit + reopen. */
+async function createSyncAccessHandleWithRetry(
+    fh: FileSystemFileHandle,
+    label: string,
+    opts?: { budgetMs?: number; notifyKind?: string },
+): Promise<FileSystemSyncAccessHandle> {
+    const budget = opts?.budgetMs ?? 15_000;
+    const notifyKind = opts?.notifyKind ?? "syncHandleWaiting";
+    const startMs = Date.now();
+    let attempt = 0;
+    while (true) {
+        try {
+            const h = await fh.createSyncAccessHandle();
+            if (attempt > 0) {
+                log(`opfs: ${label} syncHandle acquired after ${attempt} retries (${Date.now() - startMs}ms)`);
+            }
+            return h;
+        } catch (e) {
+            attempt += 1;
+            const elapsed = Date.now() - startMs;
+            if (elapsed >= budget) {
+                throw new Error(
+                    `${label}: syncHandle locked by a previous worker ` +
+                    `(${attempt} attempts over ${elapsed}ms). The data is intact — ` +
+                    `force-quit the tab/app and reopen to release the lock. ` +
+                    `Underlying: ${(e as Error)?.message ?? e}`,
+                );
+            }
+            const delay = Math.min(1500, 100 * Math.pow(2, attempt - 1));
+            notify(notifyKind, {
+                reason: "opfs-locked",
+                label,
+                attempt,
+                elapsedMs: elapsed,
+                nextDelayMs: delay,
+            });
+            log(`opfs: ${label} still locked (attempt ${attempt}, ${elapsed}ms elapsed) — retrying in ${delay}ms`);
+            await new Promise((r) => setTimeout(r, delay));
+        }
+    }
+}
+
 // ───────────────────────────────────────────────────────────────────────
 // Wasm + DB lifecycle
 // ───────────────────────────────────────────────────────────────────────
@@ -279,55 +333,11 @@ async function openSyncReadFn(modelKey: string, filename: string) {
     const dlDir    = await root.getDirectoryHandle(OPFS_DIR, { create: false });
     const modelDir = await dlDir.getDirectoryHandle(modelKey, { create: false });
     const fh       = await modelDir.getFileHandle(filename,    { create: false });
-
-    // createSyncAccessHandle is *exclusive*. After a PWA-update reload
-    // the previous page's core worker may still be holding the handle:
-    // the new page's main thread sent a `shutdown` message and the old
-    // worker is in the middle of running releaseAllHandles() +
-    // self.close(), but iOS Safari can take a noticeable moment to GC
-    // the dead worker and unlock the OPFS entry. A bare single attempt
-    // fails with NoModificationAllowedError and the load aborts even
-    // though the GGUF is sitting right there in OPFS — exactly the
-    // "data is fucking there but locked up" symptom.
-    //
-    // Retry with backoff. Total budget ~15 s, past the empirically-
-    // observed iOS GC window for an orphaned worker handle but short
-    // enough to surface a real problem instead of spinning forever.
-    // Each attempt notifies the UI so the splash/status can say
-    // "waiting for previous session to release the model" instead of
-    // looking frozen.
-    const startMs = Date.now();
-    const BUDGET_MS = 15_000;
-    let attempt = 0;
-    while (true) {
-        try {
-            syncHandle = await fh.createSyncAccessHandle();
-            break;
-        } catch (e) {
-            attempt += 1;
-            const elapsed = Date.now() - startMs;
-            if (elapsed >= BUDGET_MS) {
-                throw new Error(
-                    `OPFS file ${modelKey}/${filename} is locked by a previous worker ` +
-                    `(${attempt} attempts over ${elapsed}ms). The data is intact — ` +
-                    `force-quit the tab/app and reopen to release the lock. ` +
-                    `Underlying: ${(e as Error)?.message ?? e}`,
-                );
-            }
-            const delay = Math.min(1500, 100 * Math.pow(2, attempt - 1));
-            notify("modelLoadWaiting", {
-                reason: "opfs-locked",
-                attempt,
-                elapsedMs: elapsed,
-                nextDelayMs: delay,
-            });
-            log(`opfs: ${modelKey}/${filename} still locked (attempt ${attempt}, ${elapsed}ms elapsed) — retrying in ${delay}ms`);
-            await new Promise((r) => setTimeout(r, delay));
-        }
-    }
-    if (attempt > 0) {
-        log(`opfs: ${modelKey}/${filename} sync handle acquired after ${attempt} retries (${Date.now() - startMs}ms)`);
-    }
+    syncHandle = await createSyncAccessHandleWithRetry(
+        fh,
+        `${modelKey}/${filename} (read)`,
+        { notifyKind: "modelLoadWaiting" },
+    );
 
     const size = syncHandle.getSize();
     if (size === 0) {
@@ -409,7 +419,7 @@ async function getAdaptersDir(create: boolean): Promise<FileSystemDirectoryHandl
 async function writeAdapterBytes(name: string, bytes: Uint8Array): Promise<number> {
     const dir = await getAdaptersDir(true);
     const fh = await dir.getFileHandle(`${name}.bin`, { create: true });
-    const handle = await fh.createSyncAccessHandle();
+    const handle = await createSyncAccessHandleWithRetry(fh, `adapters/${name}.bin`);
     try {
         handle.truncate(0);
         handle.write(bytes, { at: 0 });
@@ -525,60 +535,107 @@ async function doDownload(args: EnsureArgs): Promise<{ totalBytes: number; fromC
     let writeHandle: FileSystemSyncAccessHandle | null = null;
     let bytesSinceFlush = 0;
     try {
-        writeHandle = await fileHandle.createSyncAccessHandle();
+        // Retry-acquire the WRITE syncHandle. After a screen-lock-induced
+        // Jetsam kill, the previous worker's exclusive lock may not have
+        // GC'd yet — without the retry the resume fails on first attempt
+        // even though the data is intact.
+        writeHandle = await createSyncAccessHandleWithRetry(
+            fileHandle,
+            `${modelKey}/${filename} (write)`,
+            { notifyKind: "downloadWaiting" },
+        );
         writeHandle.truncate(currentOffset);
         writeHandle.flush();
 
-        const headers: Record<string, string> = {};
-        if (currentOffset > 0) headers["Range"] = `bytes=${currentOffset}-`;
-        const resp = await fetch(url, { headers });
+        let totalBytes = 0;
 
-        if (resp.status === 416) {
-            const size = writeHandle.getSize();
-            writeHandle.close();
-            notify("downloadDone", { modelKey, filename, totalBytes: size, fromCache: true });
-            return { totalBytes: size, fromCache: false };
-        }
-        if (!resp.ok && resp.status !== 206) {
-            writeHandle.close();
-            throw new Error(`fetch failed (${resp.status})`);
-        }
-        if (resp.status === 200 && currentOffset > 0) {
-            writeHandle.truncate(0);
-            currentOffset = 0;
-        }
-
-        const cr = resp.headers.get("content-range");
-        const contentLength = Number(resp.headers.get("content-length") || "0") || 0;
-        const totalBytes = cr?.match(/\/(\d+)\s*$/)
-            ? Number(cr.match(/\/(\d+)\s*$/)![1])
-            : currentOffset + contentLength;
-
-        if (!resp.body) {
-            writeHandle.close();
-            throw new Error("no response body");
-        }
-        const reader = resp.body.getReader();
-
+        // Outer fetch-retry loop: if the network stream dies mid-download
+        // (iOS Safari severs sockets during screen lock; tab thaws but
+        // the reader.read() promise rejects), refetch with
+        // `Range: bytes=currentOffset-` and continue. Without this loop
+        // a single dropped connection ends the whole download and the
+        // user has to reload the page to recover.
+        const MAX_FETCH_RETRIES = 5;
+        let fetchAttempt = 0;
         while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            if (!value) continue;
+            const headers: Record<string, string> = {};
+            if (currentOffset > 0) headers["Range"] = `bytes=${currentOffset}-`;
+            const resp = await fetch(url, { headers });
 
-            const written = writeHandle.write(value, { at: currentOffset });
-            currentOffset   += written;
-            bytesSinceFlush += written;
-
-            if (bytesSinceFlush >= FLUSH_INTERVAL) {
-                writeHandle.flush();
-                bytesSinceFlush = 0;
+            if (resp.status === 416) {
+                // Server says we already have everything (Range past EOF).
+                const size = writeHandle.getSize();
+                notify("downloadDone", { modelKey, filename, totalBytes: size, fromCache: true });
+                writeHandle.close();
+                writeHandle = null;
+                return { totalBytes: size, fromCache: false };
             }
-            notify("downloadProgress", {
-                modelKey, filename,
-                bytesWritten: currentOffset,
-                totalBytes,
-                chunkBytes: written,
-            });
+            if (!resp.ok && resp.status !== 206) {
+                throw new Error(`fetch failed (${resp.status})`);
+            }
+            if (resp.status === 200 && currentOffset > 0) {
+                // Server doesn't honor Range — restart from byte 0.
+                writeHandle.truncate(0);
+                currentOffset = 0;
+            }
+
+            const cr = resp.headers.get("content-range");
+            const contentLength = Number(resp.headers.get("content-length") || "0") || 0;
+            totalBytes = cr?.match(/\/(\d+)\s*$/)
+                ? Number(cr.match(/\/(\d+)\s*$/)![1])
+                : currentOffset + contentLength;
+
+            if (!resp.body) {
+                throw new Error("no response body");
+            }
+            const reader = resp.body.getReader();
+
+            try {
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    if (!value) continue;
+
+                    const written = writeHandle.write(value, { at: currentOffset });
+                    currentOffset   += written;
+                    bytesSinceFlush += written;
+
+                    if (bytesSinceFlush >= FLUSH_INTERVAL) {
+                        writeHandle.flush();
+                        bytesSinceFlush = 0;
+                    }
+                    notify("downloadProgress", {
+                        modelKey, filename,
+                        bytesWritten: currentOffset,
+                        totalBytes,
+                        chunkBytes: written,
+                    });
+                }
+                // Drained cleanly — exit fetch-retry loop.
+                break;
+            } catch (readErr) {
+                // Flush so the next attempt resumes from a known offset.
+                try { writeHandle.flush(); } catch { /* */ }
+                bytesSinceFlush = 0;
+
+                fetchAttempt += 1;
+                if (fetchAttempt > MAX_FETCH_RETRIES) {
+                    throw readErr;
+                }
+                const delay = Math.min(5_000, 500 * Math.pow(2, fetchAttempt - 1));
+                const msg = (readErr as Error)?.message ?? String(readErr);
+                log(`download: ${modelKey}/${filename} stream broke at ${currentOffset}/${totalBytes} — retrying in ${delay}ms (attempt ${fetchAttempt}/${MAX_FETCH_RETRIES}): ${msg}`);
+                notify("downloadRetrying", {
+                    modelKey, filename,
+                    bytesWritten: currentOffset,
+                    totalBytes,
+                    nextDelayMs: delay,
+                    attempt: fetchAttempt,
+                    maxAttempts: MAX_FETCH_RETRIES,
+                });
+                await new Promise((r) => setTimeout(r, delay));
+                // Loop iterates to issue a fresh fetch with Range header.
+            }
         }
 
         writeHandle.flush();
