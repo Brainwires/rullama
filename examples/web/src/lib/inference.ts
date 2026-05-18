@@ -379,7 +379,14 @@ export class WorkerClient {
      *  Streams per-token deltas to `onChunk` if provided; resolves with
      *  the final transcript. Worker forces greedy sampling (temperature
      *  0) for the duration of the call regardless of the chat-side
-     *  sampling settings. */
+     *  sampling settings.
+     *
+     *  Acquires its own session lock for the duration of the call — the
+     *  mic gesture lives outside the chat-send flow that normally owns
+     *  the session, so we can't assume one's already held. The lock
+     *  blocks any concurrent chat generation in another tab while
+     *  transcribing (matches the existing single-tab-at-a-time
+     *  arbitration). */
     async transcribeAudio(
         pcm: Float32Array,
         onChunk?: (delta: string) => void,
@@ -392,11 +399,13 @@ export class WorkerClient {
             })
             : null;
         try {
-            const { transcript } = await this.rpc<{ transcript: string }>(
-                "transcribeAudio",
-                { sid: this.session, pcm } as Record<string, unknown>,
-            );
-            return transcript;
+            return await this.withSession(async () => {
+                const { transcript } = await this.rpc<{ transcript: string }>(
+                    "transcribeAudio",
+                    { sid: this.session, pcm } as Record<string, unknown>,
+                );
+                return transcript;
+            });
         } finally {
             off?.();
         }
