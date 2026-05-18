@@ -1631,6 +1631,7 @@ export function App() {
             const phase = String(p.phase ?? "encoding");
             const layer = Number(p.layer ?? 0);
             const total = Number(p.total ?? 1);
+            console.log("[pipelineProgress audio]", phase, layer, "/", total);
             setVisionEncodeState({
                 imageIdx: 1,
                 nImages:  1,
@@ -1658,6 +1659,16 @@ export function App() {
         if (pcm.length === 0) return;
         const client = getClient();
         try {
+            // Show the strip immediately so the user has visible feedback
+            // from the moment the mic stops, instead of waiting for the
+            // worker's first pipelineProgress notify to round-trip back
+            // (the message-passing delay alone can swallow the only
+            // visible window on fast desktop GPUs).
+            setVisionEncodeState({
+                imageIdx: 1, nImages: 1,
+                phase: "encoding", done: 0, total: 1,
+                kind: "audio",
+            });
             // Append-on-stream: each delta extends the current prompt
             // value so the user sees it fill in. If the prompt already
             // had content, add a leading space before the first delta.
