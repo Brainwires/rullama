@@ -77,9 +77,23 @@ export async function ensureFreshServiceWorker(): Promise<void> {
     // Wait for the new SW to claim the page. With `clientsClaim: true`
     // this fires as soon as the new SW activates. Bounded by TIMEOUT_MS
     // so a slow install / stuck lifecycle doesn't strand us.
-    await new Promise<void>((resolve) => {
-        const onSwap = () => { cleanup(); resolve(); };
-        const onTimeout = () => { cleanup(); resolve(); };
+    //
+    // If `controllerchange` actually fires here, the new SW has taken
+    // over but the JS bundle that's executing right now was fetched
+    // under the OLD precache — its hashed asset URLs don't exist in
+    // the new SW's manifest, so any worker spawned later (or chunk
+    // dynamic-imported) will 404 and surface as "checking OPFS…"
+    // hanging forever. Reload immediately to pick up a fresh bundle
+    // that matches the new SW's precache. (`installPostBootSwReloadListener`
+    // only catches swaps that arrive AFTER it's armed, which is too
+    // late for one that fires during this very await.)
+    //
+    // The timeout branch (SW didn't claim in time) does NOT reload —
+    // we'd rather render in degraded mode than reload-loop a stuck
+    // lifecycle.
+    const swapped = await new Promise<boolean>((resolve) => {
+        const onSwap = () => { cleanup(); resolve(true); };
+        const onTimeout = () => { cleanup(); resolve(false); };
         const cleanup = () => {
             navigator.serviceWorker.removeEventListener("controllerchange", onSwap);
             clearTimeout(t);
@@ -87,6 +101,13 @@ export async function ensureFreshServiceWorker(): Promise<void> {
         navigator.serviceWorker.addEventListener("controllerchange", onSwap, { once: true });
         const t = setTimeout(onTimeout, TIMEOUT_MS);
     });
+    if (swapped) {
+        console.warn("[rullama] service worker swapped during boot — reloading to pick up fresh assets");
+        // Block on a never-resolving Promise so React never mounts and
+        // no asset fetches kick off between here and the reload.
+        window.location.reload();
+        await new Promise<void>(() => {});
+    }
 }
 
 /**
