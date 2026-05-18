@@ -15,9 +15,12 @@
 // activates and claims us automatically — we just have to await the
 // `controllerchange` event (or hit the timeout).
 //
-// We deliberately do NOT install a permanent `controllerchange` listener
-// after boot. Once the page is up, that's the SW the user runs until
-// they next reload — no surprise mid-session swaps.
+// Post-boot, a permanent `controllerchange` listener (see
+// `installPostBootSwReloadListener`) reloads the page if a new SW claims
+// us mid-session. Without it, the running JS still references hashed
+// asset URLs the new SW no longer has — any worker spawned (or chunk
+// dynamic-imported) after the swap 404s, leaving operations like
+// `ensureModel` stuck waiting on a dead corePort.
 
 import { registerSW } from "virtual:pwa-register";
 
@@ -83,5 +86,51 @@ export async function ensureFreshServiceWorker(): Promise<void> {
         };
         navigator.serviceWorker.addEventListener("controllerchange", onSwap, { once: true });
         const t = setTimeout(onTimeout, TIMEOUT_MS);
+    });
+}
+
+/**
+ * Install a post-boot listener that reloads the page if a new service
+ * worker claims us mid-session. Idempotent; safe to call after
+ * `ensureFreshServiceWorker` resolves.
+ *
+ * Why: vite.config.ts sets Workbox `clientsClaim: true`, so a newly-
+ * activated SW takes over live tabs automatically. The running JS still
+ * holds hashed asset URLs from the old precache; the new SW no longer
+ * has them, so any worker constructed (or chunk dynamic-imported) after
+ * the swap 404s. Concretely, `WorkerClient.spawnCore()` ends up with a
+ * dead `InferenceCoreWorker`, the router still broadcasts `coreReady`
+ * on `attachCore` receipt, and the next `ensureModel` RPC sits on the
+ * dead corePort forever — surfacing as "checking OPFS…" hanging until
+ * the user hard-reloads.
+ *
+ * Reloading on `controllerchange` puts the page on the fresh asset set
+ * the new SW expects. Mid-generation reloads are recoverable via the
+ * OPFS-backed suspend/resume path (writes on `visibilitychange→hidden`,
+ * reads on boot).
+ */
+let _postBootListenerInstalled = false;
+let _reloading = false;
+export function installPostBootSwReloadListener(): void {
+    if (typeof window === "undefined") return;
+    if (!("serviceWorker" in navigator)) return;
+    if (_postBootListenerInstalled) return;
+    _postBootListenerInstalled = true;
+
+    // First-ever visit path: ensureFreshServiceWorker returned without
+    // awaiting (no existing controller to swap from). The SW will
+    // install/activate/claim in the background, which fires
+    // controllerchange exactly once with `controller: null → set`. That
+    // first claim doesn't change asset URLs (the network-fetched v1
+    // bundle and the new precache match), so skip it; subsequent swaps
+    // (v1 → v2 after a deploy) are the real signal.
+    let skipFirstClaim = !navigator.serviceWorker.controller;
+
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (skipFirstClaim) { skipFirstClaim = false; return; }
+        if (_reloading) return;
+        _reloading = true;
+        console.warn("[rullama] service worker changed mid-session — reloading to pick up fresh assets");
+        window.location.reload();
     });
 }

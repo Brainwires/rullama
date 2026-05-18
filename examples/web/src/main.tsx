@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import "./styles/globals.css";
 import { App } from "./App";
-import { ensureFreshServiceWorker } from "@/lib/pwa";
+import { ensureFreshServiceWorker, installPostBootSwReloadListener } from "@/lib/pwa";
 import { installGlobalRestartListeners } from "@/lib/restart";
 import { ToastProvider } from "@/lib/toast";
 import { Toaster } from "@/components/Toaster";
@@ -30,6 +30,13 @@ try {
     // eslint-disable-next-line no-console
     console.warn("[rullama] ensureFreshServiceWorker threw:", e);
 }
+
+// Arm the mid-session SW-swap reloader only AFTER the boot-time
+// freshness gate has resolved — otherwise the boot-time controllerchange
+// (clientsClaim handing us off to the just-installed SW) would trip a
+// spurious reload loop. From here on, any controller swap is a real
+// post-deploy event and we reload to land on matching assets.
+installPostBootSwReloadListener();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
