@@ -538,6 +538,11 @@ type Args = Record<string, unknown>;
 type Handler = (a: Args) => unknown | Promise<unknown>;
 
 const RPC: Record<string, Handler> = {
+    // ── Liveness probe (router pings on new tab connect; if no pong
+    //    arrives in time the router treats the corePort as dead and
+    //    re-elects a host, instead of waiting out the 30s heartbeat).
+    pingCore: () => true,
+
     // ── Model lifecycle ────────────────────────────────────────────────
     load: (a) => handleLoad(a as unknown as LoadArgs),
     free: () => {
