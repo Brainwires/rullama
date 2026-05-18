@@ -40,12 +40,32 @@ export async function requestPersistent(): Promise<boolean> {
 // GGUF magic bytes: "GGUF" (0x47 0x47 0x55 0x46).
 const GGUF_MAGIC = [0x47, 0x47, 0x55, 0x46];
 
-async function magicLooksValid(fh: FileSystemFileHandle): Promise<boolean> {
+/** Three-state outcome for the first-4-bytes check:
+ *
+ *   - `good`          — bytes match the GGUF magic. File is real.
+ *   - `bad_magic`     — bytes were *readable* but don't match. Almost certainly
+ *                       a Jetsam-killed write that left a zero-byte prefix on
+ *                       a truncated file; safe to delete and re-download.
+ *   - `read_failed`   — `getFile()` / `slice().arrayBuffer()` threw. This is
+ *                       NOT proof of corruption. The common transient cause
+ *                       on iOS Safari is an old core worker's
+ *                       `FileSystemSyncAccessHandle` not yet GC'd after a PWA
+ *                       update reload — the main-thread `getFile()` races the
+ *                       lingering exclusive lock and throws. The OLD code
+ *                       treated this as "bad magic" and deleted the file,
+ *                       which is why every deploy could nuke a perfectly good
+ *                       7 GB GGUF and trigger a fresh download.
+ */
+type MagicCheck = "good" | "bad_magic" | "read_failed";
+
+async function checkMagic(fh: FileSystemFileHandle): Promise<MagicCheck> {
+    let head: ArrayBuffer;
     try {
-        const head = await (await fh.getFile()).slice(0, 4).arrayBuffer();
-        const b    = new Uint8Array(head);
-        return b.length === 4 && b.every((v, i) => v === GGUF_MAGIC[i]);
-    } catch { return false; }
+        head = await (await fh.getFile()).slice(0, 4).arrayBuffer();
+    } catch { return "read_failed"; }
+    const b = new Uint8Array(head);
+    if (b.length === 4 && b.every((v, i) => v === GGUF_MAGIC[i])) return "good";
+    return "bad_magic";
 }
 
 async function removeFile(modelKey: string, filename: string): Promise<void> {
@@ -58,11 +78,16 @@ async function removeFile(modelKey: string, filename: string): Promise<void> {
 }
 
 /**
- * Returns the size of the cached OPFS file if its first 4 bytes match the
- * GGUF magic, otherwise 0. Files that fail the magic check are deleted so
- * the next download starts clean — iOS Safari Jetsam can kill the writer
- * worker between `truncate()` and the next 64 MiB `flush()`, leaving the
- * file at its truncated size with a zero-byte prefix.
+ * Returns the size of the cached OPFS file if it looks like a real GGUF
+ * (matches the 4-byte magic), 0 otherwise.
+ *
+ * Auto-delete policy: only when the magic check actually **read** the file
+ * and the bytes didn't match (Jetsam-truncated case). On a read failure
+ * (likely a transient sync-handle race after a PWA update reload), we
+ * return 0 but leave the file alone — the next boot's check will either
+ * succeed once the old handle is GC'd, or genuinely confirm corruption.
+ * The OLD blind delete-on-any-failure is what made OPFS-after-update look
+ * unrecoverable.
  */
 export async function existingSize(modelKey: string, filename: string): Promise<number> {
     try {
@@ -72,11 +97,17 @@ export async function existingSize(modelKey: string, filename: string): Promise<
         const fh    = await md.getFileHandle(filename, { create: false });
         const f     = await fh.getFile();
         if (f.size < 4) return 0;
-        if (!(await magicLooksValid(fh))) {
+        const magic = await checkMagic(fh);
+        if (magic === "good")       return f.size;
+        if (magic === "bad_magic") {
+            console.warn("[opfs] GGUF magic mismatch — deleting truncated file", modelKey, filename);
             await removeFile(modelKey, filename);
             return 0;
         }
-        return f.size;
+        // read_failed — leave the file alone. The caller treats 0 as
+        // "not present in OPFS"; on the next reload the check is retried.
+        console.warn("[opfs] first-bytes read failed (likely sync-handle race) — preserving file", modelKey, filename);
+        return 0;
     } catch { return 0; }
 }
 

@@ -417,8 +417,36 @@ async function existingOpfsSize(modelKey: string, filename: string): Promise<num
         const fh    = await md.getFileHandle(filename, { create: false });
         const f     = await fh.getFile();
         if (f.size < 4) return 0;
-        const head = new Uint8Array(await f.slice(0, 4).arrayBuffer());
-        if (head[0] !== 0x47 || head[1] !== 0x47 || head[2] !== 0x55 || head[3] !== 0x46) return 0;
+        // First-4-bytes magic check. On iOS Safari this can THROW transiently
+        // when a previous core worker's FileSystemSyncAccessHandle hasn't
+        // been GC'd yet (post-PWA-update reload race). The old behaviour
+        // ("any throw → return 0") made doDownload start a fresh download
+        // from byte 0, which then ALSO failed at createSyncAccessHandle
+        // because the old handle was still held. Net effect on the user:
+        // "the app keeps trying to redownload my 7 GB model after every
+        // deploy." Treat the read failure as "size unknown but the file
+        // *exists* with f.size bytes" — return f.size so downstream sees
+        // the file as potentially-complete and short-circuits if it
+        // matches expectedSize.
+        let magicGood = false;
+        let magicReadable = false;
+        try {
+            const head = new Uint8Array(await f.slice(0, 4).arrayBuffer());
+            magicReadable = head.length === 4;
+            magicGood = magicReadable
+                && head[0] === 0x47 && head[1] === 0x47
+                && head[2] === 0x55 && head[3] === 0x46;
+        } catch { /* magicReadable stays false — likely sync-handle race */ }
+        if (magicGood) return f.size;
+        if (magicReadable) {
+            // Read succeeded but bytes don't match: real corruption (Jetsam-
+            // truncated zero prefix). Caller will detect via size mismatch
+            // or downstream load failure; don't auto-delete from here.
+            log(`opfs: ${modelKey}/${filename} bytes don't match GGUF magic (size=${f.size})`);
+            return 0;
+        }
+        // Read failed — preserve the file by returning its size.
+        log(`opfs: ${modelKey}/${filename} first-bytes read failed (likely sync-handle race) — preserving file at size=${f.size}`);
         return f.size;
     } catch { return 0; }
 }
