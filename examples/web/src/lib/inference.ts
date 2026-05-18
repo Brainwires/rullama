@@ -503,6 +503,14 @@ export class WorkerClient {
     trainingFinish(): Promise<boolean> {
         return this.rpc("trainingFinish", { sid: this.session });
     }
+    /** Flip the cooperative cancel flag on the active training session
+     *  so the in-flight step bails at the next per-layer encoder
+     *  boundary. The pending `trainingStep` promise rejects with a
+     *  "cancelled" error within ~one layer of latency. No-op when no
+     *  session is active. */
+    trainingCancel(): Promise<boolean> {
+        return this.rpc("trainingCancel", { sid: this.session });
+    }
     trainingApplyAdapter(name: string): Promise<{ name: string; slots: number }> {
         return this.rpc("trainingApplyAdapter", { sid: this.session, name });
     }

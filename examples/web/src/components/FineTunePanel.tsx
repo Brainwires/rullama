@@ -291,16 +291,26 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                 }
             }
 
-            setPhase(cancelRef.current ? "ready" : "done");
+            // Loop exited cleanly. Either ran all `stepsBudget`
+            // iterations, or `cancelRef.current` was set between
+            // steps and the loop broke; in both cases the user has
+            // a partial-or-complete adapter to save.
+            setPhase(recent.length > 0 ? "done" : "ready");
         } catch (e) {
             const msg = (e as Error).message ?? String(e);
-            // Probe-failure recovery: if `trainingStart` threw before
-            // consuming the Model, drop straight back to "ready" so
-            // the form stays editable and the user can adjust knobs
-            // without going through Reset. Mid-training failures
-            // (sessionStarted=true) keep "error" so the user has a
-            // clear stop point.
-            if (!sessionStarted) {
+            // Per-layer cancellation surfaces as a thrown "cancelled
+            // by caller" error from the wasm side. If the user
+            // explicitly clicked Cancel (cancelRef is true), treat it
+            // as a graceful stop, not an error — let them choose
+            // Save / Apply / Discard against the partial adapter.
+            const userCancelled = cancelRef.current
+                && /cancelled/i.test(msg);
+            if (userCancelled) {
+                setPhase(recent.length > 0 ? "done" : "ready");
+            } else if (!sessionStarted) {
+                // Probe-failure recovery: trainingStart threw before
+                // consuming the Model. Drop back to "ready" so the
+                // form stays editable.
                 setErrorMsg(msg);
                 setPhase("ready");
                 if (sessionAcquired) {
@@ -308,17 +318,27 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                 }
                 toast.error(msg);
             } else {
+                // Mid-training failure — keep "error" phase so the
+                // user has a clear stop point and the Reset button.
                 setErrorMsg(msg);
                 setPhase("error");
                 toast.error(`Training stopped: ${msg}`);
             }
         }
-    }, [activeAdapter, client, examples, hp, lora, modelStatus, onAdapterChanged, stepsBudget, toast]);
+    }, [activeAdapter, client, examples, hp, lora, modelStatus, onAdapterChanged, recent.length, stepsBudget, toast]);
 
     const onStop = useCallback(() => {
+        // Two-stage cancel:
+        // 1. Set the JS-side flag so the driver loop in `runTraining`
+        //    exits *after* the in-flight step resolves.
+        // 2. Flip the GPU-side flag so the in-flight forward/backward
+        //    layer walk bails at the next encoder boundary — bounded
+        //    latency ~one layer (300 ms - 1 s on browser) instead of
+        //    one full step (10-30 s).
         cancelRef.current = true;
         setPhase("stopping");
-    }, []);
+        client.trainingCancel().catch(() => { /* no session — fine */ });
+    }, [client]);
 
     const onSave = useCallback(async () => {
         if (!adapterName.trim()) {

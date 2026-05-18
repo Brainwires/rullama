@@ -98,6 +98,7 @@ interface TrainingSessionHandle {
     saveAdapter(): Promise<Uint8Array>;
     setLrSchedule(totalSteps: number): void;
     finish(): ModelHandle;
+    cancel(): void;
 }
 interface TrainingSessionStatic {
     new(model: ModelHandle, loraConfigJson: string, hparamsJson: string): TrainingSessionHandle;
@@ -865,6 +866,18 @@ const RPC: Record<string, Handler> = {
         log(`training: saved adapter '${name}' (${written} bytes) → OPFS:${ADAPTERS_DIR}/${name}.bin`);
         notify("adapterSaved", { name, size: written });
         return { name, size: written };
+    },
+
+    trainingCancel: async (a) => {
+        void a;
+        if (!trainingSession) return false;
+        // Flips the cooperative cancel flag on Forward; in-flight
+        // step rejects on the next per-layer encoder boundary. The
+        // session itself stays alive until the user calls
+        // trainingFinish — cancel is purely "stop the current step".
+        trainingSession.cancel();
+        log(`training: cancel requested at step ${trainingSession.stepNum}`);
+        return true;
     },
 
     trainingFinish: async (a) => {
