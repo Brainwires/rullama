@@ -1627,7 +1627,7 @@ export function App() {
     // "looks frozen, reload" and "I can see it's at splice step 14/31."
     useEffect(() => {
         const off = getClient().subscribe("pipelineProgress", (p) => {
-            if (p.kind !== "audio") return; // image events handled scoped, below
+            if (p.modality !== "audio") return; // image events handled scoped, below
             const phase = String(p.phase ?? "encoding");
             const layer = Number(p.layer ?? 0);
             const total = Number(p.total ?? 1);

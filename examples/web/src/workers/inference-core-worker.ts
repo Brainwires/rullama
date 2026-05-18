@@ -633,7 +633,7 @@ const RPC: Record<string, Handler> = {
         m.setSampling({ temperature: 0, top_k: 1, top_p: 1, repetition_penalty: 1, seed: 0 });
 
         // 2. Encode audio → soft tokens.
-        notify("pipelineProgress", { phase: "encoding", layer: 0, total: 1, kind: "audio" });
+        notify("pipelineProgress", { phase: "encoding", layer: 0, total: 1, modality: "audio" });
         log(`transcribe: encode start (samples=${pcm.length})`);
         const softTokens = await m.encodeAudio(pcm);
         // Gemma 4's text d_model is 1536 for both e2b and e4b; the
@@ -642,7 +642,7 @@ const RPC: Record<string, Handler> = {
         const dText = 1536;
         const nSoft = softTokens.length / dText;
         log(`transcribe: encoded ${nSoft} soft tokens × ${dText} dim`);
-        notify("pipelineProgress", { phase: "encoding", layer: 1, total: 1, kind: "audio" });
+        notify("pipelineProgress", { phase: "encoding", layer: 1, total: 1, modality: "audio" });
 
         // 3. Render prompt — system + user split with withBos=false.
         //    audio_parity.rs (the proven-working harness) uses exactly
@@ -675,13 +675,13 @@ const RPC: Record<string, Handler> = {
                 // per-row progress so the strip moves visibly while
                 // we're walking through ~30+ stepWithEmbedding calls.
                 for (let r = 0; r < nSoft; r++) {
-                    notify("pipelineProgress", { phase: "embedding", layer: r, total: nSoft, kind: "audio" });
+                    notify("pipelineProgress", { phase: "embedding", layer: r, total: nSoft, modality: "audio" });
                     const row = softTokens.subarray(r * dText, (r + 1) * dText);
                     next = await m.stepWithEmbedding(row);
                 }
             }
             // Per-token prefill progress.
-            notify("pipelineProgress", { phase: "prefill", layer: i + 1, total: ids.length, kind: "audio" });
+            notify("pipelineProgress", { phase: "prefill", layer: i + 1, total: ids.length, modality: "audio" });
         }
 
         // 5. Greedy generate, streaming deltas. Reuse the
@@ -698,7 +698,7 @@ const RPC: Record<string, Handler> = {
                 notify("transcribeChunk", { delta, done: false });
             }
             genCount++;
-            notify("pipelineProgress", { phase: "generating", layer: genCount, total: maxTokens, kind: "audio" });
+            notify("pipelineProgress", { phase: "generating", layer: genCount, total: maxTokens, modality: "audio" });
             next = await m.step(next);
         }
 
