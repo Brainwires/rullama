@@ -69,6 +69,13 @@ interface ModelHandle {
     ): Promise<Float32Array>;
     encodeAudio(pcm: Float32Array): Promise<Float32Array>;
     cancelMultimodalEncode(): void;
+    /** Drop the vision tower's GPU weight buffers + cached tensors.
+     *  Re-uploads on the next `encodeImage` (free if the GGUF blob is
+     *  still in OPFS, slow if it needs re-fetch). Returns approx
+     *  bytes freed. Called between encode and prefill on iPhone to
+     *  fit under the WebContent jetsam cap. */
+    releaseVisionWeights(): number;
+    releaseAudioWeights(): number;
     saveKvState(): Promise<Uint8Array>;
     restoreKvState(bytes: Uint8Array): void;
     renderChatForContinuation(messages: unknown, withBos: boolean): string;
@@ -561,6 +568,18 @@ const RPC: Record<string, Handler> = {
     },
     encodeAudio: async (a) => { void a; return await requireModel().encodeAudio(a.pcm as Float32Array); },
     cancelMultimodalEncode: (a) => { void a; requireModel().cancelMultimodalEncode(); return true; },
+    releaseVisionWeights: (a) => {
+        void a;
+        const freed = requireModel().releaseVisionWeights();
+        if (freed > 0) log(`vision: released ${(freed / (1024 * 1024)).toFixed(1)} MB of GPU weight cache`);
+        return freed;
+    },
+    releaseAudioWeights: (a) => {
+        void a;
+        const freed = requireModel().releaseAudioWeights();
+        if (freed > 0) log(`audio: released ${(freed / (1024 * 1024)).toFixed(1)} MB of GPU weight cache`);
+        return freed;
+    },
     reset:        (a) => { void a; return requireModel().reset(); },
     setSampling:  (a) => requireModel().setSampling(a.opts),
     saveKvState:  async (a) => { void a; return await requireModel().saveKvState(); },

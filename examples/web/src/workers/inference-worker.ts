@@ -64,6 +64,8 @@ const queue: Waiter[] = [];
 const STATEFUL_RPCS = new Set([
     "load",
     "free",
+    "releaseVisionWeights",
+    "releaseAudioWeights",
     "step",
     "stepWithEmb",
     "stepAndDecode",

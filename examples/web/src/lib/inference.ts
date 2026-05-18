@@ -375,6 +375,16 @@ export class WorkerClient {
     cancelMultimodalEncode(): Promise<boolean> {
         return this.rpc("cancelMultimodalEncode", {});
     }
+    /** Drop vision tower weights from GPU memory. Returns approx bytes
+     *  freed. Re-encoding an image re-uploads. Call between encode and
+     *  prefill on memory-tight devices (iPhone) so the prefill step
+     *  doesn't push Safari WebContent past jetsam. */
+    releaseVisionWeights(): Promise<number> {
+        return this.rpc("releaseVisionWeights", { sid: this.session });
+    }
+    releaseAudioWeights(): Promise<number> {
+        return this.rpc("releaseAudioWeights", { sid: this.session });
+    }
     reset(): Promise<void> { return this.rpc("reset", { sid: this.session }); }
     setSampling(opts: SamplingOptions): Promise<void> {
         return this.rpc("setSampling", { sid: this.session, opts });

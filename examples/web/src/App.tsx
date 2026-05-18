@@ -1349,6 +1349,27 @@ export function App() {
                 setStatusLine(undefined);
             }
 
+            // Multimodal weight release between encode and prefill.
+            //
+            // Vision/audio towers carry their own GPU weight tensors —
+            // on gemma4:e2b the vision tower is ~3 GB. After
+            // `encodeImage` returns the soft-token rows we hold them
+            // as plain Float32Array in JS and don't need the tower's
+            // GPU buffers again until the next image attachment. On
+            // iPhone Safari (WebContent ~5 GB ceiling) keeping the
+            // text + vision towers + KV cache + per-step scratch
+            // co-resident is what pushes the first prefill step over
+            // jetsam. Drop them now; the next image attachment
+            // re-uploads via the WeightCache fetch path.
+            if (totalImgs > 0) {
+                try { await client.releaseVisionWeights(); }
+                catch (e) { console.warn("[multimodal] releaseVisionWeights failed", e); }
+            }
+            if (turnAudio.length > 0) {
+                try { await client.releaseAudioWeights(); }
+                catch (e) { console.warn("[multimodal] releaseAudioWeights failed", e); }
+            }
+
             const t0 = performance.now();
             let next = 0;
             // Drive the progress strip through the rest of pre-encode.
