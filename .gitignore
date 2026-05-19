@@ -24,3 +24,9 @@ Cargo.lock.bak
 
 # Claude Code session-local state
 /.claude/
+
+# Local audio test fixtures dropped at repo root by manual transcribe testing.
+# Scoped to the root so fixtures committed under examples/ or tests/ still count.
+/*.mp3
+/*.wav
+/*.m4a
