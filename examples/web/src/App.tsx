@@ -112,6 +112,28 @@ export function App() {
     const [loadingLabel, setLoadingLabel]     = useState("");
     const [statusText, setStatusText]         = useState("no model");
 
+    // Wait-reason coordination. The worker emits three independent
+    // `…Waiting` / `…Retrying` notifies during slow OPFS / network
+    // operations; surfacing them all through `setLoadingLabel` directly
+    // is racy (one event can stomp another's message). Keep the
+    // **most-recent** wait reason in its own state and have the render
+    // pass `waitInfo?.message ?? loadingLabel` to the ModelLoader, so
+    // a wait label naturally supersedes the normal progress label while
+    // the wait is fresh and is cleared by the staleness timer below.
+    const [waitInfo, setWaitInfo] = useState<
+        { kind: "modelLoad" | "downloadLock" | "downloadStream"; message: string; ts: number } | null
+    >(null);
+    useEffect(() => {
+        if (!waitInfo) return;
+        // Auto-clear after 4 s of no new updates so a finished retry
+        // doesn't leave a stale "waiting…" line in the loader once the
+        // real operation has resumed.
+        const t = setTimeout(() => {
+            setWaitInfo((cur) => (cur === waitInfo ? null : cur));
+        }, 4000);
+        return () => clearTimeout(t);
+    }, [waitInfo]);
+
     // View routing — Chat tab vs Fine-tune tab. Persisted so a reload
     // doesn't bounce the user out of the tab they were in.
     const [view, setView] = usePersistedState<"chat" | "finetune">("rullama:view", "chat");
@@ -375,14 +397,16 @@ export function App() {
             }),
             // Worker is waiting on the OPFS read-syncHandle while the
             // previous worker's exclusive lock GCs. Surface to the boot
-            // splash AND the in-app loading label so the user knows
+            // splash AND the in-app waitInfo state so the user knows
             // something is happening (this matters most on iPhone where
-            // there's no easy dev console).
+            // there's no easy dev console). Render-side combines waitInfo
+            // with loadingLabel so this label naturally supersedes the
+            // normal progress label.
             client.subscribe("modelLoadWaiting", (p) => {
                 const attempt = Number(p.attempt ?? 0);
                 const elapsed = Number(p.elapsedMs ?? 0);
                 const msg = `Waiting for previous session to release the model… (${(elapsed / 1000).toFixed(1)}s, attempt ${attempt})`;
-                setLoadingLabel(msg);
+                setWaitInfo({ kind: "modelLoad", message: msg, ts: Date.now() });
                 try {
                     window.__rullamaBootStatus?.("Almost there…", msg);
                 } catch { /* */ }
@@ -392,9 +416,8 @@ export function App() {
             client.subscribe("downloadWaiting", (p) => {
                 const attempt = Number(p.attempt ?? 0);
                 const elapsed = Number(p.elapsedMs ?? 0);
-                setLoadingLabel(
-                    `Waiting for previous session to release the download… (${(elapsed / 1000).toFixed(1)}s, attempt ${attempt})`,
-                );
+                const msg = `Waiting for previous session to release the download… (${(elapsed / 1000).toFixed(1)}s, attempt ${attempt})`;
+                setWaitInfo({ kind: "downloadLock", message: msg, ts: Date.now() });
             }),
             // Download stream broke (network drop / iOS screen-lock
             // socket sever); worker is retrying with Range resume.
@@ -402,9 +425,8 @@ export function App() {
                 const attempt = Number(p.attempt ?? 0);
                 const max = Number(p.maxAttempts ?? 0);
                 const delay = Number(p.nextDelayMs ?? 0);
-                setLoadingLabel(
-                    `Connection dropped — retrying in ${(delay / 1000).toFixed(1)}s (attempt ${attempt}/${max})`,
-                );
+                const msg = `Connection dropped — retrying in ${(delay / 1000).toFixed(1)}s (attempt ${attempt}/${max})`;
+                setWaitInfo({ kind: "downloadStream", message: msg, ts: Date.now() });
             }),
             client.subscribe("gpuFault", (p) => {
                 // Typed GPU fault surfaced by the inference core worker
@@ -1905,7 +1927,7 @@ export function App() {
             </header>
 
             {modelStatus === "loading" && (
-                <ModelLoadProgress percent={loadingPercent} label={loadingLabel} />
+                <ModelLoadProgress percent={loadingPercent} label={waitInfo?.message ?? loadingLabel} />
             )}
 
             <DualSidebarLayout
@@ -1928,7 +1950,7 @@ export function App() {
                     <SettingsDialog
                         modelStatus={modelStatus}
                         loadingPercent={loadingPercent}
-                        loadingLabel={loadingLabel}
+                        loadingLabel={waitInfo?.message ?? loadingLabel}
                         statusText={statusText}
                         onLoadModel={onLoad}
                         onDeleteModel={onDeleteModel}
@@ -1974,7 +1996,7 @@ export function App() {
                                         <ModelLoader
                                             status={modelStatus}
                                             loadingPercent={loadingPercent}
-                                            loadingLabel={loadingLabel}
+                                            loadingLabel={waitInfo?.message ?? loadingLabel}
                                             statusText={statusText}
                                             onLoad={onLoad}
                                             onDelete={onDeleteModel}

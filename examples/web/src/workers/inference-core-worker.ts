@@ -183,6 +183,22 @@ const RPC_TRACE = false;
 
 let routerPort: MessagePort | null = null;
 
+/** Flag set the moment a `{type:"shutdown"}` message is received. While
+ *  true, every RPC (including `pingCore`) replies `ok: false` so the
+ *  router doesn't false-positive a dying worker as alive.
+ *
+ *  Why this matters: on iOS Safari the router's `verifyCoreLive` ping
+ *  on a new tab's connect can race the old host's `disconnect`. If the
+ *  ping wins the race and the old worker is in the middle of
+ *  `releaseAllHandles()`, `pingCore` (a trivial `() => true`) would
+ *  return success — the new tab inherits a stale `corePort`, the
+ *  worker self.close()s a beat later, and the new tab's first RPC
+ *  vanishes into the closed port. Setting this flag at the top of the
+ *  shutdown handler closes that race: the ping returns `ok: false`
+ *  immediately, the router treats the core as dead, and re-election
+ *  fires cleanly. */
+let shuttingDown = false;
+
 function log(...args: unknown[]) {
     const argStrs = args.map((a) => String(a));
     const msg = argStrs.join(" ");
@@ -1297,6 +1313,15 @@ async function handleRequest(msg: { requestId: number; type: string } & Args) {
     const post = (payload: Record<string, unknown>) => {
         try { routerPort!.postMessage(payload); } catch { /* */ }
     };
+    if (shuttingDown) {
+        // Worker is mid-cleanup — refuse every RPC, including `pingCore`,
+        // so the router's `verifyCoreLive` on a new-tab connect sees us
+        // as dead and re-elects a fresh host. Without this, ping (a
+        // trivial `() => true`) would succeed before `self.close()`
+        // fires and the new tab would inherit a stale corePort.
+        post({ requestId, ok: false, error: "core shutting down" });
+        return;
+    }
     if (!handler) {
         post({ requestId, ok: false, error: `unknown RPC type: ${type}` });
         return;
@@ -1391,6 +1416,11 @@ function releaseAllHandles() {
     if (!data || typeof data !== "object") return;
 
     if (data.type === "shutdown") {
+        // Flip the flag BEFORE running cleanup so any in-flight RPC
+        // (notably `pingCore` from the router's `verifyCoreLive`) sees
+        // us as shutting-down and replies `ok: false`. See the comment
+        // above `shuttingDown` for why this race matters.
+        shuttingDown = true;
         try { log("core: shutdown received — releasing handles"); } catch { /* */ }
         releaseAllHandles();
         try {
