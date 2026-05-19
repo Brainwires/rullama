@@ -28,10 +28,10 @@ export default defineConfig({
             // Only precache the small static shell — the 7 GB GGUF is *not*
             // precached, it lives in OPFS via our own writer worker.
             workbox: {
-                // New SW takes over as soon as it's installed; we let the
-                // boot script await the controllerchange so the page is
-                // controlled by the new SW before render. With a hard
-                // timeout in pwa.ts (1.5 s) this never blocks the splash.
+                // New SW takes over as soon as it's installed. Navigation
+                // requests are handled NetworkFirst (below) so even a
+                // mid-session SW swap doesn't strand the page on stale
+                // chunk URLs the new precache no longer has.
                 skipWaiting: true,
                 clientsClaim: true,
                 // `cleanupOutdatedCaches` evicts cache buckets whose
@@ -43,13 +43,40 @@ export default defineConfig({
                 // to drop the precache and start clean.
                 //   docs: https://developer.chrome.com/docs/workbox/modules/workbox-precaching
                 //   issue: https://github.com/GoogleChrome/workbox/issues/2757
-                cacheId: "rullama-v4",
+                cacheId: "rullama-v5",
                 cleanupOutdatedCaches: true,
-                globPatterns: ["**/*.{html,css,js,svg,png,webmanifest}"],
-                globIgnores:  ["**/pkg/**", "**/*.wasm"],
-                // The wasm bundle is large; we don't want Workbox to inline-
-                // precache it but we *do* want it cached on first fetch.
+                // index.html is intentionally OMITTED from precache: it
+                // goes through the NetworkFirst navigation handler below
+                // so every reload picks up the live deploy's HTML. This
+                // is the load-bearing fix for the post-deploy black
+                // screen — without it, the old SW served stale index.html
+                // referencing chunk hashes the new SW had just deleted,
+                // and the page wedged trying to load 404'd chunks until
+                // the 8 s watchdog kicked in.
+                globPatterns: ["**/*.{css,js,svg,png,webmanifest}"],
+                globIgnores:  ["**/pkg/**", "**/*.wasm", "**/index.html"],
                 runtimeCaching: [
+                    // Navigation: NetworkFirst. nginx-rullama.conf already
+                    // serves HTML with `no-store, no-cache, must-revalidate,
+                    // max-age=0` (via the $rullama_cache_ctrl map), so the
+                    // network response is always fresh. Cache fallback
+                    // (rullama-pages) is purely for offline reloads — if
+                    // the network is unreachable we serve the last good
+                    // HTML; if it's just slow we wait up to 3 s.
+                    {
+                        urlPattern: ({ request }: { request: Request }) =>
+                            request.mode === "navigate",
+                        handler: "NetworkFirst",
+                        options: {
+                            cacheName: "rullama-pages",
+                            networkTimeoutSeconds: 3,
+                            expiration: { maxEntries: 5 },
+                            cacheableResponse: { statuses: [0, 200] },
+                        },
+                    },
+                    // The wasm bundle is large; we don't want Workbox to
+                    // inline-precache it but we *do* want it cached on
+                    // first fetch.
                     {
                         urlPattern: /\/pkg\/.*\.(js|wasm)$/,
                         handler:    "CacheFirst",
@@ -63,9 +90,16 @@ export default defineConfig({
                 // Allow service-worker control over a 30 MB precache budget
                 // (the placeholder is ~250 kB; real icons later).
                 maximumFileSizeToCacheInBytes: 30 * 1024 * 1024,
-                // SPA fallback so deep links to "/anything" still load the app.
-                navigateFallback: "/index.html",
-                navigateFallbackDenylist: [/^\/api\//],
+                // navigateFallback explicitly null so vite-plugin-pwa does
+                // NOT auto-register a NavigationRoute(createHandlerBoundToURL).
+                // That auto-route would be registered FIRST and short-
+                // circuit our NetworkFirst nav handler above. The
+                // NetworkFirst handler already covers SPA deep links —
+                // nginx returns index.html for any non-asset path via
+                // `try_files $uri $uri/ /index.html;` (nginx-rullama.conf:103),
+                // so the React router sees the same HTML regardless of
+                // which path the user navigated to.
+                navigateFallback: null,
             },
             devOptions: {
                 // Off by default; turn on with `VITE_PWA_DEV=1 pnpm dev`. The

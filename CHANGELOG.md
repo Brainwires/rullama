@@ -6,10 +6,182 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While the version stays in the 0.x series, only the modules listed in the
 [stability section of `lib.rs`](crates/rullama/src/lib.rs) (`api`, `error`,
-`sampling`) are covered by semver. Everything else is `#[doc(hidden)]` and
-may move in any patch release.
+`sampling`, `lora`) are covered by semver. Everything else is `#[doc(hidden)]`
+and may move in any patch release.
 
 ## [Unreleased]
+
+## [0.3.0] — 2026-05-19
+
+Two flagship landings:
+
+- **In-browser fine-tuning.** Same `Model` you've been running inference
+  on can now consume a LoRA adapter the PWA trained in the foreground
+  tab — no native build, no separate inference engine, no round-trip
+  through disk.
+- **Multimodal works on iPhone.** Both vision and audio towers run
+  end-to-end on A18 GPU through iOS Safari WebGPU after the per-block
+  encoder + GPU fence rework, with the towers' GPU residency dropped
+  between phases so the WebContent process doesn't OOM during prefill.
+
+Plus a progress-strip overhaul, an in-engine speech-to-text path, and
+a load of PWA reliability fixes.
+
+Bumped to `0.3.0` for the new `lora` module + the scope of the
+fine-tune and multimodal-on-iPhone surfaces. The existing public API is
+preserved, with one minor signature change called out below.
+
+### Public API (semver-covered modules)
+
+- New `lora` module — `InferenceAdapter::parse_safetensors(bytes)` decodes
+  the safetensors blob `TrainingSession::saveAdapter()` writes. `Model`
+  owns the active adapter; consumers don't construct it directly.
+- `api::Model` — additive:
+  `has_adapter_native()` (+ JS `hasAdapter`),
+  `adapter_slot_count_native()`,
+  `load_adapter_native(bytes)` (+ JS `loadAdapter`),
+  `clear_adapter_native()` (+ JS `clearAdapter`),
+  `load_streaming_with_max_context(...)` and
+  `load_from_opfs_native(..., max_context)` (+ JS `loadFromOpfs` now
+  takes an optional max-context argument).
+- **Minor signature change**: `release_vision_weights_native` /
+  `release_audio_weights_native` now take `&mut self` (was `&self`).
+  Callers that store `Model` behind a non-`mut` binding need to flip it
+  to `let mut`. This is the only breaking shape change in the release.
+- `error`, `sampling` — unchanged.
+
+### Inference engine (`rullama`)
+
+- **Per-encoder GPU fence shared by vision + audio.** `vision::encode`
+  and `audio_gpu::encode` both submit one `CommandEncoder` per
+  transformer block, then await a GPU fence (`queue.on_submitted_work_done`
+  + `device.poll(Wait)` + oneshot) before the next block. The fence
+  helper lives in `backend::dispatch::fence_submitted_work` so both
+  towers share it. This restores CLAUDE.md's "one CommandEncoder per
+  transformer layer" rule and is what unblocks iPhone multimodal —
+  iOS Safari WebGPU was silently corrupting state on the previous
+  single-encoder-spanning-all-12-blocks audio path, surfacing as a
+  worker crash on the first `step()` after `encodeAudio`.
+- **`loadFromOpfs` honors `max_context`.** Was previously hardcoded to
+  4096 on the multimodal load path; the JS layer's intent (e.g. iPhone
+  wanting 2048) was silently dropped. Now mirrors the text-only
+  loader's caller-supplied cap, saving ~600 MB of KV pre-allocation
+  on a 2048-cap mobile load.
+- **Soft tokens see the LoRA adapter.** `step_with_embedding_native`
+  now routes through the same adapter branch as `step_native`, so an
+  adapter-loaded `Model` actually applies the adapter to every image /
+  audio soft token spliced into the prompt.
+- **GPU fault notification.** Inference paths now signal a `gpuFault`
+  event when wgpu surfaces a device-lost / OOM so the PWA can
+  distinguish a real GPU failure from a hung worker, instead of
+  silently timing out.
+- **Multimodal scratch is now ephemeral.** `release_vision_weights` and
+  `release_audio_weights` drop the `VisionForward` / `AudioForward`
+  structs alongside the cached weights. Next encode rebuilds them
+  lazily from the cached GGUF reader. ~3 GB of GPU memory each that
+  was previously stuck resident until the page reloaded.
+
+### Fine-tuning (`rullama-finetune`)
+
+- **wasm32 port.** The crate now compiles to wasm32-unknown-unknown
+  (was native-only). On wasm builds the whole crate is gated off so it
+  remains empty; on wasm-bindgen builds (`crate-type = ["cdylib"]`) it
+  exposes a `TrainingSession` surface.
+- **`TrainingSession` wasm-bindgen surface.** JS callers can run a
+  forward → loss → backward → Adam step entirely in the foreground tab
+  against the same wgpu kernels the inference path uses. Save trained
+  weights as a safetensors `Uint8Array` and load them back into
+  `Model.loadAdapter` for inference.
+- **Real gradient checkpointing.** A shared per-step activation scratch
+  replaces the per-layer captures when `gradient_checkpointing=true`;
+  the backward walker replays each layer's forward from its saved
+  `hidden_in` before consuming it. Cuts activation memory ~`n_layers×`
+  in exchange for one extra forward per backward step.
+- **`TrainingSession::probe(model, lora_cfg, hp)`** — trial-allocates
+  the scratch + LoRA buffers against a borrowed `Model` so the UI can
+  refuse a `new(...)` call that would otherwise consume the Model and
+  then fail mid-allocation. Returns the estimated GPU bytes on
+  success, `Err` with reason on failure.
+- **Per-layer training progress beacons.** Native + wasm32 backward
+  passes fire a callback with phase / layer / total on every layer
+  boundary; the Fine-tune tab uses them to drive a live progress strip
+  rather than a frozen spinner.
+- **Per-layer encoder cancellation.** Training honors a cooperative
+  cancel flag checked between layers, mirroring the multimodal-encode
+  cancel — bail with a clean error mid-step instead of hanging the
+  worker.
+- **`checkpoint_parity` integration test** — gates that the gradient
+  checkpointing path produces gradients within tolerance of the
+  reference no-checkpoint path.
+- **GeGLU backward clamp** — `geglu_backward.wgsl` was missing the
+  [-10, 10] tanh-input clamp the forward got; surfaced as all-NaN
+  gradients at layer 33+ on Metal. Fix matches the forward formula
+  bit-identically.
+- **`overfit_one_smoke` + `per_position_smoke` integration tests** —
+  CI now gates on a 200-step overfit (17.72 → 0.00 loss) and a 3-step
+  PerPosition micro-batch (89 % loss drop).
+- **`eval_adapter` example** — loads a trained safetensors blob,
+  decodes it back through `InferenceAdapter`, and runs a generation
+  smoke against a real GGUF.
+
+### Example PWAs
+
+- **Fine-tune tab.** New first-class panel that owns a `TrainingSession`,
+  runs in the foreground over the loaded model, and writes the
+  resulting safetensors blob to OPFS. Adapter list, train/eval
+  controls, loss chart, GPU-byte budget hint, and one-click
+  `Model.loadAdapter` are all wired in.
+- **`PipelineProgress` strip spans encoding + embedding + prefill.**
+  Renamed from `VisionProgress` to cover audio transcription too. The
+  strip carries a `phase` discriminator and ticks through every phase
+  so the user isn't staring at 2-3 min of silence between
+  `encodeImage` / `encodeAudio` resolving and the gen loop starting.
+- **Vision + audio tower weights released between encode and
+  prefill / transcribe.** The PWA now drops the multimodal towers as
+  soon as soft tokens are extracted, freeing ~3 GB each on iPhone
+  before the text prefill kicks off. Re-uploaded on demand for the
+  next attachment.
+- **Mic = in-engine STT via rullama.** The mic button now always runs
+  audio through `encodeAudio` + soft-token splice for a transcription
+  pass instead of routing through a separate API. Paperclip icon
+  replaces the Plus, and the paperclip accepts audio files for the
+  same path.
+- **`transcribeAudio` acquires its own session lock.** Audio
+  transcription no longer races against an in-flight chat send.
+- **NetworkFirst navigation handler.** Replaces the precache-based nav
+  strategy that left post-deploy reloads stranded on stale chunk
+  URLs. The mid-session and boot-time `controllerchange` reload
+  workarounds are gone — every reload picks up live HTML
+  referencing whatever chunk hashes the live deploy has right now.
+- **Visible boot splash + graceful worker shutdown + auto-recovery
+  on first stuck boot.** New `index.html` splash with a tiny
+  `__rullamaBootStatus` global; worker shutdown handler explicitly
+  releases vision + audio tower GPU resources; first-launch hangs
+  recover automatically instead of black-screening.
+- **OPFS write hardening.** Don't nuke the cached GGUF on a transient
+  magic-check read failure; retry `FileSystemSyncAccessHandle` write
+  acquisition while iOS GCs the previous lock; resume downloads on
+  stream drop instead of restarting from byte 0.
+- **`ModelLoader` polish** — controls on a single row with status on
+  its own line; dropped the redundant refresh-list button.
+- **Settings hints.** Multimodal models surface a hint about
+  disabling "thinking" + temperature when sending image / audio
+  attachments (gemma4's behavior on multimodal inputs is sharp
+  enough that the default sampling assumes it).
+
+### Tooling / deploy
+
+- `Dockerfile` builds the wasm bundle from `rullama-finetune` so the
+  shipped `pkg/` exports both the inference (`Model`) and training
+  (`TrainingSession`) wasm-bindgen surfaces.
+- `cargo bump <version>` (`xtask`) updates both crate manifests AND
+  the `rullama = { path, version = "MAJOR.MINOR" }` constraint in
+  `rullama-finetune` so the next `cargo publish` resolves cleanly.
+- `scripts/publish.sh` orchestrates the two-stage publish (rullama
+  → wait for crates.io index → rullama-finetune).
+- `audio_parity` example handles mp3/m4a inputs via `afconvert`
+  (macOS) or `ffmpeg` (Linux) so parity runs don't require a manual
+  pre-conversion to wav.
 
 ## [0.2.0] — 2026-05-17
 

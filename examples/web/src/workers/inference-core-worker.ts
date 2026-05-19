@@ -14,7 +14,19 @@
 // (the router), one request at a time per stateful RPC.
 
 // @ts-expect-error — generated bundle, no .d.ts
-import init, { Model, WasmDatabase } from "/pkg/rullama.js";
+import init, { Model, TrainingSession, probeTrainingFit, WasmDatabase } from "/pkg/rullama.js";
+
+interface ProbeReport {
+    ok:             boolean;
+    estimatedBytes: number;
+    reason?:        string;
+}
+type ProbeFn = (
+    model:          ModelHandle,
+    loraConfigJson: string,
+    hparamsJson:    string,
+) => Promise<ProbeReport>;
+const probeFit = probeTrainingFit as unknown as ProbeFn;
 
 interface WasmDbHandle {
     exec(sql: string): bigint;
@@ -38,6 +50,7 @@ interface ModelHandle {
     vocabSize: number;
     hasVision: boolean;
     hasAudio: boolean;
+    hasAdapter: boolean;
     imageSentinelIds(): [number, number] | null | undefined;
     audioSentinelIds(): [number, number] | null | undefined;
     encode(text: string): Uint32Array;
@@ -56,11 +69,61 @@ interface ModelHandle {
     ): Promise<Float32Array>;
     encodeAudio(pcm: Float32Array): Promise<Float32Array>;
     cancelMultimodalEncode(): void;
+    /** Drop the vision tower's GPU weight buffers + cached tensors.
+     *  Re-uploads on the next `encodeImage` (free if the GGUF blob is
+     *  still in OPFS, slow if it needs re-fetch). Returns approx
+     *  bytes freed. Called between encode and prefill on iPhone to
+     *  fit under the WebContent jetsam cap. */
+    releaseVisionWeights(): number;
+    releaseAudioWeights(): number;
+    /** Total bytes resident in the shared GPU WeightCache. Useful as
+     *  a coarse memory-pressure signal at phase boundaries
+     *  (encode → release → prefill) so a jetsam kill can be localised
+     *  to the right phase on next run. */
+    readonly cachedWeightBytes: bigint;
     saveKvState(): Promise<Uint8Array>;
     restoreKvState(bytes: Uint8Array): void;
     renderChatForContinuation(messages: unknown, withBos: boolean): string;
     readonly position: number;
+    loadAdapter(bytes: Uint8Array): number;
+    clearAdapter(): void;
 }
+
+// Wasm-bindgen `TrainingSession` (from rullama-finetune). All async
+// methods return a Promise. The session *consumes* the Model on
+// construction (move semantics from JS' perspective): no Model RPC
+// can run while training is live. `finish()` returns the Model back
+// to JS so chat can resume against the same loaded weights.
+interface TrainingSessionHandle {
+    free?(): void;
+    readonly stepNum: number;
+    readonly lr: number;
+    readonly parameterCount: number;
+    readonly gradientCheckpointing: boolean;
+    readonly mixedPrecision: boolean;
+    step(
+        inputIds: Uint32Array,
+        targetId: number,
+        progressCb?: (phase: string, current: number, total: number) => void,
+    ): Promise<{ loss: number; lr: number; step: number }>;
+    stepPerPosition(
+        inputIds: Uint32Array,
+        targets: Uint32Array,
+        progressCb?: (phase: string, current: number, total: number) => void,
+    ): Promise<{ loss: number; lr: number; step: number }>;
+    zeroGrads(): void;
+    forwardBackward(inputIds: Uint32Array, targetId: number): Promise<number>;
+    forwardBackwardPerPosition(inputIds: Uint32Array, targets: Uint32Array): Promise<number>;
+    optimizerStep(): void;
+    saveAdapter(): Promise<Uint8Array>;
+    setLrSchedule(totalSteps: number): void;
+    finish(): ModelHandle;
+    cancel(): void;
+}
+interface TrainingSessionStatic {
+    new(model: ModelHandle, loraConfigJson: string, hparamsJson: string): TrainingSessionHandle;
+}
+const TrainingSessionClass = TrainingSession as unknown as TrainingSessionStatic;
 interface ModelStatic {
     loadFromOpfsTextOnly(
         readFn: (offset: number, length: number) => Uint8Array | Promise<Uint8Array>,
@@ -70,6 +133,7 @@ interface ModelStatic {
     loadFromOpfs(
         readFn: (offset: number, length: number) => Uint8Array | Promise<Uint8Array>,
         totalBytes: number,
+        maxContext: number,
     ): Promise<ModelHandle>;
 }
 const ModelClass = Model as unknown as ModelStatic;
@@ -79,12 +143,19 @@ const ModelClass = Model as unknown as ModelStatic;
 // ───────────────────────────────────────────────────────────────────────
 
 const OPFS_DIR = "rullama-models";
+const ADAPTERS_DIR = "rullama-adapters";
 const DB_NAME  = "rullama-chat.db";
 
 let wasmReady: Promise<unknown> | null = null;
 let model: ModelHandle | null = null;
 let syncHandle: FileSystemSyncAccessHandle | null = null;
 let dbReady: Promise<WasmDbHandle> | null = null;
+// When non-null, a training session owns the Model. All Model-mutating
+// RPCs (step, encodeImage, reset, etc.) refuse to run; the chat UI
+// gates this at the surface level.
+let trainingSession: TrainingSessionHandle | null = null;
+/** Name of the adapter currently loaded into Model, if any. */
+let activeAdapterName: string | null = null;
 
 interface LoadedModelInfo {
     name: string | null;
@@ -112,6 +183,22 @@ const RPC_TRACE = false;
 
 let routerPort: MessagePort | null = null;
 
+/** Flag set the moment a `{type:"shutdown"}` message is received. While
+ *  true, every RPC (including `pingCore`) replies `ok: false` so the
+ *  router doesn't false-positive a dying worker as alive.
+ *
+ *  Why this matters: on iOS Safari the router's `verifyCoreLive` ping
+ *  on a new tab's connect can race the old host's `disconnect`. If the
+ *  ping wins the race and the old worker is in the middle of
+ *  `releaseAllHandles()`, `pingCore` (a trivial `() => true`) would
+ *  return success — the new tab inherits a stale `corePort`, the
+ *  worker self.close()s a beat later, and the new tab's first RPC
+ *  vanishes into the closed port. Setting this flag at the top of the
+ *  shutdown handler closes that race: the ping returns `ok: false`
+ *  immediately, the router treats the core as dead, and re-election
+ *  fires cleanly. */
+let shuttingDown = false;
+
 function log(...args: unknown[]) {
     const argStrs = args.map((a) => String(a));
     const msg = argStrs.join(" ");
@@ -131,6 +218,60 @@ function log(...args: unknown[]) {
 function notify(kind: string, payload: Record<string, unknown> = {}) {
     if (!routerPort) return;
     try { routerPort.postMessage({ type: "notify", kind, ...payload }); } catch { /* */ }
+}
+
+/** Open `FileSystemSyncAccessHandle` with backoff retry.
+ *
+ *  iOS Safari can take several seconds to GC a previous worker that's
+ *  still holding an exclusive lock — this is the root of every
+ *  "PWA-update reload can't open the OPFS file" report. Retry instead
+ *  of failing on the first attempt, and notify the UI each pass so it
+ *  can show "waiting for previous session to release …" instead of
+ *  looking frozen.
+ *
+ *  Total budget defaults to 15 s, well past the empirically-observed
+ *  iOS GC window for an orphaned worker handle. After the budget,
+ *  throw with a message that says the data is intact and instructs
+ *  the user to force-quit + reopen. */
+async function createSyncAccessHandleWithRetry(
+    fh: FileSystemFileHandle,
+    label: string,
+    opts?: { budgetMs?: number; notifyKind?: string },
+): Promise<FileSystemSyncAccessHandle> {
+    const budget = opts?.budgetMs ?? 15_000;
+    const notifyKind = opts?.notifyKind ?? "syncHandleWaiting";
+    const startMs = Date.now();
+    let attempt = 0;
+    while (true) {
+        try {
+            const h = await fh.createSyncAccessHandle();
+            if (attempt > 0) {
+                log(`opfs: ${label} syncHandle acquired after ${attempt} retries (${Date.now() - startMs}ms)`);
+            }
+            return h;
+        } catch (e) {
+            attempt += 1;
+            const elapsed = Date.now() - startMs;
+            if (elapsed >= budget) {
+                throw new Error(
+                    `${label}: syncHandle locked by a previous worker ` +
+                    `(${attempt} attempts over ${elapsed}ms). The data is intact — ` +
+                    `force-quit the tab/app and reopen to release the lock. ` +
+                    `Underlying: ${(e as Error)?.message ?? e}`,
+                );
+            }
+            const delay = Math.min(1500, 100 * Math.pow(2, attempt - 1));
+            notify(notifyKind, {
+                reason: "opfs-locked",
+                label,
+                attempt,
+                elapsedMs: elapsed,
+                nextDelayMs: delay,
+            });
+            log(`opfs: ${label} still locked (attempt ${attempt}, ${elapsed}ms elapsed) — retrying in ${delay}ms`);
+            await new Promise((r) => setTimeout(r, delay));
+        }
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -208,7 +349,12 @@ async function openSyncReadFn(modelKey: string, filename: string) {
     const dlDir    = await root.getDirectoryHandle(OPFS_DIR, { create: false });
     const modelDir = await dlDir.getDirectoryHandle(modelKey, { create: false });
     const fh       = await modelDir.getFileHandle(filename,    { create: false });
-    syncHandle     = await fh.createSyncAccessHandle();
+    syncHandle = await createSyncAccessHandleWithRetry(
+        fh,
+        `${modelKey}/${filename} (read)`,
+        { notifyKind: "modelLoadWaiting" },
+    );
+
     const size = syncHandle.getSize();
     if (size === 0) {
         try { syncHandle.close(); } catch { /* */ }
@@ -252,7 +398,7 @@ async function handleLoad(args: LoadArgs): Promise<LoadedModelInfo> {
 
     model = args.textOnly
         ? await ModelClass.loadFromOpfsTextOnly(readFn, size, args.maxContext ?? 0)
-        : await ModelClass.loadFromOpfs(readFn, size);
+        : await ModelClass.loadFromOpfs(readFn, size, args.maxContext ?? 0);
 
     log(`load: ready vocabSize=${model.vocabSize}`);
     loadedInfo = {
@@ -271,7 +417,65 @@ async function handleLoad(args: LoadArgs): Promise<LoadedModelInfo> {
 
 function requireModel(): ModelHandle {
     if (!model) throw new Error("no model loaded — call load() first");
+    if (trainingSession) throw new Error(
+        "model is owned by an active training session — call trainingFinish() first");
     return model;
+}
+
+function requireTraining(): TrainingSessionHandle {
+    if (!trainingSession) throw new Error("no training session active — call trainingStart() first");
+    return trainingSession;
+}
+
+async function getAdaptersDir(create: boolean): Promise<FileSystemDirectoryHandle> {
+    const root = await navigator.storage.getDirectory();
+    return await root.getDirectoryHandle(ADAPTERS_DIR, { create });
+}
+
+async function writeAdapterBytes(name: string, bytes: Uint8Array): Promise<number> {
+    const dir = await getAdaptersDir(true);
+    const fh = await dir.getFileHandle(`${name}.bin`, { create: true });
+    const handle = await createSyncAccessHandleWithRetry(fh, `adapters/${name}.bin`);
+    try {
+        handle.truncate(0);
+        handle.write(bytes, { at: 0 });
+        handle.flush();
+        return handle.getSize();
+    } finally {
+        try { handle.close(); } catch { /* */ }
+    }
+}
+
+async function readAdapterBytes(name: string): Promise<Uint8Array> {
+    const dir = await getAdaptersDir(false);
+    const fh = await dir.getFileHandle(`${name}.bin`, { create: false });
+    const f = await fh.getFile();
+    return new Uint8Array(await f.arrayBuffer());
+}
+
+async function listAdapterEntries(): Promise<Array<{name: string; size: number; lastModified: number}>> {
+    try {
+        const dir = await getAdaptersDir(false);
+        const out: Array<{name: string; size: number; lastModified: number}> = [];
+        const anyDir = dir as unknown as {
+            entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
+        };
+        for await (const [name, h] of anyDir.entries()) {
+            if (h.kind !== "file" || !name.endsWith(".bin")) continue;
+            try {
+                const f = await (h as FileSystemFileHandle).getFile();
+                out.push({
+                    name: name.replace(/\.bin$/, ""),
+                    size: f.size,
+                    lastModified: f.lastModified,
+                });
+            } catch { /* */ }
+        }
+        out.sort((a, b) => b.lastModified - a.lastModified);
+        return out;
+    } catch {
+        return [];
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -288,8 +492,36 @@ async function existingOpfsSize(modelKey: string, filename: string): Promise<num
         const fh    = await md.getFileHandle(filename, { create: false });
         const f     = await fh.getFile();
         if (f.size < 4) return 0;
-        const head = new Uint8Array(await f.slice(0, 4).arrayBuffer());
-        if (head[0] !== 0x47 || head[1] !== 0x47 || head[2] !== 0x55 || head[3] !== 0x46) return 0;
+        // First-4-bytes magic check. On iOS Safari this can THROW transiently
+        // when a previous core worker's FileSystemSyncAccessHandle hasn't
+        // been GC'd yet (post-PWA-update reload race). The old behaviour
+        // ("any throw → return 0") made doDownload start a fresh download
+        // from byte 0, which then ALSO failed at createSyncAccessHandle
+        // because the old handle was still held. Net effect on the user:
+        // "the app keeps trying to redownload my 7 GB model after every
+        // deploy." Treat the read failure as "size unknown but the file
+        // *exists* with f.size bytes" — return f.size so downstream sees
+        // the file as potentially-complete and short-circuits if it
+        // matches expectedSize.
+        let magicGood = false;
+        let magicReadable = false;
+        try {
+            const head = new Uint8Array(await f.slice(0, 4).arrayBuffer());
+            magicReadable = head.length === 4;
+            magicGood = magicReadable
+                && head[0] === 0x47 && head[1] === 0x47
+                && head[2] === 0x55 && head[3] === 0x46;
+        } catch { /* magicReadable stays false — likely sync-handle race */ }
+        if (magicGood) return f.size;
+        if (magicReadable) {
+            // Read succeeded but bytes don't match: real corruption (Jetsam-
+            // truncated zero prefix). Caller will detect via size mismatch
+            // or downstream load failure; don't auto-delete from here.
+            log(`opfs: ${modelKey}/${filename} bytes don't match GGUF magic (size=${f.size})`);
+            return 0;
+        }
+        // Read failed — preserve the file by returning its size.
+        log(`opfs: ${modelKey}/${filename} first-bytes read failed (likely sync-handle race) — preserving file at size=${f.size}`);
         return f.size;
     } catch { return 0; }
 }
@@ -319,60 +551,107 @@ async function doDownload(args: EnsureArgs): Promise<{ totalBytes: number; fromC
     let writeHandle: FileSystemSyncAccessHandle | null = null;
     let bytesSinceFlush = 0;
     try {
-        writeHandle = await fileHandle.createSyncAccessHandle();
+        // Retry-acquire the WRITE syncHandle. After a screen-lock-induced
+        // Jetsam kill, the previous worker's exclusive lock may not have
+        // GC'd yet — without the retry the resume fails on first attempt
+        // even though the data is intact.
+        writeHandle = await createSyncAccessHandleWithRetry(
+            fileHandle,
+            `${modelKey}/${filename} (write)`,
+            { notifyKind: "downloadWaiting" },
+        );
         writeHandle.truncate(currentOffset);
         writeHandle.flush();
 
-        const headers: Record<string, string> = {};
-        if (currentOffset > 0) headers["Range"] = `bytes=${currentOffset}-`;
-        const resp = await fetch(url, { headers });
+        let totalBytes = 0;
 
-        if (resp.status === 416) {
-            const size = writeHandle.getSize();
-            writeHandle.close();
-            notify("downloadDone", { modelKey, filename, totalBytes: size, fromCache: true });
-            return { totalBytes: size, fromCache: false };
-        }
-        if (!resp.ok && resp.status !== 206) {
-            writeHandle.close();
-            throw new Error(`fetch failed (${resp.status})`);
-        }
-        if (resp.status === 200 && currentOffset > 0) {
-            writeHandle.truncate(0);
-            currentOffset = 0;
-        }
-
-        const cr = resp.headers.get("content-range");
-        const contentLength = Number(resp.headers.get("content-length") || "0") || 0;
-        const totalBytes = cr?.match(/\/(\d+)\s*$/)
-            ? Number(cr.match(/\/(\d+)\s*$/)![1])
-            : currentOffset + contentLength;
-
-        if (!resp.body) {
-            writeHandle.close();
-            throw new Error("no response body");
-        }
-        const reader = resp.body.getReader();
-
+        // Outer fetch-retry loop: if the network stream dies mid-download
+        // (iOS Safari severs sockets during screen lock; tab thaws but
+        // the reader.read() promise rejects), refetch with
+        // `Range: bytes=currentOffset-` and continue. Without this loop
+        // a single dropped connection ends the whole download and the
+        // user has to reload the page to recover.
+        const MAX_FETCH_RETRIES = 5;
+        let fetchAttempt = 0;
         while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            if (!value) continue;
+            const headers: Record<string, string> = {};
+            if (currentOffset > 0) headers["Range"] = `bytes=${currentOffset}-`;
+            const resp = await fetch(url, { headers });
 
-            const written = writeHandle.write(value, { at: currentOffset });
-            currentOffset   += written;
-            bytesSinceFlush += written;
-
-            if (bytesSinceFlush >= FLUSH_INTERVAL) {
-                writeHandle.flush();
-                bytesSinceFlush = 0;
+            if (resp.status === 416) {
+                // Server says we already have everything (Range past EOF).
+                const size = writeHandle.getSize();
+                notify("downloadDone", { modelKey, filename, totalBytes: size, fromCache: true });
+                writeHandle.close();
+                writeHandle = null;
+                return { totalBytes: size, fromCache: false };
             }
-            notify("downloadProgress", {
-                modelKey, filename,
-                bytesWritten: currentOffset,
-                totalBytes,
-                chunkBytes: written,
-            });
+            if (!resp.ok && resp.status !== 206) {
+                throw new Error(`fetch failed (${resp.status})`);
+            }
+            if (resp.status === 200 && currentOffset > 0) {
+                // Server doesn't honor Range — restart from byte 0.
+                writeHandle.truncate(0);
+                currentOffset = 0;
+            }
+
+            const cr = resp.headers.get("content-range");
+            const contentLength = Number(resp.headers.get("content-length") || "0") || 0;
+            totalBytes = cr?.match(/\/(\d+)\s*$/)
+                ? Number(cr.match(/\/(\d+)\s*$/)![1])
+                : currentOffset + contentLength;
+
+            if (!resp.body) {
+                throw new Error("no response body");
+            }
+            const reader = resp.body.getReader();
+
+            try {
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    if (!value) continue;
+
+                    const written = writeHandle.write(value, { at: currentOffset });
+                    currentOffset   += written;
+                    bytesSinceFlush += written;
+
+                    if (bytesSinceFlush >= FLUSH_INTERVAL) {
+                        writeHandle.flush();
+                        bytesSinceFlush = 0;
+                    }
+                    notify("downloadProgress", {
+                        modelKey, filename,
+                        bytesWritten: currentOffset,
+                        totalBytes,
+                        chunkBytes: written,
+                    });
+                }
+                // Drained cleanly — exit fetch-retry loop.
+                break;
+            } catch (readErr) {
+                // Flush so the next attempt resumes from a known offset.
+                try { writeHandle.flush(); } catch { /* */ }
+                bytesSinceFlush = 0;
+
+                fetchAttempt += 1;
+                if (fetchAttempt > MAX_FETCH_RETRIES) {
+                    throw readErr;
+                }
+                const delay = Math.min(5_000, 500 * Math.pow(2, fetchAttempt - 1));
+                const msg = (readErr as Error)?.message ?? String(readErr);
+                log(`download: ${modelKey}/${filename} stream broke at ${currentOffset}/${totalBytes} — retrying in ${delay}ms (attempt ${fetchAttempt}/${MAX_FETCH_RETRIES}): ${msg}`);
+                notify("downloadRetrying", {
+                    modelKey, filename,
+                    bytesWritten: currentOffset,
+                    totalBytes,
+                    nextDelayMs: delay,
+                    attempt: fetchAttempt,
+                    maxAttempts: MAX_FETCH_RETRIES,
+                });
+                await new Promise((r) => setTimeout(r, delay));
+                // Loop iterates to issue a fresh fetch with Range header.
+            }
         }
 
         writeHandle.flush();
@@ -414,6 +693,11 @@ type Args = Record<string, unknown>;
 type Handler = (a: Args) => unknown | Promise<unknown>;
 
 const RPC: Record<string, Handler> = {
+    // ── Liveness probe (router pings on new tab connect; if no pong
+    //    arrives in time the router treats the corePort as dead and
+    //    re-elects a host, instead of waiting out the 30s heartbeat).
+    pingCore: () => true,
+
     // ── Model lifecycle ────────────────────────────────────────────────
     load: (a) => handleLoad(a as unknown as LoadArgs),
     free: () => {
@@ -445,14 +729,162 @@ const RPC: Record<string, Handler> = {
     },
     encodeImage: async (a) => {
         const cb = (layer: number, total: number) => {
-            notify("visionProgress", { layer, total });
+            notify("pipelineProgress", { layer, total });
         };
         return await requireModel().encodeImage(
             a.pixels as Float32Array, Number(a.h), Number(a.w), cb,
         );
     },
-    encodeAudio: async (a) => { void a; return await requireModel().encodeAudio(a.pcm as Float32Array); },
+    encodeAudio: async (a) => {
+        const m = requireModel();
+        const pcm = a.pcm as Float32Array;
+        // Diagnostic beacons so a mobile jetsam-kill can be localised
+        // on the next iPhone run. iOS Safari may kill WebContent
+        // without surfacing a JS error; if we see "audio: encode start"
+        // in the log but no "encode done", we know the encode itself
+        // is the trigger. The cachedWeightBytes snapshot identifies
+        // whether weight memory pressure is the culprit.
+        const beforeBytes = Number(m.cachedWeightBytes ?? 0);
+        log(`audio: encode start (samples=${pcm.length}, cached=${(beforeBytes / (1024 * 1024)).toFixed(0)}MB)`);
+        try {
+            const soft = await m.encodeAudio(pcm);
+            const afterBytes = Number(m.cachedWeightBytes ?? 0);
+            log(`audio: encode done (soft_dims=${soft.length}, cached=${(afterBytes / (1024 * 1024)).toFixed(0)}MB, Δ=${((afterBytes - beforeBytes) / (1024 * 1024)).toFixed(0)}MB)`);
+            return soft;
+        } catch (e) {
+            log(`audio: encode FAILED: ${(e as Error).message}`);
+            throw e;
+        }
+    },
     cancelMultimodalEncode: (a) => { void a; requireModel().cancelMultimodalEncode(); return true; },
+
+    transcribeAudio: async (a) => {
+        // In-engine speech-to-text driven by the audio tower + a fixed
+        // instruction prompt + greedy decode. Streams per-token deltas
+        // out via `notify("transcribeChunk", {delta, done})` so the UI
+        // can fill the input box as the transcript arrives, and reuses
+        // the existing `pipelineProgress` notify channel to drive the
+        // status strip just above the chat input — same phase pill the
+        // user sees for image encode + prefill.
+        //
+        // Sampling is forced to greedy (temperature=0, top_k=1)
+        // regardless of the user's chat sampling settings — transcription
+        // needs determinism. Settings restored on exit.
+        const m = requireModel();
+        const pcm = a.pcm as Float32Array;
+        const maxTokens = Number(a.maxTokens ?? 512);
+
+        const sent = m.audioSentinelIds();
+        if (!sent) throw new Error("transcribeAudio: model has no <|audio> sentinel");
+        const [audioBeginId] = sent;
+
+        // 1. Save sampling, switch to greedy.
+        const userSampling = a.sampling as Record<string, unknown> | undefined;
+        m.setSampling({ temperature: 0, top_k: 1, top_p: 1, repetition_penalty: 1, seed: 0 });
+
+        // 2. Encode audio → soft tokens.
+        notify("pipelineProgress", { phase: "encoding", layer: 0, total: 1, modality: "audio" });
+        log(`transcribe: encode start (samples=${pcm.length})`);
+        const softTokens = await m.encodeAudio(pcm);
+        // Gemma 4's text d_model is 1536 for both e2b and e4b; the
+        // audio tower's projector outputs soft tokens in that same
+        // embedding space. Same fallback the chat-attach path uses.
+        const dText = 1536;
+        const nSoft = softTokens.length / dText;
+        log(`transcribe: encoded ${nSoft} soft tokens × ${dText} dim`);
+        notify("pipelineProgress", { phase: "encoding", layer: 1, total: 1, modality: "audio" });
+
+        // Free the Conformer tower (~3 GB GPU resident) before the text
+        // prefill+splice+gen runs. On iPhone Safari WebGPU, keeping the
+        // audio weights cached alongside the text tower's prefill scratch
+        // tips the WebContent process over the GPU memory budget mid-
+        // prefill and the worker dies silently. Audio tower isn't needed
+        // again in this transcribe — soft tokens are already in CPU
+        // memory; the next encodeAudio call will rebuild lazily.
+        try {
+            const freed = m.releaseAudioWeights();
+            if (freed > 0) log(`transcribe: released ${(freed / (1024 * 1024)).toFixed(1)} MB audio weights`);
+        } catch { /* */ }
+
+        // 3. Render prompt — system + user split with withBos=false.
+        //    audio_parity.rs (the proven-working harness) uses exactly
+        //    this structure and produces clean output; an earlier
+        //    single-user-message + withBos=true variant produced
+        //    garbage like "wosredit" on the same input. Per
+        //    `gemma4_small.rs:16` Gemma 4's chat template does NOT
+        //    want a leading BOS.
+        const messages = [
+            {
+                role: "system",
+                content: "Transcribe the following audio exactly as spoken. Output only the transcription text, nothing else.",
+            },
+            {
+                role: "user",
+                content: "<|audio><audio|>Transcribe this audio.",
+            },
+        ];
+        const promptText = m.renderChat(messages, false);
+        const ids = m.encode(promptText);
+
+        // 4. Reset KV cache, drive feed loop (splice soft tokens at sentinel).
+        m.reset();
+        let next = 0;
+        for (let i = 0; i < ids.length; i++) {
+            const id = ids[i];
+            next = await m.step(id);
+            if (id === audioBeginId) {
+                // Splice soft tokens. This is the long phase — emit
+                // per-row progress so the strip moves visibly while
+                // we're walking through ~30+ stepWithEmbedding calls.
+                for (let r = 0; r < nSoft; r++) {
+                    notify("pipelineProgress", { phase: "embedding", layer: r, total: nSoft, modality: "audio" });
+                    const row = softTokens.subarray(r * dText, (r + 1) * dText);
+                    next = await m.stepWithEmbedding(row);
+                }
+            }
+            // Per-token prefill progress.
+            notify("pipelineProgress", { phase: "prefill", layer: i + 1, total: ids.length, modality: "audio" });
+        }
+
+        // 5. Greedy generate, streaming deltas. Reuse the
+        //    pipelineProgress channel with a final phase so the strip
+        //    stays alive while the model emits the transcript.
+        let transcript = "";
+        let genCount = 0;
+        for (let gen = 0; gen < maxTokens; gen++) {
+            if (m.isEos(next)) break;
+            const tok = m.tokenStr(next);
+            if (tok) {
+                const delta = tok.replace(/▁/g, " ");
+                transcript += delta;
+                notify("transcribeChunk", { delta, done: false });
+            }
+            genCount++;
+            notify("pipelineProgress", { phase: "generating", layer: genCount, total: maxTokens, modality: "audio" });
+            next = await m.step(next);
+        }
+
+        // 6. Restore sampling.
+        if (userSampling) {
+            try { m.setSampling(userSampling); } catch { /* */ }
+        }
+
+        log(`transcribe: done (${transcript.length} chars, ${genCount} tokens)`);
+        notify("transcribeChunk", { delta: "", done: true, transcript });
+        return { transcript };
+    },
+    releaseVisionWeights: (a) => {
+        void a;
+        const freed = requireModel().releaseVisionWeights();
+        if (freed > 0) log(`vision: released ${(freed / (1024 * 1024)).toFixed(1)} MB of GPU weight cache`);
+        return freed;
+    },
+    releaseAudioWeights: (a) => {
+        void a;
+        const freed = requireModel().releaseAudioWeights();
+        if (freed > 0) log(`audio: released ${(freed / (1024 * 1024)).toFixed(1)} MB of GPU weight cache`);
+        return freed;
+    },
     reset:        (a) => { void a; return requireModel().reset(); },
     setSampling:  (a) => requireModel().setSampling(a.opts),
     saveKvState:  async (a) => { void a; return await requireModel().saveKvState(); },
@@ -635,11 +1067,243 @@ const RPC: Record<string, Handler> = {
         db.flush();
         return true;
     },
+
+    // ── LoRA fine-tuning ────────────────────────────────────────────────
+    // Training consumes the Model handle for its lifetime; chat-side RPCs
+    // (step, encode, reset, etc.) all throw via `requireModel()` while a
+    // session is live. UI must mode-gate to avoid the throw.
+
+    trainingStart: async (a) => {
+        if (!model) throw new Error("load a model before starting training");
+        if (trainingSession) throw new Error(
+            "training already active — call trainingFinish() first");
+        const loraCfgJson = JSON.stringify(a.loraConfig ?? {});
+        const hpJson      = JSON.stringify(a.hparams ?? {});
+
+        // Probe first — try the scratch + LoRA allocations against a
+        // BORROWED Model. If the device can't fit them, surface a
+        // typed error WITHOUT consuming the Model handle. The chat
+        // path stays alive; the user can lower rank / seq_len and
+        // retry without re-loading the multi-GB GGUF.
+        const probe = await probeFit(model, loraCfgJson, hpJson);
+        log(`training: probe ok=${probe.ok} estimated=${(probe.estimatedBytes / (1024 * 1024)).toFixed(1)}MB ${probe.reason ?? ""}`);
+        if (!probe.ok) {
+            const mb = (probe.estimatedBytes / (1024 * 1024)).toFixed(0);
+            throw new Error(
+                `Training would need ~${mb} MB GPU memory and this device rejected the allocation. ` +
+                `Lower the rank, shorten max_seq_len, or drop FFN targets and try again. ` +
+                `(GPU said: ${probe.reason ?? "unknown"})`
+            );
+        }
+
+        // If there's an active adapter loaded into Model from a previous
+        // session, clear it — training initialises fresh LoRA state.
+        if (activeAdapterName) {
+            try { model.clearAdapter(); } catch { /* */ }
+            activeAdapterName = null;
+            notify("adapterChanged", { active: null });
+        }
+        const moved = model;
+        model = null; // Model is moved into TrainingSession.
+        try {
+            trainingSession = new TrainingSessionClass(moved, loraCfgJson, hpJson);
+        } catch (e) {
+            // Probe said ok but the constructor still threw — likely a
+            // device-loss race. Drop loadedInfo so chat re-loads
+            // cleanly on next attempt rather than wedging on a
+            // half-consumed Model handle.
+            loadedInfo = null;
+            notify("modelFreed", {});
+            throw e;
+        }
+        const totalSteps = Number(a.totalSteps ?? 0);
+        if (totalSteps > 0) trainingSession.setLrSchedule(totalSteps);
+        const info = {
+            parameterCount: trainingSession.parameterCount,
+            gradientCheckpointing: trainingSession.gradientCheckpointing,
+            mixedPrecision: trainingSession.mixedPrecision,
+            estimatedBytes: probe.estimatedBytes,
+        };
+        notify("trainingStarted", info);
+        log(`training: started, params=${info.parameterCount} ckpt=${info.gradientCheckpointing} mp=${info.mixedPrecision}`);
+        return info;
+    },
+
+    trainingProbeFit: async (a) => {
+        if (!model) throw new Error("load a model before probing fit");
+        if (trainingSession) throw new Error("training already active — can't probe");
+        const loraCfgJson = JSON.stringify(a.loraConfig ?? {});
+        const hpJson      = JSON.stringify(a.hparams ?? {});
+        return await probeFit(model, loraCfgJson, hpJson);
+    },
+
+    trainingStep: async (a) => {
+        const s = requireTraining();
+        const inputIds = a.inputIds as Uint32Array;
+        const lossMode = String(a.lossMode ?? "next_token");
+        // Progress beacons: every per-layer + per-token tick fans out
+        // via the `trainingProgress` notify so the UI's
+        // TrainingProgress strip (modelled on PipelineProgress) updates
+        // mid-step. Fast (~3-5 Hz worth of postMessage traffic on
+        // browser); the strip prevents the "is it frozen?" panic
+        // during slow first steps.
+        const onProgress = (phase: string, current: number, total: number) => {
+            notify("trainingProgress", { phase, current, total, step: s.stepNum, lr: s.lr });
+        };
+        try {
+            return lossMode === "per_position"
+                ? await s.stepPerPosition(inputIds, a.targets as Uint32Array, onProgress)
+                : await s.step(inputIds, Number(a.targetId), onProgress);
+        } catch (e) {
+            // Log + rethrow. The session stays alive (the wasm side
+            // doesn't drop on a kernel error), so the UI can choose
+            // Discard to release the Model cleanly.
+            log(`training: step ${s.stepNum} failed (lossMode=${lossMode}, inputLen=${inputIds.length}): ${(e as Error).message}`);
+            throw e;
+        }
+    },
+
+    trainingZeroGrads: async (a) => { void a; requireTraining().zeroGrads(); return true; },
+
+    trainingForwardBackward: async (a) => {
+        const s = requireTraining();
+        const inputIds = a.inputIds as Uint32Array;
+        const lossMode = String(a.lossMode ?? "next_token");
+        try {
+            const loss = lossMode === "per_position"
+                ? await s.forwardBackwardPerPosition(inputIds, a.targets as Uint32Array)
+                : await s.forwardBackward(inputIds, Number(a.targetId));
+            return { loss, step: s.stepNum, lr: s.lr };
+        } catch (e) {
+            log(`training: forwardBackward step ${s.stepNum} failed (lossMode=${lossMode}, inputLen=${inputIds.length}): ${(e as Error).message}`);
+            throw e;
+        }
+    },
+
+    trainingOptimizerStep: async (a) => {
+        void a;
+        const s = requireTraining();
+        s.optimizerStep();
+        return { step: s.stepNum, lr: s.lr };
+    },
+
+    trainingSaveAdapter: async (a) => {
+        const s = requireTraining();
+        const name = String(a.name ?? "").trim();
+        if (!name) throw new Error("trainingSaveAdapter: 'name' must be a non-empty string");
+        if (!/^[\w\-. ]+$/.test(name)) {
+            throw new Error("trainingSaveAdapter: 'name' must match [\\w\\-. ]+");
+        }
+        const bytes = await s.saveAdapter();
+        const written = await writeAdapterBytes(name, bytes);
+        log(`training: saved adapter '${name}' (${written} bytes) → OPFS:${ADAPTERS_DIR}/${name}.bin`);
+        notify("adapterSaved", { name, size: written });
+        return { name, size: written };
+    },
+
+    trainingCancel: async (a) => {
+        void a;
+        if (!trainingSession) return false;
+        // Flips the cooperative cancel flag on Forward; in-flight
+        // step rejects on the next per-layer encoder boundary. The
+        // session itself stays alive until the user calls
+        // trainingFinish — cancel is purely "stop the current step".
+        trainingSession.cancel();
+        log(`training: cancel requested at step ${trainingSession.stepNum}`);
+        return true;
+    },
+
+    trainingFinish: async (a) => {
+        void a;
+        if (!trainingSession) throw new Error("no training session to finish");
+        try {
+            model = trainingSession.finish();
+        } finally {
+            trainingSession = null;
+        }
+        notify("trainingFinished", {});
+        log(`training: finished, Model returned to chat`);
+        return true;
+    },
+
+    trainingApplyAdapter: async (a) => {
+        if (!model) throw new Error("load a model before applying an adapter");
+        if (trainingSession) throw new Error(
+            "active training session owns the model — finish it first");
+        const name = String(a.name ?? "").trim();
+        if (!name) throw new Error("trainingApplyAdapter: 'name' required");
+        const bytes = await readAdapterBytes(name);
+        const slots = model.loadAdapter(bytes);
+        activeAdapterName = name;
+        notify("adapterChanged", { active: name, slots });
+        log(`training: applied adapter '${name}' (${slots} slots)`);
+        return { name, slots };
+    },
+
+    trainingClearAdapter: async (a) => {
+        void a;
+        if (!model) return false;
+        if (trainingSession) throw new Error(
+            "active training session owns the model — finish it first");
+        model.clearAdapter();
+        const was = activeAdapterName;
+        activeAdapterName = null;
+        notify("adapterChanged", { active: null, was });
+        return true;
+    },
+
+    trainingListAdapters: async (a) => {
+        void a;
+        const entries = await listAdapterEntries();
+        return { entries, active: activeAdapterName };
+    },
+
+    trainingDeleteAdapter: async (a) => {
+        const name = String(a.name ?? "").trim();
+        if (!name) throw new Error("trainingDeleteAdapter: 'name' required");
+        if (activeAdapterName === name && model) {
+            try { model.clearAdapter(); } catch { /* */ }
+            activeAdapterName = null;
+            notify("adapterChanged", { active: null });
+        }
+        try {
+            const dir = await getAdaptersDir(false);
+            await dir.removeEntry(`${name}.bin`);
+        } catch { /* */ }
+        notify("adapterDeleted", { name });
+        return true;
+    },
+
+    trainingStatus: async (a) => {
+        void a;
+        if (!trainingSession) return { active: false };
+        return {
+            active: true,
+            step: trainingSession.stepNum,
+            lr: trainingSession.lr,
+            parameterCount: trainingSession.parameterCount,
+            gradientCheckpointing: trainingSession.gradientCheckpointing,
+            mixedPrecision: trainingSession.mixedPrecision,
+        };
+    },
 };
 
 // ───────────────────────────────────────────────────────────────────────
 // Dispatch
 // ───────────────────────────────────────────────────────────────────────
+
+/** Classify a thrown error as a GPU fault (device-lost, OOM, WebGPU
+ *  validation) so the UI can show a typed banner instead of letting
+ *  the worker look "frozen." Pattern-matches the error message; wgpu
+ *  surfaces these as plain `Error` instances with descriptive strings,
+ *  so message-matching is the only available hook. */
+function classifyGpuFault(msg: string): "device-lost" | "oom" | "validation" | null {
+    const m = msg.toLowerCase();
+    if (m.includes("device") && m.includes("lost")) return "device-lost";
+    if (m.includes("out of memory") || m.includes("oom") || m.includes("memory allocation")) return "oom";
+    if (m.includes("webgpu") && (m.includes("error") || m.includes("invalid"))) return "validation";
+    return null;
+}
 
 async function handleRequest(msg: { requestId: number; type: string } & Args) {
     if (!msg || typeof msg !== "object" || !msg.type) return;
@@ -649,6 +1313,15 @@ async function handleRequest(msg: { requestId: number; type: string } & Args) {
     const post = (payload: Record<string, unknown>) => {
         try { routerPort!.postMessage(payload); } catch { /* */ }
     };
+    if (shuttingDown) {
+        // Worker is mid-cleanup — refuse every RPC, including `pingCore`,
+        // so the router's `verifyCoreLive` on a new-tab connect sees us
+        // as dead and re-elects a fresh host. Without this, ping (a
+        // trivial `() => true`) would succeed before `self.close()`
+        // fires and the new tab would inherit a stale corePort.
+        post({ requestId, ok: false, error: "core shutting down" });
+        return;
+    }
     if (!handler) {
         post({ requestId, ok: false, error: `unknown RPC type: ${type}` });
         return;
@@ -661,16 +1334,102 @@ async function handleRequest(msg: { requestId: number; type: string } & Args) {
     } catch (e) {
         const err = (e as Error)?.message ?? String(e);
         log(`rpc ${type} failed: ${err}`);
+        // Typed GPU-fault diagnostic — the UI subscribes to this
+        // separately so a device-lost / OOM surfaces as a banner
+        // ("the GPU bailed — try reloading or freeing other tabs")
+        // instead of the generic error path that just looks like a
+        // hung worker.
+        const fault = classifyGpuFault(err);
+        if (fault) {
+            log(`rpc ${type} GPU fault: ${fault}`);
+            notify("gpuFault", { kind: fault, message: err, during: type });
+        }
         post({ requestId, ok: false, error: err });
     }
 }
 
+/** Synchronously release every OS handle the core worker holds. Called
+ *  from the shutdown signal on `pagehide`/`beforeunload`, plus as a
+ *  belt-and-suspenders cleanup before `self.close()`.
+ *
+ *  Order matters here:
+ *
+ *  1. **GPU towers first.** `releaseVisionWeights()` + `releaseAudioWeights()`
+ *     synchronously drop the per-block weight buffers (~3 GB audio,
+ *     ~3 GB vision on gemma4:e2b). These are the largest GPU residents;
+ *     `model.free?.()` would *eventually* free them via Rust Drop, but
+ *     iOS Safari can take a noticeable moment before the wgpu queue
+ *     actually surrenders the memory — and during that window the NEW
+ *     core worker is already booting, allocating its own audio tower,
+ *     and OOMing the GPU. This was the "audio crashing on iPhone after
+ *     a reload" symptom: the data and code were fine, the previous
+ *     worker's GPU surface just hadn't been handed back yet.
+ *  2. **wasm Model.** Drops the text tower, KV cache, sampler state,
+ *     pipeline cache. Rust Drop handles the rest.
+ *  3. **OPFS sync handle.** Releases the exclusive lock so the next
+ *     worker can open the GGUF.
+ *  4. **DB.** Best-effort close (may be a pending Promise).
+ */
+function releaseAllHandles() {
+    try {
+        if (model) {
+            try {
+                const freedV = model.releaseVisionWeights?.() ?? 0;
+                const freedA = model.releaseAudioWeights?.() ?? 0;
+                if (freedV > 0 || freedA > 0) {
+                    log(`shutdown: released ${(freedV / (1024 * 1024)).toFixed(0)}MB vision + ${(freedA / (1024 * 1024)).toFixed(0)}MB audio GPU weights before free()`);
+                }
+            } catch { /* */ }
+            try { model.free?.(); } catch { /* */ }
+            model = null;
+        }
+    } catch { /* */ }
+    try {
+        if (syncHandle) {
+            try { syncHandle.close(); } catch { /* */ }
+            syncHandle = null;
+        }
+    } catch { /* */ }
+    try {
+        // dbReady may be a pending Promise; if so, settle it best-effort
+        // by no-op (the worker is about to exit). If resolved, close().
+        if (dbReady) {
+            void dbReady.then((db) => {
+                try { (db as unknown as { close?: () => void }).close?.(); } catch { /* */ }
+            }).catch(() => {});
+            dbReady = null;
+        }
+    } catch { /* */ }
+    loadedInfo = null;
+}
+
 // Boot: wait for the host tab's `attach` message carrying the
-// MessagePort we'll use for all router traffic. Subsequent self.onmessage
-// fires are ignored — everything flows over the attached port.
+// MessagePort we'll use for all router traffic. The same channel also
+// carries the `{type: "shutdown"}` signal posted by `WorkerClient` on
+// `pagehide` — we cleanly release OPFS / DB handles + the wasm Model
+// before `self.close()`, so the next boot's `createSyncAccessHandle`
+// doesn't collide with a leaked handle from this worker. (Browser GC of
+// dead workers is slow on iOS Safari, so a plain `terminate()` from the
+// main thread can otherwise leave the model file locked for minutes.)
 (self as unknown as DedicatedWorkerGlobalScope).onmessage = (ev: MessageEvent) => {
     const data = ev.data;
-    if (!data || typeof data !== "object" || data.type !== "attach" || !data.port) return;
+    if (!data || typeof data !== "object") return;
+
+    if (data.type === "shutdown") {
+        // Flip the flag BEFORE running cleanup so any in-flight RPC
+        // (notably `pingCore` from the router's `verifyCoreLive`) sees
+        // us as shutting-down and replies `ok: false`. See the comment
+        // above `shuttingDown` for why this race matters.
+        shuttingDown = true;
+        try { log("core: shutdown received — releasing handles"); } catch { /* */ }
+        releaseAllHandles();
+        try {
+            (self as unknown as DedicatedWorkerGlobalScope).close();
+        } catch { /* */ }
+        return;
+    }
+
+    if (data.type !== "attach" || !data.port) return;
     if (routerPort) return; // already attached
     routerPort = data.port as MessagePort;
     routerPort.addEventListener("message", (e: MessageEvent) => {

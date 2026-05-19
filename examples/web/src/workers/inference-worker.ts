@@ -64,18 +64,37 @@ const queue: Waiter[] = [];
 const STATEFUL_RPCS = new Set([
     "load",
     "free",
+    "releaseVisionWeights",
+    "releaseAudioWeights",
     "step",
     "stepWithEmb",
     "stepAndDecode",
     "encodeImage",
     "encodeAudio",
+    "transcribeAudio",
     "reset",
     "setSampling",
     "saveKvState",
     "restoreKvState",
+    // Training RPCs all mutate the Model handle (TrainingSession owns
+    // it for the session's lifetime) — same session-locking pattern as
+    // the chat-side step/encode RPCs.
+    "trainingProbeFit",
+    "trainingStart",
+    "trainingStep",
+    "trainingZeroGrads",
+    "trainingForwardBackward",
+    "trainingOptimizerStep",
+    "trainingSaveAdapter",
+    "trainingCancel",
+    "trainingFinish",
+    "trainingApplyAdapter",
+    "trainingClearAdapter",
+    "trainingDeleteAdapter",
 ]);
-// renderChatForContinuation + position are stateless reads — no session
-// gating needed; they can interleave with another tab's generation.
+// renderChatForContinuation + position + trainingStatus + trainingListAdapters
+// are stateless reads — no session gating needed; they can interleave with
+// another tab's generation.
 
 function acquireSession(abortToken: string, port: MessagePort): Promise<number> {
     return new Promise<number>((resolve, reject) => {
@@ -136,6 +155,13 @@ interface PendingChild {
 const pendingChild = new Map<number, PendingChild>();
 let nextChildReqId = 1;
 
+// Liveness pings (router → core). Disjoint id space from pendingChild
+// so onCoreMessage can route the pong reply without confusing it with
+// a regular tab RPC reply. See `verifyCoreLive`.
+const pingsAwaitingPong = new Map<number, (ok: boolean) => void>();
+let nextPingId = 1_000_000_000;
+const CORE_PING_TIMEOUT_MS = 800;
+
 function electHost(tab: MessagePort) {
     if (corePort || electionInFlight) return;
     electionInFlight = { tab, startedAt: Date.now() };
@@ -191,6 +217,15 @@ function onCoreMessage(ev: MessageEvent) {
         return;
     }
 
+    // Pong for an internal liveness ping — routed back to the waiting
+    // verifyCoreLive() Promise instead of any tab.
+    if (typeof msg.requestId === "number" && pingsAwaitingPong.has(msg.requestId)) {
+        const resolver = pingsAwaitingPong.get(msg.requestId)!;
+        pingsAwaitingPong.delete(msg.requestId);
+        resolver(!!msg.ok);
+        return;
+    }
+
     // RPC reply
     if (typeof msg.requestId === "number") {
         const p = pendingChild.get(msg.requestId);
@@ -204,6 +239,35 @@ function onCoreMessage(ev: MessageEvent) {
             });
         } catch { /* */ }
     }
+}
+
+/**
+ * Send a `pingCore` over the current corePort and wait up to
+ * `CORE_PING_TIMEOUT_MS` for the reply. Used on new tab connections to
+ * detect the "host tab died without firing pagehide" case (common on
+ * iOS Safari when the WebContent process is killed) — without this,
+ * the router keeps trusting a corePort whose other end is dead until
+ * the 30s heartbeat GC runs, and RPCs forwarded in that window vanish
+ * into the closed port. Returns true on pong, false on timeout / no
+ * corePort / postMessage throw.
+ */
+function verifyCoreLive(): Promise<boolean> {
+    if (!corePort) return Promise.resolve(false);
+    const port = corePort;
+    const pingId = nextPingId++;
+    return new Promise<boolean>((resolve) => {
+        let done = false;
+        const finish = (ok: boolean) => {
+            if (done) return;
+            done = true;
+            pingsAwaitingPong.delete(pingId);
+            resolve(ok);
+        };
+        pingsAwaitingPong.set(pingId, finish);
+        setTimeout(() => finish(false), CORE_PING_TIMEOUT_MS);
+        try { port.postMessage({ requestId: pingId, type: "pingCore" }); }
+        catch { finish(false); }
+    });
 }
 
 function loseCore(reason: string) {
@@ -440,10 +504,31 @@ async function handleRequest(
         kind: "meta",
         loaded: loadedInfo,
     });
-    // If we already have a core, tell the new tab so its client can
-    // drop any "core disconnected" retry queue.
+    // If we already have a core, verify it's actually alive before
+    // telling the new tab so. The "host tab killed without firing
+    // pagehide" case (iOS WebContent process death, refresh during
+    // backgrounding, page-reaper) leaves a corePort whose other end is
+    // closed; the router has no socket-level way to detect that and
+    // would otherwise trust it until the 30s heartbeat GC runs. A
+    // quick pingCore round-trip catches it in <1s — on timeout we
+    // synthesise a loseCore so the new tab inherits a clean election
+    // path instead of having its first RPC vanish into the closed port.
     if (corePort) {
-        port.postMessage({ type: "notify", kind: "coreReady" });
+        void (async () => {
+            const alive = await verifyCoreLive();
+            if (alive) {
+                try { port.postMessage({ type: "notify", kind: "coreReady" }); }
+                catch { /* */ }
+                return;
+            }
+            log(`core: ping failed on new connection — re-electing`);
+            loseCore("ping failed on new connection");
+            // loseCore already calls electHost on the next electable
+            // tab. If, somehow, no election fired (e.g. PORTS was empty
+            // at loseCore time, which can't happen here since we just
+            // added `port`), kick one off manually.
+            if (!corePort && !electionInFlight) electHost(port);
+        })();
     } else if (!electionInFlight) {
         // No core attached and no election running → this tab gets to
         // spawn the core.

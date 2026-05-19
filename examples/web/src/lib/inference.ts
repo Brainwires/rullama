@@ -144,13 +144,33 @@ export class WorkerClient {
             }
         });
 
-        // Send a final `disconnect` on tab close so the worker can
+        // Send a final `disconnect` on tab close so the router can
         // immediately release any held session + drop the port without
-        // waiting for the heartbeat GC.
+        // waiting for the heartbeat GC. If we're the elected core host,
+        // also post `{type:"shutdown"}` to the dedicated worker so it
+        // closes its FileSystemSyncAccessHandle / DB / Model and then
+        // self.close()s on its own time.
+        //
+        // CRITICAL: do NOT call worker.terminate() here. terminate() is
+        // synchronous and kills the worker before its onmessage loop has
+        // a chance to process the shutdown message — which means
+        // releaseAllHandles() never runs, the FileSystemSyncAccessHandle
+        // stays held by the dead worker until iOS Safari finally GCs it,
+        // and the next page load can't open the same OPFS file. The
+        // 7 GB GGUF is sitting right there but the new core worker
+        // races a lingering exclusive lock and the load fails. The whole
+        // point of the shutdown message is to let the worker close
+        // handles BEFORE exiting; terminate() defeats that.
         const onLeave = () => {
             try { this.port.postMessage({ requestId: -1, type: "disconnect" }); } catch { /* */ }
-            try { this.coreWorker?.terminate(); } catch { /* */ }
+            const w = this.coreWorker;
             this.coreWorker = null;
+            if (w) {
+                try { w.postMessage({ type: "shutdown" }); } catch { /* */ }
+                // Intentionally no terminate(). The worker calls
+                // self.close() after releaseAllHandles() — see the
+                // shutdown handler in inference-core-worker.ts.
+            }
         };
         window.addEventListener("pagehide", onLeave);
         window.addEventListener("beforeunload", onLeave);
@@ -375,6 +395,51 @@ export class WorkerClient {
     cancelMultimodalEncode(): Promise<boolean> {
         return this.rpc("cancelMultimodalEncode", {});
     }
+    /** In-engine speech-to-text via the audio tower + greedy decode.
+     *  Streams per-token deltas to `onChunk` if provided; resolves with
+     *  the final transcript. Worker forces greedy sampling (temperature
+     *  0) for the duration of the call regardless of the chat-side
+     *  sampling settings.
+     *
+     *  Acquires its own session lock for the duration of the call — the
+     *  mic gesture lives outside the chat-send flow that normally owns
+     *  the session, so we can't assume one's already held. The lock
+     *  blocks any concurrent chat generation in another tab while
+     *  transcribing (matches the existing single-tab-at-a-time
+     *  arbitration). */
+    async transcribeAudio(
+        pcm: Float32Array,
+        onChunk?: (delta: string) => void,
+    ): Promise<string> {
+        const off = onChunk
+            ? this.subscribe("transcribeChunk", (p) => {
+                if (p.done) return;
+                const delta = String(p.delta ?? "");
+                if (delta) onChunk(delta);
+            })
+            : null;
+        try {
+            return await this.withSession(async () => {
+                const { transcript } = await this.rpc<{ transcript: string }>(
+                    "transcribeAudio",
+                    { sid: this.session, pcm } as Record<string, unknown>,
+                );
+                return transcript;
+            });
+        } finally {
+            off?.();
+        }
+    }
+    /** Drop vision tower weights from GPU memory. Returns approx bytes
+     *  freed. Re-encoding an image re-uploads. Call between encode and
+     *  prefill on memory-tight devices (iPhone) so the prefill step
+     *  doesn't push Safari WebContent past jetsam. */
+    releaseVisionWeights(): Promise<number> {
+        return this.rpc("releaseVisionWeights", { sid: this.session });
+    }
+    releaseAudioWeights(): Promise<number> {
+        return this.rpc("releaseAudioWeights", { sid: this.session });
+    }
     reset(): Promise<void> { return this.rpc("reset", { sid: this.session }); }
     setSampling(opts: SamplingOptions): Promise<void> {
         return this.rpc("setSampling", { sid: this.session, opts });
@@ -452,6 +517,130 @@ export class WorkerClient {
         return this.rpc("msgListImages", { conversationId });
     }
     dbFlush(): Promise<boolean> { return this.rpc("dbFlush"); }
+
+    // ── LoRA fine-tuning ───────────────────────────────────────────────
+    /** Start a training session. Consumes the Model — chat-side RPCs
+     *  will throw until `trainingFinish()` returns the Model. */
+    trainingStart(args: {
+        loraConfig: TrainingLoraConfig;
+        hparams:    TrainingHyperparams;
+        totalSteps?: number;
+    }): Promise<TrainingSessionInfo> {
+        return this.rpc("trainingStart", { sid: this.session, ...args } as Record<string, unknown>);
+    }
+    /** Run the scratch+LoRA allocation trial against a borrowed Model
+     *  without consuming it. Returns `{ok, estimatedBytes, reason?}`;
+     *  caller can use this to grey out Start if the device can't fit
+     *  the requested config. The worker also runs this automatically
+     *  inside `trainingStart` and refuses to consume the Model on
+     *  probe failure, so explicit pre-flight is optional. */
+    trainingProbeFit(args: {
+        loraConfig: TrainingLoraConfig;
+        hparams:    TrainingHyperparams;
+    }): Promise<{ ok: boolean; estimatedBytes: number; reason?: string }> {
+        return this.rpc("trainingProbeFit", { sid: this.session, ...args } as Record<string, unknown>);
+    }
+    trainingStep(args: {
+        inputIds:  Uint32Array;
+        targetId?: number;
+        targets?:  Uint32Array;
+        lossMode?: "next_token" | "per_position";
+    }): Promise<TrainingStepReport> {
+        return this.rpc("trainingStep", { sid: this.session, ...args } as Record<string, unknown>);
+    }
+    trainingZeroGrads(): Promise<boolean> {
+        return this.rpc("trainingZeroGrads", { sid: this.session });
+    }
+    trainingForwardBackward(args: {
+        inputIds:  Uint32Array;
+        targetId?: number;
+        targets?:  Uint32Array;
+        lossMode?: "next_token" | "per_position";
+    }): Promise<{ loss: number; step: number; lr: number }> {
+        return this.rpc("trainingForwardBackward", { sid: this.session, ...args } as Record<string, unknown>);
+    }
+    trainingOptimizerStep(): Promise<{ step: number; lr: number }> {
+        return this.rpc("trainingOptimizerStep", { sid: this.session });
+    }
+    trainingSaveAdapter(name: string): Promise<{ name: string; size: number }> {
+        return this.rpc("trainingSaveAdapter", { sid: this.session, name });
+    }
+    trainingFinish(): Promise<boolean> {
+        return this.rpc("trainingFinish", { sid: this.session });
+    }
+    /** Flip the cooperative cancel flag on the active training session
+     *  so the in-flight step bails at the next per-layer encoder
+     *  boundary. The pending `trainingStep` promise rejects with a
+     *  "cancelled" error within ~one layer of latency. No-op when no
+     *  session is active. */
+    trainingCancel(): Promise<boolean> {
+        return this.rpc("trainingCancel", { sid: this.session });
+    }
+    trainingApplyAdapter(name: string): Promise<{ name: string; slots: number }> {
+        return this.rpc("trainingApplyAdapter", { sid: this.session, name });
+    }
+    trainingClearAdapter(): Promise<boolean> {
+        return this.rpc("trainingClearAdapter", { sid: this.session });
+    }
+    trainingDeleteAdapter(name: string): Promise<boolean> {
+        return this.rpc("trainingDeleteAdapter", { sid: this.session, name });
+    }
+    trainingListAdapters(): Promise<{ entries: AdapterListEntry[]; active: string | null }> {
+        return this.rpc("trainingListAdapters", {});
+    }
+    trainingStatus(): Promise<TrainingStatusInfo> {
+        return this.rpc("trainingStatus", {});
+    }
+}
+
+export interface TrainingLoraConfig {
+    rank:           number;
+    alpha:          number;
+    dropout:        number;
+    target_modules: string[];
+}
+export interface TrainingHyperparams {
+    epochs:                       number;
+    batch_size:                   number;
+    learning_rate:                number;
+    warmup_steps:                 number;
+    weight_decay:                 number;
+    lr_scheduler:                 "constant" | "linear" | "cosine" | "cosine_warm_restarts";
+    seed:                         number;
+    max_seq_len:                  number;
+    gradient_accumulation_steps:  number;
+    max_grad_norm:                number;
+    loss_mode:                    "next_token" | "per_position";
+    gradient_checkpointing:       boolean;
+    mixed_precision:              boolean;
+}
+export interface TrainingStepReport {
+    loss: number;
+    lr:   number;
+    step: number;
+}
+export interface TrainingSessionInfo {
+    parameterCount:        number;
+    gradientCheckpointing: boolean;
+    mixedPrecision:        boolean;
+    /** GPU bytes the trainer is expected to occupy — surfaced by the
+     *  probe that runs at the top of `trainingStart`. */
+    estimatedBytes?:       number;
+}
+export type TrainingStatusInfo =
+    | { active: false }
+    | {
+        active: true;
+        step: number;
+        lr: number;
+        parameterCount: number;
+        gradientCheckpointing: boolean;
+        mixedPrecision: boolean;
+    };
+export interface AdapterListEntry {
+    name:         string;
+    size:         number;
+    lastModified: number;
 }
 
 export interface ConversationRow {

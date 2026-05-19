@@ -38,12 +38,15 @@ COPY examples ./examples
 COPY xtask ./xtask
 
 # BuildKit cache mounts speed up rebuilds ~10x; harmless without BuildKit.
-# wasm-pack runs against the rullama package inside the workspace; --out-dir
-# is relative to the package, so `../../pkg` lands at /build/pkg/ which is
-# what the web stage and the nginx COPYs both expect.
+# wasm-pack runs against `rullama-finetune` so the unified bundle exposes
+# both inference (`Model`) and training (`TrainingSession`) wasm-bindgen
+# surfaces; `--out-name rullama` keeps the JS entry at `pkg/rullama.js`
+# so existing PWA imports + nginx COPYs don't need to change. --out-dir
+# is relative to the package, so `../../pkg` lands at /build/pkg/.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    wasm-pack build crates/rullama --target web --release --out-dir ../../pkg
+    wasm-pack build crates/rullama-finetune --target web --release \
+        --out-dir ../../pkg --out-name rullama
 
 # -------------------- stage 2: vite + react PWA --------------------
 # Vite needs the wasm-pack output to resolve `/pkg/rullama.js` at build

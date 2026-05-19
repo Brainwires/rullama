@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "rullama"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "bytemuck",
@@ -1478,6 +1478,7 @@ dependencies = [
  "log",
  "pollster",
  "rsqlite-wasm",
+ "safetensors",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
@@ -1490,20 +1491,24 @@ dependencies = [
 
 [[package]]
 name = "rullama-finetune"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytemuck",
  "futures-channel",
  "half",
+ "js-sys",
  "pollster",
  "rullama",
  "safetensors",
  "serde",
+ "serde-wasm-bindgen",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokenizers",
  "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wgpu",
 ]
 

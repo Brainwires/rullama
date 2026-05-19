@@ -6,9 +6,9 @@ import { type ChatMessage, type ImageAttachment } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
 import { parseModelContent } from "@/lib/parseModel";
 import { cn } from "@/lib/utils";
-import { Mic, Send, Square, Plus, X } from "lucide-react";
+import { Mic, Send, Square, Paperclip, X } from "lucide-react";
 import { MicButton } from "@/components/MicButton";
-import { VisionProgress, type VisionProgressState } from "@/components/VisionProgress";
+import { PipelineProgress, type PipelineProgressState } from "@/components/PipelineProgress";
 import type { VoiceOptions } from "@/lib/voice";
 
 // The think-token slips into the chat history when the user enables
@@ -47,7 +47,7 @@ interface Props {
     onAudioError?:   (msg: string) => void;
     /** When non-null, a large progress strip mounts above the input row
      *  showing per-layer vision-encode progress for the current image. */
-    visionProgress?: VisionProgressState | null;
+    pipelineProgress?: PipelineProgressState | null;
     statusLine?: string;
     /** Optional drop-in for the empty chat history pane (e.g. a
      *  no-model-loaded card). Falls back to a plain hint when omitted. */
@@ -218,7 +218,7 @@ export function ChatPanel(props: Props) {
                 </p>
             )}
 
-            {props.visionProgress && <VisionProgress state={props.visionProgress} />}
+            {props.pipelineProgress && <PipelineProgress state={props.pipelineProgress} />}
 
             {/* Pending-attachment preview strip, only when there's at
                 least one image or voice clip queued. */}
@@ -268,7 +268,7 @@ export function ChatPanel(props: Props) {
                 <input
                     ref={fileInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="image/*,audio/*"
                     multiple
                     className="hidden"
                     onChange={onFilesPicked}
@@ -290,9 +290,11 @@ export function ChatPanel(props: Props) {
                     onClick={onAttachClick}
                     disabled={!props.canAttach || !props.canType}
                     variant="outline"
-                    title={props.canAttach ? "Attach image" : "Vision tower unavailable for this model"}
+                    title={props.canAttach
+                        ? "Attach image or audio file for analysis"
+                        : "Multimodal tower unavailable for this model"}
                 >
-                    <Plus />
+                    <Paperclip />
                 </Button>
                 {props.canRecord && (
                     <MicButton

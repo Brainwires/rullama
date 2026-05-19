@@ -23,8 +23,8 @@ wasm32-unknown-unknown` doesn't try to compile its staticlib for wasm):
 
 | Crate              | Target        | Notes                                             |
 |--------------------|---------------|---------------------------------------------------|
-| `crates/rullama`           | wasm + native | The engine. Stable public API is `api` + `error` + `sampling` ONLY; everything else (`backend`, `gguf`, `kernels`, `model`, `multimodal`, `reference`, `template`, `tokenizer`) is `#[doc(hidden)]` and may change in any patch release. |
-| `crates/rullama-finetune`  | native only   | LoRA SGD over the same wgpu kernels. Compiles to an **empty crate** on `wasm32` (whole crate body is `#![cfg(not(target_arch = "wasm32"))]`). |
+| `crates/rullama`           | wasm + native | The engine. Stable public API is `api` + `error` + `sampling` + `lora` ONLY; everything else (`backend`, `gguf`, `kernels`, `model`, `multimodal`, `reference`, `template`, `tokenizer`) is `#[doc(hidden)]` and may change in any patch release. |
+| `crates/rullama-finetune`  | wasm + native | LoRA SGD over the same wgpu kernels. On wasm32 it exposes a `TrainingSession` wasm-bindgen surface; the PWA's Fine-tune tab consumes it. Native examples (`overfit_one`, `train_jsonl`, `eval_adapter`) are the parity oracle. |
 | `xtask`                    | native        | Tiny std-only dispatcher for `cargo docker:*` aliases. Keep it dependency-free. |
 | `tools/ios-bench`          | static lib    | Out-of-workspace; staticlib for Xcode, C-ABI `rullama_run_bench`. |
 
@@ -37,6 +37,13 @@ deps.
 
 ```sh
 # WASM bundle — output lands at <repo>/pkg/ and is shared by BOTH example PWAs
+# Build via the finetune crate so the unified bundle exposes both inference
+# (Model) and training (TrainingSession) wasm-bindgen surfaces; --out-name
+# keeps the JS entry at pkg/rullama.js for PWA import compat.
+wasm-pack build crates/rullama-finetune --target web --release --out-dir ../../pkg --out-name rullama
+
+# Inference-only variant (smaller bundle, no TrainingSession). Use when
+# shipping a chat-only deployment.
 wasm-pack build crates/rullama --target web --release --out-dir ../../pkg
 
 # Native parity / smoke tests against a local Ollama GGUF blob
@@ -120,16 +127,20 @@ Add a task by appending a match arm in `xtask/src/main.rs` and the alias line in
   back into one big submit.
 - **GPU-resident KV cache.** Multi-turn chat and mid-generation stop rely on
   it; don't reintroduce CPU readbacks per token.
-- **Public API surface is small on purpose.** If you're adding something for
-  the wasm-bindgen / native consumer, it goes through `api::Model`. Touching
-  the doc-hidden modules' signatures across patch releases is allowed but
-  should be noted in the changelog.
+- **Public API surface is small on purpose.** Stable modules: `api`,
+  `error`, `sampling`, `lora`. If you're adding something for the
+  wasm-bindgen / native consumer of `rullama`, it goes through `api::Model`.
+  Adapter parsing lives in `lora`. Touching the doc-hidden modules'
+  signatures across patch releases is allowed but should be noted in the
+  changelog. For `rullama-finetune`, the JS-facing surface is
+  `TrainingSession` in `wasm_bindgen_api.rs`.
 
 ## Layout pointers
 
 ```
 crates/rullama/src/
-  api.rs                  # JS-facing Model (load / loadFromUrl / loadFromOpfs[TextOnly] / generate / stop)
+  api.rs                  # JS-facing Model (load / loadFromUrl / loadFromOpfs[TextOnly] / generate / stop / loadAdapter / clearAdapter)
+  lora.rs                 # InferenceAdapter — parses the safetensors blob TrainingSession writes
   backend/                # WgpuCtx, dispatchers, pipeline cache, WeightCache
   gguf/                   # GGUF v3 reader, TensorFetcher impls (InMemory / HttpRange / Opfs), dequant
   kernels/wgsl/           # 70+ hand-written compute shaders (text + vision + audio + backward)
@@ -147,6 +158,7 @@ crates/rullama-finetune/src/
   lora.rs                 # per-LoRA GPU state (A / B), grad buffers
   scratch.rs              # per-step GPU scratch buffers for backward
   dataset_loader.rs       # JSONL + Tokenizer trait
+  wasm_bindgen_api.rs     # JS-facing TrainingSession (wasm32 only); save/load adapter as safetensors
 
 examples/web/             # React + Vite production PWA
 examples/pwa/             # Vanilla JS bench + safaridriver scripts

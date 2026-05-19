@@ -3,7 +3,7 @@ import { ModelLoader, ModelLoadProgress, type ModelStatus } from "@/components/M
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChatPanel } from "@/components/ChatPanel";
-import type { VisionProgressState } from "@/components/VisionProgress";
+import type { PipelineProgressState } from "@/components/PipelineProgress";
 import { RestartOverlay } from "@/components/RestartOverlay";
 import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
 import { ConversationList } from "@/components/ConversationList";
@@ -19,11 +19,14 @@ import { useToast } from "@/lib/toast";
 import { usePersistedState } from "@/lib/persisted";
 import { useIOSKeyboard } from "@/lib/useIOSKeyboard";
 import { useWakeLock } from "@/lib/wakeLock";
-import { fmtBytes, fmtEta, clampInt, clampNum } from "@/lib/utils";
+import { fmtBytes, fmtEta, clampInt, clampNum, cn } from "@/lib/utils";
 import { preprocessImage } from "@/lib/image_preprocess";
+import { decodeAudioFile } from "@/lib/audio_decode";
 import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
 import { DEFAULT_VOICE_OPTIONS, VOICE_BOUNDS, type VoiceOptions } from "@/lib/voice";
-import { Settings, History } from "lucide-react";
+import { FineTunePanel } from "@/components/FineTunePanel";
+import { Badge } from "@/components/ui/badge";
+import { Settings, History, MessageSquare, Sparkles } from "lucide-react";
 
 const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
@@ -109,12 +112,41 @@ export function App() {
     const [loadingLabel, setLoadingLabel]     = useState("");
     const [statusText, setStatusText]         = useState("no model");
 
+    // Wait-reason coordination. The worker emits three independent
+    // `…Waiting` / `…Retrying` notifies during slow OPFS / network
+    // operations; surfacing them all through `setLoadingLabel` directly
+    // is racy (one event can stomp another's message). Keep the
+    // **most-recent** wait reason in its own state and have the render
+    // pass `waitInfo?.message ?? loadingLabel` to the ModelLoader, so
+    // a wait label naturally supersedes the normal progress label while
+    // the wait is fresh and is cleared by the staleness timer below.
+    const [waitInfo, setWaitInfo] = useState<
+        { kind: "modelLoad" | "downloadLock" | "downloadStream"; message: string; ts: number } | null
+    >(null);
+    useEffect(() => {
+        if (!waitInfo) return;
+        // Auto-clear after 4 s of no new updates so a finished retry
+        // doesn't leave a stale "waiting…" line in the loader once the
+        // real operation has resumed.
+        const t = setTimeout(() => {
+            setWaitInfo((cur) => (cur === waitInfo ? null : cur));
+        }, 4000);
+        return () => clearTimeout(t);
+    }, [waitInfo]);
+
+    // View routing — Chat tab vs Fine-tune tab. Persisted so a reload
+    // doesn't bounce the user out of the tab they were in.
+    const [view, setView] = usePersistedState<"chat" | "finetune">("rullama:view", "chat");
+    // Adapter currently active in chat. Kept here (not just inside
+    // FineTunePanel) so the header badge stays in sync.
+    const [activeAdapter, setActiveAdapter] = useState<string | null>(null);
+
     // Chat state
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [prompt, setPrompt]     = useState("");
     const [busy, setBusy]         = useState(false);
     const [statusLine, setStatusLine] = useState<string | undefined>();
-    const [visionEncodeState, setVisionEncodeState] = useState<VisionProgressState | null>(null);
+    const [visionEncodeState, setVisionEncodeState] = useState<PipelineProgressState | null>(null);
 
     // Multimodal: vision availability latches on after a successful model
     // load (it's a property of the meta, only known post-load). Pending
@@ -298,6 +330,7 @@ export function App() {
         return () => document.removeEventListener("visibilitychange", onVis);
     }, [busy]);
 
+
     // Bootstrap DB + conversation list on mount.
     useEffect(() => {
         const client = getClient();
@@ -359,7 +392,72 @@ export function App() {
                     .then(setConversations)
                     .catch(() => { /* */ });
             }),
+            client.subscribe("adapterChanged", (p) => {
+                setActiveAdapter((p.active as string | null | undefined) ?? null);
+            }),
+            // Worker is waiting on the OPFS read-syncHandle while the
+            // previous worker's exclusive lock GCs. Surface to the boot
+            // splash AND the in-app waitInfo state so the user knows
+            // something is happening (this matters most on iPhone where
+            // there's no easy dev console). Render-side combines waitInfo
+            // with loadingLabel so this label naturally supersedes the
+            // normal progress label.
+            client.subscribe("modelLoadWaiting", (p) => {
+                const attempt = Number(p.attempt ?? 0);
+                const elapsed = Number(p.elapsedMs ?? 0);
+                const msg = `Waiting for previous session to release the model… (${(elapsed / 1000).toFixed(1)}s, attempt ${attempt})`;
+                setWaitInfo({ kind: "modelLoad", message: msg, ts: Date.now() });
+                try {
+                    window.__rullamaBootStatus?.("Almost there…", msg);
+                } catch { /* */ }
+            }),
+            // Worker is waiting on the WRITE syncHandle for a resumed
+            // download. Same situation, different operation.
+            client.subscribe("downloadWaiting", (p) => {
+                const attempt = Number(p.attempt ?? 0);
+                const elapsed = Number(p.elapsedMs ?? 0);
+                const msg = `Waiting for previous session to release the download… (${(elapsed / 1000).toFixed(1)}s, attempt ${attempt})`;
+                setWaitInfo({ kind: "downloadLock", message: msg, ts: Date.now() });
+            }),
+            // Download stream broke (network drop / iOS screen-lock
+            // socket sever); worker is retrying with Range resume.
+            client.subscribe("downloadRetrying", (p) => {
+                const attempt = Number(p.attempt ?? 0);
+                const max = Number(p.maxAttempts ?? 0);
+                const delay = Number(p.nextDelayMs ?? 0);
+                const msg = `Connection dropped — retrying in ${(delay / 1000).toFixed(1)}s (attempt ${attempt}/${max})`;
+                setWaitInfo({ kind: "downloadStream", message: msg, ts: Date.now() });
+            }),
+            client.subscribe("gpuFault", (p) => {
+                // Typed GPU fault surfaced by the inference core worker
+                // when wgpu returns device-lost / OOM / WebGPU validation
+                // error. Without this banner the tab just looks frozen.
+                const kind = String(p.kind ?? "unknown");
+                const during = String(p.during ?? "an inference call");
+                const message = String(p.message ?? "");
+                const title = kind === "oom"
+                    ? "GPU is out of memory"
+                    : kind === "device-lost"
+                        ? "GPU device was lost"
+                        : "GPU error";
+                const hint = kind === "oom"
+                    ? "Close other browser tabs or reload to free GPU memory, then try again."
+                    : kind === "device-lost"
+                        ? "Reload the page to restart the GPU context."
+                        : "Reload and check the dev console for details.";
+                showToast({
+                    level: "error",
+                    title,
+                    message: `${hint} (during: ${during})\n${message}`,
+                    persist: true,
+                });
+            }),
         ];
+        // Probe initial adapter state once the model is ready (worker
+        // remembers what was applied across page reloads).
+        void getClient().trainingListAdapters()
+            .then((r) => setActiveAdapter(r.active))
+            .catch(() => { /* */ });
         return () => { for (const o of offs) o(); };
     }, []);
 
@@ -371,19 +469,24 @@ export function App() {
     // notification — if another tab already loaded a model, we inherit
     // that state via the meta payload and skip auto-load entirely.
     //
-    // Resume priority: `pendingLoadDigest` first (the user kicked off a
-    // load that didn't finish — likely an iOS suspend mid-download;
-    // re-firing onLoad routes through ensureModel's Range-resume); then
-    // `lastLoadedDigest` (previously fully loaded, just rehydrate from
-    // OPFS cache). Both paths funnel through the same onLoad call.
+    // Auto-rehydrate ONLY when the model is fully present in OPFS — that
+    // means a previous session completed a download and just wants to
+    // reopen the file. We deliberately do NOT auto-trigger a download
+    // here, even when `pendingLoadDigest` says one was in flight before
+    // the tab died: that auto-download path was the source of the
+    // "every PWA reload after a screen lock tries to redownload the
+    // model and fails" pain (the failure path on iOS is the
+    // syncHandle / fetch race against an old worker that hasn't GC'd
+    // yet, and it's much more reliable when the user clicks Load
+    // explicitly because by then everything has settled).
+    //
+    // For partially-downloaded models, the ModelLoader UI shows the
+    // resume option and the user can decide when to fire it.
     const autoLoadAttempted = useRef(false);
     useEffect(() => {
         if (!metaInit) return;
         if (autoLoadAttempted.current) return;
         autoLoadAttempted.current = true;
-        // The meta subscriber already set modelStatus when a model is
-        // loaded worker-side; bail out so we don't gratuitously call
-        // load() and queue behind another tab.
         if (modelStatus === "ready") return;
         const target = pendingLoadDigest || lastLoadedDigest;
         if (!target) return;
@@ -392,11 +495,21 @@ export function App() {
                 const models = await listModels();
                 const m = models.find((x) => x.digest === target);
                 if (!m) {
-                    // Model vanished from the catalog (server-side delete,
-                    // or stale localStorage). Clear both so we don't keep
-                    // retrying on every boot.
                     setPendingLoadDigest("");
                     setLastLoadedDigest("");
+                    return;
+                }
+                // Gate on OPFS: only auto-fire onLoad if the cached file
+                // already matches the expected size. existingSize is
+                // tolerant of the sync-handle read race (returns f.size
+                // on transient failures), so a momentary lock conflict
+                // doesn't push us into the download path.
+                const modelKey = m.digest.replace(/[^A-Za-z0-9_.-]/g, "_");
+                const filename = m.name.replace(/[^A-Za-z0-9_.-]/g, "_") + ".gguf";
+                const cachedBytes = await existingSize(modelKey, filename);
+                if (cachedBytes < m.size) {
+                    // Not fully cached — bail. The ModelLoader UI will
+                    // render and the user can tap Load to resume.
                     return;
                 }
                 if (onLoadRef.current) {
@@ -500,26 +613,50 @@ export function App() {
     }, [busy]);
 
     const onAttachFiles = useCallback(async (files: FileList) => {
-        // Reject silently when vision is unavailable — the UI gating
-        // should already prevent the click, but a stale handler still
-        // could fire mid-unload.
-        if (!hasVision) return;
-        const next: ImageAttachment[] = [];
+        // Two attach paths: images route through the vision tower,
+        // audio files route through the audio tower (analyse-this-clip
+        // use-case; mic-button transcription is now a separate flow,
+        // see `onCaptureAudio`). UI gating should prevent attaching
+        // capability-mismatched files but a stale handler can still
+        // fire mid-unload — silently drop in that case.
+        const nextImages: ImageAttachment[] = [];
+        const nextAudio: { pcm: Float32Array; durationMs: number }[] = [];
         for (let i = 0; i < files.length; i++) {
             const f = files[i];
-            if (!f.type.startsWith("image/")) continue;
-            try {
-                const p = await preprocessImage(f);
-                next.push(p);
-            } catch (e) {
-                showToast({
-                    level: "error", title: `Couldn't load ${f.name}`,
-                    message: (e as Error).message,
-                });
+            if (f.type.startsWith("image/")) {
+                if (!hasVision) continue;
+                try {
+                    const p = await preprocessImage(f);
+                    nextImages.push(p);
+                } catch (e) {
+                    showToast({
+                        level: "error", title: `Couldn't load ${f.name}`,
+                        message: (e as Error).message,
+                    });
+                }
+            } else if (f.type.startsWith("audio/")) {
+                if (!hasAudio) continue;
+                try {
+                    const decoded = await decodeAudioFile(f);
+                    if (decoded) {
+                        nextAudio.push({ pcm: decoded.pcm, durationMs: decoded.durationMs });
+                    } else {
+                        showToast({
+                            level: "warn", title: `Couldn't decode ${f.name}`,
+                            message: "This browser doesn't support that audio format. Try MP3 or WAV.",
+                        });
+                    }
+                } catch (e) {
+                    showToast({
+                        level: "error", title: `Couldn't load ${f.name}`,
+                        message: (e as Error).message,
+                    });
+                }
             }
         }
-        if (next.length) setPendingImages((prev) => [...prev, ...next]);
-    }, [hasVision, showToast]);
+        if (nextImages.length) setPendingImages((prev) => [...prev, ...nextImages]);
+        if (nextAudio.length) setPendingAudio((prev) => [...prev, ...nextAudio]);
+    }, [hasVision, hasAudio, showToast]);
 
     const onRemoveImage = useCallback((idx: number) => {
         setPendingImages((prev) => prev.filter((_, i) => i !== idx));
@@ -658,11 +795,13 @@ export function App() {
 
             setLoadingLabel("loading into wasm…");
             const mobile = isMobileUA();
-            // KV-cache cap on mobile only — the original 512 was a
-            // crash-avoidance number from the iPhone-load-path work, but
-            // since the worker + sync-OPFS + per-tile range-fetch combo
-            // stabilised, 2048 ctx (≈ 144 MB GPU on A18) is comfortable.
-            const mobileMaxCtx = 2048;
+            // KV-cache cap on mobile. Was 2048 (~530 MB KV); dropped to
+            // 1024 (~265 MB) for multimodal-capable checkpoints because
+            // iPhone Safari WebContent peaks during text-prefill +
+            // resident multimodal scratch were tipping over jetsam on
+            // audio-attached Send. Text-only loads keep the 2048 ceiling
+            // since there's no multimodal tower competing for budget.
+            const mobileMaxCtx = m.multimodal ? 1024 : 2048;
             // textOnly policy:
             //   Catalog drives it everywhere — `multimodal: true` on a
             //   BAKED_IN_MODELS / R2 entry means the blob carries the
@@ -1248,6 +1387,7 @@ export function App() {
             type SoftEntry = { nSoft: number; dText: number; softTokens: Float32Array };
             const softQueue: SoftEntry[] = [];
             let beginId: number | null = null;
+            const totalImgs = turnImages.filter((x) => x.pixels).length;
             if (turnImages.length > 0) {
                 const sent = client.imageSentinelIds();
                 if (!sent) {
@@ -1255,19 +1395,23 @@ export function App() {
                 }
                 beginId = sent[0];
                 // Surface per-layer vision encode progress as a sticky
-                // strip above the input row (see VisionProgress). The
-                // encode can be ~2 min on slow GPUs; users need clear
-                // feedback that the app is alive.
+                // strip above the input row (see PipelineProgress). The
+                // strip stays alive across three phases — encoding (vision
+                // tower) → embedding (soft-token splice through the text
+                // model) → prefill (prompt-token feed). Without all three
+                // the user sees the bar disappear at 16/16 and then sits
+                // 2-3 min in silence while the JS prefill loop chews on
+                // 256 soft tokens per image at ~870 ms each.
                 let imgIdx = 0;
-                const totalImgs = turnImages.filter((x) => x.pixels).length;
-                const offProgress = client.subscribe("visionProgress", (p) => {
+                const offProgress = client.subscribe("pipelineProgress", (p) => {
                     const layer = Number(p.layer);
                     const total = Number(p.total);
                     setVisionEncodeState({
                         imageIdx: imgIdx + 1,
                         nImages:  totalImgs,
-                        layer,
-                        nLayers:  total,
+                        phase:    "encoding",
+                        done:     layer,
+                        total,
                     });
                 });
                 try {
@@ -1276,8 +1420,9 @@ export function App() {
                         setVisionEncodeState({
                             imageIdx: imgIdx + 1,
                             nImages:  totalImgs,
-                            layer:    0,
-                            nLayers:  1,  // updated on the first progress event
+                            phase:    "encoding",
+                            done:     0,
+                            total:    1,  // updated on the first progress event
                         });
                         const softTokens = await client.encodeImage(im.pixels, im.h, im.w);
                         const nSoft = await client.imageSoftTokenCount(im.h, im.w);
@@ -1287,7 +1432,9 @@ export function App() {
                     }
                 } finally {
                     offProgress();
-                    setVisionEncodeState(null);
+                    // Don't null the strip here — the embedding + prefill
+                    // phases below take it over for the next 2-3 min of
+                    // otherwise-silent work.
                 }
             }
 
@@ -1324,18 +1471,82 @@ export function App() {
                 setStatusLine(undefined);
             }
 
+            // Multimodal weight release between encode and prefill.
+            //
+            // Vision/audio towers carry their own GPU weight tensors —
+            // on gemma4:e2b the vision tower is ~3 GB. After
+            // `encodeImage` returns the soft-token rows we hold them
+            // as plain Float32Array in JS and don't need the tower's
+            // GPU buffers again until the next image attachment. On
+            // iPhone Safari (WebContent ~5 GB ceiling) keeping the
+            // text + vision towers + KV cache + per-step scratch
+            // co-resident is what pushes the first prefill step over
+            // jetsam. Drop them now; the next image attachment
+            // re-uploads via the WeightCache fetch path.
+            if (totalImgs > 0) {
+                try { await client.releaseVisionWeights(); }
+                catch (e) { console.warn("[multimodal] releaseVisionWeights failed", e); }
+            }
+            if (turnAudio.length > 0) {
+                try { await client.releaseAudioWeights(); }
+                catch (e) { console.warn("[multimodal] releaseAudioWeights failed", e); }
+            }
+            if (totalImgs > 0 || turnAudio.length > 0) {
+                // Yield one rAF tick before prefill so iOS Safari's wgpu
+                // device finishes reclaiming the just-dropped Vision/Audio
+                // scratch buffers (~250 MB / ~110 MB) BEFORE the text-
+                // weight upload barrage starts. Without this, the
+                // released buffers can linger in the device's "pending
+                // drop" queue until the next vsync, and the prefill
+                // peak resident set briefly includes both — enough to
+                // tip iPhone over jetsam. Cost on desktop is one
+                // frame (~16 ms), unmeasurable in human time.
+                await new Promise<void>((r) => requestAnimationFrame(() => r()));
+            }
+
             const t0 = performance.now();
             let next = 0;
+            // Breadcrumb so a jetsam kill mid-prefill leaves something
+            // in /tmp/rullama-page.log on the iPhone harness. If this
+            // beacon is the last line before silence, the crash is
+            // during the first text-prefill step (W7a-equivalent OOM);
+            // if it never lands, the crash is earlier (encode or
+            // release).
+            beacon("pe", `prefill start (n_tokens=${ids.length}, imgs=${totalImgs}, audio=${turnAudio.length})`);
+            // Drive the progress strip through the rest of pre-encode.
+            // The outer loop is the prompt-token feed (~50 tokens) and
+            // each `<|image>` / `<|audio>` sentinel triggers an inner
+            // splice loop of ~256 stepWithEmbedding calls (~870 ms each).
+            // Without these per-iteration updates the strip would freeze
+            // for 2-3 min per image attachment.
+            setVisionEncodeState({
+                imageIdx: totalImgs,
+                nImages:  totalImgs,
+                phase:    "prefill",
+                done:     0,
+                total:    ids.length,
+            });
             for (let i = 0; i < ids.length; i++) {
                 if (cancelRef.current) throw new Error("cancelled");
                 const id = ids[i];
                 next = await client.step(id);
                 if (beginId !== null && id === beginId && softQueue.length > 0) {
                     const ent = softQueue.shift()!;
+                    // softQueue.shift() already removed this entry, so the
+                    // currently-embedding image is the (totalImgs -
+                    // softQueue.length)-th — 1-based.
+                    const embedImgIdx = totalImgs - softQueue.length;
                     for (let r = 0; r < ent.nSoft; r++) {
                         if (cancelRef.current) throw new Error("cancelled");
                         const row = ent.softTokens.subarray(r * ent.dText, (r + 1) * ent.dText);
                         next = await client.stepWithEmbedding(row);
+                        setVisionEncodeState({
+                            imageIdx: embedImgIdx,
+                            nImages:  totalImgs,
+                            phase:    "embedding",
+                            done:     r + 1,
+                            total:    ent.nSoft,
+                        });
                     }
                 } else if (audioBeginId !== null && id === audioBeginId && audioQueue.length > 0) {
                     const ent = audioQueue.shift()!;
@@ -1345,6 +1556,13 @@ export function App() {
                         next = await client.stepWithEmbedding(row);
                     }
                 }
+                setVisionEncodeState({
+                    imageIdx: totalImgs,
+                    nImages:  totalImgs,
+                    phase:    "prefill",
+                    done:     i + 1,
+                    total:    ids.length,
+                });
                 // Track pre-encode progress so a visibilitychange→hidden
                 // mid-prompt-feed has a resumable snapshot. `next` at
                 // this point is the model's predicted next token AFTER
@@ -1359,6 +1577,7 @@ export function App() {
                     };
                 }
             }
+            setVisionEncodeState(null);
             const peMs = performance.now() - t0;
 
             const tg0 = performance.now();
@@ -1436,6 +1655,11 @@ export function App() {
                 }
             }
         } finally {
+            // Strip is normally cleared just before the gen loop, but
+            // an error/cancel during encode, splice, or prefill skips
+            // that point — make sure it's gone here so the chat input
+            // isn't stuck behind a stale progress bar.
+            setVisionEncodeState(null);
             if (liveRecovery) {
                 // Hand off without clearing — resumeInflightGeneration
                 // owns the metadata + OPFS state from here. Mirror to
@@ -1463,14 +1687,92 @@ export function App() {
         }
     }, [activeConvId, busy, lastLoadedDigest, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, refreshConversations, resumeInflightGeneration, sampling, statusText, systemPrompt, thinking, showToast]);
 
-    // VAD-driven mic capture wired into the existing pendingAudio queue.
-    // Each invocation produces one clip; user can stack multiple before
-    // sending. Encoding to soft tokens happens later in onSend so the
-    // tap-to-talk flow stays snappy (no inference under the hand).
-    const onCaptureAudio = useCallback((pcm: Float32Array) => {
-        const durationMs = (pcm.length / 16_000) * 1000;
-        setPendingAudio((prev) => [...prev, { pcm, durationMs }]);
+    // Top-level pipelineProgress subscription. The chat-send flow has
+    // its own scoped subscription (around image encode + prefill) but
+    // the mic-transcribe pipeline runs OUTSIDE that scope and needs
+    // its own. Audio-kind beacons drive the same `visionEncodeState`
+    // so the same status strip above the chat input shows
+    // "Transcribing — encoding/splicing/reading/generating" phases.
+    // Without this the user has no visibility into where a long-running
+    // transcribe is — on mobile, that's the difference between
+    // "looks frozen, reload" and "I can see it's at splice step 14/31."
+    useEffect(() => {
+        const off = getClient().subscribe("pipelineProgress", (p) => {
+            if (p.modality !== "audio") return; // image events handled scoped, below
+            const phase = String(p.phase ?? "encoding");
+            const layer = Number(p.layer ?? 0);
+            const total = Number(p.total ?? 1);
+            setVisionEncodeState({
+                imageIdx: 1,
+                nImages:  1,
+                phase:    phase as PipelineProgressState["phase"],
+                done:     layer,
+                total,
+                kind:     "audio",
+            });
+        });
+        return off;
     }, []);
+
+    // VAD-driven mic capture → in-engine transcription → fill the chat
+    // input box. Mic press is "speak my next message" — text fills the
+    // prompt and the user can edit/send like any typed message.
+    //
+    // The audio-clip-attachment path is reserved for file uploads (mp3/
+    // wav via the paperclip), where the user explicitly wants the model
+    // to *analyse* the audio rather than transcribe it.
+    //
+    // Greedy decode is enforced worker-side regardless of chat sampling.
+    // Streams deltas into `prompt` so the user sees the transcript fill
+    // in real time while the audio tower + LM are still running.
+    const onCaptureAudio = useCallback(async (pcm: Float32Array) => {
+        if (pcm.length === 0) return;
+        const client = getClient();
+        try {
+            // Show the strip immediately so the user has visible feedback
+            // from the moment the mic stops, instead of waiting for the
+            // worker's first pipelineProgress notify to round-trip back
+            // (the message-passing delay alone can swallow the only
+            // visible window on fast desktop GPUs).
+            setVisionEncodeState({
+                imageIdx: 1, nImages: 1,
+                phase: "encoding", done: 0, total: 1,
+                kind: "audio",
+            });
+            // Append-on-stream: each delta extends the current prompt
+            // value so the user sees it fill in. If the prompt already
+            // had content, add a leading space before the first delta.
+            let leadingPad: string | null = null;
+            setPrompt((cur) => {
+                leadingPad = cur.length > 0 && !cur.endsWith(" ") ? " " : "";
+                return cur;
+            });
+            const transcript = await client.transcribeAudio(pcm, (delta) => {
+                setPrompt((cur) => {
+                    const pad = leadingPad ?? "";
+                    leadingPad = ""; // only insert pad once
+                    return cur + pad + delta;
+                });
+            });
+            if (!transcript.trim()) {
+                showToast({
+                    level: "warn",
+                    title: "Didn't catch that",
+                    message: "Try speaking again, or use the paperclip to attach an audio file for analysis.",
+                });
+            }
+        } catch (e) {
+            showToast({
+                level: "error",
+                title: "Transcription failed",
+                message: (e as Error).message,
+            });
+        } finally {
+            // Clear the audio-kind status strip; image-kind strips are
+            // managed by the chat-send flow's own scoped subscription.
+            setVisionEncodeState((cur) => cur?.kind === "audio" ? null : cur);
+        }
+    }, [showToast]);
     const onRemoveAudio = useCallback((idx: number) => {
         setPendingAudio((prev) => prev.filter((_, i) => i !== idx));
     }, []);
@@ -1554,23 +1856,63 @@ export function App() {
                 Dynamic Island — fixed h-12 was stuffing all content
                 under the status bar in standalone PWA mode. */}
             <header className="flex min-h-12 shrink-0 items-center gap-2 border-b border-border bg-card/50 px-3 safe-top">
-                <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8"
-                    onClick={() => setHistoryOpen(!historyOpen)}
-                    title="Toggle conversation history"
-                    aria-pressed={historyOpen}
-                >
-                    <History />
-                </Button>
+                {view === "chat" && (
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => setHistoryOpen(!historyOpen)}
+                        title="Toggle conversation history"
+                        aria-pressed={historyOpen}
+                    >
+                        <History />
+                    </Button>
+                )}
                 <span className="font-semibold tracking-tight">rullama</span>
-                {activeTitle && (
+                {view === "chat" && activeTitle && (
                     <span className="hidden truncate text-xs text-muted-foreground sm:inline">
                         / {activeTitle}
                     </span>
                 )}
-                <div className="ml-auto flex items-center gap-2">
+                {activeAdapter && (
+                    <Badge tone="info" className="hidden text-[10px] sm:inline-flex">
+                        adapter: {activeAdapter}
+                    </Badge>
+                )}
+                <div className="ml-auto flex items-center gap-1">
+                    {/* Tab switcher — segmented control. */}
+                    <div className="flex gap-0.5 rounded-md border border-border bg-muted/30 p-0.5">
+                        <button
+                            type="button"
+                            onClick={() => setView("chat")}
+                            aria-pressed={view === "chat"}
+                            className={cn(
+                                "flex h-7 items-center gap-1 rounded px-2 text-xs transition-colors",
+                                view === "chat"
+                                    ? "bg-background text-foreground shadow-sm"
+                                    : "text-muted-foreground hover:bg-background/50",
+                            )}
+                            title="Chat"
+                        >
+                            <MessageSquare className="size-3.5" />
+                            <span className="hidden sm:inline">Chat</span>
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setView("finetune")}
+                            aria-pressed={view === "finetune"}
+                            className={cn(
+                                "flex h-7 items-center gap-1 rounded px-2 text-xs transition-colors",
+                                view === "finetune"
+                                    ? "bg-background text-foreground shadow-sm"
+                                    : "text-muted-foreground hover:bg-background/50",
+                            )}
+                            title="Fine-tune"
+                        >
+                            <Sparkles className="size-3.5" />
+                            <span className="hidden sm:inline">Fine-tune</span>
+                        </button>
+                    </div>
                     <Button
                         variant="ghost"
                         size="icon"
@@ -1585,7 +1927,7 @@ export function App() {
             </header>
 
             {modelStatus === "loading" && (
-                <ModelLoadProgress percent={loadingPercent} label={loadingLabel} />
+                <ModelLoadProgress percent={loadingPercent} label={waitInfo?.message ?? loadingLabel} />
             )}
 
             <DualSidebarLayout
@@ -1608,7 +1950,7 @@ export function App() {
                     <SettingsDialog
                         modelStatus={modelStatus}
                         loadingPercent={loadingPercent}
-                        loadingLabel={loadingLabel}
+                        loadingLabel={waitInfo?.message ?? loadingLabel}
                         statusText={statusText}
                         onLoadModel={onLoad}
                         onDeleteModel={onDeleteModel}
@@ -1628,6 +1970,13 @@ export function App() {
                     />
                 }
             >
+                {view === "finetune" ? (
+                    <FineTunePanel
+                        modelStatus={modelStatus}
+                        activeAdapter={activeAdapter}
+                        onAdapterChanged={setActiveAdapter}
+                    />
+                ) : (
                 <ChatPanel
                     messages={messages}
                     emptyState={
@@ -1647,7 +1996,7 @@ export function App() {
                                         <ModelLoader
                                             status={modelStatus}
                                             loadingPercent={loadingPercent}
-                                            loadingLabel={loadingLabel}
+                                            loadingLabel={waitInfo?.message ?? loadingLabel}
                                             statusText={statusText}
                                             onLoad={onLoad}
                                             onDelete={onDeleteModel}
@@ -1669,7 +2018,7 @@ export function App() {
                         && (prompt.trim().length > 0 || pendingImages.length > 0 || pendingAudio.length > 0)
                     }
                     canStop={busy}
-                    canAttach={modelStatus === "ready" && hasVision}
+                    canAttach={modelStatus === "ready" && (hasVision || hasAudio)}
                     canRecord={modelStatus === "ready" && hasAudio && !busy}
                     pendingImages={pendingImages}
                     pendingAudio={pendingAudio.map((a) => ({ durationMs: a.durationMs }))}
@@ -1690,9 +2039,10 @@ export function App() {
                     onCaptureAudio={onCaptureAudio}
                     onRemoveAudio={onRemoveAudio}
                     onAudioError={onAudioError}
-                    visionProgress={visionEncodeState}
+                    pipelineProgress={visionEncodeState}
                     statusLine={statusLine}
                 />
+                )}
             </DualSidebarLayout>
             <RestartOverlay />
         </div>
