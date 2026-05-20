@@ -592,14 +592,34 @@ export class WorkerClient {
     trainingCancel(): Promise<boolean> {
         return this.rpc("trainingCancel", { sid: this.session });
     }
-    trainingApplyAdapter(name: string): Promise<{ name: string; slots: number }> {
-        return this.rpc("trainingApplyAdapter", { sid: this.session, name });
+    // Adapter-library ops: auto-acquire a session for the duration of
+    // the call ONLY IF no session is already held. These mutate the
+    // Model (apply / clear) or OPFS (delete), so the SharedWorker
+    // router gates them under SESSION_REQUIRED. On a fresh page load
+    // the user hasn't sent a chat turn yet, so `this.session` is null
+    // and the bare RPC fails with "no active session". This wrapper
+    // acquires the lock for the call's duration when needed, and is a
+    // no-op when an outer session is already active (e.g. user
+    // applying from the library mid-chat) — avoids deadlocking on
+    // re-acquire of an already-held session.
+    private async withSessionIfNone<T>(fn: () => Promise<T>): Promise<T> {
+        if (this.session != null) return fn();
+        return this.withSession(fn);
     }
-    trainingClearAdapter(): Promise<boolean> {
-        return this.rpc("trainingClearAdapter", { sid: this.session });
+    async trainingApplyAdapter(name: string): Promise<{ name: string; slots: number }> {
+        return this.withSessionIfNone(async () =>
+            this.rpc("trainingApplyAdapter", { sid: this.session, name }),
+        );
     }
-    trainingDeleteAdapter(name: string): Promise<boolean> {
-        return this.rpc("trainingDeleteAdapter", { sid: this.session, name });
+    async trainingClearAdapter(): Promise<boolean> {
+        return this.withSessionIfNone(async () =>
+            this.rpc("trainingClearAdapter", { sid: this.session }),
+        );
+    }
+    async trainingDeleteAdapter(name: string): Promise<boolean> {
+        return this.withSessionIfNone(async () =>
+            this.rpc("trainingDeleteAdapter", { sid: this.session, name }),
+        );
     }
     trainingListAdapters(): Promise<{ entries: AdapterListEntry[]; active: string | null }> {
         return this.rpc("trainingListAdapters", {});

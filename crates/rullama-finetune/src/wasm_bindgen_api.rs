@@ -232,8 +232,19 @@ impl TrainingSession {
     /// `Blob` download, etc.). Metadata sidecar carries
     /// rank/alpha/target_modules so `Model.loadAdapter` can reconstruct
     /// the shape table.
+    /// `&mut self` not `&self` on purpose. wasm-bindgen's async-with-
+    /// `&self` codegen holds a JS-side `Borrow` of the wrapped Rust
+    /// value across the await, and that borrow does not release on a
+    /// macrotask boundary (verified — a `setTimeout(0)` yield between
+    /// `await saveAdapter()` and `finish()` was insufficient). So a
+    /// subsequent `finish_js(self)` call fails with "attempted to
+    /// take ownership of Rust value while it was borrowed". Switching
+    /// to `&mut self` uses `RefMut` which is released at the await's
+    /// resolution, letting `finish` consume `self` right after save.
+    /// Inner `save_adapter_to_bytes` still takes `&self` — `&mut self`
+    /// here derefs cleanly to it.
     #[wasm_bindgen(js_name = saveAdapter)]
-    pub async fn save_adapter_js(&self) -> std::result::Result<Vec<u8>, JsError> {
+    pub async fn save_adapter_js(&mut self) -> std::result::Result<Vec<u8>, JsError> {
         self.inner
             .save_adapter_to_bytes()
             .await
