@@ -907,7 +907,12 @@ function MemoryTightToggle(props: {
 }) {
     return (
         <Card>
-            <CardContent className="pt-4">
+            {/* `py-5` (20 px symmetric) gives the checkbox the same
+                vertical breathing room a `<CardHeader>` would, without
+                imposing a full header element. CardContent's default
+                p-6 assumes there's a CardHeader above — without one,
+                the content lands flush against the card border. */}
+            <CardContent className="py-5">
                 <label className={cn(
                     "flex cursor-pointer items-start gap-3",
                     props.disabled && "cursor-not-allowed opacity-60",
