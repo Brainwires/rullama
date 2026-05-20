@@ -2095,27 +2095,34 @@ export function App() {
                         onAdapterChanged={setActiveAdapter}
                     />
                 ) : view === "settings" ? (
-                    <SettingsDialog
-                        modelStatus={modelStatus}
-                        loadingPercent={loadingPercent}
-                        loadingLabel={waitInfo?.message ?? loadingLabel}
-                        statusText={statusText}
-                        onLoadModel={onLoad}
-                        onDeleteModel={onDeleteModel}
-                        onEjectModel={onEjectModel}
-                        systemPrompt={systemPrompt}
-                        onSystemPromptChange={setSystemPrompt}
-                        sampling={sampling}
-                        onSamplingChange={setSampling}
-                        maxTokens={maxTokens}
-                        onMaxTokensChange={setMaxTokens}
-                        thinking={thinking}
-                        onThinkingChange={setThinking}
-                        voice={voice}
-                        onVoiceChange={setVoice}
-                        canRecord={modelStatus === "ready" && hasAudio}
-                        onResetDefaults={onResetDefaults}
-                    />
+                    // Centered max-width wrapper so the form controls
+                    // don't stretch across the full main-content width
+                    // on desktop monitors. `h-full min-h-0` keeps the
+                    // height-fill contract SettingsDialog expects from
+                    // its parent (it uses h-full internally).
+                    <div className="mx-auto flex h-full w-full max-w-3xl min-h-0 flex-col">
+                        <SettingsDialog
+                            modelStatus={modelStatus}
+                            loadingPercent={loadingPercent}
+                            loadingLabel={waitInfo?.message ?? loadingLabel}
+                            statusText={statusText}
+                            onLoadModel={onLoad}
+                            onDeleteModel={onDeleteModel}
+                            onEjectModel={onEjectModel}
+                            systemPrompt={systemPrompt}
+                            onSystemPromptChange={setSystemPrompt}
+                            sampling={sampling}
+                            onSamplingChange={setSampling}
+                            maxTokens={maxTokens}
+                            onMaxTokensChange={setMaxTokens}
+                            thinking={thinking}
+                            onThinkingChange={setThinking}
+                            voice={voice}
+                            onVoiceChange={setVoice}
+                            canRecord={modelStatus === "ready" && hasAudio}
+                            onResetDefaults={onResetDefaults}
+                        />
+                    </div>
                 ) : (
                 <ChatPanel
                     messages={messages}
