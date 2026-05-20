@@ -95,6 +95,11 @@ pub struct TrainingSession {
     /// in this revision; full bf16 kernel variants are a future
     /// optimization.
     mixed_precision: bool,
+    /// Truncated backward floor — only train layers >= this index.
+    /// 0 means "backprop every layer" (default). Threaded into every
+    /// `backward_step_with_progress` call. See
+    /// `TrainingHyperparams::backward_layer_floor`.
+    backward_layer_floor: u32,
     /// 1-based step counter used by Adam's bias correction. Increments
     /// at the end of every successful `step()` call.
     step_num: u32,
@@ -275,6 +280,7 @@ impl TrainingSession {
             max_grad_norm: hp.max_grad_norm as f32,
             gradient_checkpointing: hp.gradient_checkpointing,
             mixed_precision: hp.mixed_precision,
+            backward_layer_floor: hp.backward_layer_floor,
             step_num: 1,
         })
     }
@@ -766,6 +772,7 @@ impl TrainingSession {
                 pos,
                 self.gradient_checkpointing,
                 progress_cb,
+                self.backward_layer_floor,
             )
             .await
             .map_err(|e| TrainingError::Backend(format!("{e:?}")))?;
@@ -1077,6 +1084,7 @@ impl TrainingSession {
                     p as u32,
                     false,
                     progress_cb,
+                    self.backward_layer_floor,
                 )
                 .await
                 .map_err(|e| TrainingError::Backend(format!("{e:?}")))?;

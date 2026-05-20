@@ -95,6 +95,10 @@ function deviceDefaults(): { hp: TrainingHyperparams; lora: TrainingLoraConfig; 
             // savings; the right call on every device.
             gradient_checkpointing: true,
             mixed_precision: false,
+            // 0 = backprop every layer (full standard training).
+            // The Memory-tight preset overrides this with 25 (last
+            // ~10 layers only) when the user opts in.
+            backward_layer_floor: 0,
         },
         tight,
     };
@@ -112,11 +116,15 @@ const ULTRA_SAFE_LORA: Pick<TrainingLoraConfig, "rank" | "alpha" | "target_modul
     target_modules: ["attn_q", "attn_v"],
     dropout: 0,
 };
-const ULTRA_SAFE_HP: Pick<TrainingHyperparams, "max_seq_len" | "batch_size" | "loss_mode" | "gradient_checkpointing"> = {
+const ULTRA_SAFE_HP: Pick<TrainingHyperparams, "max_seq_len" | "batch_size" | "loss_mode" | "gradient_checkpointing" | "backward_layer_floor"> = {
     max_seq_len: 16,
     batch_size: 1,
     loss_mode: "next_token",
     gradient_checkpointing: true,
+    // Truncated backward: train only the top 10 layers on gemma4:e2b
+    // (35 total → floor=25). The Rust side saturate-clamps if the
+    // model has fewer layers, so this is safe across model sizes.
+    backward_layer_floor: 25,
 };
 
 function parseJsonl(text: string): { examples: ParsedExample[]; errors: string[] } {
@@ -1115,6 +1123,14 @@ function AdvancedCard(props: {
                         description="f16 adapter on disk"
                         value={props.hp.mixed_precision}
                         onChange={(v) => props.setHp({ ...props.hp, mixed_precision: v })}
+                        disabled={props.disabled}
+                    />
+                    <LabeledInput
+                        label="Backward layer floor"
+                        description="0 = train every layer; N = only train layers ≥ N (smaller adapter, less GPU memory)"
+                        value={props.hp.backward_layer_floor ?? 0}
+                        min={0} max={34} step={1}
+                        onChange={(n) => props.setHp({ ...props.hp, backward_layer_floor: clampInt(n, 0, 34, 0) })}
                         disabled={props.disabled}
                     />
                     <LabeledInput

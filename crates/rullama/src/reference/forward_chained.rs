@@ -2613,6 +2613,7 @@ impl Forward {
             pos,
             recompute_captures,
             None,
+            0, // backward_layer_floor = 0 → backprop all layers (default)
         )
         .await
     }
@@ -2636,6 +2637,12 @@ impl Forward {
         pos: u32,
         recompute_captures: bool,
         progress_cb: Option<&LayerProgressCb<'_>>,
+        // **Truncated backward.** When > 0, exit the per-layer
+        // reverse walk early once `li < backward_layer_floor`. Layers
+        // below the floor get no gradient updates, saving compute +
+        // memory transients. 0 keeps every layer trainable (the
+        // production default). See `TrainingHyperparams::backward_layer_floor`.
+        backward_layer_floor: u32,
     ) -> Result<f32> {
         // Clear any stale cancel flag from a previous step; the layer
         // walk below checks it after each `backward_layer` submit.
@@ -2748,7 +2755,20 @@ impl Forward {
         }
         // ===== Walk layers top-down =====
         let d_model_bytes = (self.cfg.d_model as u64) * 4;
+        // Saturate-clamp the floor so an oversized value just means
+        // "skip everything" rather than panic; a value of n_layers
+        // or larger short-circuits the entire backward sweep.
+        let floor = (backward_layer_floor as usize).min(n_layers);
         for li in (0..n_layers).rev() {
+            // **Truncated backward gate.** Once `li` drops below the
+            // configured floor, no more LoRA grads accumulate. The
+            // forward pass already ran every layer (to populate the
+            // captures up to the floor); we just stop walking the
+            // gradient back. Layers below the floor stay frozen for
+            // this step.
+            if li < floor {
+                break;
+            }
             let i = li as u32;
             let cap = &capture[li];
             let lora = &loras[li];

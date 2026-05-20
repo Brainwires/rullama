@@ -629,6 +629,15 @@ export interface TrainingHyperparams {
     loss_mode:                    "next_token" | "per_position";
     gradient_checkpointing:       boolean;
     mixed_precision:              boolean;
+    /** Truncated backward: only train layers >= this index. 0 (default)
+     *  means "backprop every layer" — the standard training path.
+     *  Larger values progressively narrow the trainable region to just
+     *  the top `n_layers - backward_layer_floor` layers, trading
+     *  adapter expressiveness for backward memory + compute savings.
+     *  Auto-applied by the Memory-tight preset on iPhone-class
+     *  devices; manually editable via AdvancedCard's "Trainable
+     *  depth" slider. */
+    backward_layer_floor?:        number;
 }
 export interface TrainingStepReport {
     loss: number;

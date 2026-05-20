@@ -51,6 +51,27 @@ pub struct TrainingHyperparams {
     /// save path — bf16 adapters round-trip identically.
     #[serde(default)]
     pub mixed_precision: bool,
+    /// **Truncated backward** — exit the backward sweep early when the
+    /// current layer index is below this floor. `0` (default) means
+    /// "backprop through every layer" (the standard case); larger
+    /// values progressively narrow the trainable region to just the
+    /// top `n_layers - backward_layer_floor` layers.
+    ///
+    /// Memory + compute win on memory-constrained devices (iPhone):
+    /// the per-layer LoRA backward, attention/FFN backward, and per-
+    /// layer activation captures BELOW the floor are skipped. The
+    /// FORWARD pass still runs every layer (the activations at the
+    /// floor are needed to seed the partial backward); only the
+    /// backward sweep is truncated.
+    ///
+    /// Trade-off: the adapter only updates the unfrozen top layers,
+    /// so the adapter's expressive range shrinks. Empirically the
+    /// last 5-10 layers carry most of the task-specific signal, so
+    /// `floor = n_layers - 10` is a reasonable iPhone-safe default.
+    ///
+    /// Default `0` keeps the production training path unchanged.
+    #[serde(default)]
+    pub backward_layer_floor: u32,
 }
 
 impl Default for TrainingHyperparams {
@@ -69,6 +90,7 @@ impl Default for TrainingHyperparams {
             loss_mode: LossMode::default(),
             gradient_checkpointing: false,
             mixed_precision: false,
+            backward_layer_floor: 0,
         }
     }
 }
