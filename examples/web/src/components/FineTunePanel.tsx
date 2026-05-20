@@ -14,6 +14,7 @@ import { Progress } from "@/components/ui/progress";
 import {
     Play, Square, Save, CheckCircle2, AlertTriangle, Sparkles,
     FileText, Settings2, Activity, RefreshCw, Trash2, Plug,
+    Pencil, X,
 } from "lucide-react";
 import { cn, clampInt, clampNum } from "@/lib/utils";
 import {
@@ -383,6 +384,46 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
         toast.success("Added 1 example");
     }, [toast, lora.rank]);
 
+    // Replace one example in place. Used by the inline edit flow in
+    // DatasetCard — user clicks a row's pencil icon, the form
+    // populates with that example, they tweak it, click Update.
+    const onEditExample = useCallback((index: number, prompt: string, completion: string) => {
+        const p = prompt.trim();
+        const c = completion.trim();
+        if (!p || !c) {
+            toast.error("Both prompt and completion need text");
+            return;
+        }
+        setExamples((cur) => {
+            if (index < 0 || index >= cur.length) return cur;
+            const next = [...cur];
+            next[index] = { prompt: p, completion: c };
+            return next;
+        });
+        // Token-length cache is now stale — clear it; the user can
+        // re-validate.
+        setTokenLengths(null);
+        toast.success("Updated example");
+    }, [toast]);
+
+    // Drop one example. Used by the row-level delete button. If this
+    // empties the dataset, fall back to "idle" phase and clear the
+    // datasetName so the UI doesn't show stale state.
+    const onRemoveExample = useCallback((index: number) => {
+        setExamples((cur) => {
+            if (index < 0 || index >= cur.length) return cur;
+            const next = cur.filter((_, i) => i !== index);
+            if (next.length === 0) {
+                setPhase("idle");
+                setDatasetName(null);
+                setAdapterName("");
+                setParseErrors([]);
+            }
+            return next;
+        });
+        setTokenLengths(null);
+    }, []);
+
     const onValidate = useCallback(async () => {
         if (modelStatus !== "ready") {
             toast.error("Load a model in Chat first so I can tokenise");
@@ -685,6 +726,8 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                             onFile={onFile}
                             onPasteText={onPasteText}
                             onAddExample={onAddExample}
+                            onEditExample={onEditExample}
+                            onRemoveExample={onRemoveExample}
                             onValidate={onValidate}
                         />
                     )}
@@ -837,6 +880,8 @@ function DatasetCard(props: {
     onFile: (f: File) => void;
     onPasteText: (text: string) => void;
     onAddExample: (prompt: string, completion: string) => void;
+    onEditExample: (index: number, prompt: string, completion: string) => void;
+    onRemoveExample: (index: number) => void;
     onValidate: () => void;
 }) {
     const inputRef = useRef<HTMLInputElement>(null);
@@ -850,6 +895,34 @@ function DatasetCard(props: {
     const [pasteText, setPasteText] = useState("");
     const [buildPrompt, setBuildPrompt] = useState("");
     const [buildCompletion, setBuildCompletion] = useState("");
+    // When non-null, the build form is editing an existing example
+    // (loaded into prompt/completion fields). Clicking "Update"
+    // replaces that index instead of appending; "Cancel" drops edit
+    // mode without changes.
+    const [editingIndex, setEditingIndex] = useState<number | null>(null);
+    const startEdit = (i: number) => {
+        const ex = props.examples[i];
+        if (!ex) return;
+        setBuildPrompt(ex.prompt);
+        setBuildCompletion(ex.completion);
+        setEditingIndex(i);
+        setMode("build");
+    };
+    const cancelEdit = () => {
+        setEditingIndex(null);
+        setBuildPrompt("");
+        setBuildCompletion("");
+    };
+    const commitBuild = () => {
+        if (editingIndex !== null) {
+            props.onEditExample(editingIndex, buildPrompt, buildCompletion);
+            setEditingIndex(null);
+        } else {
+            props.onAddExample(buildPrompt, buildCompletion);
+        }
+        setBuildPrompt("");
+        setBuildCompletion("");
+    };
     const onDrop = (e: React.DragEvent) => {
         e.preventDefault();
         setDragOver(false);
@@ -991,21 +1064,26 @@ function DatasetCard(props: {
                         </div>
                         <div className="flex items-center justify-between gap-2">
                             <div className="text-[11px] text-muted-foreground">
-                                {props.examples.length > 0
-                                    ? <>Current dataset: <span className="text-foreground">{props.examples.length} examples</span>. Click Add to append; click Start training when ready.</>
-                                    : <>Add at least one (prompt, completion) pair, then Start training. Pairs accumulate — keep adding to build a tiny dataset by hand.</>}
+                                {editingIndex !== null
+                                    ? <>Editing example <span className="text-foreground">#{editingIndex + 1}</span>. Save to replace, Cancel to drop changes.</>
+                                    : props.examples.length > 0
+                                        ? <>Current dataset: <span className="text-foreground">{props.examples.length} examples</span>. Click Add to append; click Start training when ready.</>
+                                        : <>Add at least one (prompt, completion) pair, then Start training. Pairs accumulate — keep adding to build a tiny dataset by hand.</>}
                             </div>
-                            <Button
-                                size="sm"
-                                onClick={() => {
-                                    props.onAddExample(buildPrompt, buildCompletion);
-                                    setBuildPrompt("");
-                                    setBuildCompletion("");
-                                }}
-                                disabled={!buildPrompt.trim() || !buildCompletion.trim()}
-                            >
-                                Add example
-                            </Button>
+                            <div className="flex shrink-0 gap-2">
+                                {editingIndex !== null && (
+                                    <Button size="sm" variant="ghost" onClick={cancelEdit}>
+                                        Cancel
+                                    </Button>
+                                )}
+                                <Button
+                                    size="sm"
+                                    onClick={commitBuild}
+                                    disabled={!buildPrompt.trim() || !buildCompletion.trim()}
+                                >
+                                    {editingIndex !== null ? "Save changes" : "Add example"}
+                                </Button>
+                            </div>
                         </div>
                     </div>
                 )}
@@ -1043,16 +1121,59 @@ function DatasetCard(props: {
                                 </div>
                             </div>
                         )}
-                        <div className="max-h-32 overflow-y-auto rounded border border-border bg-muted/20 p-2 font-mono text-[11px] leading-snug">
-                            {props.examples.slice(0, 5).map((ex, i) => (
-                                <div key={i} className="mb-2 last:mb-0">
-                                    <span className="text-muted-foreground">{ex.prompt}</span>
-                                    <span className="text-foreground">{ex.completion}</span>
-                                </div>
-                            ))}
-                            {props.examples.length > 5 && (
-                                <div className="text-muted-foreground">…and {props.examples.length - 5} more</div>
-                            )}
+                        {/* Editable example list. Each row is a small
+                            card with prompt + completion on separate
+                            lines (so it's actually readable), an Edit
+                            pencil that loads the row into the build
+                            form, and an X to delete. Capped at
+                            max-h-64 with overflow-y-auto so a 500-
+                            example dataset doesn't blow out the
+                            layout. The "n / m" header lets the user
+                            see how many they have at a glance. */}
+                        <div className="space-y-1">
+                            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                                <span>{props.examples.length} example{props.examples.length === 1 ? "" : "s"}</span>
+                                <span>click ✏️ to edit, ✕ to remove</span>
+                            </div>
+                            <div className="max-h-64 space-y-1 overflow-y-auto rounded border border-border bg-muted/20 p-1.5">
+                                {props.examples.map((ex, i) => (
+                                    <div
+                                        key={i}
+                                        className="group flex items-start gap-2 rounded bg-background/60 p-2 text-[11px] leading-snug"
+                                    >
+                                        <div className="min-w-0 flex-1 space-y-1 font-mono">
+                                            <div className="flex gap-1">
+                                                <span className="shrink-0 select-none text-muted-foreground">prompt</span>
+                                                <span className="text-foreground break-words">{ex.prompt}</span>
+                                            </div>
+                                            <div className="flex gap-1">
+                                                <span className="shrink-0 select-none text-muted-foreground">target</span>
+                                                <span className="text-primary break-words">{ex.completion}</span>
+                                            </div>
+                                        </div>
+                                        <div className="flex shrink-0 gap-0.5 opacity-60 transition-opacity group-hover:opacity-100">
+                                            <button
+                                                type="button"
+                                                onClick={() => startEdit(i)}
+                                                className="rounded p-1 text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                                                aria-label={`Edit example ${i + 1}`}
+                                                title="Edit"
+                                            >
+                                                <Pencil className="size-3" />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => props.onRemoveExample(i)}
+                                                className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                                                aria-label={`Remove example ${i + 1}`}
+                                                title="Remove"
+                                            >
+                                                <X className="size-3" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
                         </div>
                     </>
                 )}
