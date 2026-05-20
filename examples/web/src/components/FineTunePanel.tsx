@@ -62,7 +62,7 @@ const ALL_TARGETS = ["attn_q", "attn_k", "attn_v", "attn_o", "ffn_gate", "ffn_up
 // that's roughly `seq * 40 MB` of GPU memory total. Desktop 128 → ~5 GB
 // budget hit, mobile 32 → ~1.3 GB. These are safe starting points;
 // users with headroom can crank seq via the form.
-function deviceDefaults(): { hp: TrainingHyperparams; lora: TrainingLoraConfig } {
+function deviceDefaults(): { hp: TrainingHyperparams; lora: TrainingLoraConfig; tight: boolean } {
     const nav = navigator as Navigator & { deviceMemory?: number };
     const memGB = nav.deviceMemory ?? 8;
     const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -96,8 +96,28 @@ function deviceDefaults(): { hp: TrainingHyperparams; lora: TrainingLoraConfig }
             gradient_checkpointing: true,
             mixed_precision: false,
         },
+        tight,
     };
 }
+
+/** Smallest config that's expected to fit on iPhone 16e (A18 / ~3-4 GB
+ *  WebContent budget) without OOM. Rank 1, attn_q + attn_v only,
+ *  seq_len 16, gradient checkpointing on. Memory feasibility audit
+ *  estimates peak ~2.1 GB on top of the text tower. Applied when the
+ *  user toggles the "Memory-tight" switch; the sliders lock so the
+ *  preset can't be drifted out of by accident. */
+const ULTRA_SAFE_LORA: Pick<TrainingLoraConfig, "rank" | "alpha" | "target_modules" | "dropout"> = {
+    rank: 1,
+    alpha: 2,
+    target_modules: ["attn_q", "attn_v"],
+    dropout: 0,
+};
+const ULTRA_SAFE_HP: Pick<TrainingHyperparams, "max_seq_len" | "batch_size" | "loss_mode" | "gradient_checkpointing"> = {
+    max_seq_len: 16,
+    batch_size: 1,
+    loss_mode: "next_token",
+    gradient_checkpointing: true,
+};
 
 function parseJsonl(text: string): { examples: ParsedExample[]; errors: string[] } {
     const examples: ParsedExample[] = [];
@@ -151,6 +171,36 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
     const [hp, setHp] = useState<TrainingHyperparams>(initialDefaults.hp);
     const [stepsBudget, setStepsBudget] = useState<number>(100);
     const [adapterName, setAdapterName] = useState<string>("");
+
+    // **B2 — Memory-tight preset.** When on, force-applies the
+    // ULTRA_SAFE_LORA + ULTRA_SAFE_HP values and locks the
+    // affected sliders. Auto-on for devices `deviceDefaults` flagged
+    // as tight (mobile / <4 GB system RAM); user can override either
+    // direction. Stored as a usePersistedState-style flag would be
+    // nice for follow-up but isn't load-bearing — boot defaults are
+    // device-derived, the user's choice survives within the session.
+    const [memoryTight, setMemoryTight] = useState<boolean>(initialDefaults.tight);
+    const applyMemoryTight = useCallback((on: boolean) => {
+        setMemoryTight(on);
+        if (on) {
+            setLora((cur) => ({ ...cur, ...ULTRA_SAFE_LORA, target_modules: [...ULTRA_SAFE_LORA.target_modules] }));
+            setHp((cur) => ({ ...cur, ...ULTRA_SAFE_HP }));
+        }
+        // Toggling OFF leaves the current values in place — user can
+        // then adjust the sliders freely. Auto-reverting to the
+        // device default would surprise them.
+    }, []);
+    // Apply the preset on initial mount when the device flagged tight,
+    // so the first paint shows the safe config (not the unsafe
+    // deviceDefaults that haven't been overridden yet).
+    useEffect(() => {
+        if (initialDefaults.tight) {
+            setLora((cur) => ({ ...cur, ...ULTRA_SAFE_LORA, target_modules: [...ULTRA_SAFE_LORA.target_modules] }));
+            setHp((cur) => ({ ...cur, ...ULTRA_SAFE_HP }));
+        }
+        // Run once on mount — deliberately no deps.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     // Runtime state.
     const [phase, setPhase] = useState<Phase>("idle");
@@ -567,15 +617,21 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
 
                 {/* ─── Right: hyperparams + actions ─── */}
                 <div className="flex min-w-0 flex-col gap-4">
+                    <MemoryTightToggle
+                        on={memoryTight}
+                        onChange={applyMemoryTight}
+                        disabled={isTraining}
+                    />
                     <ObjectiveCard
                         hp={hp} setHp={setHp}
                         stepsBudget={stepsBudget} setStepsBudget={setStepsBudget}
                         disabled={isTraining}
+                        seqLenLocked={memoryTight}
                     />
                     <LoraShapeCard
                         lora={lora} setLora={setLora}
                         estimated={estimatedAdapterMB}
-                        disabled={isTraining}
+                        disabled={isTraining || memoryTight}
                     />
                     <AdvancedCard
                         hp={hp} setHp={setHp}
@@ -800,10 +856,58 @@ function DatasetCard(props: {
     );
 }
 
+/** Memory-tight preset toggle. Renders as a compact card-shaped switch
+ *  above ObjectiveCard / LoraShapeCard. When on:
+ *   - LoraShapeCard sliders + target-module toggles are disabled.
+ *   - ObjectiveCard's loss-mode picker + max_seq_len input are disabled.
+ *   - The values are force-applied via `applyMemoryTight` in the parent.
+ *
+ *  Style mirrors the Card pattern used by ObjectiveCard / LoraShapeCard,
+ *  with a clear "preset" affordance (the small description explains what
+ *  it actually does so the user isn't guessing).
+ */
+function MemoryTightToggle(props: {
+    on: boolean;
+    onChange: (next: boolean) => void;
+    disabled: boolean;
+}) {
+    return (
+        <Card>
+            <CardContent className="pt-4">
+                <label className={cn(
+                    "flex cursor-pointer items-start gap-3",
+                    props.disabled && "cursor-not-allowed opacity-60",
+                )}>
+                    <input
+                        type="checkbox"
+                        checked={props.on}
+                        onChange={(e) => props.onChange(e.target.checked)}
+                        disabled={props.disabled}
+                        className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer accent-primary"
+                    />
+                    <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium">Memory-tight (iPhone-safe) preset</div>
+                        <div className="mt-0.5 text-xs text-muted-foreground">
+                            Smallest config that's expected to fit on iPhone 16e:
+                            rank&nbsp;1, alpha&nbsp;2, attn_q + attn_v only, seq_len&nbsp;16,
+                            next-token loss, gradient checkpointing. Locks the LoRA shape
+                            and max&nbsp;seq_len so the preset can't drift.
+                        </div>
+                    </div>
+                </label>
+            </CardContent>
+        </Card>
+    );
+}
+
 function ObjectiveCard(props: {
     hp: TrainingHyperparams; setHp: (h: TrainingHyperparams) => void;
     stepsBudget: number; setStepsBudget: (n: number) => void;
     disabled: boolean;
+    /** When true (memory-tight preset is on), the max_seq_len + loss_mode
+     *  controls are forced by the preset and shouldn't be editable. The
+     *  rest of the card (steps, learning rate) stays interactive. */
+    seqLenLocked?: boolean;
 }) {
     return (
         <Card>
@@ -816,7 +920,7 @@ function ObjectiveCard(props: {
                     {(["next_token", "per_position"] as const).map((m) => (
                         <button
                             key={m}
-                            disabled={props.disabled}
+                            disabled={props.disabled || !!props.seqLenLocked}
                             onClick={() => props.setHp({ ...props.hp, loss_mode: m })}
                             className={cn(
                                 "flex-1 rounded px-2 py-1 text-xs transition-colors",
@@ -852,7 +956,7 @@ function ObjectiveCard(props: {
                     value={props.hp.max_seq_len}
                     min={16} max={2048} step={16}
                     onChange={(n) => props.setHp({ ...props.hp, max_seq_len: clampInt(n, 16, 2048, 128) })}
-                    disabled={props.disabled}
+                    disabled={props.disabled || !!props.seqLenLocked}
                 />
             </CardContent>
         </Card>

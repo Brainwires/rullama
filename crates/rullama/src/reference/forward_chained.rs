@@ -565,6 +565,82 @@ impl Forward {
         }
     }
 
+    /// Re-allocate the per-layer KV cache buffers at a smaller `max_context`.
+    /// Discards any cached content (kv_lens reset to 0, pos = 0) and returns
+    /// the previous `max_context` so the caller can restore on demand.
+    ///
+    /// Use case: chat sessions reserve `max_context` positions (~600 MB at
+    /// 4096 on gemma4:e2b) which training's NextToken loss only needs 1
+    /// position of. Calling `shrink_kv(seq_len + 1)` before `TrainingSession::new`
+    /// frees the bulk of that allocation back to the WebGPU device for the
+    /// training scratch / LoRA / Adam buffers. `trainingFinish` calls
+    /// `shrink_kv(original_max)` to put chat back to its full cache.
+    ///
+    /// Returns an error if `new_max_context` is 0 or larger than the
+    /// hardware-cap `MAX_CONTEXT`. Larger-than-current values are allowed
+    /// (used by the restore path on `trainingFinish`).
+    pub fn shrink_kv(&mut self, new_max_context: u32) -> Result<u32> {
+        if new_max_context == 0 || new_max_context > MAX_CONTEXT {
+            return Err(RullamaError::Inference(format!(
+                "shrink_kv: new_max_context={new_max_context} out of range (1..={MAX_CONTEXT})"
+            )));
+        }
+        let device = &self.ctx.device;
+        let n_layers = self.cfg.n_layers as usize;
+        let prev = self.max_context;
+
+        // Re-allocate non-donor K/V buffers at the new size, then re-build
+        // the donor aliasing the same way the constructor does. Any stale
+        // KV content is dropped — that's the contract of shrink (callers
+        // call reset implicitly).
+        let mut kv_k_opt: Vec<Option<Arc<wgpu::Buffer>>> = vec![None; n_layers];
+        let mut kv_v_opt: Vec<Option<Arc<wgpu::Buffer>>> = vec![None; n_layers];
+        for i in 0..n_layers {
+            if self.donor_map[i].is_none() {
+                let n_kv = self.cfg.n_kv_heads(i as u32) as usize;
+                let hd = self.cfg.head_dim(i as u32) as usize;
+                let bytes = (new_max_context as usize * n_kv * hd * 4) as u64;
+                kv_k_opt[i] = Some(Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("fwd.kv_k.{i}")),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                })));
+                kv_v_opt[i] = Some(Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("fwd.kv_v.{i}")),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                })));
+            }
+        }
+        for i in 0..n_layers {
+            if let Some(d) = self.donor_map[i] {
+                kv_k_opt[i] = kv_k_opt[d as usize].clone();
+                kv_v_opt[i] = kv_v_opt[d as usize].clone();
+            }
+        }
+        self.kv_k = kv_k_opt.into_iter().map(|x| x.unwrap()).collect();
+        self.kv_v = kv_v_opt.into_iter().map(|x| x.unwrap()).collect();
+        for l in self.kv_lens.iter_mut() {
+            *l = 0;
+        }
+        self.pos = 0;
+        self.max_context = new_max_context;
+        Ok(prev)
+    }
+
+    /// Current `max_context` — the cap on how many tokens the per-layer
+    /// K/V buffers can hold. Useful for snapshotting before `shrink_kv`
+    /// so the caller can restore.
+    pub fn max_context(&self) -> u32 {
+        self.max_context
+    }
+
     /// Hash of the per-layer KV geometry. Used to refuse a `load_kv` from a
     /// snapshot taken under a different model architecture (e.g. user
     /// switched gemma4 variants between sessions).

@@ -76,6 +76,14 @@ interface ModelHandle {
      *  fit under the WebContent jetsam cap. */
     releaseVisionWeights(): number;
     releaseAudioWeights(): number;
+    /** Re-allocate the per-layer KV cache at a new token capacity.
+     *  Returns the previous max_context so JS can restore later.
+     *  Discards cached KV content. Used by `trainingStart` /
+     *  `trainingFinish` to shrink chat's KV during a training run. */
+    shrinkKv(newMaxContext: number): number;
+    /** Current KV cache capacity in tokens. Read before `shrinkKv`
+     *  to remember what to restore. */
+    readonly maxContext: number;
     /** Total bytes resident in the shared GPU WeightCache. Useful as
      *  a coarse memory-pressure signal at phase boundaries
      *  (encode → release → prefill) so a jetsam kill can be localised
@@ -156,6 +164,11 @@ let dbReady: Promise<WasmDbHandle> | null = null;
 let trainingSession: TrainingSessionHandle | null = null;
 /** Name of the adapter currently loaded into Model, if any. */
 let activeAdapterName: string | null = null;
+
+/** KV cache capacity snapshot taken just before `trainingStart` shrinks
+ *  it. `trainingFinish` reads this and restores the model back to the
+ *  chat-sized KV. Null while no training session is active or pending. */
+let trainingOriginalKvContext: number | null = null;
 
 interface LoadedModelInfo {
     name: string | null;
@@ -1096,6 +1109,34 @@ const RPC: Record<string, Handler> = {
             );
         }
 
+        // **B3 — probe safety margin.** The probe's `ok=true` means
+        // `wgpu` could currently allocate the requested scratch + LoRA
+        // + Adam buffers, but it doesn't account for the per-step
+        // backward transients (~1-2 MB per layer summed across the
+        // backward sweep) that get allocated on the actual first
+        // step. A config sitting at 95% of the device budget at
+        // probe time will OOM the first real backward. Apply a
+        // heuristic ceiling (85% of a per-platform budget) and reject
+        // before consuming the Model.
+        const ua = (typeof self !== "undefined" && self.navigator?.userAgent) ? self.navigator.userAgent : "";
+        const isMobile = /iPhone|iPad|iPod|Android/i.test(ua);
+        // iPhone WebContent process budget is ~3-4 GB shared with the
+        // already-loaded text tower (~2 GB). Desktop wgpu typically
+        // has multi-GB buffers available, so we set a high ceiling
+        // that still leaves headroom for chat-side allocations.
+        const budgetBytes = isMobile ? 3.5 * 1024 * 1024 * 1024 : 8 * 1024 * 1024 * 1024;
+        const ratio = probe.estimatedBytes / budgetBytes;
+        if (ratio > 0.85) {
+            const mb = (probe.estimatedBytes / (1024 * 1024)).toFixed(0);
+            const pct = (ratio * 100).toFixed(0);
+            throw new Error(
+                `Training config would use ~${mb} MB (${pct}% of the ${isMobile ? "iPhone" : "desktop"} GPU budget). ` +
+                `That's too close to the ceiling — the first backward step's transient buffers may push it over. ` +
+                `Lower the rank, shorten max_seq_len, drop FFN targets, or enable "Memory-tight" mode and try again.`,
+            );
+        }
+        log(`training: probe within margin (${(ratio * 100).toFixed(0)}% of ${(budgetBytes / (1024 * 1024)).toFixed(0)}MB ${isMobile ? "mobile" : "desktop"} budget)`);
+
         // If there's an active adapter loaded into Model from a previous
         // session, clear it — training initialises fresh LoRA state.
         if (activeAdapterName) {
@@ -1123,6 +1164,33 @@ const RPC: Record<string, Handler> = {
             // Model lacks the methods (no multimodal towers in this
             // GGUF) or release threw — neither is fatal for training.
             log(`trainingStart: pre-training multimodal release skipped: ${(e as Error).message ?? e}`);
+        }
+
+        // **B1 — shrink KV cache for training.** Chat reserves
+        // `max_context` positions of K/V cache (~600 MB at 4096 on
+        // gemma4:e2b). Training's NextToken loss only needs 1 history
+        // position; PerPosition needs at most `seq_len`. Shrinking to
+        // `max(seq_len + 1, 64)` frees the bulk of that allocation back
+        // to the WebGPU device for training scratch / LoRA / Adam.
+        // Stash the original so trainingFinish can restore.
+        try {
+            const hp = (a.hparams ?? {}) as { max_seq_len?: number; seq_len?: number };
+            const seqLen = Math.max(1, Number(hp.max_seq_len ?? hp.seq_len ?? 32));
+            const targetKv = Math.max(seqLen + 1, 64);
+            const original = Number(model.maxContext ?? 0);
+            if (original > 0 && targetKv < original) {
+                model.shrinkKv(targetKv);
+                trainingOriginalKvContext = original;
+                log(`trainingStart: shrunk KV cache ${original} → ${targetKv} tokens (will restore on finish)`);
+            } else {
+                trainingOriginalKvContext = null;
+            }
+        } catch (e) {
+            // shrinkKv unsupported (older wasm bundle?) or threw — fall
+            // through. Training still works at the full KV size; only
+            // the iPhone-tight-RAM case suffers.
+            log(`trainingStart: KV shrink skipped: ${(e as Error).message ?? e}`);
+            trainingOriginalKvContext = null;
         }
 
         // **A2 — don't null `model` until TrainingSession::new
@@ -1278,6 +1346,21 @@ const RPC: Record<string, Handler> = {
             model = trainingSession.finish();
         } finally {
             trainingSession = null;
+        }
+        // **B1 — restore chat's KV cache.** If trainingStart shrunk it,
+        // grow it back so chat's next turn has the full context window.
+        // Fail-soft: a restore failure just leaves the smaller cache in
+        // place; chat still works, just with a shorter history limit
+        // until the user reloads the model.
+        if (model && trainingOriginalKvContext != null) {
+            const original = trainingOriginalKvContext;
+            trainingOriginalKvContext = null;
+            try {
+                model.shrinkKv(original);
+                log(`trainingFinish: restored KV cache to ${original} tokens`);
+            } catch (e) {
+                log(`trainingFinish: KV restore failed (cache stays small): ${(e as Error).message ?? e}`);
+            }
         }
         notify("trainingFinished", {});
         log(`training: finished, Model returned to chat`);

@@ -349,6 +349,26 @@ impl Model {
         freed
     }
 
+    /// Re-allocate the per-layer KV cache at a smaller (or larger) capacity.
+    /// Returns the *previous* `max_context` so the caller can restore on
+    /// demand. Discards any cached KV content (kv_lens reset to 0, pos = 0).
+    ///
+    /// Use case: chat reserves `max_context` positions (~600 MB at 4096 on
+    /// gemma4:e2b) which training's NextToken loss only needs 1 position
+    /// of. The browser-side `trainingStart` handler calls this before
+    /// `TrainingSession::new` to hand the freed memory to training scratch;
+    /// `trainingFinish` calls it again with the saved original value to
+    /// restore chat's full cache.
+    pub fn shrink_kv_native(&mut self, new_max_context: u32) -> Result<u32> {
+        self.forward.shrink_kv(new_max_context)
+    }
+
+    /// Current per-layer KV cache capacity (in tokens). Snapshot before
+    /// `shrink_kv_native` so you know what to restore.
+    pub fn max_context_native(&self) -> u32 {
+        self.forward.max_context()
+    }
+
     /// Total bytes currently held in the shared `WeightCache`. Useful for
     /// memory accounting / regression checks around `release_*_weights`.
     pub fn cached_weight_bytes_native(&self) -> u64 {
@@ -913,6 +933,22 @@ impl Model {
     #[wasm_bindgen(js_name = releaseAudioWeights)]
     pub fn release_audio_weights_js(&mut self) -> usize {
         self.release_audio_weights_native()
+    }
+
+    /// Re-allocate the per-layer KV cache at a new capacity (tokens).
+    /// Returns the previous max_context so JS can restore later. See
+    /// `shrink_kv_native` for the full rationale.
+    #[wasm_bindgen(js_name = shrinkKv)]
+    pub fn shrink_kv_js(&mut self, new_max_context: u32) -> std::result::Result<u32, JsValue> {
+        self.shrink_kv_native(new_max_context)
+            .map_err(|e| JsValue::from_str(&format!("{e}")))
+    }
+
+    /// Current KV cache capacity (tokens). Snapshot this before
+    /// `shrinkKv()` and pass it back on `trainingFinish` to restore.
+    #[wasm_bindgen(js_name = maxContext, getter)]
+    pub fn max_context_js(&self) -> u32 {
+        self.max_context_native()
     }
 
     /// Total bytes currently held in the shared GPU weight cache.
