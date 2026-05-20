@@ -40,9 +40,26 @@ const INFLIGHT_KEY = "rullama:inflight";
 // gives us a deterministic detection point. setTimeout is paused
 // while JS is suspended, so on foreground-after-kill the timer is
 // already past-due and fires immediately — recovery kicks in within
-// one task. 8 s sits ~40× a normal iPhone step (~200 ms @ 5 tok/s)
-// and ~8× a slow-Mac step, well clear of normal variance.
-const STEP_TIMEOUT_MS = 8_000;
+// one task.
+//
+// 8 s was way too aggressive: it false-positives on legitimately-slow
+// steps and the recovery cascade (releaseSession + resumeInflightGen +
+// session reacquire while the worker is still processing the original
+// step) wedges the app. Concrete cases that legitimately exceed 8 s:
+//
+//   - First step after a fresh model load (cold WGSL pipeline compile
+//     + cold weight-tile fetches from OPFS — 20-40 s on iPhone).
+//   - First step after a tab thaw (GPU context warmup).
+//   - Thinking-mode generations on iPhone where weight bandwidth
+//     dominates and 4-5 tokens/s is the steady-state ceiling — but a
+//     single token can spike to several seconds during contention.
+//
+// 60 s is conservative enough that a real Jetsam kill still surfaces
+// within a minute, but slow-but-alive workers are no longer mistaken
+// for dead ones. If we ever add per-token notify heartbeats from the
+// worker we can tighten this back up to a "no progress for N s"
+// detector that doesn't depend on a single step's wall time.
+const STEP_TIMEOUT_MS = 60_000;
 
 // Persisted snapshot of the currently-running generation. On
 // visibilitychange→hidden we mirror this into localStorage; on boot
