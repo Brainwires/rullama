@@ -1099,23 +1099,58 @@ const RPC: Record<string, Handler> = {
         // If there's an active adapter loaded into Model from a previous
         // session, clear it — training initialises fresh LoRA state.
         if (activeAdapterName) {
-            try { model.clearAdapter(); } catch { /* */ }
+            try { model.clearAdapter(); }
+            catch (e) { log(`trainingStart: clearAdapter failed (ignored): ${(e as Error).message ?? e}`); }
             activeAdapterName = null;
             notify("adapterChanged", { active: null });
         }
-        const moved = model;
-        model = null; // Model is moved into TrainingSession.
+
+        // **A1 — release vision/audio GPU towers before allocating
+        // training scratch.** If the user did any image / audio chat
+        // before clicking "Start training", the ~3 GB tower(s) are still
+        // GPU-resident. On iPhone's ~3-4 GB WebContent budget, that's a
+        // guaranteed OOM the moment TrainingScratch + LoRA + Adam buffers
+        // try to allocate. The chat path's release calls already exist
+        // (`api.rs:330,343`) — `trainingStart` just never invoked them.
+        // Pattern mirrors `releaseAllHandles()` below.
         try {
-            trainingSession = new TrainingSessionClass(moved, loraCfgJson, hpJson);
+            const freedV = model.releaseVisionWeights?.() ?? 0;
+            const freedA = model.releaseAudioWeights?.() ?? 0;
+            if (freedV > 0 || freedA > 0) {
+                log(`trainingStart: released ${(freedV / (1024 * 1024)).toFixed(0)}MB vision + ${(freedA / (1024 * 1024)).toFixed(0)}MB audio GPU weights before TrainingSession::new`);
+            }
         } catch (e) {
-            // Probe said ok but the constructor still threw — likely a
-            // device-loss race. Drop loadedInfo so chat re-loads
-            // cleanly on next attempt rather than wedging on a
-            // half-consumed Model handle.
+            // Model lacks the methods (no multimodal towers in this
+            // GGUF) or release threw — neither is fatal for training.
+            log(`trainingStart: pre-training multimodal release skipped: ${(e as Error).message ?? e}`);
+        }
+
+        // **A2 — don't null `model` until TrainingSession::new
+        // succeeds.** Old code did `const moved = model; model = null;`
+        // before the constructor, so a throw mid-init left the JS-side
+        // model variable nulled even though the user could conceivably
+        // recover with a manual reload. Reorder so the null happens
+        // AFTER the constructor returns, and on failure surface a
+        // clear error + reset loadedInfo so the chat UI honestly
+        // reflects "no model — reload required" instead of letting
+        // the next chat-send vanish into a half-consumed handle.
+        let session: TrainingSessionHandle;
+        try {
+            session = new TrainingSessionClass(model, loraCfgJson, hpJson);
+        } catch (e) {
+            log(`trainingStart: TrainingSession::new failed: ${(e as Error).message ?? e}`);
+            // wasm-bindgen takes ownership of the Model on entry; on
+            // throw, the handle is consumed regardless of where we
+            // null the JS variable. So we DO need to clean up the
+            // JS-side state here — but only after the throw, not
+            // pre-emptively.
+            model = null;
             loadedInfo = null;
             notify("modelFreed", {});
             throw e;
         }
+        trainingSession = session;
+        model = null; // Ownership transferred — null now that it's safe.
         const totalSteps = Number(a.totalSteps ?? 0);
         if (totalSteps > 0) trainingSession.setLrSchedule(totalSteps);
         const info = {
@@ -1151,9 +1186,23 @@ const RPC: Record<string, Handler> = {
             notify("trainingProgress", { phase, current, total, step: s.stepNum, lr: s.lr });
         };
         try {
-            return lossMode === "per_position"
+            const result = lossMode === "per_position"
                 ? await s.stepPerPosition(inputIds, a.targets as Uint32Array, onProgress)
                 : await s.step(inputIds, Number(a.targetId), onProgress);
+            // **A3 — NaN/Inf auto-halt.** Without this, training would
+            // continue stepping with NaN-polluted Adam state and the
+            // user could unknowingly save a garbage adapter. Throw
+            // early; the UI's catch reports "training diverged" and
+            // moves to the error phase so the partial-adapter Save
+            // button isn't offered.
+            const loss = (result as { loss?: unknown })?.loss;
+            if (typeof loss === "number" && !Number.isFinite(loss)) {
+                throw new Error(
+                    `training diverged at step ${s.stepNum} — loss is ${loss}. ` +
+                    `Try a lower learning rate, smaller rank, or shorter seq_len.`,
+                );
+            }
+            return result;
         } catch (e) {
             // Log + rethrow. The session stays alive (the wasm side
             // doesn't drop on a kernel error), so the UI can choose
@@ -1173,6 +1222,15 @@ const RPC: Record<string, Handler> = {
             const loss = lossMode === "per_position"
                 ? await s.forwardBackwardPerPosition(inputIds, a.targets as Uint32Array)
                 : await s.forwardBackward(inputIds, Number(a.targetId));
+            // **A3 — NaN/Inf auto-halt.** Same rationale as in
+            // `trainingStep`; this is the manual-accumulation entry
+            // point and needs the same defence.
+            if (typeof loss === "number" && !Number.isFinite(loss)) {
+                throw new Error(
+                    `training diverged at step ${s.stepNum} — loss is ${loss}. ` +
+                    `Try a lower learning rate, smaller rank, or shorter seq_len.`,
+                );
+            }
             return { loss, step: s.stepNum, lr: s.lr };
         } catch (e) {
             log(`training: forwardBackward step ${s.stepNum} failed (lossMode=${lossMode}, inputLen=${inputIds.length}): ${(e as Error).message}`);

@@ -165,21 +165,58 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
     const [progress, setProgress] = useState<TrainingProgressState | null>(null);
     const [coldHint, setColdHint] = useState<string | null>(null);
     useEffect(() => {
-        const off = client.subscribe("trainingProgress", (p) => {
-            const phase = String(p.phase ?? "");
-            // Once any progress beacon lands, the cold-start window
-            // is over — clear the hint.
-            setColdHint(null);
-            setProgress({
-                phase: phase as TrainingProgressState["phase"],
-                current: Number(p.current ?? 0),
-                total: Number(p.total ?? 0),
-                step: Number(p.step ?? 0) || undefined,
-                lr: typeof p.lr === "number" ? p.lr : undefined,
-            });
-        });
-        return off;
-    }, [client]);
+        const offs = [
+            client.subscribe("trainingProgress", (p) => {
+                const phase = String(p.phase ?? "");
+                // Once any progress beacon lands, the cold-start window
+                // is over — clear the hint.
+                setColdHint(null);
+                setProgress({
+                    phase: phase as TrainingProgressState["phase"],
+                    current: Number(p.current ?? 0),
+                    total: Number(p.total ?? 0),
+                    step: Number(p.step ?? 0) || undefined,
+                    lr: typeof p.lr === "number" ? p.lr : undefined,
+                });
+            }),
+            // **A4 — surface GPU faults during training.** Chat has
+            // its own `gpuFault` subscriber in App.tsx; without one
+            // here, an OOM / device-lost during `trainingStep` shows
+            // up as a generic "Training stopped" toast and the user
+            // has no idea it was hardware-related. Subscribing means
+            // we get the typed kind + during fields and can produce
+            // an actionable banner. Only react when the fault was
+            // raised during a training-prefixed RPC so chat-side
+            // faults don't bleed into the FineTune panel.
+            client.subscribe("gpuFault", (p) => {
+                const during = String((p as { during?: unknown }).during ?? "");
+                if (!during.startsWith("training")) return;
+                const kind = String((p as { kind?: unknown }).kind ?? "unknown");
+                const message = String((p as { message?: unknown }).message ?? "");
+                const title = kind === "oom"
+                    ? "GPU ran out of memory"
+                    : kind === "device-lost"
+                        ? "GPU device was lost"
+                        : "GPU error during training";
+                const hint = kind === "oom"
+                    ? "Lower the rank / seq_len / target modules and try again. The 'Memory-tight' preset is the smallest safe config on iPhone."
+                    : kind === "device-lost"
+                        ? "Reload the page to restart the WebGPU context, then try a smaller config."
+                        : "Reload and check the dev console for details.";
+                toast.error(title);
+                setErrorMsg(`${title}. ${hint} (GPU said: ${message})`);
+                setPhase("error");
+                setProgress(null);
+                // Release the Model back to chat so the user isn't
+                // stuck. trainingFinish is idempotent + tolerates the
+                // session being in a bad state.
+                client.trainingFinish().catch((e) => {
+                    console.warn("[fine-tune] trainingFinish after gpuFault rejected:", e);
+                });
+            }),
+        ];
+        return () => { for (const off of offs) off(); };
+    }, [client, toast]);
 
     // Adapter library.
     const [adapters, setAdapters] = useState<AdapterListEntry[]>([]);
@@ -304,6 +341,20 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                 const promptTokens = await client.encode(ex.prompt);
                 if (allTokens.length === 0 || promptTokens.length === 0) continue;
                 const truncated = allTokens.slice(0, Math.max(2, hp.max_seq_len));
+                // **A3 — UI safety net for NaN/Inf loss.** The worker
+                // detects divergence first and throws; this catches
+                // the case where the worker missed it (e.g., loss
+                // came back as a poisoned f32 that JSON-serialized
+                // to `null`). Throwing here funnels into the existing
+                // catch which moves us to "error" phase cleanly.
+                const checkLoss = (r: { loss: number; step: number }) => {
+                    if (typeof r.loss !== "number" || !Number.isFinite(r.loss)) {
+                        throw new Error(
+                            `training diverged at step ${r.step} — loss is ${r.loss}. ` +
+                            `Try a lower learning rate, smaller rank, or shorter seq_len.`,
+                        );
+                    }
+                };
                 if (hp.loss_mode === "per_position") {
                     const targets = new Uint32Array(truncated.length);
                     for (let p = 0; p < truncated.length; p++) {
@@ -317,6 +368,7 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                         targets,
                         lossMode: "per_position",
                     });
+                    checkLoss(r);
                     setRecent((prev) => [...prev.slice(-199), { ...r, ms: performance.now() - t0 }]);
                 } else {
                     const promptOnly = truncated.slice(0, promptTokens.length);
@@ -327,6 +379,7 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                         targetId,
                         lossMode: "next_token",
                     });
+                    checkLoss(r);
                     setRecent((prev) => [...prev.slice(-199), { ...r, ms: performance.now() - t0 }]);
                 }
             }
