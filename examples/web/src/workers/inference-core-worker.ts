@@ -1270,14 +1270,23 @@ const RPC: Record<string, Handler> = {
         const s = requireTraining();
         const inputIds = a.inputIds as Uint32Array;
         const lossMode = String(a.lossMode ?? "next_token");
-        // Progress beacons: every per-layer + per-token tick fans out
-        // via the `trainingProgress` notify so the UI's
-        // TrainingProgress strip (modelled on PipelineProgress) updates
-        // mid-step. Fast (~3-5 Hz worth of postMessage traffic on
-        // browser); the strip prevents the "is it frozen?" panic
-        // during slow first steps.
+        // **Capture stepNum/lr BEFORE calling step.** The progress
+        // callback fires from inside the Rust step's execution, which
+        // holds a `&mut self` RefMut on the TrainingSession. Reading
+        // `s.stepNum` / `s.lr` from inside the callback would attempt
+        // to acquire a `&self` Ref on the same RefCell, which fails
+        // with "attempted to take ownership of Rust value while it
+        // was borrowed" — observed under high-rank + many-step runs.
+        // The values are stable for the duration of the step anyway
+        // (stepNum bumps AFTER the optimizer call completes), so
+        // capturing them once is equivalent and avoids the borrow
+        // conflict. The captured `step` value is the index of the
+        // step that's about to run, which is exactly what the UI
+        // progress strip wants.
+        const stepBefore = s.stepNum;
+        const lrBefore = s.lr;
         const onProgress = (phase: string, current: number, total: number) => {
-            notify("trainingProgress", { phase, current, total, step: s.stepNum, lr: s.lr });
+            notify("trainingProgress", { phase, current, total, step: stepBefore, lr: lrBefore });
         };
         try {
             const result = lossMode === "per_position"
