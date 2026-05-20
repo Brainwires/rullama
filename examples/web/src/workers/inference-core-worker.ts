@@ -1287,6 +1287,15 @@ const RPC: Record<string, Handler> = {
                     `Try a lower learning rate, smaller rank, or shorter seq_len.`,
                 );
             }
+            // Log every 10th step so a long run produces visible
+            // breadcrumbs in the worker log. First step also logs so
+            // the user sees "yes, this is actually running" even if
+            // the cold-start window was minutes.
+            const stepNum = (result as { step?: number })?.step ?? 0;
+            if (stepNum === 1 || stepNum % 10 === 0) {
+                const lossStr = typeof loss === "number" ? loss.toFixed(4) : String(loss);
+                log(`training: step ${stepNum} loss=${lossStr} lossMode=${lossMode}`);
+            }
             return result;
         } catch (e) {
             // Log + rethrow. The session stays alive (the wasm side

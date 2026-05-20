@@ -466,6 +466,11 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
 
         let sessionStarted = false;
         let sessionAcquired = false;
+        // Local counter, hoisted out of the try block so the catch
+        // can read it for the cancellation phase decision. See the
+        // big comment further down on why React state's `recent`
+        // isn't safe to use here.
+        let stepsCompleted = 0;
         try {
             await client.acquireSession();
             sessionAcquired = true;
@@ -496,6 +501,7 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
             //    successfully, no effect on output". Wrap during
             //    pre-tokenize with `renderChat` so train-time tokens
             //    match chat-time tokens exactly.
+            console.log(`[fine-tune] pre-tokenizing ${examples.length} examples (chat-template wrap)…`);
             const preTokenized: Array<{ all: Uint32Array; prompt: Uint32Array }> = [];
             for (const ex of examples) {
                 const wrappedPrompt = await client.renderChat(
@@ -513,17 +519,26 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
             if (preTokenized.length === 0) {
                 throw new Error("None of the examples produced any tokens — check the dataset");
             }
+            console.log(`[fine-tune] pre-tokenized ${preTokenized.length}/${examples.length} examples; total tokens =`, preTokenized.reduce((s, x) => s + x.all.length, 0));
 
             // The worker probes the scratch+LoRA fit before consuming the
             // Model. If the device can't fit the requested config, this
             // throws with a "Training would need ~X MB…" message and the
             // Model stays alive in chat.
+            console.log(`[fine-tune] calling trainingStart (rank=${lora.rank}, alpha=${lora.alpha}, targets=${lora.target_modules.join("+")}, seq=${hp.max_seq_len}, steps=${stepsBudget})…`);
             await client.trainingStart({
                 loraConfig: lora,
                 hparams: hp,
                 totalSteps: stepsBudget,
             });
             sessionStarted = true;
+            console.log(`[fine-tune] trainingStart returned — beginning ${stepsBudget}-step loop`);
+            const loopStart = performance.now();
+
+            // (stepsCompleted is declared above the try block so the
+            // catch path can read it. See the big comment near the
+            // setPhase(stepsCompleted > 0 ? "done" : "ready") line
+            // for why this matters — closures vs React state.)
 
             for (let i = 0; i < stepsBudget; i++) {
                 if (cancelRef.current) break;
@@ -557,7 +572,11 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                         lossMode: "per_position",
                     });
                     checkLoss(r);
+                    stepsCompleted++;
                     setRecent((prev) => [...prev.slice(-199), { ...r, ms: performance.now() - t0 }]);
+                    if (stepsCompleted === 1 || stepsCompleted % 10 === 0) {
+                        console.log(`[fine-tune] step ${stepsCompleted}/${stepsBudget} loss=${r.loss.toFixed(4)} lr=${r.lr.toExponential(2)} (${(performance.now() - t0).toFixed(0)}ms)`);
+                    }
                 } else {
                     const promptOnly = truncated.slice(0, promptTokens.length);
                     const targetId = truncated[promptTokens.length] ?? truncated[truncated.length - 1];
@@ -568,15 +587,33 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                         lossMode: "next_token",
                     });
                     checkLoss(r);
+                    stepsCompleted++;
                     setRecent((prev) => [...prev.slice(-199), { ...r, ms: performance.now() - t0 }]);
+                    if (stepsCompleted === 1 || stepsCompleted % 10 === 0) {
+                        console.log(`[fine-tune] step ${stepsCompleted}/${stepsBudget} loss=${r.loss.toFixed(4)} lr=${r.lr.toExponential(2)} (${(performance.now() - t0).toFixed(0)}ms)`);
+                    }
                 }
             }
+
+            const loopMs = performance.now() - loopStart;
+            console.log(`[fine-tune] training loop done — ${stepsCompleted}/${stepsBudget} steps in ${(loopMs / 1000).toFixed(1)}s (cancelled=${cancelRef.current})`);
 
             // Loop exited cleanly. Either ran all `stepsBudget`
             // iterations, or `cancelRef.current` was set between
             // steps and the loop broke; in both cases the user has
             // a partial-or-complete adapter to save.
-            setPhase(recent.length > 0 ? "done" : "ready");
+            //
+            // **Critical:** use the local `stepsCompleted` counter,
+            // NOT the React `recent.length`. The closure captures
+            // `recent` as the snapshot at callback-creation time,
+            // so reading its length never reflects the in-loop
+            // setRecent updates. Reading the snapshot gave 0 here
+            // even after 100 successful steps, dropping phase to
+            // "ready" instead of "done" — the user then saw no
+            // Save / Apply / Discard buttons and got stuck with a
+            // locked chat because no action button could fire
+            // trainingFinish to release the session.
+            setPhase(stepsCompleted > 0 ? "done" : "ready");
         } catch (e) {
             const msg = (e as Error).message ?? String(e);
             // Per-layer cancellation surfaces as a thrown "cancelled
@@ -587,7 +624,10 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
             const userCancelled = cancelRef.current
                 && /cancelled/i.test(msg);
             if (userCancelled) {
-                setPhase(recent.length > 0 ? "done" : "ready");
+                // Same closure-bug fix as the success path — use the
+                // local counter, not React state.
+                console.log(`[fine-tune] training cancelled by user at step ${stepsCompleted}/${stepsBudget}`);
+                setPhase(stepsCompleted > 0 ? "done" : "ready");
             } else if (!sessionStarted) {
                 // Probe-failure recovery: trainingStart threw before
                 // consuming the Model. Drop back to "ready" so the
