@@ -711,18 +711,17 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
             if (!ok) return;
         }
         try {
-            const r = await client.trainingSaveAdapter(name);
+            // **Combined save+finish.** The two-call sequence
+            // (`trainingSaveAdapter` → `trainingFinish`) intermittently
+            // failed with "attempted to take ownership of Rust value
+            // while it was borrowed" because wasm-bindgen's
+            // async-with-`&self` (and even `&mut self`) borrow tracker
+            // didn't reliably release between the two calls. The
+            // combined RPC takes `self` on the Rust side, sidestepping
+            // the borrow entirely.
+            const r = await client.trainingSaveAdapterAndFinish(name);
             toast.success(`Saved ${r.name}.bin (${formatBytes(r.size)})`);
             await refreshAdapters();
-            // **Finish the session after save.** Without this, the
-            // TrainingSession stays alive owning the Model and chat
-            // is locked until the user clicks "Save + apply" or
-            // "Discard". Saving-without-finishing was a footgun —
-            // the only way it'd be useful is mid-training
-            // checkpointing, which isn't a supported workflow today.
-            // Save = "save and exit"; chat unlocks immediately.
-            try { await client.trainingFinish(); }
-            catch (e) { console.warn("[fine-tune] trainingFinish after save failed:", e); }
             try { await client.releaseSession(); }
             catch (e) { console.warn("[fine-tune] releaseSession after save failed:", e); }
             setPhase("idle");
@@ -750,13 +749,20 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
         }
         try {
             if (name) {
-                // Save first. If this throws, the training session is
-                // still alive — user can rename and retry, or click
-                // Discard to release the Model back to chat.
-                await client.trainingSaveAdapter(name);
+                // **Combined save+finish.** Atomic on the Rust side
+                // (one consume-self call); avoids the
+                // wasm-bindgen async-borrow leak that the separated
+                // pair hits intermittently. After this returns, the
+                // Model is owned by the worker again and ready for
+                // applyAdapter.
+                await client.trainingSaveAdapterAndFinish(name);
+            } else {
+                // No name → no save → just finish. The plain
+                // `trainingFinish` works fine because there's no
+                // preceding async-`&self` save to leave a tracked
+                // borrow behind.
+                await client.trainingFinish();
             }
-            // Only finish + apply after save succeeded (or no name).
-            await client.trainingFinish();
             if (name) {
                 await client.trainingApplyAdapter(name);
                 onAdapterChanged?.(name);

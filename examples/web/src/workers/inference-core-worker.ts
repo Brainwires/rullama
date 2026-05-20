@@ -124,9 +124,18 @@ interface TrainingSessionHandle {
     forwardBackwardPerPosition(inputIds: Uint32Array, targets: Uint32Array): Promise<number>;
     optimizerStep(): void;
     saveAdapter(): Promise<Uint8Array>;
+    saveAdapterAndFinish(): Promise<SaveAndFinishResultHandle>;
     setLrSchedule(totalSteps: number): void;
     finish(): ModelHandle;
     cancel(): void;
+}
+// Mirrors the wasm-bindgen `SaveAndFinishResult` returned by the
+// combined save+finish call. `bytes` getter consumes on read;
+// `takeModel()` consumes on first call. Both throw on second access.
+interface SaveAndFinishResultHandle {
+    free?(): void;
+    readonly bytes: Uint8Array;
+    takeModel(): ModelHandle;
 }
 interface TrainingSessionStatic {
     new(model: ModelHandle, loraConfigJson: string, hparamsJson: string): TrainingSessionHandle;
@@ -1351,6 +1360,56 @@ const RPC: Record<string, Handler> = {
         return { name, size: written };
     },
 
+    // **Combined save+finish.** Calls the Rust-side
+    // `saveAdapterAndFinish(self)` which consumes the TrainingSession
+    // in a single await and returns both the safetensors bytes and the
+    // wrapped Model. Avoids the wasm-bindgen async-borrow problem the
+    // separated `saveAdapter` → `finish` pair hits:
+    //   • `save_adapter_js(&mut self).await` leaves a `Borrow` tracked
+    //     on the JS-side wrapper that persists past the await's
+    //     resolution (even with setTimeout-zero yields), so a
+    //     subsequent `finish_js(self)` call intermittently fails with
+    //     "attempted to take ownership of Rust value while it was
+    //     borrowed".
+    //   • `save_adapter_and_finish_js(self)` takes `self` at call
+    //     time — wasm-bindgen invalidates the JS handle on entry,
+    //     no `&self`/`&mut self` borrow is ever tracked, and the
+    //     consume-self happens deterministically inside the Rust
+    //     function body.
+    // This is now the recommended worker-side path for any flow that
+    // wants to save AND release the session. The old `saveAdapter`
+    // RPC stays for the rare save-without-finishing case.
+    trainingSaveAdapterAndFinish: async (a) => {
+        const session = requireTraining();
+        const name = String(a?.name ?? "").trim();
+        if (!name) throw new Error("trainingSaveAdapterAndFinish: 'name' required");
+        if (!/^[\w\-. ]+$/.test(name)) {
+            throw new Error("trainingSaveAdapterAndFinish: 'name' must match [\\w\\-. ]+");
+        }
+        const result = await session.saveAdapterAndFinish();
+        trainingSession = null;
+        const bytes = result.bytes;
+        const written = await writeAdapterBytes(name, bytes);
+        model = result.takeModel();
+        log(`training: saved+finished adapter '${name}' (${written} bytes) → OPFS:${ADAPTERS_DIR}/${name}.bin`);
+        notify("adapterSaved", { name, size: written });
+        // Restore the KV cache to chat-size, same as the standalone
+        // finish path. Fail-soft: a restore failure leaves the smaller
+        // cache in place but chat still works.
+        if (trainingOriginalKvContext != null) {
+            const original = trainingOriginalKvContext;
+            trainingOriginalKvContext = null;
+            try {
+                model.shrinkKv(original);
+                log(`trainingSaveAdapterAndFinish: restored KV cache to ${original} tokens`);
+            } catch (e) {
+                log(`trainingSaveAdapterAndFinish: KV restore failed (cache stays small): ${(e as Error).message ?? e}`);
+            }
+        }
+        notify("trainingFinished", {});
+        return { name, size: written };
+    },
+
     trainingCancel: async (a) => {
         void a;
         if (!trainingSession) return false;
@@ -1366,28 +1425,15 @@ const RPC: Record<string, Handler> = {
     trainingFinish: async (a) => {
         void a;
         if (!trainingSession) throw new Error("no training session to finish");
-        // **wasm-bindgen async-borrow yield.** `save_adapter_js` is
-        // `async fn(&self)`. wasm-bindgen wraps async-with-`&self`
-        // methods such that the JS-side `Borrow` against the Rust
-        // value stays alive across the await — it doesn't release
-        // until the microtask queue drains after the returned Promise
-        // resolves. `finish_js` is `fn(self)` (consumes), so if it's
-        // called immediately after `await saveAdapter()`, wasm-bindgen
-        // refuses with "attempted to take ownership of Rust value
-        // while it was borrowed". Two real fixes:
-        //   1. Switch `save_adapter_js` to `&mut self` (changes the
-        //      wasm-bindgen surface; coordinate-able but bigger).
-        //   2. Yield to the event loop here so the pending borrow
-        //      gets released before the take-self call below.
-        // Going with (2) — a single setTimeout-zero is enough to
-        // drain the relevant microtask, and the fix lives entirely
-        // in the worker JS so the wasm signature isn't perturbed.
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-        try {
-            model = trainingSession.finish();
-        } finally {
-            trainingSession = null;
-        }
+        // No prior save call on this path (discard / cancel flow), so
+        // no async-borrow to drain. `finish()` synchronously consumes
+        // `self` — wasm-bindgen invalidates the JS handle on call.
+        // Only null `trainingSession` AFTER finish() returns
+        // successfully; if it throws, leave the session alive so the
+        // user can retry (or so the save+finish path can take over).
+        const finished = trainingSession.finish();
+        trainingSession = null;
+        model = finished;
         // **B1 — restore chat's KV cache.** If trainingStart shrunk it,
         // grow it back so chat's next turn has the full context window.
         // Fail-soft: a restore failure just leaves the smaller cache in

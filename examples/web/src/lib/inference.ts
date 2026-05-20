@@ -581,6 +581,15 @@ export class WorkerClient {
     trainingSaveAdapter(name: string): Promise<{ name: string; size: number }> {
         return this.rpc("trainingSaveAdapter", { sid: this.session, name });
     }
+    /** Combined save + finish — atomic on the Rust side (one
+     *  consume-self call). Use this for any flow that wants to save
+     *  AND release the session in one shot; the two-call sequence
+     *  `trainingSaveAdapter` → `trainingFinish` is broken by a
+     *  wasm-bindgen async-borrow leak and should only be used when
+     *  the session needs to stay alive after save. */
+    trainingSaveAdapterAndFinish(name: string): Promise<{ name: string; size: number }> {
+        return this.rpc("trainingSaveAdapterAndFinish", { sid: this.session, name });
+    }
     trainingFinish(): Promise<boolean> {
         return this.rpc("trainingFinish", { sid: this.session });
     }

@@ -96,6 +96,7 @@ const STATEFUL_RPCS = new Set([
     "trainingForwardBackward",
     "trainingOptimizerStep",
     "trainingSaveAdapter",
+    "trainingSaveAdapterAndFinish",
     "trainingCancel",
     "trainingFinish",
     "trainingApplyAdapter",
