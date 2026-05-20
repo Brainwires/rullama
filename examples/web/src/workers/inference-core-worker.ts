@@ -429,9 +429,13 @@ async function handleLoad(args: LoadArgs): Promise<LoadedModelInfo> {
 }
 
 function requireModel(): ModelHandle {
-    if (!model) throw new Error("no model loaded — call load() first");
+    // Order matters: when training is active, `model` is null AND
+    // `trainingSession` is set. Surface the specific "owned by
+    // training" message first so the caller knows the model is alive
+    // but loaned out, not gone.
     if (trainingSession) throw new Error(
         "model is owned by an active training session — call trainingFinish() first");
+    if (!model) throw new Error("no model loaded — call load() first");
     return model;
 }
 

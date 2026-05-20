@@ -475,6 +475,29 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                 try { await client.trainingClearAdapter(); } catch { /* */ }
                 onAdapterChanged?.(null);
             }
+            // **Pre-tokenize BEFORE trainingStart.** Once trainingStart
+            // returns, the Model is owned by the TrainingSession and
+            // the chat-path `client.encode()` RPC throws "no model
+            // loaded" via `requireModel()` (encode reuses the Model's
+            // tokenizer). Tokenize every example up front while the
+            // Model is still ours, cache the token arrays, then drive
+            // the training loop off the cached IDs.
+            //
+            // The strings don't change per step (we're iterating over
+            // the same examples N times), so this is a one-time cost
+            // even for thousand-step runs.
+            const preTokenized: Array<{ all: Uint32Array; prompt: Uint32Array }> = [];
+            for (const ex of examples) {
+                const all = await client.encode(ex.prompt + ex.completion);
+                const prompt = await client.encode(ex.prompt);
+                if (all.length > 0 && prompt.length > 0) {
+                    preTokenized.push({ all, prompt });
+                }
+            }
+            if (preTokenized.length === 0) {
+                throw new Error("None of the examples produced any tokens — check the dataset");
+            }
+
             // The worker probes the scratch+LoRA fit before consuming the
             // Model. If the device can't fit the requested config, this
             // throws with a "Training would need ~X MB…" message and the
@@ -488,11 +511,7 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
 
             for (let i = 0; i < stepsBudget; i++) {
                 if (cancelRef.current) break;
-                const ex = examples[i % examples.length];
-                const text = ex.prompt + ex.completion;
-                const allTokens = await client.encode(text);
-                const promptTokens = await client.encode(ex.prompt);
-                if (allTokens.length === 0 || promptTokens.length === 0) continue;
+                const { all: allTokens, prompt: promptTokens } = preTokenized[i % preTokenized.length];
                 const truncated = allTokens.slice(0, Math.max(2, hp.max_seq_len));
                 // **A3 — UI safety net for NaN/Inf loss.** The worker
                 // detects divergence first and throws; this catches
