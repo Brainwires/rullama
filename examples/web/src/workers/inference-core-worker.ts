@@ -393,6 +393,19 @@ interface LoadArgs {
 
 async function handleLoad(args: LoadArgs): Promise<LoadedModelInfo> {
     await ensureWasm();
+    // **Refuse to load while training is active.** The TrainingSession
+    // owns the Model + holds the OPFS syncHandle; trying to load a
+    // new model would close the syncHandle out from under it (or get
+    // stuck in the createSyncAccessHandle retry budget waiting for
+    // a lock that won't release until trainingFinish runs). Surface
+    // the situation explicitly so the user goes back to the Fine-tune
+    // tab and applies/discards their adapter first.
+    if (trainingSession) {
+        throw new Error(
+            "training session is active — apply / save / discard the adapter " +
+            "from the Fine-tune tab first, then try loading again",
+        );
+    }
     if (model && loadedInfo
         && loadedInfo.modelKey === args.modelKey
         && loadedInfo.filename === args.filename) {

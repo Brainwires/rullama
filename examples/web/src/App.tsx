@@ -2240,7 +2240,7 @@ export function App() {
                     canAttach={modelStatus === "ready" && (hasVision || hasAudio) && !trainingInProgress}
                     canRecord={modelStatus === "ready" && hasAudio && !busy && !trainingInProgress}
                     statusLine={trainingInProgress
-                        ? "Fine-tuning in progress — chat resumes when training completes."
+                        ? "Training session is active — open the Fine-tune tab and Save / Apply / Discard the adapter to return chat."
                         : statusLine}
                     pendingImages={pendingImages}
                     pendingAudio={pendingAudio.map((a) => ({ durationMs: a.durationMs }))}

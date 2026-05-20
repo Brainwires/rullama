@@ -475,21 +475,37 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                 try { await client.trainingClearAdapter(); } catch { /* */ }
                 onAdapterChanged?.(null);
             }
-            // **Pre-tokenize BEFORE trainingStart.** Once trainingStart
-            // returns, the Model is owned by the TrainingSession and
-            // the chat-path `client.encode()` RPC throws "no model
-            // loaded" via `requireModel()` (encode reuses the Model's
-            // tokenizer). Tokenize every example up front while the
-            // Model is still ours, cache the token arrays, then drive
-            // the training loop off the cached IDs.
+            // **Pre-tokenize BEFORE trainingStart**, and wrap each
+            // prompt in the same chat template chat-time inference
+            // uses. Two things going on here:
             //
-            // The strings don't change per step (we're iterating over
-            // the same examples N times), so this is a one-time cost
-            // even for thousand-step runs.
+            // 1. Once trainingStart returns, the Model is owned by
+            //    the TrainingSession and the chat-path `client.encode()`
+            //    RPC throws via `requireModel()`. So we tokenize while
+            //    the Model is still ours, cache the token arrays, then
+            //    drive the loop off them.
+            //
+            // 2. **Critical correctness bit:** the trained adapter
+            //    only fires for token sequences the model actually
+            //    sees at inference time. Chat wraps every prompt in
+            //    `<start_of_turn>user\n…<end_of_turn><start_of_turn>model\n`
+            //    before generation. If we tokenize the raw user-typed
+            //    prompt (no template) and train against THAT, the
+            //    adapter learns a mapping at token positions chat
+            //    will never reach — so the user sees "trained
+            //    successfully, no effect on output". Wrap during
+            //    pre-tokenize with `renderChat` so train-time tokens
+            //    match chat-time tokens exactly.
             const preTokenized: Array<{ all: Uint32Array; prompt: Uint32Array }> = [];
             for (const ex of examples) {
-                const all = await client.encode(ex.prompt + ex.completion);
-                const prompt = await client.encode(ex.prompt);
+                const wrappedPrompt = await client.renderChat(
+                    [{ role: "user", content: ex.prompt }],
+                    false,
+                );
+                const promptText = wrappedPrompt;
+                const fullText = wrappedPrompt + ex.completion;
+                const all = await client.encode(fullText);
+                const prompt = await client.encode(promptText);
                 if (all.length > 0 && prompt.length > 0) {
                     preTokenized.push({ all, prompt });
                 }
@@ -627,6 +643,21 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
             const r = await client.trainingSaveAdapter(name);
             toast.success(`Saved ${r.name}.bin (${formatBytes(r.size)})`);
             await refreshAdapters();
+            // **Finish the session after save.** Without this, the
+            // TrainingSession stays alive owning the Model and chat
+            // is locked until the user clicks "Save + apply" or
+            // "Discard". Saving-without-finishing was a footgun —
+            // the only way it'd be useful is mid-training
+            // checkpointing, which isn't a supported workflow today.
+            // Save = "save and exit"; chat unlocks immediately.
+            try { await client.trainingFinish(); }
+            catch (e) { console.warn("[fine-tune] trainingFinish after save failed:", e); }
+            try { await client.releaseSession(); }
+            catch (e) { console.warn("[fine-tune] releaseSession after save failed:", e); }
+            setPhase("idle");
+            setRecent([]);
+            setExamples([]);
+            setDatasetName(null);
         } catch (e) {
             toast.error(`Save failed: ${(e as Error).message}`);
         }
