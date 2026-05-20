@@ -14,6 +14,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Thread the host's current git short-hash through to the build so
+      # `emit-version.mjs` can stamp it into `public/version.json` +
+      # `__APP_VERSION__`. The `:-` default keeps an unset env harmless;
+      # emit-version falls back to "nogit" and the timestamp half still
+      # uniquely identifies the build. Export RULLAMA_COMMIT in your
+      # shell or in `.env` before `cargo docker:restart` to populate it.
+      args:
+        RULLAMA_COMMIT: "${RULLAMA_COMMIT:-}"
     image: rullama:local
     container_name: rullama
     restart: unless-stopped

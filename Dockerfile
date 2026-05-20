@@ -55,6 +55,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # expects, then run `pnpm install && pnpm build`.
 FROM node:22-bookworm-slim AS web-builder
 
+# Optional commit hash threaded in from the host (set by `cargo
+# docker:restart` if it knows). When absent, emit-version.mjs falls
+# back to "nogit" — the timestamp half still uniquely identifies the
+# build, which is all the runtime update-check needs to detect a new
+# deploy.
+ARG RULLAMA_COMMIT=""
+ENV RULLAMA_COMMIT=${RULLAMA_COMMIT}
+
 WORKDIR /build
 
 RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
@@ -69,7 +77,14 @@ WORKDIR /build/examples/web
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 
-RUN pnpm exec vite build
+# `pnpm build` (not `pnpm exec vite build`) so the build script runs
+# `node scripts/emit-version.mjs` first — that writes
+# `public/version.json` with the build timestamp + commit, and
+# `vite.config.ts` reads the same file at config-time to inject
+# `__APP_VERSION__` into the bundle. Bypassing the script (the
+# previous `pnpm exec vite build`) would leave the runtime update
+# check thinking every deploy is identical.
+RUN pnpm build
 
 # -------------------- stage 3: nginx runtime --------------------
 # nginx-unprivileged runs as UID 101 from the start and puts all writable

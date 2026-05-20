@@ -170,7 +170,7 @@ export function App() {
 
     // View routing — Chat tab vs Fine-tune tab. Persisted so a reload
     // doesn't bounce the user out of the tab they were in.
-    const [view, setView] = usePersistedState<"chat" | "finetune">("rullama:view", "chat");
+    const [view, setView] = usePersistedState<"chat" | "finetune" | "settings">("rullama:view", "chat");
     // Adapter currently active in chat. Kept here (not just inside
     // FineTunePanel) so the header badge stays in sync.
     const [activeAdapter, setActiveAdapter] = useState<string | null>(null);
@@ -198,10 +198,11 @@ export function App() {
     const [conversations, setConversations] = useState<ConversationRow[]>([]);
     const [activeConvId, setActiveConvId]   = useState<string | null>(null);
 
-    // Sidebar visibility — persisted across reloads. Settings defaults
-    // open on first ever load so the model picker is visible.
-    const [historyOpen,  setHistoryOpen]  = usePersistedState<boolean>("ui.historyOpen",  false);
-    const [settingsOpen, setSettingsOpen] = usePersistedState<boolean>("ui.settingsOpen", true);
+    // Sidebar visibility — persisted across reloads. Only the left
+    // (history) sidebar exists now; Settings has been promoted to its
+    // own tab so it doesn't compete with chat content for screen
+    // real-estate on small displays.
+    const [historyOpen, setHistoryOpen] = usePersistedState<boolean>("ui.historyOpen", false);
 
     // Persisted tunables.
     const [systemPrompt, setSystemPrompt] = usePersistedState<string>("systemPrompt", DEFAULT_SYSTEM_PROMPT);
@@ -2045,17 +2046,22 @@ export function App() {
                             <Sparkles className="size-3.5" />
                             <span className="hidden sm:inline">Fine-tune</span>
                         </button>
+                        <button
+                            type="button"
+                            onClick={() => setView("settings")}
+                            aria-pressed={view === "settings"}
+                            className={cn(
+                                "flex h-7 items-center gap-1 rounded px-2 text-xs transition-colors",
+                                view === "settings"
+                                    ? "bg-background text-foreground shadow-sm"
+                                    : "text-muted-foreground hover:bg-background/50",
+                            )}
+                            title="Settings"
+                        >
+                            <Settings className="size-3.5" />
+                            <span className="hidden sm:inline">Settings</span>
+                        </button>
                     </div>
-                    <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
-                        onClick={() => setSettingsOpen(!settingsOpen)}
-                        title="Toggle settings"
-                        aria-pressed={settingsOpen}
-                    >
-                        <Settings />
-                    </Button>
                 </div>
             </header>
 
@@ -2064,22 +2070,31 @@ export function App() {
             )}
 
             <DualSidebarLayout
-                leftOpen={historyOpen}
-                rightOpen={settingsOpen}
+                leftOpen={view === "chat" && historyOpen}
                 onToggleLeft={setHistoryOpen}
-                onToggleRight={setSettingsOpen}
                 leftWidth={280}
-                rightWidth={320}
+                // Left sidebar (conversation list) is chat-specific —
+                // hide on Fine-tune and Settings tabs. The right
+                // sidebar is gone entirely now that Settings is a tab.
                 leftSidebar={
-                    <ConversationList
-                        conversations={conversations}
-                        activeId={activeConvId}
-                        onSelect={(id) => { void onSelectConversation(id); }}
-                        onCreate={onCreateConversation}
-                        onDelete={(id) => void onDeleteConversation(id)}
-                    />
+                    view === "chat" ? (
+                        <ConversationList
+                            conversations={conversations}
+                            activeId={activeConvId}
+                            onSelect={(id) => { void onSelectConversation(id); }}
+                            onCreate={onCreateConversation}
+                            onDelete={(id) => void onDeleteConversation(id)}
+                        />
+                    ) : undefined
                 }
-                rightSidebar={
+            >
+                {view === "finetune" ? (
+                    <FineTunePanel
+                        modelStatus={modelStatus}
+                        activeAdapter={activeAdapter}
+                        onAdapterChanged={setActiveAdapter}
+                    />
+                ) : view === "settings" ? (
                     <SettingsDialog
                         modelStatus={modelStatus}
                         loadingPercent={loadingPercent}
@@ -2100,14 +2115,6 @@ export function App() {
                         onVoiceChange={setVoice}
                         canRecord={modelStatus === "ready" && hasAudio}
                         onResetDefaults={onResetDefaults}
-                    />
-                }
-            >
-                {view === "finetune" ? (
-                    <FineTunePanel
-                        modelStatus={modelStatus}
-                        activeAdapter={activeAdapter}
-                        onAdapterChanged={setActiveAdapter}
                     />
                 ) : (
                 <ChatPanel

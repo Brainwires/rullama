@@ -42,7 +42,28 @@ fn main() -> ExitCode {
 
 fn compose(args: &[&str]) -> ExitCode {
     eprintln!("$ docker compose {}", args.join(" "));
-    let status = Command::new("docker").arg("compose").args(args).status();
+    // Set RULLAMA_COMMIT from `git rev-parse --short HEAD` if not already
+    // exported by the caller. compose.yaml interpolates this into the
+    // image's build-args so emit-version.mjs can stamp the commit into
+    // /version.json + __APP_VERSION__. Failure is fine — emit-version
+    // falls back to "nogit" and the timestamp is still unique.
+    let mut cmd = Command::new("docker");
+    cmd.arg("compose").args(args);
+    if std::env::var_os("RULLAMA_COMMIT").is_none() {
+        if let Ok(output) = Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+        {
+            if output.status.success() {
+                let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !sha.is_empty() {
+                    cmd.env("RULLAMA_COMMIT", &sha);
+                    eprintln!("(setting RULLAMA_COMMIT={sha})");
+                }
+            }
+        }
+    }
+    let status = cmd.status();
     match status {
         Ok(s) if s.success() => ExitCode::SUCCESS,
         Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
