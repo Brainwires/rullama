@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import {
@@ -312,21 +313,74 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
 
     // ─── Dataset handlers ──────────────────────────────────────────────
 
-    const onFile = useCallback(async (f: File) => {
-        const text = await f.text();
-        const { examples: ex, errors } = parseJsonl(text);
-        setDatasetName(f.name);
+    // Shared finaliser used by all three input modes (file / paste /
+    // build). Sets the parsed examples + parse errors + dataset name,
+    // flips the phase, and pre-fills an adapter name.
+    const setParsedDataset = useCallback((ex: ParsedExample[], errors: string[], name: string) => {
+        setDatasetName(name);
         setExamples(ex);
         setParseErrors(errors);
         setTokenLengths(null);
         if (ex.length > 0) {
             setPhase("ready");
-            setAdapterName(f.name.replace(/\.[^.]+$/, "") + "-r" + lora.rank);
+            // Strip extension if any and append rank for a sensible
+            // default adapter filename.
+            const base = name.replace(/\.[^.]+$/, "");
+            setAdapterName(base + "-r" + lora.rank);
             toast.success(`Parsed ${ex.length} examples${errors.length ? `, ${errors.length} skipped` : ""}`);
         } else {
             setPhase("idle");
             toast.error("Couldn't parse any examples — check JSONL shape");
         }
+    }, [toast, lora.rank]);
+
+    const onFile = useCallback(async (f: File) => {
+        const text = await f.text();
+        const { examples: ex, errors } = parseJsonl(text);
+        setParsedDataset(ex, errors, f.name);
+    }, [setParsedDataset]);
+
+    // Paste mode — user dumps a JSONL blob into the textarea, clicks
+    // Parse. Same parser as the file path. Default name is a
+    // timestamp so re-pastes don't collide on the auto adapter
+    // filename.
+    const onPasteText = useCallback((text: string) => {
+        if (!text.trim()) {
+            toast.error("Paste some JSONL first");
+            return;
+        }
+        const { examples: ex, errors } = parseJsonl(text);
+        const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+        setParsedDataset(ex, errors, `pasted-${stamp}`);
+    }, [setParsedDataset, toast]);
+
+    // Build mode — user fills out a single (prompt, completion) pair
+    // and clicks "Add example". Appends to the current `examples`
+    // list and flips phase to "ready" on the first add. Useful for
+    // quick smoke tests where typing one or two pairs is faster than
+    // writing a file.
+    const onAddExample = useCallback((prompt: string, completion: string) => {
+        const p = prompt.trim();
+        const c = completion.trim();
+        if (!p || !c) {
+            toast.error("Both prompt and completion need text");
+            return;
+        }
+        setExamples((cur) => {
+            const next = [...cur, { prompt: p, completion: c }];
+            if (cur.length === 0) {
+                // First add — name the dataset, set phase, pre-fill
+                // adapter name. Subsequent adds just append.
+                const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+                setDatasetName(`hand-built-${stamp}`);
+                setAdapterName(`hand-built-${stamp}-r` + lora.rank);
+                setPhase("ready");
+                setParseErrors([]);
+                setTokenLengths(null);
+            }
+            return next;
+        });
+        toast.success("Added 1 example");
     }, [toast, lora.rank]);
 
     const onValidate = useCallback(async () => {
@@ -629,6 +683,8 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                             tokenLengths={tokenLengths}
                             seqCap={hp.max_seq_len}
                             onFile={onFile}
+                            onPasteText={onPasteText}
+                            onAddExample={onAddExample}
                             onValidate={onValidate}
                         />
                     )}
@@ -779,10 +835,21 @@ function DatasetCard(props: {
     tokenLengths: number[] | null;
     seqCap: number;
     onFile: (f: File) => void;
+    onPasteText: (text: string) => void;
+    onAddExample: (prompt: string, completion: string) => void;
     onValidate: () => void;
 }) {
     const inputRef = useRef<HTMLInputElement>(null);
     const [dragOver, setDragOver] = useState(false);
+    // Input mode tabs. "file" is the original drop-zone path; "paste"
+    // lets the user dump raw JSONL into a textarea (matches the
+    // clipboard workflow); "build" gives them a prompt + completion
+    // form so they can hand-write examples without ever leaving the
+    // page. All three feed the same `examples` state.
+    const [mode, setMode] = useState<"file" | "paste" | "build">("file");
+    const [pasteText, setPasteText] = useState("");
+    const [buildPrompt, setBuildPrompt] = useState("");
+    const [buildCompletion, setBuildCompletion] = useState("");
     const onDrop = (e: React.DragEvent) => {
         e.preventDefault();
         setDragOver(false);
@@ -815,29 +882,133 @@ function DatasetCard(props: {
                 </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-                <div
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => inputRef.current?.click()}
-                    onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-                    onDragLeave={() => setDragOver(false)}
-                    onDrop={onDrop}
-                    className={cn(
-                        "flex h-24 cursor-pointer items-center justify-center rounded-md border-2 border-dashed text-xs transition-colors",
-                        dragOver ? "border-primary bg-primary/5" : "border-border text-muted-foreground hover:bg-muted/30",
-                    )}
-                >
-                    {props.datasetName
-                        ? <span className="text-foreground">{props.datasetName} — {props.examples.length} examples</span>
-                        : <span>Drop a .jsonl file, or click to pick</span>}
+                {/* Input-mode tabs — three ways to feed the trainer:
+                    drop a file, paste raw JSONL, or build examples by
+                    hand. Same parsed-examples state downstream so the
+                    rest of the card (preview, token-length validate,
+                    histogram) works uniformly. */}
+                <div className="flex gap-1 rounded-md border border-border bg-muted/30 p-0.5">
+                    {(["file", "paste", "build"] as const).map((m) => (
+                        <button
+                            key={m}
+                            type="button"
+                            onClick={() => setMode(m)}
+                            aria-pressed={mode === m}
+                            className={cn(
+                                "flex-1 rounded px-2 py-1 text-xs transition-colors",
+                                mode === m
+                                    ? "bg-background text-foreground shadow-sm"
+                                    : "text-muted-foreground hover:bg-background/50",
+                            )}
+                        >
+                            {m === "file" ? "Upload file" : m === "paste" ? "Paste JSONL" : "Build by hand"}
+                        </button>
+                    ))}
                 </div>
-                <input
-                    ref={inputRef}
-                    type="file"
-                    accept=".jsonl,.json,.txt"
-                    className="hidden"
-                    onChange={(e) => { const f = e.target.files?.[0]; if (f) props.onFile(f); }}
-                />
+
+                {mode === "file" && (
+                    <>
+                        <div
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => inputRef.current?.click()}
+                            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                            onDragLeave={() => setDragOver(false)}
+                            onDrop={onDrop}
+                            className={cn(
+                                "flex h-24 cursor-pointer items-center justify-center rounded-md border-2 border-dashed text-xs transition-colors",
+                                dragOver ? "border-primary bg-primary/5" : "border-border text-muted-foreground hover:bg-muted/30",
+                            )}
+                        >
+                            {props.datasetName
+                                ? <span className="text-foreground">{props.datasetName} — {props.examples.length} examples</span>
+                                : <span>Drop a .jsonl file, or click to pick</span>}
+                        </div>
+                        <input
+                            ref={inputRef}
+                            type="file"
+                            accept=".jsonl,.json,.txt"
+                            className="hidden"
+                            onChange={(e) => { const f = e.target.files?.[0]; if (f) props.onFile(f); }}
+                        />
+                    </>
+                )}
+
+                {mode === "paste" && (
+                    <>
+                        <Textarea
+                            value={pasteText}
+                            onChange={(e) => setPasteText(e.target.value)}
+                            placeholder={`{"prompt":"capital of France?","completion":"Paris."}\n{"prompt":"capital of Japan?","completion":"Tokyo."}\n...`}
+                            className="min-h-32 font-mono text-xs"
+                            spellCheck={false}
+                        />
+                        <div className="flex items-center justify-between gap-2">
+                            <div className="text-[11px] text-muted-foreground">
+                                One JSON object per line. Shapes accepted:{" "}
+                                <code className="text-foreground">{"{prompt, completion}"}</code>,{" "}
+                                <code className="text-foreground">{"{instruction, output}"}</code>,{" "}
+                                <code className="text-foreground">{"{messages:[…]}"}</code>.
+                            </div>
+                            <Button
+                                size="sm"
+                                onClick={() => props.onPasteText(pasteText)}
+                                disabled={!pasteText.trim()}
+                            >
+                                Parse
+                            </Button>
+                        </div>
+                        {props.datasetName && props.examples.length > 0 && (
+                            <div className="text-xs text-muted-foreground">
+                                Current dataset: <span className="text-foreground">{props.datasetName}</span>
+                                {" — "}{props.examples.length} examples
+                            </div>
+                        )}
+                    </>
+                )}
+
+                {mode === "build" && (
+                    <div className="space-y-2">
+                        <div>
+                            <div className="mb-1 text-xs text-muted-foreground">Prompt</div>
+                            <Textarea
+                                value={buildPrompt}
+                                onChange={(e) => setBuildPrompt(e.target.value)}
+                                placeholder="What's the capital of France?"
+                                className="min-h-16 text-xs"
+                                spellCheck={false}
+                            />
+                        </div>
+                        <div>
+                            <div className="mb-1 text-xs text-muted-foreground">Completion</div>
+                            <Textarea
+                                value={buildCompletion}
+                                onChange={(e) => setBuildCompletion(e.target.value)}
+                                placeholder=" Paris."
+                                className="min-h-16 text-xs"
+                                spellCheck={false}
+                            />
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                            <div className="text-[11px] text-muted-foreground">
+                                {props.examples.length > 0
+                                    ? <>Current dataset: <span className="text-foreground">{props.examples.length} examples</span>. Click Add to append; click Start training when ready.</>
+                                    : <>Add at least one (prompt, completion) pair, then Start training. Pairs accumulate — keep adding to build a tiny dataset by hand.</>}
+                            </div>
+                            <Button
+                                size="sm"
+                                onClick={() => {
+                                    props.onAddExample(buildPrompt, buildCompletion);
+                                    setBuildPrompt("");
+                                    setBuildCompletion("");
+                                }}
+                                disabled={!buildPrompt.trim() || !buildCompletion.trim()}
+                            >
+                                Add example
+                            </Button>
+                        </div>
+                    </div>
+                )}
                 {props.parseErrors.length > 0 && (
                     <div className="rounded border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-700 dark:text-amber-300">
                         <div className="font-medium">Skipped {props.parseErrors.length} malformed lines:</div>
