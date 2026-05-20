@@ -4852,6 +4852,54 @@ mod tests {
         assert!(max_diff < 1e-5, "d_logits max_diff = {max_diff}");
     }
 
+    /// **D5 — fuzz-magnitude cross-entropy backward.** Same kernel,
+    /// inputs scaled to logit magnitudes a barely-trained or
+    /// diverging model produces (some outputs at ±50, most ~0). The
+    /// stability concern is the LogSumExp in CE-loss: a single large
+    /// logit can blow up the softmax sum if the GPU implementation
+    /// isn't doing the max-subtract trick. Tolerance loosened for
+    /// the larger floor on f32 round-off at these scales.
+    #[test]
+    fn cross_entropy_backward_gpu_vs_cpu_wide_magnitude() {
+        let ctx = pollster::block_on(WgpuCtx::new()).expect("wgpu");
+        let p = Pipelines::new(&ctx.device);
+
+        let vocab = 4096usize;
+        let mut state: u32 = 0x1234_5678;
+        let mut next = || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            ((state >> 8) as f32 / 16_777_216.0) - 0.5
+        };
+        // Most logits modest, scatter ~5% of them out to ±50 to
+        // exercise the LogSumExp stability path.
+        let logits: Vec<f32> = (0..vocab).map(|i| {
+            let n = next();
+            if i % 19 == 0 { n * 100.0 } else { n * 4.0 }
+        }).collect();
+        let target: u32 = 137;
+
+        let mut cpu_grad = vec![0.0f32; vocab];
+        let cpu_loss = crate::reference::ops::cross_entropy_backward(&logits, target, &mut cpu_grad);
+
+        let (gpu_grad, gpu_loss) =
+            pollster::block_on(cross_entropy_backward_cached(&ctx, &p, &logits, target))
+                .expect("gpu");
+
+        // Loss tolerance loosened because LogSumExp at ±50 input range
+        // produces larger absolute round-off than at ±4 (the synthetic
+        // test's range). Bug-level failures would be orders bigger.
+        assert!(
+            (cpu_loss - gpu_loss).abs() < 1e-2,
+            "wide-magnitude loss cpu={cpu_loss} gpu={gpu_loss}"
+        );
+        let mut max_diff = 0.0f32;
+        for (c, g) in cpu_grad.iter().zip(gpu_grad.iter()) {
+            let d = (c - g).abs();
+            if d > max_diff { max_diff = d; }
+        }
+        assert!(max_diff < 1e-4, "wide-magnitude d_logits max_diff = {max_diff}");
+    }
+
     /// GPU vs CPU parity for `matmul_q4_k_backward_input`. Synthesizes a
     /// small Q4_K weight buffer from a deterministic byte stream — Q4_K
     /// block bytes are unconstrained (any pattern parses), so this exercises
@@ -5017,6 +5065,51 @@ mod tests {
         assert!(max_diff < 1e-4, "rmsnorm_bwd max_diff = {max_diff}");
     }
 
+    /// **D5 — fuzz-magnitude rmsnorm backward.** Production residual
+    /// streams can hit hidden-state norms in the ±20 range and weight
+    /// scales near 0.05 (small) or 5.0 (large). The variance
+    /// reduction inside rmsnorm is the place where extreme magnitudes
+    /// produce f32 round-off concentration. Larger tolerance to
+    /// reflect the genuine f32 limit at this scale; a real bug would
+    /// produce mismatches orders of magnitude larger.
+    #[test]
+    fn rmsnorm_backward_gpu_vs_cpu_wide_magnitude() {
+        let ctx = pollster::block_on(WgpuCtx::new()).expect("wgpu");
+        let p = Pipelines::new(&ctx.device);
+        let n = 256usize;
+        // Wider, asymmetric range; mix of small and large weights.
+        let x: Vec<f32> = (0..n).map(|i| ((i as f32 - 128.0) * 0.15).sin() * 20.0).collect();
+        let w: Vec<f32> = (0..n).map(|i| if i % 4 == 0 { 5.0 } else { 0.05 }).collect();
+        let dy: Vec<f32> = (0..n).map(|i| (i as f32 * 0.7).cos() * 10.0).collect();
+        let eps = 1e-6f32;
+
+        let mut cpu_dx = vec![0.0f32; n];
+        crate::reference::ops::rmsnorm_backward(&x, Some(&w), &dy, eps, &mut cpu_dx);
+
+        let device = &ctx.device;
+        let queue = &ctx.queue;
+        let x_buf = write_storage_f32(device, queue, "x", &x);
+        let w_buf = write_storage_f32(device, queue, "w", &w);
+        let dy_buf = write_storage_f32(device, queue, "dy", &dy);
+        let (dx_buf, dx_read) = make_output_pair(device, "dx", (n * 4) as u64);
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("rms_bwd_wide.enc"),
+        });
+        rmsnorm_backward_chained(
+            &ctx, &p, &mut enc, &x_buf, &w_buf, &dy_buf, &dx_buf, n, eps, true,
+        );
+        enc.copy_buffer_to_buffer(&dx_buf, 0, &dx_read, 0, (n * 4) as u64);
+        queue.submit(Some(enc.finish()));
+        let gpu_dx = pollster::block_on(read_back_f32(device, &dx_read)).expect("readback");
+
+        let mut max_diff = 0.0f32;
+        for (c, g) in cpu_dx.iter().zip(gpu_dx.iter()) {
+            let d = (c - g).abs();
+            if d > max_diff { max_diff = d; }
+        }
+        assert!(max_diff < 5e-3, "rmsnorm_bwd wide-magnitude max_diff = {max_diff}");
+    }
+
     /// GPU vs CPU parity for `rmsnorm_per_row_backward`.
     #[test]
     fn rmsnorm_per_row_backward_gpu_vs_cpu() {
@@ -5152,6 +5245,12 @@ mod tests {
     /// GPU vs CPU parity for `geglu_backward`.
     #[test]
     fn geglu_backward_gpu_vs_cpu() {
+        // **D5 — production-magnitude variant lives below as
+        // `geglu_backward_gpu_vs_cpu_wide_magnitude`.** The
+        // synthetic-range test here (gate ∈ [-1.5, 1.65]) is a cheap
+        // CI gate; the wide variant exercises the regime real
+        // checkpoints actually hit (±20-40 gate values), which is
+        // what the May 2026 tanh-clamp bug needed to surface.
         let ctx = pollster::block_on(WgpuCtx::new()).expect("wgpu");
         let p = Pipelines::new(&ctx.device);
         let n = 64usize;
@@ -5191,6 +5290,65 @@ mod tests {
         assert!(
             max_dg < 1e-5 && max_du < 1e-5,
             "geglu_bwd max_dg={max_dg} max_du={max_du}"
+        );
+    }
+
+    /// **D5 — fuzz-magnitude geglu backward.** Re-runs the same kernel
+    /// vs the CPU oracle with inputs scaled to the empirical range
+    /// production checkpoints actually hit (gates reaching ±40 on
+    /// gemma4:e2b — that's where the May 2026 tanh-clamp bug surfaced).
+    /// The synthetic-range test above runs in CI as a cheap gate; this
+    /// one is the regression net for magnitude-dependent kernel bugs.
+    /// Bigger tolerance than the synthetic test (5e-4 vs 1e-5) because
+    /// at large magnitudes f32 round-off in the tanh-saturated tail is
+    /// no longer negligible, but a clamp-missing-style bug would
+    /// produce diffs orders of magnitude larger.
+    #[test]
+    fn geglu_backward_gpu_vs_cpu_wide_magnitude() {
+        let ctx = pollster::block_on(WgpuCtx::new()).expect("wgpu");
+        let p = Pipelines::new(&ctx.device);
+        let n = 128usize;
+        // Gate values that exercise both saturation tails of GELU/tanh.
+        let gate: Vec<f32> = (0..n).map(|i| ((i as f32 / (n as f32)) - 0.5) * 80.0).collect();
+        let up: Vec<f32> = (0..n).map(|i| (i as f32 * 0.31).sin() * 10.0).collect();
+        let dy: Vec<f32> = (0..n).map(|i| (i as f32 * 0.17).cos() * 5.0).collect();
+
+        let mut cpu_dg = vec![0.0f32; n];
+        let mut cpu_du = vec![0.0f32; n];
+        crate::reference::ops::geglu_backward(&gate, &up, &dy, &mut cpu_dg, &mut cpu_du);
+
+        let device = &ctx.device;
+        let queue = &ctx.queue;
+        let g_buf = write_storage_f32(device, queue, "gate", &gate);
+        let u_buf = write_storage_f32(device, queue, "up", &up);
+        let dy_buf = write_storage_f32(device, queue, "dy", &dy);
+        let (dg_buf, dg_read) = make_output_pair(device, "dg", (n * 4) as u64);
+        let (du_buf, du_read) = make_output_pair(device, "du", (n * 4) as u64);
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("geglu_bwd_wide.enc"),
+        });
+        geglu_backward_chained(
+            &ctx, &p, &mut enc, &g_buf, &u_buf, &dy_buf, &dg_buf, &du_buf, n,
+        );
+        enc.copy_buffer_to_buffer(&dg_buf, 0, &dg_read, 0, (n * 4) as u64);
+        enc.copy_buffer_to_buffer(&du_buf, 0, &du_read, 0, (n * 4) as u64);
+        queue.submit(Some(enc.finish()));
+        let gpu_dg = pollster::block_on(read_back_f32(device, &dg_read)).expect("dg readback");
+        let gpu_du = pollster::block_on(read_back_f32(device, &du_read)).expect("du readback");
+
+        let mut max_dg = 0.0f32;
+        let mut max_du = 0.0f32;
+        for i in 0..n {
+            max_dg = max_dg.max((cpu_dg[i] - gpu_dg[i]).abs());
+            max_du = max_du.max((cpu_du[i] - gpu_du[i]).abs());
+        }
+        // Tolerance loosened from 1e-5 → 5e-4 because at gate=±40 the
+        // tanh saturation tail dominates and f32 rounding produces
+        // larger absolute diffs. A clamp bug would produce mismatches
+        // orders of magnitude larger than this.
+        assert!(
+            max_dg < 5e-4 && max_du < 5e-4,
+            "geglu_bwd wide-magnitude max_dg={max_dg} max_du={max_du}"
         );
     }
 

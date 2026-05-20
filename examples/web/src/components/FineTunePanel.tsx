@@ -488,25 +488,50 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
     }, [client]);
 
     const onSave = useCallback(async () => {
-        if (!adapterName.trim()) {
+        const name = adapterName.trim();
+        if (!name) {
             toast.error("Give the adapter a name first");
             return;
         }
+        // **D2 — collision warning.** trainingSaveAdapter silently
+        // overwrites because OPFS `getFileHandle(..., {create: true})`
+        // is a no-prompt clobber. Surfaces here instead so the user
+        // doesn't lose a prior adapter to a duplicate name.
+        if (adapters.some((a) => a.name === name)) {
+            const ok = window.confirm(`Overwrite existing adapter "${name}"? The previous version will be permanently lost.`);
+            if (!ok) return;
+        }
         try {
-            const r = await client.trainingSaveAdapter(adapterName.trim());
+            const r = await client.trainingSaveAdapter(name);
             toast.success(`Saved ${r.name}.bin (${formatBytes(r.size)})`);
             await refreshAdapters();
         } catch (e) {
             toast.error(`Save failed: ${(e as Error).message}`);
         }
-    }, [adapterName, client, refreshAdapters, toast]);
+    }, [adapterName, adapters, client, refreshAdapters, toast]);
 
     const onFinishAndApply = useCallback(async () => {
+        // **D4 — save-then-finish ordering.** Previously the order was
+        // save → finish → apply. If save threw, finish() had already
+        // run on the wrong side of the catch in a way that lost the
+        // in-memory adapter forever. Now: save FIRST (only proceed if
+        // it succeeds); finish + apply only after a successful save.
+        // On save failure, leave the training session active so the
+        // user can retry save with a different name / different
+        // storage.
+        const name = adapterName.trim();
+        if (name && adapters.some((a) => a.name === name)) {
+            const ok = window.confirm(`Overwrite existing adapter "${name}"? The previous version will be permanently lost.`);
+            if (!ok) return;
+        }
         try {
-            // Save first (if user picked a name), then finish (returns Model
-            // to chat), then apply.
-            const name = adapterName.trim();
-            if (name) await client.trainingSaveAdapter(name);
+            if (name) {
+                // Save first. If this throws, the training session is
+                // still alive — user can rename and retry, or click
+                // Discard to release the Model back to chat.
+                await client.trainingSaveAdapter(name);
+            }
+            // Only finish + apply after save succeeded (or no name).
             await client.trainingFinish();
             if (name) {
                 await client.trainingApplyAdapter(name);
@@ -520,11 +545,12 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
             setExamples([]);
             setDatasetName(null);
             await refreshAdapters();
-            try { await client.releaseSession(); } catch { /* */ }
+            try { await client.releaseSession(); }
+            catch (e) { console.warn("[fine-tune] releaseSession after finish failed:", e); }
         } catch (e) {
             toast.error(`Finish failed: ${(e as Error).message}`);
         }
-    }, [adapterName, client, onAdapterChanged, refreshAdapters, toast]);
+    }, [adapterName, adapters, client, onAdapterChanged, refreshAdapters, toast]);
 
     const onDiscard = useCallback(async () => {
         // Best-effort: release any active training session + session

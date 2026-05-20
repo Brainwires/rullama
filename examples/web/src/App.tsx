@@ -171,9 +171,26 @@ export function App() {
     // View routing — Chat tab vs Fine-tune tab. Persisted so a reload
     // doesn't bounce the user out of the tab they were in.
     const [view, setView] = usePersistedState<"chat" | "finetune" | "settings">("rullama:view", "chat");
-    // Adapter currently active in chat. Kept here (not just inside
-    // FineTunePanel) so the header badge stays in sync.
-    const [activeAdapter, setActiveAdapter] = useState<string | null>(null);
+    // **D3 — chat-during-training gate.** When a Fine-tune run is
+    // active in this (or any other) tab, the Model is owned by the
+    // training session and chat-side step RPCs would fail with
+    // "model is owned by an active training session". Reflect that
+    // in the UI so the user sees a clear "training in progress"
+    // affordance instead of an opaque error toast on Send. Sourced
+    // from the worker's `trainingStarted` / `trainingFinished`
+    // notifies, which fan out across tabs via the SharedWorker
+    // router.
+    const [trainingInProgress, setTrainingInProgress] = useState<boolean>(false);
+
+    // Adapter currently active in chat. Persisted across reloads so a
+    // page refresh doesn't silently drop a trained adapter — the bytes
+    // are in OPFS regardless, but the "this one is loaded into Model"
+    // state used to reset to null on boot, forcing the user to
+    // re-apply manually via the Fine-tune tab. The restore-on-boot
+    // effect below re-applies the saved adapter once the model is
+    // ready; failure clears the persisted name so we don't keep
+    // trying.
+    const [activeAdapter, setActiveAdapter] = usePersistedState<string | null>("activeAdapter", null);
 
     // Chat state
     const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -469,6 +486,14 @@ export function App() {
             client.subscribe("adapterChanged", (p) => {
                 setActiveAdapter((p.active as string | null | undefined) ?? null);
             }),
+            // **D3 — training-in-progress tracking.** The worker
+            // broadcasts these notifies across tabs via the
+            // SharedWorker router; every tab learns about it and the
+            // chat input gates uniformly. Without this, the Send
+            // button would fail with "model is owned by training
+            // session" on click and the user wouldn't know why.
+            client.subscribe("trainingStarted", () => { setTrainingInProgress(true); }),
+            client.subscribe("trainingFinished", () => { setTrainingInProgress(false); }),
             // Worker is waiting on the OPFS read-syncHandle while the
             // previous worker's exclusive lock GCs. Surface to the boot
             // splash AND the in-app waitInfo state so the user knows
@@ -527,13 +552,59 @@ export function App() {
                 });
             }),
         ];
-        // Probe initial adapter state once the model is ready (worker
-        // remembers what was applied across page reloads).
+        // Probe initial adapter state. The worker's `active` is its
+        // in-memory state for THIS core session — empty on a fresh
+        // boot. If we have a persisted activeAdapter (from a prior
+        // tab that applied one), prefer ours and trust the
+        // restore-on-ready effect below to re-apply it via
+        // `trainingApplyAdapter`. If we don't, take whatever the
+        // worker says (could be non-null if another tab is already
+        // running with one applied).
         void getClient().trainingListAdapters()
-            .then((r) => setActiveAdapter(r.active))
+            .then((r) => {
+                // Only overwrite if BOTH the persisted name is null
+                // and the worker has nothing. Otherwise the persisted
+                // (or the worker's existing) name wins.
+                setActiveAdapter((cur) => cur ?? r.active);
+            })
             .catch(() => { /* */ });
         return () => { for (const o of offs) o(); };
     }, []);
+
+    // **D1 — restore active adapter on reload.** The adapter bytes
+    // survive in OPFS but the "this one is loaded into Model" state
+    // used to reset to null on every boot, leaving the user to manually
+    // re-apply via the Fine-tune tab. Once the model is ready and an
+    // activeAdapter is persisted but not yet applied to the worker,
+    // re-apply it. A single retry on the next-`modelStatus` change is
+    // enough; failure clears the persisted name so we don't keep
+    // trying for a missing/incompatible adapter.
+    const adapterRestoredRef = useRef(false);
+    useEffect(() => {
+        if (adapterRestoredRef.current) return;
+        if (modelStatus !== "ready") return;
+        if (!activeAdapter) return;
+        adapterRestoredRef.current = true;
+        (async () => {
+            const c = getClient();
+            try {
+                const list = await c.trainingListAdapters();
+                if (list.active === activeAdapter) return; // already applied
+                if (!list.entries.some((e) => e.name === activeAdapter)) {
+                    console.warn(`[rullama] persisted activeAdapter '${activeAdapter}' is no longer in the library — clearing`);
+                    setActiveAdapter(null);
+                    return;
+                }
+                // trainingApplyAdapter is session-gated. Wrap in
+                // withSession so the apply queues behind any other
+                // tab's active work and releases cleanly when done.
+                await c.withSession(() => c.trainingApplyAdapter(activeAdapter));
+            } catch (e) {
+                console.warn(`[rullama] failed to restore activeAdapter '${activeAdapter}' on boot:`, e);
+                setActiveAdapter(null);
+            }
+        })();
+    }, [modelStatus, activeAdapter, setActiveAdapter]);
 
     // Boot-time PWA update check. Fetches /version.json (server's
     // currently-deployed version) and compares against the version
@@ -2158,15 +2229,19 @@ export function App() {
                             />
                         )
                     }
-                    canType={modelStatus === "ready"}
+                    canType={modelStatus === "ready" && !trainingInProgress}
                     canSend={
                         modelStatus === "ready"
                         && !busy
+                        && !trainingInProgress
                         && (prompt.trim().length > 0 || pendingImages.length > 0 || pendingAudio.length > 0)
                     }
                     canStop={busy}
-                    canAttach={modelStatus === "ready" && (hasVision || hasAudio)}
-                    canRecord={modelStatus === "ready" && hasAudio && !busy}
+                    canAttach={modelStatus === "ready" && (hasVision || hasAudio) && !trainingInProgress}
+                    canRecord={modelStatus === "ready" && hasAudio && !busy && !trainingInProgress}
+                    statusLine={trainingInProgress
+                        ? "Fine-tuning in progress — chat resumes when training completes."
+                        : statusLine}
                     pendingImages={pendingImages}
                     pendingAudio={pendingAudio.map((a) => ({ durationMs: a.durationMs }))}
                     voice={voice}
@@ -2187,7 +2262,6 @@ export function App() {
                     onRemoveAudio={onRemoveAudio}
                     onAudioError={onAudioError}
                     pipelineProgress={visionEncodeState}
-                    statusLine={statusLine}
                 />
                 )}
             </DualSidebarLayout>
