@@ -1078,12 +1078,16 @@ function MemoryTightToggle(props: {
 }) {
     return (
         <Card>
-            {/* `py-5` (20 px symmetric) gives the checkbox the same
-                vertical breathing room a `<CardHeader>` would, without
-                imposing a full header element. CardContent's default
-                p-6 assumes there's a CardHeader above — without one,
-                the content lands flush against the card border. */}
-            <CardContent className="py-5">
+            {/* CardContent's base classes are `p-4 pt-0 sm:p-5 sm:pt-0`
+                — it always zeros out the top padding because it
+                assumes a `<CardHeader>` sits above to provide that
+                space. We don't have a header here, so we'd lose all
+                top breathing room (mobile got a faint top edge from
+                Card's border + checkbox `mt-0.5`, but desktop's `sm:`
+                breakpoint stripped even that). Skip CardContent
+                entirely and use a plain padded div so the `pt-0`
+                override doesn't apply. */}
+            <div className="p-4 sm:p-5">
                 <label className={cn(
                     "flex cursor-pointer items-start gap-3",
                     props.disabled && "cursor-not-allowed opacity-60",
@@ -1105,7 +1109,7 @@ function MemoryTightToggle(props: {
                         </div>
                     </div>
                 </label>
-            </CardContent>
+            </div>
         </Card>
     );
 }
