@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 // The wasm bundle (`/pkg/rullama.js` + `rullama_bg.wasm`) is built by
@@ -8,6 +9,21 @@ import path from "node:path";
 // via a static-asset alias so the bundle's `import.meta.url`-based
 // wasm fetch resolves to `/pkg/rullama_bg.wasm` in both dev and prod.
 const repoRoot = path.resolve(__dirname, "..", "..");
+
+// Read the build version emitted by `scripts/emit-version.mjs`. This
+// runs as part of the `build` npm script *before* Vite, so the file
+// exists when this config is evaluated. In `dev` mode the file may
+// not exist yet — fall back to "dev" so the bundle still type-checks.
+// The same version string is served at `/version.json`, and the
+// runtime update-check compares the two.
+function readBuildVersion(): string {
+    try {
+        const raw = readFileSync(path.resolve(__dirname, "public", "version.json"), "utf8");
+        const j = JSON.parse(raw) as { version?: string };
+        return j.version ?? "dev";
+    } catch { return "dev"; }
+}
+const BUILD_VERSION = readBuildVersion();
 
 export default defineConfig({
     root: __dirname,
@@ -18,21 +34,22 @@ export default defineConfig({
             // Safari "Add to Home Screen" gets the icons we control. Tell the
             // plugin to leave manifest generation alone.
             manifest: false,
-            // "autoUpdate" + Workbox `skipWaiting`/`clientsClaim` is the
-            // silent-update path. The dialog-driven "prompt" mode forced the
-            // user through a reload after the app had already mounted —
-            // confusing and slow. Now we gate React mount on SW freshness
-            // (see `src/lib/pwa.ts::ensureFreshServiceWorker`), so the new
-            // SW is in charge before the user sees anything.
-            registerType: "autoUpdate",
+            // "prompt" mode: the SW installs in the background but does
+            // NOT auto-activate. The user-facing "an update is available"
+            // signal is the version manifest (lib/version.ts) + the
+            // in-app banner; clicking Apply triggers a coordinated
+            // multi-tab shutdown + reload, which is when the new SW
+            // takes over. Workbox's `skipWaiting` would race that flow
+            // (silently activating a SW whose precache no longer
+            // matches the running page's chunk URLs), so it's off.
+            registerType: "prompt",
             // Only precache the small static shell — the 7 GB GGUF is *not*
             // precached, it lives in OPFS via our own writer worker.
             workbox: {
-                // New SW takes over as soon as it's installed. Navigation
-                // requests are handled NetworkFirst (below) so even a
-                // mid-session SW swap doesn't strand the page on stale
-                // chunk URLs the new precache no longer has.
-                skipWaiting: true,
+                // No skipWaiting: the new SW waits until all clients are
+                // gone (which happens during the coordinated reload).
+                // clientsClaim stays on so the new SW immediately
+                // handles fetches once it activates.
                 clientsClaim: true,
                 // `cleanupOutdatedCaches` evicts cache buckets whose
                 // *prefix* no longer matches; bumping `cacheId` is what
@@ -43,7 +60,7 @@ export default defineConfig({
                 // to drop the precache and start clean.
                 //   docs: https://developer.chrome.com/docs/workbox/modules/workbox-precaching
                 //   issue: https://github.com/GoogleChrome/workbox/issues/2757
-                cacheId: "rullama-v5",
+                cacheId: "rullama-v6",
                 cleanupOutdatedCaches: true,
                 // index.html is intentionally OMITTED from precache: it
                 // goes through the NetworkFirst navigation handler below
@@ -115,6 +132,13 @@ export default defineConfig({
             ],
         }),
     ],
+    define: {
+        // Same version string as `public/version.json`. The runtime
+        // boot check (`lib/version.ts`) compares the two; a mismatch
+        // means a newer build is deployed and the app surfaces the
+        // update banner.
+        __APP_VERSION__: JSON.stringify(BUILD_VERSION),
+    },
     resolve: {
         alias: {
             "@": path.resolve(__dirname, "src"),

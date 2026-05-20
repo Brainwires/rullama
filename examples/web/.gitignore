@@ -1,0 +1,4 @@
+# Build-time generated; emitted by scripts/emit-version.mjs before each
+# `vite build`. Checking it in would just guarantee merge conflicts on
+# every PR + a stale value vs whatever the deploy actually ships.
+public/version.json

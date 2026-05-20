@@ -26,6 +26,15 @@ import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
 import { DEFAULT_VOICE_OPTIONS, VOICE_BOUNDS, type VoiceOptions } from "@/lib/voice";
 import { FineTunePanel } from "@/components/FineTunePanel";
 import { Badge } from "@/components/ui/badge";
+import { UpdateBanner } from "@/components/UpdateBanner";
+import { ApplyingOverlay } from "@/components/ApplyingOverlay";
+import {
+    BUNDLED_VERSION,
+    fetchServerVersion,
+    isUpdateAvailable,
+    isDismissed,
+    setDismissedVersion,
+} from "@/lib/version";
 import { Settings, History, MessageSquare, Sparkles } from "lucide-react";
 
 const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -128,6 +137,14 @@ export function App() {
     const [loadingPercent, setLoadingPercent] = useState(0);
     const [loadingLabel, setLoadingLabel]     = useState("");
     const [statusText, setStatusText]         = useState("no model");
+
+    // PWA update banner state. Driven by the boot-time version check
+    // (lib/version.ts) plus cross-tab `updateAvailable` / `applyingUpdate`
+    // notifies from the SharedWorker router. The banner itself is
+    // gated on `!busy` (defer mid-generation); the apply overlay is
+    // always rendered when the version mismatch is being applied.
+    const [updateVersion, setUpdateVersion] = useState<string | null>(null);
+    const [applyingUpdate, setApplyingUpdate] = useState(false);
 
     // Wait-reason coordination. The worker emits three independent
     // `…Waiting` / `…Retrying` notifies during slow OPFS / network
@@ -394,6 +411,45 @@ export function App() {
             client.subscribe("meta", (p) => {
                 setMetaInit(true);
                 applyLoaded(p.loaded as Parameters<typeof applyLoaded>[0]);
+                // The router may have already learned of a pending
+                // update from an earlier tab. Pick it up on first meta
+                // broadcast so this tab surfaces the same banner
+                // without re-fetching /version.json.
+                const pending = (p as { pendingUpdateVersion?: string | null }).pendingUpdateVersion;
+                if (typeof pending === "string" && pending && pending !== BUNDLED_VERSION) {
+                    setUpdateVersion((cur) => cur ?? pending);
+                }
+            }),
+            // A tab somewhere detected (via /version.json) that a
+            // newer build is deployed. Surface in our banner state.
+            client.subscribe("updateAvailable", (p) => {
+                const v = String((p as { version?: unknown }).version ?? "");
+                if (v && v !== BUNDLED_VERSION) {
+                    setUpdateVersion(v);
+                }
+            }),
+            // The user clicked "Apply now" on some tab; every tab
+            // reloads in lockstep so the new SharedWorker URL is
+            // adopted simultaneously.
+            client.subscribe("applyingUpdate", (p) => {
+                const v = String((p as { version?: unknown }).version ?? "");
+                setApplyingUpdate(true);
+                if (v) setUpdateVersion(v);
+                // Best-effort: snapshot in-flight generation so the new
+                // bundle can pick it up via the existing visibilitychange
+                // resume path on next boot. Fire-and-forget — if
+                // localStorage throws (private mode, quota), we fall
+                // back to slow-path replay from the DB, which is fine.
+                const inflight = inflightRef.current;
+                if (inflight) {
+                    try { localStorage.setItem(INFLIGHT_KEY, JSON.stringify(inflight)); }
+                    catch (e) { console.warn("[rullama] failed to snapshot inflight before update reload:", e); }
+                }
+                // 600 ms gives the core worker time to process the
+                // {type:"shutdown"} message (sent by the router) and
+                // release its OPFS sync handle + GPU towers BEFORE the
+                // new bundle boots a fresh core that needs them.
+                setTimeout(() => window.location.reload(), 600);
             }),
             client.subscribe("modelLoaded", (p) => {
                 applyLoaded(p as Parameters<typeof applyLoaded>[0]);
@@ -477,6 +533,55 @@ export function App() {
             .catch(() => { /* */ });
         return () => { for (const o of offs) o(); };
     }, []);
+
+    // Boot-time PWA update check. Fetches /version.json (server's
+    // currently-deployed version) and compares against the version
+    // baked into this bundle at build time. If they differ, broadcast
+    // to all tabs via the SharedWorker so they surface the same banner
+    // without each having to re-fetch.
+    //
+    // The function is offline-aware: navigator.onLine === false or a
+    // failed/timeout fetch returns null and we silently no-op. We never
+    // block boot on this; rendering proceeds in parallel.
+    useEffect(() => {
+        (async () => {
+            const server = await fetchServerVersion();
+            if (!server) return;                              // offline / fetch failed
+            if (!isUpdateAvailable(server)) return;           // already on latest
+            if (isDismissed(server))        return;           // user clicked "Later" on this version
+            setUpdateVersion(server.version);
+            try {
+                await getClient().broadcastUpdateAvailable(server.version);
+            } catch (e) {
+                console.warn("[rullama] failed to broadcast update availability to other tabs:", e);
+            }
+        })();
+    }, []);
+
+    // Apply / dismiss handlers for the UpdateBanner.
+    const onApplyUpdate = useCallback(() => {
+        const v = updateVersion ?? "";
+        // Optimistically show the overlay even before the router echoes
+        // back `applyingUpdate` — keeps the UI feeling responsive.
+        setApplyingUpdate(true);
+        (async () => {
+            try {
+                await getClient().applyUpdate(v);
+            } catch (e) {
+                console.warn("[rullama] applyUpdate RPC failed; reloading this tab only:", e);
+                // The router never fanned out `applyingUpdate` to other
+                // tabs. Reload solo as a fallback — at least this tab
+                // gets the new bundle, the other tabs will catch up on
+                // their next reload.
+                setTimeout(() => window.location.reload(), 200);
+            }
+        })();
+    }, [updateVersion]);
+
+    const onDismissUpdate = useCallback(() => {
+        if (updateVersion) setDismissedVersion(updateVersion);
+        setUpdateVersion(null);
+    }, [updateVersion]);
 
     // Latest-onLoad ref so the auto-load effect doesn't need it as a dep
     // (which would re-trigger whenever onLoad's closure changes).
@@ -1867,6 +1972,17 @@ export function App() {
 
     return (
         <div className="flex h-[100dvh] flex-col overflow-hidden bg-background text-foreground">
+            {/* PWA update banner. Detected via boot-time /version.json
+                fetch (lib/version.ts) and broadcast across tabs via
+                the SharedWorker. Deferred while mid-generation so an
+                in-flight chat reply is never interrupted. */}
+            {updateVersion && !busy && !applyingUpdate && (
+                <UpdateBanner
+                    version={updateVersion}
+                    onApply={onApplyUpdate}
+                    onDismiss={onDismissUpdate}
+                />
+            )}
             {/* ─── top header (3rem / 48px tall — matches DualSidebarLayout offset) ─── */}
             {/* `min-h-12` not `h-12` so the safe-area-inset-top padding
                 actually grows the header on iPhones with a notch /
@@ -2062,6 +2178,7 @@ export function App() {
                 )}
             </DualSidebarLayout>
             <RestartOverlay />
+            {applyingUpdate && updateVersion && <ApplyingOverlay version={updateVersion} />}
         </div>
     );
 }

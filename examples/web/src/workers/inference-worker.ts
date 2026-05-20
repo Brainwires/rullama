@@ -45,6 +45,16 @@ interface LoadedModelInfo {
 // connecting tab without a round-trip.
 let loadedInfo: LoadedModelInfo | null = null;
 
+// Cross-tab update coordination. One tab's boot-time version check
+// detects an update and broadcasts `updateAvailable`; the router
+// remembers the version so newly-connecting tabs get the same banner
+// without each having to re-fetch /version.json. When any tab clicks
+// "Apply now", the router broadcasts `applyingUpdate` to ALL ports
+// and signals the dedicated core worker to shut down. `updateInProgress`
+// gates further actions (e.g. don't elect a new host mid-shutdown).
+let pendingUpdateVersion: string | null = null;
+let updateInProgress = false;
+
 // ───────────────────────────────────────────────────────────────────────
 // Session arbitration (FIFO across tabs)
 // ───────────────────────────────────────────────────────────────────────
@@ -454,8 +464,50 @@ async function handleRequest(
                 return;
             }
             case "currentMeta":
-                reply({ ok: true, result: { loaded: loadedInfo, activeSessionPortHeld: active != null } });
+                reply({ ok: true, result: { loaded: loadedInfo, activeSessionPortHeld: active != null, pendingUpdateVersion } });
                 return;
+            case "updateAvailable": {
+                // A tab detected (via its boot-time version-manifest
+                // fetch) that a newer build is deployed. Remember it,
+                // and broadcast so every other open tab can surface
+                // the banner too — no need for each tab to re-fetch.
+                const v = String(raw.version ?? "");
+                if (!v) {
+                    reply({ ok: false, error: "updateAvailable: missing version" });
+                    return;
+                }
+                pendingUpdateVersion = v;
+                notifyAll({ type: "notify", kind: "updateAvailable", version: v });
+                reply({ ok: true, result: true });
+                return;
+            }
+            case "applyUpdate": {
+                // Coordinated multi-tab shutdown + reload. Every tab
+                // shows the ApplyingOverlay and reloads in lockstep, so
+                // the new SharedWorker URL (Vite-hashed) is picked up
+                // simultaneously and we never end up with a v1/v2 split.
+                if (updateInProgress) {
+                    reply({ ok: true, result: false });
+                    return;
+                }
+                updateInProgress = true;
+                const v = pendingUpdateVersion ?? String(raw.version ?? "");
+                notifyAll({ type: "notify", kind: "applyingUpdate", version: v });
+                // Tell the dedicated core worker to release OPFS / GPU /
+                // DB / Model BEFORE the tabs reload. The core's shutdown
+                // handler runs `releaseAllHandles()` and then
+                // `self.close()`s — same path used on pagehide. If
+                // corePort is null or already closed (host tab died
+                // before reaching here), tabs still reload via the
+                // applyingUpdate broadcast above and a fresh core is
+                // elected on the new bundle.
+                if (corePort) {
+                    try { corePort.postMessage({ type: "shutdown" }); }
+                    catch (e) { log(`applyUpdate: core shutdown post failed (port closed?): ${(e as Error).message ?? e}`); }
+                }
+                reply({ ok: true, result: true });
+                return;
+            }
             case "attachCore": {
                 // Transferred MessagePort arrives on the event.ports array.
                 const transferred = rawEvent && rawEvent.ports && rawEvent.ports[0];
@@ -498,11 +550,16 @@ async function handleRequest(
         void handleRequest(port, ev.data, ev);
     });
     // Push initial state so the freshly connected tab can skip "Load a
-    // model" if a model is already active in the core worker.
+    // model" if a model is already active in the core worker. We also
+    // include any pendingUpdateVersion that another tab already
+    // detected, so this tab can surface its banner without an
+    // independent /version.json fetch (the banner is still gated on
+    // busy=false in the React layer).
     port.postMessage({
         type: "notify",
         kind: "meta",
         loaded: loadedInfo,
+        pendingUpdateVersion,
     });
     // If we already have a core, verify it's actually alive before
     // telling the new tab so. The "host tab killed without firing

@@ -440,6 +440,22 @@ export class WorkerClient {
     releaseAudioWeights(): Promise<number> {
         return this.rpc("releaseAudioWeights", { sid: this.session });
     }
+
+    // ── PWA update coordination (router-only, no session needed) ───────
+    /** Tell the router that this tab's boot-time version check found a
+     *  newer build. The router remembers it and broadcasts to every
+     *  other open tab so they all surface the same banner. */
+    broadcastUpdateAvailable(version: string): Promise<true> {
+        return this.rpc("updateAvailable", { version });
+    }
+    /** Trigger the coordinated multi-tab shutdown + reload. Router
+     *  broadcasts `applyingUpdate` to all tabs and signals the core
+     *  worker to release its handles. Each tab reloads ~600 ms after
+     *  receiving the broadcast. */
+    applyUpdate(version: string): Promise<boolean> {
+        return this.rpc("applyUpdate", { version });
+    }
+
     reset(): Promise<void> { return this.rpc("reset", { sid: this.session }); }
     setSampling(opts: SamplingOptions): Promise<void> {
         return this.rpc("setSampling", { sid: this.session, opts });

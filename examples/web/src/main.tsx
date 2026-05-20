@@ -2,7 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import "./styles/globals.css";
 import { App } from "./App";
-import { ensureFreshServiceWorker, installPostBootSwReloadListener } from "@/lib/pwa";
+import { ensureFreshServiceWorker } from "@/lib/pwa";
 import { installGlobalRestartListeners } from "@/lib/restart";
 import { ToastProvider } from "@/lib/toast";
 import { Toaster } from "@/components/Toaster";
@@ -31,12 +31,11 @@ try {
     console.warn("[rullama] ensureFreshServiceWorker threw:", e);
 }
 
-// Arm the mid-session SW-swap reloader only AFTER the boot-time
-// freshness gate has resolved — otherwise the boot-time controllerchange
-// (clientsClaim handing us off to the just-installed SW) would trip a
-// spurious reload loop. From here on, any controller swap is a real
-// post-deploy event and we reload to land on matching assets.
-installPostBootSwReloadListener();
+// (Previously this called installPostBootSwReloadListener to reload
+// on controllerchange. That was a workaround for autoUpdate-mode +
+// precache-nav. With prompt-mode + NetworkFirst nav + the version-
+// manifest update flow, there's nothing to do here — the user clicks
+// the banner and a coordinated reload happens explicitly.)
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>

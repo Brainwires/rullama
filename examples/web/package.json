@@ -7,7 +7,7 @@
     "dev": "concurrently -k -n web,api -c blue,green \"pnpm:dev:web\" \"pnpm:dev:api\"",
     "dev:web": "vite",
     "dev:api": "tsx watch server/index.ts",
-    "build": "tsc -b && vite build",
+    "build": "node scripts/emit-version.mjs && tsc -b && vite build",
     "preview": "vite preview",
     "start": "node --experimental-strip-types server/index.ts"
   },
