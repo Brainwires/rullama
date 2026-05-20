@@ -1366,6 +1366,23 @@ const RPC: Record<string, Handler> = {
     trainingFinish: async (a) => {
         void a;
         if (!trainingSession) throw new Error("no training session to finish");
+        // **wasm-bindgen async-borrow yield.** `save_adapter_js` is
+        // `async fn(&self)`. wasm-bindgen wraps async-with-`&self`
+        // methods such that the JS-side `Borrow` against the Rust
+        // value stays alive across the await — it doesn't release
+        // until the microtask queue drains after the returned Promise
+        // resolves. `finish_js` is `fn(self)` (consumes), so if it's
+        // called immediately after `await saveAdapter()`, wasm-bindgen
+        // refuses with "attempted to take ownership of Rust value
+        // while it was borrowed". Two real fixes:
+        //   1. Switch `save_adapter_js` to `&mut self` (changes the
+        //      wasm-bindgen surface; coordinate-able but bigger).
+        //   2. Yield to the event loop here so the pending borrow
+        //      gets released before the take-self call below.
+        // Going with (2) — a single setTimeout-zero is enough to
+        // drain the relevant microtask, and the fix lives entirely
+        // in the worker JS so the wasm signature isn't perturbed.
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
         try {
             model = trainingSession.finish();
         } finally {
