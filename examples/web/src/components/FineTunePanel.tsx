@@ -502,7 +502,7 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
             //    pre-tokenize with `renderChat` so train-time tokens
             //    match chat-time tokens exactly.
             console.log(`[fine-tune] pre-tokenizing ${examples.length} examples (chat-template wrap)…`);
-            const preTokenized: Array<{ all: Uint32Array; prompt: Uint32Array }> = [];
+            const preTokenized: Array<{ all: Uint32Array; prompt: Uint32Array; promptText: string; completion: string }> = [];
             for (const ex of examples) {
                 const wrappedPrompt = await client.renderChat(
                     [{ role: "user", content: ex.prompt }],
@@ -513,13 +513,30 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                 const all = await client.encode(fullText);
                 const prompt = await client.encode(promptText);
                 if (all.length > 0 && prompt.length > 0) {
-                    preTokenized.push({ all, prompt });
+                    preTokenized.push({ all, prompt, promptText, completion: ex.completion });
                 }
             }
             if (preTokenized.length === 0) {
                 throw new Error("None of the examples produced any tokens — check the dataset");
             }
             console.log(`[fine-tune] pre-tokenized ${preTokenized.length}/${examples.length} examples; total tokens =`, preTokenized.reduce((s, x) => s + x.all.length, 0));
+            // Diagnostic: decode the first NEW token after the prompt for
+            // each example. That's the `targetId` NextToken loss will
+            // train on. If it's an `<end_of_turn>` template marker or
+            // something not in the user's completion, the chat-template
+            // wrap is producing a boundary mismatch (hypothesis H3 from
+            // the BufferMap-error investigation).
+            try {
+                for (let i = 0; i < Math.min(preTokenized.length, 5); i++) {
+                    const { all, prompt, completion } = preTokenized[i];
+                    const targetId = all[prompt.length] ?? -1;
+                    const decoded = targetId >= 0 ? await client.tokenStr(targetId) : "<oob>";
+                    const promptTail = await client.tokenStr(prompt[prompt.length - 1] ?? 0);
+                    console.log(`[fine-tune]   ex${i}: allLen=${all.length} promptLen=${prompt.length} promptTail=${JSON.stringify(promptTail)} targetId=${targetId} target=${JSON.stringify(decoded)} (expected first token of ${JSON.stringify(completion)})`);
+                }
+            } catch (e) {
+                console.warn("[fine-tune] target-alignment decode failed:", e);
+            }
 
             // The worker probes the scratch+LoRA fit before consuming the
             // Model. If the device can't fit the requested config, this
@@ -544,6 +561,14 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                 if (cancelRef.current) break;
                 const { all: allTokens, prompt: promptTokens } = preTokenized[i % preTokenized.length];
                 const truncated = allTokens.slice(0, Math.max(2, hp.max_seq_len));
+                if (i < 3) {
+                    // Per-step alignment diagnostics for the first 3
+                    // steps — if H3 is the cause, the targetId here
+                    // will be visibly the wrong token (template
+                    // marker, end-of-turn, etc.) on at least one
+                    // example.
+                    console.log(`[fine-tune.step.pre] i=${i} truncated.len=${truncated.length} promptTokens.len=${promptTokens.length}`);
+                }
                 // **A3 — UI safety net for NaN/Inf loss.** The worker
                 // detects divergence first and throws; this catches
                 // the case where the worker missed it (e.g., loss
@@ -574,9 +599,12 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                     checkLoss(r);
                     stepsCompleted++;
                     setRecent((prev) => [...prev.slice(-199), { ...r, ms: performance.now() - t0 }]);
-                    if (stepsCompleted === 1 || stepsCompleted % 10 === 0) {
-                        console.log(`[fine-tune] step ${stepsCompleted}/${stepsBudget} loss=${r.loss.toFixed(4)} lr=${r.lr.toExponential(2)} (${(performance.now() - t0).toFixed(0)}ms)`);
-                    }
+                    // Log EVERY step now, not every 10. Long-running
+                    // configurations need a heartbeat to confirm
+                    // they're not frozen; short runs need every
+                    // step to debug stability problems like the
+                    // step-8 BufferMap crash.
+                    console.log(`[fine-tune] step ${stepsCompleted}/${stepsBudget} loss=${r.loss.toFixed(4)} lr=${r.lr.toExponential(2)} (${(performance.now() - t0).toFixed(0)}ms)`);
                 } else {
                     const promptOnly = truncated.slice(0, promptTokens.length);
                     const targetId = truncated[promptTokens.length] ?? truncated[truncated.length - 1];
@@ -589,9 +617,12 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                     checkLoss(r);
                     stepsCompleted++;
                     setRecent((prev) => [...prev.slice(-199), { ...r, ms: performance.now() - t0 }]);
-                    if (stepsCompleted === 1 || stepsCompleted % 10 === 0) {
-                        console.log(`[fine-tune] step ${stepsCompleted}/${stepsBudget} loss=${r.loss.toFixed(4)} lr=${r.lr.toExponential(2)} (${(performance.now() - t0).toFixed(0)}ms)`);
-                    }
+                    // Log EVERY step now, not every 10. Long-running
+                    // configurations need a heartbeat to confirm
+                    // they're not frozen; short runs need every
+                    // step to debug stability problems like the
+                    // step-8 BufferMap crash.
+                    console.log(`[fine-tune] step ${stepsCompleted}/${stepsBudget} loss=${r.loss.toFixed(4)} lr=${r.lr.toExponential(2)} (${(performance.now() - t0).toFixed(0)}ms)`);
                 }
             }
 

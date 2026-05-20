@@ -1287,15 +1287,13 @@ const RPC: Record<string, Handler> = {
                     `Try a lower learning rate, smaller rank, or shorter seq_len.`,
                 );
             }
-            // Log every 10th step so a long run produces visible
-            // breadcrumbs in the worker log. First step also logs so
-            // the user sees "yes, this is actually running" even if
-            // the cold-start window was minutes.
+            // Log EVERY step now. Step-8-crash investigation needs the
+            // full trajectory leading to the failure, not a sampled
+            // every-10th view. Long stable runs will tolerate the log
+            // volume; if it gets noisy we can throttle later.
             const stepNum = (result as { step?: number })?.step ?? 0;
-            if (stepNum === 1 || stepNum % 10 === 0) {
-                const lossStr = typeof loss === "number" ? loss.toFixed(4) : String(loss);
-                log(`training: step ${stepNum} loss=${lossStr} lossMode=${lossMode}`);
-            }
+            const lossStr = typeof loss === "number" ? loss.toFixed(4) : String(loss);
+            log(`training: step ${stepNum} loss=${lossStr} lossMode=${lossMode} inputLen=${inputIds.length}`);
             return result;
         } catch (e) {
             // Log + rethrow. The session stays alive (the wasm side
