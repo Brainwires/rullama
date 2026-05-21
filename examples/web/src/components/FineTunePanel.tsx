@@ -697,8 +697,10 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
     }, [client]);
 
     const onSave = useCallback(async () => {
+        console.log(`[fine-tune] onSave clicked: name="${adapterName.trim()}", phase=${phase}, sessionHeld=${client.currentSession() != null}`);
         const name = adapterName.trim();
         if (!name) {
+            console.log("[fine-tune] onSave aborted — no adapter name");
             toast.error("Give the adapter a name first");
             return;
         }
@@ -719,7 +721,9 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
             // didn't reliably release between the two calls. The
             // combined RPC takes `self` on the Rust side, sidestepping
             // the borrow entirely.
+            console.log("[fine-tune] onSave → trainingSaveAdapterAndFinish()…");
             const r = await client.trainingSaveAdapterAndFinish(name);
+            console.log("[fine-tune] onSave → trainingSaveAdapterAndFinish returned", r);
             toast.success(`Saved ${r.name}.bin (${formatBytes(r.size)})`);
             await refreshAdapters();
             try { await client.releaseSession(); }
@@ -734,6 +738,7 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
     }, [adapterName, adapters, client, refreshAdapters, toast]);
 
     const onFinishAndApply = useCallback(async () => {
+        console.log(`[fine-tune] onFinishAndApply clicked: name="${adapterName.trim()}", phase=${phase}, sessionHeld=${client.currentSession() != null}`);
         // **D4 — save-then-finish ordering.** Previously the order was
         // save → finish → apply. If save threw, finish() had already
         // run on the wrong side of the catch in a way that lost the
@@ -749,22 +754,18 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
         }
         try {
             if (name) {
-                // **Combined save+finish.** Atomic on the Rust side
-                // (one consume-self call); avoids the
-                // wasm-bindgen async-borrow leak that the separated
-                // pair hits intermittently. After this returns, the
-                // Model is owned by the worker again and ready for
-                // applyAdapter.
+                console.log("[fine-tune] onFinishAndApply → trainingSaveAdapterAndFinish()…");
                 await client.trainingSaveAdapterAndFinish(name);
+                console.log("[fine-tune] onFinishAndApply → trainingSaveAdapterAndFinish returned");
             } else {
-                // No name → no save → just finish. The plain
-                // `trainingFinish` works fine because there's no
-                // preceding async-`&self` save to leave a tracked
-                // borrow behind.
+                console.log("[fine-tune] onFinishAndApply → trainingFinish() (no name)…");
                 await client.trainingFinish();
+                console.log("[fine-tune] onFinishAndApply → trainingFinish returned");
             }
             if (name) {
+                console.log("[fine-tune] onFinishAndApply → trainingApplyAdapter()…");
                 await client.trainingApplyAdapter(name);
+                console.log("[fine-tune] onFinishAndApply → trainingApplyAdapter returned");
                 onAdapterChanged?.(name);
                 toast.success(`Adapter "${name}" applied to chat`);
             } else {
@@ -783,11 +784,24 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
     }, [adapterName, adapters, client, onAdapterChanged, refreshAdapters, toast]);
 
     const onDiscard = useCallback(async () => {
+        console.log(`[fine-tune] onDiscard clicked: phase=${phase}, sessionHeld=${client.currentSession() != null}`);
         // Best-effort: release any active training session + session
         // lock. Both can throw if there isn't one (e.g. probe-failure
         // path where Model was never consumed); swallow.
-        try { await client.trainingFinish(); } catch { /* */ }
-        try { await client.releaseSession(); } catch { /* */ }
+        try {
+            console.log("[fine-tune] onDiscard → trainingFinish()…");
+            await client.trainingFinish();
+            console.log("[fine-tune] onDiscard → trainingFinish() returned");
+        } catch (e) {
+            console.warn("[fine-tune] onDiscard → trainingFinish threw:", e);
+        }
+        try {
+            console.log("[fine-tune] onDiscard → releaseSession()…");
+            await client.releaseSession();
+            console.log("[fine-tune] onDiscard → releaseSession() returned");
+        } catch (e) {
+            console.warn("[fine-tune] onDiscard → releaseSession threw:", e);
+        }
         // Preserve the loaded dataset if there is one — user just hit
         // an error mid-training or wants to retry. Going all the way
         // back to "idle" forces them to re-pick the file, which is
