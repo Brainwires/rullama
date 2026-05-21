@@ -175,11 +175,22 @@ export class WorkerClient {
         window.addEventListener("pagehide", onLeave);
         window.addEventListener("beforeunload", onLeave);
 
-        // Heartbeat keeps the worker's port-liveness tracker happy. 10 s
-        // is well inside the 30 s reaper window (HEARTBEAT_DEAD_MS).
+        // Heartbeat keeps the worker's port-liveness tracker happy. 10s
+        // when the tab is foregrounded is well within the 5-minute
+        // reaper window (HEARTBEAT_DEAD_MS in inference-worker.ts).
+        // When the tab is BACKGROUNDED, Chrome throttles `setInterval`
+        // to >=1-minute, so we additionally fire an immediate ping on
+        // `visibilitychange` → visible. Without that, a tab returning
+        // from a long background can briefly have a stale port until
+        // the next throttled tick lands.
         setInterval(() => {
             try { this.port.postMessage({ requestId: -1, type: "ping" }); } catch { /* */ }
         }, 10_000);
+        document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "visible") {
+                try { this.port.postMessage({ requestId: -1, type: "ping" }); } catch { /* */ }
+            }
+        });
     }
 
     /**
