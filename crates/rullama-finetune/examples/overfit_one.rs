@@ -29,8 +29,14 @@ use rullama_finetune::shared::config::{LoraConfig, TrainingHyperparams};
 type BoxError = Box<dyn Error + Send + Sync>;
 
 const DEFAULT_N_STEPS: u32 = 200;
-const PROMPT: &str = "The quick brown fox";
-const TARGET: &str = " jumps";
+// Override via env vars so we can A/B different prompts without
+// recompiling. Defaults match the original M0 acceptance test.
+fn prompt() -> String {
+    env::var("RULLAMA_OVERFIT_PROMPT").unwrap_or_else(|_| "The quick brown fox".into())
+}
+fn target() -> String {
+    env::var("RULLAMA_OVERFIT_TARGET").unwrap_or_else(|_| " jumps".into())
+}
 
 fn main() -> Result<(), BoxError> {
     pollster::block_on(run())
@@ -61,8 +67,12 @@ async fn run() -> Result<(), BoxError> {
     eprintln!("[load] model ready (vocab={})", model.vocab_size_native());
 
     // Tokenize the example.
-    let input_tokens = model.encode_tokens(PROMPT);
-    let target_tokens = model.encode_tokens(TARGET);
+    let prompt_s = prompt();
+    let target_s = target();
+    eprintln!("[encode] prompt = {:?}", prompt_s);
+    eprintln!("[encode] target = {:?}", target_s);
+    let input_tokens = model.encode_tokens(&prompt_s);
+    let target_tokens = model.encode_tokens(&target_s);
     let target_id = *target_tokens
         .first()
         .ok_or_else(|| -> BoxError { "target tokenized to zero tokens".into() })?;

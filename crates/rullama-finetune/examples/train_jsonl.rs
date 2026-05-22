@@ -133,6 +133,12 @@ async fn run() -> Result<(), BoxError> {
     let checkpointing = env::var("RULLAMA_TRAIN_CHECKPOINT").is_ok();
     let mixed_precision = env::var("RULLAMA_TRAIN_MIXED_PRECISION").is_ok();
     let apply_chat_template = env::var("RULLAMA_TRAIN_APPLY_CHAT_TEMPLATE").is_ok();
+    // Newly exposed knobs to match Unsloth's recommended Gemma 4 recipe:
+    //   weight_decay = 0.01, lora_dropout = 0.05.
+    // Without these, training is brittle — the user's earlier iter
+    // runs diverged after ~80 steps because there was no regularization.
+    let weight_decay = env_f32("RULLAMA_TRAIN_WEIGHT_DECAY", 0.0) as f64;
+    let dropout = env_f32("RULLAMA_TRAIN_DROPOUT", 0.0);
 
     eprintln!("[load] gguf = {}", gguf_path.display());
     let bytes = fs::read(&gguf_path)?;
@@ -268,7 +274,7 @@ async fn run() -> Result<(), BoxError> {
     let lora_cfg = LoraConfig {
         rank,
         alpha,
-        dropout: 0.0,
+        dropout,
         target_modules: targets,
     };
     // PerPosition forwards run over prompt+completion; NextToken only
@@ -279,7 +285,7 @@ async fn run() -> Result<(), BoxError> {
     };
     let mut hp = TrainingHyperparams {
         learning_rate: lr,
-        weight_decay: 0.0,
+        weight_decay,
         max_seq_len: max_seq_len_for_hp,
         seed,
         loss_mode,
