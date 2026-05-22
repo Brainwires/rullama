@@ -593,6 +593,69 @@ impl Model {
         self.adapter = None;
     }
 
+    /// **ROME Phase 1.1 — `k*` extraction.**
+    ///
+    /// Run the prompt through the model, capture the post-RMSNorm
+    /// pre-FFN activation (`norm_x_ffn`) at `target_layer` for the
+    /// LAST prompt token, and return it as a `[d_model]` f32 vector.
+    /// This is exactly `k*` from the ROME paper (Meng et al. 2022)
+    /// — the "subject's key" vector that addresses fact storage in
+    /// the FFN's down-projection.
+    ///
+    /// After this call, `target_layer` and `k*` are the inputs to
+    /// `compute_rome_v_star` (Phase 1.2) which finds the
+    /// residual-stream perturbation that flips the model's output
+    /// to a target token.
+    ///
+    /// The forward also leaves the KV cache populated for the
+    /// subject prompt, so a subsequent `compute_rome_v_star` call
+    /// can start from the right hidden state without re-running
+    /// the prompt.
+    pub async fn extract_mlp_input_native(
+        &mut self,
+        prompt_tokens: &[u32],
+        target_layer: u32,
+    ) -> Result<Vec<f32>> {
+        if prompt_tokens.is_empty() {
+            return Err(crate::error::RullamaError::Inference(
+                "extract_mlp_input_native: prompt_tokens must be non-empty".into(),
+            ));
+        }
+        let n_layers = self.forward.cfg().n_layers;
+        if target_layer >= n_layers {
+            return Err(crate::error::RullamaError::Inference(format!(
+                "extract_mlp_input_native: target_layer {target_layer} out of range (have {n_layers})"
+            )));
+        }
+        let ctx = Arc::new(self.forward.ctx().clone());
+        let cfg = self.forward.cfg().clone();
+        // Size capture buffers for the prompt length. `step_capture`
+        // writes activations at per-position offsets, so the buffers
+        // must be seq-shaped to hold the last token's slice.
+        let seq_len = prompt_tokens.len() as u32;
+        let capture = crate::reference::rome::RomeCapture::new(&ctx, &cfg, seq_len);
+
+        // Reset KV so the prompt runs from position 0.
+        self.forward.reset();
+
+        // Forward EVERY prompt token via `step_capture`. The kernels
+        // index captures by current KV position, so unless every step
+        // writes into our buffers the final position's slice will be
+        // wrong (we only care about the LAST position's, but the
+        // forward path indexes by `pos()` which advances every step).
+        let captures = capture.as_captures();
+        for &tok in prompt_tokens {
+            let _ = self
+                .forward
+                .step_capture(tok, &captures, None)
+                .await?;
+        }
+        let last_position = (prompt_tokens.len() - 1) as u32;
+        drop(captures);
+
+        capture.read_norm_x_ffn(target_layer, last_position).await
+    }
+
     /// Feed one position with a pre-computed `[d_model]` embedding instead of a
     /// token id — the path multimodal soft tokens take (each row of the
     /// `encode_image` / `encode_audio` output is one such embedding). Returns the
