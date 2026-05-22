@@ -796,6 +796,61 @@ impl Model {
         target_token_id: u32,
         alpha: f32,
     ) -> Result<Vec<u8>> {
+        self.rome_edit_native_inner(prompt_tokens, target_layer, target_token_id, alpha, None)
+            .await
+    }
+
+    /// **ROME Phase 2.3 — covariance-corrected edit.**
+    ///
+    /// Same shape as [`Model::rome_edit_native`] but replaces the
+    /// spherical denominator `s = ||k*||²` with the covariance-weighted
+    /// `s = k*ᵀ C⁻¹ k*` where `C = E[k kᵀ]` is the typical-key
+    /// covariance precomputed by `examples/compute_rome_covariance.rs`
+    /// and loaded via [`reference::rome::RomeCovariance`].
+    ///
+    /// The LoRA A factor becomes `(C⁻¹ k*) / s` (rather than just `k*`)
+    /// so that at typical inputs `x ~ C` the contribution
+    /// `((C⁻¹ k*)ᵀ x / s) · Δv` averages to zero, preserving unrelated
+    /// facts. At `x = k*` exactly the contribution is `Δv` (because
+    /// `(C⁻¹ k*)ᵀ k* / s = 1`), so the targeted edit fires unchanged.
+    ///
+    /// `alpha` retains the "step size in gradient-direction space"
+    /// interpretation from the spherical version — `Δv = -α · g`.
+    pub async fn rome_edit_native_with_covariance(
+        &mut self,
+        prompt_tokens: &[u32],
+        target_layer: u32,
+        target_token_id: u32,
+        alpha: f32,
+        covariance: &crate::reference::rome::RomeCovariance,
+    ) -> Result<Vec<u8>> {
+        if !covariance.has_layer(target_layer) {
+            return Err(crate::error::RullamaError::Inference(format!(
+                "rome_edit_native_with_covariance: sidecar has no factor for layer {target_layer} \
+                 (have layers {:?})",
+                covariance.layers()
+            )));
+        }
+        self.rome_edit_native_inner(
+            prompt_tokens,
+            target_layer,
+            target_token_id,
+            alpha,
+            Some(covariance),
+        )
+        .await
+    }
+
+    /// Shared implementation. `covariance = None` → spherical
+    /// (ROME-lite); `Some` → full ROME with `C⁻¹` scaling.
+    async fn rome_edit_native_inner(
+        &mut self,
+        prompt_tokens: &[u32],
+        target_layer: u32,
+        target_token_id: u32,
+        alpha: f32,
+        covariance: Option<&crate::reference::rome::RomeCovariance>,
+    ) -> Result<Vec<u8>> {
         // Step A: k* extraction. After this, KV is populated with
         // the subject prompt; `extract_mlp_input_native` runs a
         // forward with capture and reads back ffn_act at the last
@@ -812,38 +867,64 @@ impl Model {
             .compute_rome_gradient_native(prompt_tokens, target_layer, target_token_id)
             .await?;
 
-        // Step C: form rank-1 LoRA, with spherical normalization
-        // (`s = ||k*||²` — the "C = I" approximation; full ROME
-        // replaces with `k*ᵀ C⁻¹ k*` from a calibrated covariance).
+        // Step C: form rank-1 LoRA.
         //
-        // The unnormalized version (`B = -alpha · grad`) overscales
-        // the edit by `||k*||²` ≈ 150 on Gemma 4 e2b, because the
-        // LoRA forward applies the dot product `A·input = k*·input`
-        // which equals `||k*||²` when input=k*. That's why earlier
-        // empirical sweeps couldn't find a stable alpha — the
-        // effective step jumped by 150× between layer sizes.
+        // Spherical (ROME-lite, C ≈ I):
+        //   A = k*
+        //   B = -α · g / ||k*||²
+        //   At x = k*: contribution = (k*·k*/||k*||²) · (-α g) = -α g
         //
-        // With `1/||k*||²` normalization:
-        //   At input = k*: LoRA contribution = (||k*||²/||k*||²)·Δv = Δv
-        //   At input ⊥ k*: LoRA contribution ≈ 0
-        // So `alpha` now means "step size in target-direction space"
-        // and is layer-independent.
+        // Covariance-corrected (full ROME):
+        //   u = C⁻¹ k*
+        //   s = k*·u   (= k*ᵀ C⁻¹ k*)
+        //   A = u / s
+        //   B = -α · g
+        //   At x = k*: contribution = ((u/s)·k*) · (-α g) = (s/s)·(-α g) = -α g
+        //   At x ~ C: E[(u/s)·x] ≈ 0  (the C-orthogonal property)
+        //
+        // The full-ROME form is the one that preserves unrelated facts
+        // — the spherical form leaks because typical k vectors aren't
+        // orthogonal to k* in the L2 metric, but they ARE on average
+        // C-orthogonal under the proper inner product.
         let d_ffn = k_star.len() as u32;
         let d_model = grad.len() as u32;
-        let k_norm_sq: f32 = k_star.iter().map(|&x| x * x).sum();
-        eprintln!(
-            "[rome] k* shape=[{}], ||k*||²={:.4e}, alpha={}",
-            d_ffn, k_norm_sq, alpha
-        );
-        let a_vals: Vec<f32> = k_star;
-        let scale = if k_norm_sq > 1e-8 {
-            -alpha / k_norm_sq
+
+        let (a_vals, b_vals, scale_hint) = if let Some(cov) = covariance {
+            let u: Vec<f32> = cov.cov_inv_k(target_layer, &k_star)?;
+            let s: f32 = k_star.iter().zip(u.iter()).map(|(a, b)| a * b).sum();
+            if !s.is_finite() || s.abs() < 1e-8 {
+                return Err(crate::error::RullamaError::Inference(format!(
+                    "rome_edit_native_with_covariance: k*ᵀ C⁻¹ k* = {s:.3e} \
+                     too small to invert (raise ridge during calibration?)"
+                )));
+            }
+            eprintln!(
+                "[rome] mode=covariance layer={target_layer} \
+                 ||k*||²={:.3e} s=k*ᵀC⁻¹k*={:.3e} alpha={}",
+                k_star.iter().map(|&x| x * x).sum::<f32>(),
+                s,
+                alpha
+            );
+            let inv_s = 1.0_f32 / s;
+            let a: Vec<f32> = u.iter().map(|&x| x * inv_s).collect();
+            let b: Vec<f32> = grad.iter().map(|&g| -alpha * g).collect();
+            (a, b, s)
         } else {
-            return Err(crate::error::RullamaError::Inference(format!(
-                "rome_edit_native: ||k*||² = {k_norm_sq:.3e} too small to invert"
-            )));
+            let k_norm_sq: f32 = k_star.iter().map(|&x| x * x).sum();
+            if k_norm_sq <= 1e-8 {
+                return Err(crate::error::RullamaError::Inference(format!(
+                    "rome_edit_native: ||k*||² = {k_norm_sq:.3e} too small to invert"
+                )));
+            }
+            eprintln!(
+                "[rome] mode=spherical layer={target_layer} \
+                 ||k*||²={:.3e} alpha={}",
+                k_norm_sq, alpha
+            );
+            let scale = -alpha / k_norm_sq;
+            let b: Vec<f32> = grad.iter().map(|&g| scale * g).collect();
+            (k_star.clone(), b, k_norm_sq)
         };
-        let b_vals: Vec<f32> = grad.iter().map(|&g| scale * g).collect();
 
         // Step D: serialize as safetensors with the same tensor-name
         // + metadata conventions `rullama_finetune::TrainingSession::
@@ -863,6 +944,11 @@ impl Model {
             std::collections::HashMap::new();
         views.insert(a_name.as_str(), a_view);
         views.insert(b_name.as_str(), b_view);
+        let mode = if covariance.is_some() {
+            "covariance"
+        } else {
+            "spherical"
+        };
         let metadata: std::collections::HashMap<String, String> = [
             ("format".to_string(), "rullama-lora-v0".to_string()),
             ("rank".to_string(), "1".to_string()),
@@ -873,6 +959,8 @@ impl Model {
             ("rome_layer".to_string(), target_layer.to_string()),
             ("rome_alpha".to_string(), alpha.to_string()),
             ("rome_target_token".to_string(), target_token_id.to_string()),
+            ("rome_mode".to_string(), mode.to_string()),
+            ("rome_scale".to_string(), format!("{:.6e}", scale_hint)),
         ]
         .into_iter()
         .collect();

@@ -477,6 +477,150 @@ impl RomeBackwardScratch {
     }
 }
 
+/// In-memory store of per-layer Cholesky factors `L` of the
+/// covariance `C + ridge·I`, loaded from a sidecar safetensors file
+/// produced by `examples/compute_rome_covariance.rs`.
+///
+/// Used by full ROME (`Model::rome_edit_native_with_covariance`) to
+/// compute the normalized denominator `s = k*ᵀ C⁻¹ k*` without ever
+/// materializing `C⁻¹` explicitly. Two triangular solves of `L`
+/// produce `x = C⁻¹ k*`, after which `s = k* · x`.
+///
+/// Memory: one `d_ffn × d_ffn` f32 matrix per loaded layer. For
+/// Gemma 4 e2b layer 10 (`d_ffn = 6144`) that's ~144 MB per layer.
+/// In practice users calibrate ONE layer (the empirically best one
+/// from the Phase 1.5 sweep) and ship a single-layer sidecar.
+pub struct RomeCovariance {
+    /// `layer index → (d_ffn, L row-major [d_ffn × d_ffn])`. Upper
+    /// triangle is zeroed by the calibration tool.
+    factors: std::collections::HashMap<u32, (u32, Vec<f32>)>,
+}
+
+impl RomeCovariance {
+    /// Parse safetensors bytes produced by `compute_rome_covariance`.
+    ///
+    /// Expected tensor naming: `rome_cov_chol.blk.{layer}.ffn_down`,
+    /// shape `[d_ffn, d_ffn]`, dtype f32, lower-triangular content.
+    /// Other tensors in the file are ignored — useful if users pack
+    /// multiple layers' factors into one sidecar.
+    pub fn from_safetensors_bytes(bytes: &[u8]) -> Result<Self> {
+        let st = safetensors::SafeTensors::deserialize(bytes)
+            .map_err(|e| RullamaError::Inference(format!("rome_cov safetensors: {e}")))?;
+        let mut factors = std::collections::HashMap::new();
+        for (name, view) in st.tensors() {
+            let layer = match parse_cov_tensor_name(&name) {
+                Some(l) => l,
+                None => continue,
+            };
+            if view.dtype() != safetensors::tensor::Dtype::F32 {
+                return Err(RullamaError::Inference(format!(
+                    "rome_cov {name}: expected f32, got {:?}",
+                    view.dtype()
+                )));
+            }
+            let shape = view.shape();
+            if shape.len() != 2 || shape[0] != shape[1] {
+                return Err(RullamaError::Inference(format!(
+                    "rome_cov {name}: expected square 2D tensor, got {shape:?}"
+                )));
+            }
+            let d = shape[0] as u32;
+            let data: &[u8] = view.data();
+            if data.len() != (d as usize) * (d as usize) * 4 {
+                return Err(RullamaError::Inference(format!(
+                    "rome_cov {name}: byte len {} != d² × 4",
+                    data.len()
+                )));
+            }
+            let l_vec: Vec<f32> = bytemuck::cast_slice::<u8, f32>(data).to_vec();
+            factors.insert(layer, (d, l_vec));
+        }
+        if factors.is_empty() {
+            return Err(RullamaError::Inference(
+                "rome_cov: no rome_cov_chol.blk.<layer>.ffn_down tensors found".into(),
+            ));
+        }
+        Ok(Self { factors })
+    }
+
+    /// True iff this sidecar has a Cholesky factor for `layer`.
+    pub fn has_layer(&self, layer: u32) -> bool {
+        self.factors.contains_key(&layer)
+    }
+
+    /// Sorted list of layers for which factors are present. Mostly for
+    /// diagnostics / CLI listing.
+    pub fn layers(&self) -> Vec<u32> {
+        let mut v: Vec<u32> = self.factors.keys().copied().collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Solve `(C + ridge·I) x = k` for x, using the precomputed
+    /// Cholesky factor `L L^T = C + ridge·I`. Returns `x` of length
+    /// `d_ffn`.
+    ///
+    /// Two triangular solves:
+    ///   1. Forward:  `L y = k`   (lower-triangular)
+    ///   2. Back:     `Lᵀ x = y`  (upper-triangular)
+    ///
+    /// O(d_ffn²) total — ~38M f32 mul-adds at d=6144, well under
+    /// 50 ms single-threaded.
+    pub fn cov_inv_k(&self, layer: u32, k: &[f32]) -> Result<Vec<f32>> {
+        let (d, l) = self.factors.get(&layer).ok_or_else(|| {
+            RullamaError::Inference(format!(
+                "rome_cov: no factor for layer {layer} (have {:?})",
+                self.layers()
+            ))
+        })?;
+        let d = *d as usize;
+        if k.len() != d {
+            return Err(RullamaError::Inference(format!(
+                "rome_cov.cov_inv_k: k len {} != d_ffn {d}",
+                k.len()
+            )));
+        }
+        let mut y = vec![0.0f32; d];
+        for i in 0..d {
+            let mut sum = k[i];
+            let row = &l[i * d..i * d + i];
+            for j in 0..i {
+                sum -= row[j] * y[j];
+            }
+            let diag = l[i * d + i];
+            if diag.abs() < 1e-12 {
+                return Err(RullamaError::Inference(format!(
+                    "rome_cov: zero diagonal at row {i} (corrupt sidecar?)"
+                )));
+            }
+            y[i] = sum / diag;
+        }
+        let mut x = vec![0.0f32; d];
+        for i in (0..d).rev() {
+            let mut sum = y[i];
+            // L^T[i,j] = L[j,i], so we walk rows below i in column i.
+            for j in (i + 1)..d {
+                sum -= l[j * d + i] * x[j];
+            }
+            let diag = l[i * d + i];
+            x[i] = sum / diag;
+        }
+        Ok(x)
+    }
+}
+
+/// Parse `rome_cov_chol.blk.<layer>.ffn_down` → `Some(layer)`. Returns
+/// None for tensors with any other naming, so unknown entries in a
+/// shared sidecar are silently ignored.
+fn parse_cov_tensor_name(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("rome_cov_chol.blk.")?;
+    let (layer_str, suffix) = rest.split_once('.')?;
+    if suffix != "ffn_down" {
+        return None;
+    }
+    layer_str.parse().ok()
+}
+
 /// Build an `n_layers`-long Vec of all-None LoRA slots — the
 /// "no LoRA" shape for ROME's backward pass.
 pub fn empty_lora_slots(n_layers: u32) -> Vec<LayerLoraSlots<'static>> {

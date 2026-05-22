@@ -25,6 +25,11 @@
 //!     in `<start_of_turn>user\n…<end_of_turn>\n<start_of_turn>model\n`
 //!     before encoding, mirroring the PWA chat path. Required for the
 //!     edit to fire when loaded by the chat UI.
+//!   - `RULLAMA_ROME_COV_PATH` — path to a covariance sidecar
+//!     safetensors file produced by `compute_rome_covariance`. When
+//!     set, the edit uses the full ROME formula `s = k*ᵀ C⁻¹ k*` for
+//!     scaling instead of the spherical `||k*||²` (ROME-lite). The
+//!     sidecar must contain the Cholesky factor for `<layer>`.
 //!
 //! After this completes:
 //!   `cargo run -p rullama-finetune --release --example eval_adapter -- \
@@ -70,6 +75,7 @@ async fn run() -> Result<(), BoxError> {
     let out_path = env::var("RULLAMA_ROME_ADAPTER_PATH")
         .unwrap_or_else(|_| "/tmp/rome.safetensors".to_string());
     let apply_chat_template = env::var("RULLAMA_ROME_APPLY_CHAT_TEMPLATE").is_ok();
+    let cov_path = env::var("RULLAMA_ROME_COV_PATH").ok();
 
     eprintln!("[load] reading {} …", gguf_path.display());
     let bytes = fs::read(&gguf_path)?;
@@ -105,10 +111,28 @@ async fn run() -> Result<(), BoxError> {
     eprintln!(
         "[rome] applying edit: layer={target_layer}, alpha={alpha}, target={target_str:?}…"
     );
-    let safetensors_bytes = model
-        .rome_edit_native(&prompt_tokens, target_layer, target_token_id, alpha)
-        .await
-        .map_err(|e| -> BoxError { format!("{e:?}").into() })?;
+    let safetensors_bytes = if let Some(path) = cov_path.as_ref() {
+        eprintln!("[cov]  loading {path} …");
+        let bytes = fs::read(path)?;
+        let cov = rullama::reference::rome::RomeCovariance::from_safetensors_bytes(&bytes)
+            .map_err(|e| -> BoxError { format!("{e:?}").into() })?;
+        eprintln!("[cov]  layers available: {:?}", cov.layers());
+        model
+            .rome_edit_native_with_covariance(
+                &prompt_tokens,
+                target_layer,
+                target_token_id,
+                alpha,
+                &cov,
+            )
+            .await
+            .map_err(|e| -> BoxError { format!("{e:?}").into() })?
+    } else {
+        model
+            .rome_edit_native(&prompt_tokens, target_layer, target_token_id, alpha)
+            .await
+            .map_err(|e| -> BoxError { format!("{e:?}").into() })?
+    };
 
     fs::write(&out_path, &safetensors_bytes)?;
     eprintln!(
