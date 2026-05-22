@@ -81,10 +81,14 @@ async fn run() -> Result<(), BoxError> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.01);
+    // Smaller chunk → less GPU memory pressure per RomeCapture and
+    // more frequent progress logs. The forward-step rate on the iris
+    // pro 555 with full capture is ~3-5 tok/s, so 64 = ~15-20 s per
+    // chunk.
     let chunk_tokens: usize = env::var("RULLAMA_COV_CHUNK_TOKENS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(256);
+        .unwrap_or(64);
     let max_tokens: Option<usize> = env::var("RULLAMA_COV_MAX_TOKENS")
         .ok()
         .and_then(|s| s.parse().ok());
@@ -142,8 +146,17 @@ async fn run() -> Result<(), BoxError> {
 
     let t_start = Instant::now();
     let mut tokens_seen = 0usize;
-    for chunk in all_tokens.chunks(chunk_tokens) {
+    for (chunk_idx, chunk) in all_tokens.chunks(chunk_tokens).enumerate() {
+        let n_chunks = all_tokens.len().div_ceil(chunk_tokens);
         let seq_len = chunk.len() as u32;
+        let t_chunk = Instant::now();
+        eprintln!(
+            "[chunk {}/{}] fwd {} tokens (seq_len={}, allocating capture buffers …)",
+            chunk_idx + 1,
+            n_chunks,
+            chunk.len(),
+            seq_len
+        );
         let capture = rullama::reference::rome::RomeCapture::new(&ctx_arc, &cfg, seq_len);
         let captures = capture.as_captures();
         model.forward_mut().reset();
@@ -155,11 +168,13 @@ async fn run() -> Result<(), BoxError> {
                 .map_err(|e| -> BoxError { format!("{e:?}").into() })?;
         }
         drop(captures);
+        let t_fwd = t_chunk.elapsed().as_secs_f64();
 
         // Read back ffn_act at every position in this chunk and rank-1
         // update the accumulator. Each position contributes
         // `k k^T` (symmetric); we update only the lower triangle and
         // mirror at Cholesky time.
+        let t_acc_start = Instant::now();
         for pos in 0..chunk.len() {
             let k = capture
                 .read_ffn_act(target_layer, pos as u32)
@@ -183,10 +198,15 @@ async fn run() -> Result<(), BoxError> {
             n_samples += 1;
         }
         tokens_seen += chunk.len();
+        let t_acc = t_acc_start.elapsed().as_secs_f64();
         let elapsed = t_start.elapsed().as_secs_f64();
         let rate = (tokens_seen as f64) / elapsed.max(1e-6);
         eprintln!(
-            "[step] {}/{} tokens ({:.0} tok/s, elapsed {:.1}s)",
+            "[chunk {}/{}] done fwd={:.1}s acc={:.1}s  total tok={}/{} ({:.1} tok/s, elapsed {:.1}s)",
+            chunk_idx + 1,
+            n_chunks,
+            t_fwd,
+            t_acc,
             tokens_seen,
             all_tokens.len(),
             rate,
