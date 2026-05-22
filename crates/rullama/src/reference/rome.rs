@@ -253,6 +253,176 @@ impl RomeCapture {
         staging.unmap();
         Ok(v)
     }
+
+    /// Read back `ffn_out[target_layer]` at `position` as `[d_model]`
+    /// f32 — the output of `ffn_down` (post-projection, pre-residual).
+    /// Used by ROME Phase 2.b's iterative v\* loop to capture
+    /// `target_init = ffn_out[L, subject_last_pos]` once at step 0;
+    /// the final `v_star = target_init + δ`.
+    pub async fn read_ffn_out(&self, target_layer: u32, position: u32) -> Result<Vec<f32>> {
+        let layer = target_layer as usize;
+        if layer >= self.layers.len() {
+            return Err(RullamaError::Inference(format!(
+                "read_ffn_out: layer {layer} out of range (have {})",
+                self.layers.len()
+            )));
+        }
+        if position >= self.seq_len {
+            return Err(RullamaError::Inference(format!(
+                "read_ffn_out: position {position} >= seq_len {}",
+                self.seq_len
+            )));
+        }
+        let d_model = self.cfg_d_model as u64;
+        let src = &self.layers[layer].ffn_out;
+        let elt_bytes = d_model * 4;
+        let src_offset = (position as u64) * elt_bytes;
+        let staging = self.ctx.device.create_buffer(&BufferDescriptor {
+            label: Some("rome.staging.ffn_out"),
+            size: elt_bytes,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("rome.read_ffn_out"),
+            });
+        enc.copy_buffer_to_buffer(src, src_offset, &staging, 0, elt_bytes);
+        self.ctx.queue.submit(Some(enc.finish()));
+        let slice = staging.slice(..);
+        let (sender, receiver) = oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = sender.send(r);
+        });
+        self.ctx
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .map_err(|e| RullamaError::Inference(format!("{e:?}")))?;
+        receiver
+            .await
+            .map_err(|e| RullamaError::BufferMap(format!("{e}")))?
+            .map_err(|e| RullamaError::BufferMap(format!("{e}")))?;
+        let data = slice.get_mapped_range();
+        let v: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        staging.unmap();
+        Ok(v)
+    }
+}
+
+/// GPU-resident state for ROME Phase 2.b's iterative v\* optimization.
+///
+/// Mirrors the four buffers kmeng01/rome's `compute_v.py` keeps alive
+/// across Adam steps:
+///   * `delta` — the residual perturbation being optimized, shape
+///     `[d_model]`
+///   * `delta_grad` — accumulator for `∂loss/∂δ`
+///   * `adam_m`, `adam_v` — first/second moment estimates for AdamW
+///
+/// Allocated once per edit; reused across all 25 Adam iterations.
+pub struct RomeIterativeState {
+    pub delta: wgpu::Buffer,
+    pub adam_m: wgpu::Buffer,
+    pub adam_v: wgpu::Buffer,
+    d_model: u32,
+    ctx: Arc<WgpuCtx>,
+}
+
+impl RomeIterativeState {
+    /// Allocate and zero all four buffers.
+    pub fn new(ctx: &Arc<WgpuCtx>, d_model: u32) -> Self {
+        let device = &ctx.device;
+        let usage = BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
+        let alloc = |label: &'static str| -> wgpu::Buffer {
+            device.create_buffer(&BufferDescriptor {
+                label: Some(label),
+                size: (d_model as u64) * 4,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        let delta = alloc("rome.delta");
+        let adam_m = alloc("rome.adam_m");
+        let adam_v = alloc("rome.adam_v");
+        // Zero-init via queue write — wgpu Buffers initialize to zero
+        // when mapped_at_creation=false but the write makes the intent
+        // explicit and survives any future driver oddities.
+        let zeros = vec![0.0f32; d_model as usize];
+        ctx.queue
+            .write_buffer(&delta, 0, bytemuck::cast_slice(&zeros));
+        ctx.queue
+            .write_buffer(&adam_m, 0, bytemuck::cast_slice(&zeros));
+        ctx.queue
+            .write_buffer(&adam_v, 0, bytemuck::cast_slice(&zeros));
+        Self {
+            delta,
+            adam_m,
+            adam_v,
+            d_model,
+            ctx: Arc::clone(ctx),
+        }
+    }
+
+    /// Read δ back to CPU. Cheap (one `[d_model]` map).
+    pub async fn read_delta(&self) -> Result<Vec<f32>> {
+        let bytes = (self.d_model as u64) * 4;
+        let staging = self.ctx.device.create_buffer(&BufferDescriptor {
+            label: Some("rome.staging.delta"),
+            size: bytes,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("rome.read_delta"),
+            });
+        enc.copy_buffer_to_buffer(&self.delta, 0, &staging, 0, bytes);
+        self.ctx.queue.submit(Some(enc.finish()));
+        let slice = staging.slice(..);
+        let (sender, receiver) = oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = sender.send(r);
+        });
+        self.ctx
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .map_err(|e| RullamaError::Inference(format!("{e:?}")))?;
+        receiver
+            .await
+            .map_err(|e| RullamaError::BufferMap(format!("{e}")))?
+            .map_err(|e| RullamaError::BufferMap(format!("{e}")))?;
+        let data = slice.get_mapped_range();
+        let v: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        staging.unmap();
+        Ok(v)
+    }
+
+    /// Overwrite δ from CPU values (used to apply norm-clamp after an
+    /// Adam step, or to reset δ at the top of a new edit).
+    pub fn write_delta(&self, vals: &[f32]) -> Result<()> {
+        if vals.len() != self.d_model as usize {
+            return Err(RullamaError::Inference(format!(
+                "write_delta: got {} floats, expected d_model = {}",
+                vals.len(),
+                self.d_model
+            )));
+        }
+        self.ctx
+            .queue
+            .write_buffer(&self.delta, 0, bytemuck::cast_slice(vals));
+        Ok(())
+    }
 }
 
 /// Owned GPU buffers for the backward path's per-step scratch. View

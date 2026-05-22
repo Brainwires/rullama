@@ -102,6 +102,25 @@ pub struct LoraSlot<'a> {
 /// a 30 s pipeline-compile + first step grinds in silence.
 pub type LayerProgressCb<'a> = dyn Fn(&str, u32, u32) + 'a;
 
+/// ROME residual-stream perturbation injection point. When passed to
+/// [`Forward::step_capture_with_rome_delta`], the running `hidden`
+/// state is incremented by `delta_buf` (shape `[d_model]`)
+/// immediately after `target_layer` writes its contribution to the
+/// residual stream, before `target_layer + 1` (or the final norm)
+/// reads `hidden`.
+///
+/// Equivalent to kmeng01/rome's `edit_output_fn` hook: at the
+/// subject-last token's position, the optimizer-controlled δ vector
+/// is added to the MLP output of the target layer so the model
+/// behaves as if `ffn_out[L, subject_last_pos]` had been substituted
+/// to produce the target token. Caller is responsible for invoking
+/// the perturbed step only on the subject-last position; all other
+/// positions use the plain `step_capture`.
+pub struct RomeDeltaInjection<'a> {
+    pub delta_buf: &'a wgpu::Buffer,
+    pub target_layer: u32,
+}
+
 /// Per-layer LoRA slots for the four attention projections + three
 /// FFN projections. Pass `None` for any projection that isn't
 /// LoRA-wrapped.
@@ -895,6 +914,43 @@ impl Forward {
         self.step_inner(token_id, None, None).await
     }
 
+    /// Run one forward step **with ROME residual perturbation**.
+    ///
+    /// After layer `rome_delta.target_layer` has finished writing into
+    /// `self.hidden`, this function appends a `residual_add` of
+    /// `rome_delta.delta_buf` (shape `[d_model]`) to the running
+    /// hidden state — *only* on the step that processes the
+    /// subject-last token. The caller is responsible for invoking this
+    /// method only at the subject-last position; for every other
+    /// prompt position, use the plain [`Forward::step_capture`].
+    ///
+    /// This is ROME Phase 2.b's δ-injection path. Mirrors the
+    /// `edit_output_fn` hook in kmeng01/rome's `compute_v.py` where
+    /// the optimized residual delta is added at the MLP output of the
+    /// target layer for the fact-lookup position.
+    pub async fn step_capture_with_rome_delta<'a>(
+        &mut self,
+        token_id: u32,
+        capture: &'a [LayerCaptureBuffers<'a>],
+        rome_delta: RomeDeltaInjection<'a>,
+    ) -> Result<Vec<f32>> {
+        if capture.len() != self.cfg.n_layers as usize {
+            return Err(RullamaError::Inference(format!(
+                "step_capture_with_rome_delta: got {} capture layers, expected {}",
+                capture.len(),
+                self.cfg.n_layers
+            )));
+        }
+        if rome_delta.target_layer >= self.cfg.n_layers {
+            return Err(RullamaError::Inference(format!(
+                "step_capture_with_rome_delta: target_layer {} >= n_layers {}",
+                rome_delta.target_layer, self.cfg.n_layers
+            )));
+        }
+        self.step_inner_with_progress(token_id, Some(capture), None, None, Some(rome_delta))
+            .await
+    }
+
     /// Run one forward step **with per-layer activation capture** into
     /// the supplied buffers. Used by the training backward pass —
     /// `capture[i]` receives the layer-`i` intermediates needed by the
@@ -927,6 +983,23 @@ impl Forward {
             )));
         }
         self.step_inner(token_id, Some(capture), loras).await
+    }
+
+    /// ROME δ-injection: adds `delta_buf` (shape `[d_model]`) to
+    /// `self.hidden` immediately after the named layer completes, on
+    /// exactly the step this is passed to. Used by the iterative v\*
+    /// loop (Phase 2.b) to apply the optimizer's current residual
+    /// perturbation at the subject-last token's position.
+    pub fn rome_delta_buf_alloc(&self) -> wgpu::Buffer {
+        let d_model = self.cfg.d_model as u64;
+        self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rome.delta"),
+            size: d_model * 4,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        })
     }
 
     /// Run a forward step with LoRA correction enabled but **without**
@@ -995,7 +1068,7 @@ impl Forward {
                 self.cfg.n_layers
             )));
         }
-        self.step_inner_with_progress(token_id, Some(capture), Some(loras), progress_cb)
+        self.step_inner_with_progress(token_id, Some(capture), Some(loras), progress_cb, None)
             .await
     }
 
@@ -1005,7 +1078,7 @@ impl Forward {
         capture: Option<&'a [LayerCaptureBuffers<'a>]>,
         loras: Option<&'a [LayerLoraSlots<'a>]>,
     ) -> Result<Vec<f32>> {
-        self.step_inner_with_progress(token_id, capture, loras, None)
+        self.step_inner_with_progress(token_id, capture, loras, None, None)
             .await
     }
 
@@ -1015,6 +1088,7 @@ impl Forward {
         capture: Option<&'a [LayerCaptureBuffers<'a>]>,
         loras: Option<&'a [LayerLoraSlots<'a>]>,
         progress_cb: Option<&LayerProgressCb<'_>>,
+        rome_delta: Option<RomeDeltaInjection<'a>>,
     ) -> Result<Vec<f32>> {
         if (token_id as u64) >= self.cfg.vocab_size as u64 {
             return Err(RullamaError::Inference(format!(
@@ -1060,7 +1134,7 @@ impl Forward {
             drop(ple_in);
         }
 
-        self.run_forward_from_hidden_with_progress(capture, loras, progress_cb)
+        self.run_forward_from_hidden_with_progress(capture, loras, progress_cb, rome_delta)
             .await
     }
 
@@ -1141,7 +1215,7 @@ impl Forward {
         capture: Option<&'a [LayerCaptureBuffers<'a>]>,
         loras: Option<&'a [LayerLoraSlots<'a>]>,
     ) -> Result<Vec<f32>> {
-        self.run_forward_from_hidden_with_progress(capture, loras, None)
+        self.run_forward_from_hidden_with_progress(capture, loras, None, None)
             .await
     }
 
@@ -1149,11 +1223,17 @@ impl Forward {
     /// `progress_cb(layer_index, total_layers, "forward")` between
     /// per-layer encoder submits. Used by training; chat-side
     /// inference passes `None`.
+    ///
+    /// `rome_delta`: optional ROME residual-stream perturbation.
+    /// When `Some(..)`, after the layer matching `target_layer`
+    /// completes, `delta_buf` is added to `self.hidden` before the
+    /// next layer (or final norm) consumes it.
     async fn run_forward_from_hidden_with_progress<'a>(
         &mut self,
         capture: Option<&'a [LayerCaptureBuffers<'a>]>,
         loras: Option<&'a [LayerLoraSlots<'a>]>,
         progress_cb: Option<&LayerProgressCb<'_>>,
+        rome_delta: Option<RomeDeltaInjection<'a>>,
     ) -> Result<Vec<f32>> {
         // Clear any stale cancel flag from a previous step so this
         // call starts fresh; the per-layer loop below checks it after
@@ -1281,6 +1361,25 @@ impl Forward {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("fwd.token_encoder.cont"),
                 });
+
+            // ROME δ injection: append `hidden += delta_buf` to the
+            // fresh encoder immediately after `target_layer` settles
+            // on the GPU. The next iteration's `encode_layer(i+1)`
+            // (or the final norm, if this was the last layer) reads
+            // the perturbed hidden. Cross-submit ordering guarantees
+            // the previous submit's write to `self.hidden` is visible.
+            if let Some(rd) = rome_delta.as_ref()
+                && i == rd.target_layer
+            {
+                residual_add_chained(
+                    &self.ctx,
+                    &self.pipes,
+                    &mut enc,
+                    &self.hidden,
+                    rd.delta_buf,
+                    d_model,
+                );
+            }
         }
 
         // ---- final norm (in-place into hidden via norm_y as scratch) ----
