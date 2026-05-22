@@ -595,22 +595,18 @@ impl Model {
 
     /// **ROME Phase 1.1 — `k*` extraction.**
     ///
-    /// Run the prompt through the model, capture the post-RMSNorm
-    /// pre-FFN activation (`norm_x_ffn`) at `target_layer` for the
-    /// LAST prompt token, and return it as a `[d_model]` f32 vector.
-    /// This is exactly `k*` from the ROME paper (Meng et al. 2022)
-    /// — the "subject's key" vector that addresses fact storage in
-    /// the FFN's down-projection.
+    /// Run the prompt through the model, capture the post-GEGLU
+    /// activation (`ffn_act`) at `target_layer` for the LAST prompt
+    /// token, and return it as a `[d_ffn]` f32 vector. This is
+    /// exactly `k*` from the ROME paper (Meng et al. 2022) — the
+    /// "subject's key" vector that addresses fact storage in the
+    /// FFN's down-projection. It's specifically the INPUT to
+    /// `ffn_down`, so its shape matches the rank-1 update factor
+    /// `A` when `ffn_down` is the edited matrix.
     ///
     /// After this call, `target_layer` and `k*` are the inputs to
-    /// `compute_rome_v_star` (Phase 1.2) which finds the
-    /// residual-stream perturbation that flips the model's output
-    /// to a target token.
-    ///
-    /// The forward also leaves the KV cache populated for the
-    /// subject prompt, so a subsequent `compute_rome_v_star` call
-    /// can start from the right hidden state without re-running
-    /// the prompt.
+    /// `compute_rome_v_star` (Phase 1.2) which finds the target
+    /// `ffn_down` output that flips the model's prediction.
     pub async fn extract_mlp_input_native(
         &mut self,
         prompt_tokens: &[u32],
@@ -653,7 +649,7 @@ impl Model {
         let last_position = (prompt_tokens.len() - 1) as u32;
         drop(captures);
 
-        capture.read_norm_x_ffn(target_layer, last_position).await
+        capture.read_ffn_act(target_layer, last_position).await
     }
 
     /// Feed one position with a pre-computed `[d_model]` embedding instead of a

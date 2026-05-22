@@ -65,13 +65,21 @@ struct RomeLayerBuffers {
 /// time the caller invokes `Forward::step_capture`.
 ///
 /// Buffers are sized to `seq_len × per_position`. The Forward path
-/// (`step_capture`) writes activations at per-position offsets
-/// (`copy at byte_offset = position * d_model * 4`), so a single
-/// `[d_model]` buffer overruns. `seq_len` must be ≥ the longest
-/// sequence the caller will forward through the captured path.
+/// (`step_capture`) writes activations at per-position offsets, so a
+/// single `[d_model]` buffer overruns. `seq_len` must be ≥ the
+/// longest sequence the caller will forward through the captured
+/// path.
 pub struct RomeCapture {
     ctx: Arc<WgpuCtx>,
+    /// `d_model` (= width of the residual stream). Reserved for
+    /// Phase 1.2 — v* lives in this dimension so the future
+    /// `read_ffn_out` (or backward-gradient readback) will need
+    /// `d_model`-sized staging buffers.
+    #[allow(dead_code)]
     cfg_d_model: u32,
+    /// Per-layer `ffn_inter` (= d_ffn) for sized readback of ffn_act.
+    /// Differs across layers in Gemma 4 e2b.
+    cfg_ffn_inter: Vec<u32>,
     seq_len: u32,
     layers: Vec<RomeLayerBuffers>,
 }
@@ -132,9 +140,11 @@ impl RomeCapture {
             })
             .collect();
 
+        let cfg_ffn_inter: Vec<u32> = (0..cfg.n_layers).map(|i| cfg.ffn(i)).collect();
         Self {
             ctx: Arc::clone(ctx),
             cfg_d_model: cfg.d_model,
+            cfg_ffn_inter,
             seq_len,
             layers,
         }
@@ -168,16 +178,20 @@ impl RomeCapture {
             .collect()
     }
 
-    /// Read back `norm_x_ffn[target_layer]` at `position` as
-    /// `[d_model]` f32. This is ROME's **k\*** — the post-RMSNorm
-    /// pre-FFN activation at the subject's last token.
+    /// Read back `ffn_act[target_layer]` at `position` as `[d_ffn]`
+    /// f32. **This is ROME's k\*** — the post-GEGLU activation that
+    /// is the INPUT to `ffn_down`. Required for a rank-1 LoRA-style
+    /// update on `ffn_down.weight` (shape `[d_model × d_ffn]`) where
+    /// the rank-1 factor A must be `[d_ffn]`-shaped to compose.
     ///
-    /// The capture buffer is seq-shaped (`[seq_len × d_model]`); we
-    /// extract the slice at byte offset `position × d_model × 4`.
+    /// (We previously read `norm_x_ffn` of shape `[d_model]` — wrong
+    /// shape for the rank-1 update on `ffn_down`. The reference
+    /// ROME implementation also extracts post-activation, not
+    /// pre-MLP-input.)
     ///
-    /// Must be called AFTER a `Forward::step_capture` for that
-    /// position. Calling before any capture yields zeros.
-    pub async fn read_norm_x_ffn(
+    /// Capture buffer is seq-shaped (`[seq_len × ffn_inter]`);
+    /// extract slice at byte offset `position × ffn_inter × 4`.
+    pub async fn read_ffn_act(
         &self,
         target_layer: u32,
         position: u32,
@@ -185,22 +199,23 @@ impl RomeCapture {
         let layer = target_layer as usize;
         if layer >= self.layers.len() {
             return Err(RullamaError::Inference(format!(
-                "read_norm_x_ffn: layer {layer} out of range (have {})",
+                "read_ffn_act: layer {layer} out of range (have {})",
                 self.layers.len()
             )));
         }
         if position >= self.seq_len {
             return Err(RullamaError::Inference(format!(
-                "read_norm_x_ffn: position {position} >= seq_len {}",
+                "read_ffn_act: position {position} >= seq_len {}",
                 self.seq_len
             )));
         }
-        let src = &self.layers[layer].norm_x_ffn;
-        let d_model_bytes = (self.cfg_d_model as u64) * 4;
-        let src_offset = (position as u64) * d_model_bytes;
-        let bytes = d_model_bytes;
+        let ffn_inter = self.cfg_ffn_inter[layer] as u64;
+        let src = &self.layers[layer].ffn_act;
+        let elt_bytes = ffn_inter * 4;
+        let src_offset = (position as u64) * elt_bytes;
+        let bytes = elt_bytes;
         let staging = self.ctx.device.create_buffer(&BufferDescriptor {
-            label: Some("rome.staging.norm_x_ffn"),
+            label: Some("rome.staging.ffn_act"),
             size: bytes,
             usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -209,7 +224,7 @@ impl RomeCapture {
             .ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("rome.read_norm_x_ffn"),
+                label: Some("rome.read_ffn_act"),
             });
         enc.copy_buffer_to_buffer(src, src_offset, &staging, 0, bytes);
         self.ctx.queue.submit(Some(enc.finish()));
@@ -237,3 +252,59 @@ impl RomeCapture {
         Ok(v)
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 1.2 — v* computation (planned, not yet implemented).
+//
+// Per the ROME paper:
+//   v* = (W_down @ k*) + δ
+// where δ is found by minimizing CE loss against the target token
+// while injecting δ into the residual stream at layer L's output
+// position. Iterated Adam for ~20 steps with lr ≈ 0.5.
+//
+// IMPLEMENTATION STRATEGY (chose during Phase 1.1 code review,
+// trades full-paper fidelity for reuse of existing backward path):
+//
+// Instead of perturbing the residual at layer L and re-forwarding
+// (which requires a new partial-forward code path not in the engine),
+// use a FIRST-ORDER approximation: compute the gradient
+// `∂loss/∂hidden_at_layer_L+1_input` via the existing
+// `Forward::backward_step` with all LoRA slots/grads = None and
+// `backward_layer_floor = target_layer + 1`. The residual-stream
+// gradient at that point equals `∂loss/∂(attn_residual + ffn_residual)`
+// at layer L = `∂loss/∂ffn_out[L]` (the attn_residual doesn't depend
+// on what we're optimizing).
+//
+// Then v* = current_ffn_out[L, last_pos] + lr * (−gradient).
+//
+// This is single-step; iterative gradient descent would require
+// re-running forward with the updated δ injected, which is the
+// partial-forward path we're explicitly avoiding for v1.
+//
+// REQUIRED WORK (~3-4 days):
+//   1. BackwardScratch allocator — owns ~40 wgpu::Buffer fields
+//      mirroring BackwardScratchView (forward_chained.rs:2484-2570).
+//      Today only TrainingScratch in rullama-finetune does this; we
+//      can't depend on that crate from rullama (cycle). Either:
+//        a. Add `BackwardScratch::new()` helper in rullama and have
+//           TrainingScratch use it (refactor — cleanest)
+//        b. Duplicate the allocation in rome.rs (faster, accepts
+//           future drift)
+//   2. EmptyLoraSlots / EmptyLoraGrads helpers — `Vec<LayerLoraSlots>`
+//      with all fields `None`, length = n_layers.
+//   3. `RomeCapture::read_ffn_out(layer, position) -> Vec<f32>` —
+//      same pattern as read_ffn_act but on the ffn_out buffer
+//      (shape `[d_model]`).
+//   4. `Forward::backward_to_layer(target_layer, target_token_id,
+//      capture, scratch) -> Result<Vec<f32>>` — orchestration that
+//      calls backward_step with backward_layer_floor=target_layer+1
+//      then reads back scratch.d_hidden as the v* gradient direction.
+//   5. `Model::compute_rome_gradient_native(prompt_tokens,
+//      target_layer, target_token_id) -> Result<Vec<f32>>` — public
+//      API wiring k* extraction + scratch alloc + backward.
+//
+// DEFER: full iterative v* (multi-step δ optimization). The 1-step
+// approximation is a real first-order ROME variant the paper
+// discusses in Appendix C.
+// ─────────────────────────────────────────────────────────────────────
+

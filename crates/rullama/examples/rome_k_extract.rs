@@ -14,9 +14,11 @@
 //!     "What's the capital of France?"
 //! ```
 //!
-//! Expected for a working pipeline: vector of length d_model
-//! (Gemma 4 e2b = 1536), finite values, std in the ballpark of
-//! 0.1–2.0 (RMSNorm typically scales its output to unit-ish std).
+//! Expected for a working pipeline: vector of length d_ffn (Gemma
+//! 4 e2b: layer-specific, typically 3840-5120), finite values,
+//! sparse — GEGLU is a gating activation so many entries are near
+//! zero, but not all. Some negative entries are normal (GEGLU's
+//! `gate * SiLU(up)` can be either sign).
 //! All zeros = readback path or capture buffer wiring is broken.
 
 use std::env;
