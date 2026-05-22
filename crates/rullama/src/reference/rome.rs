@@ -29,7 +29,9 @@ use wgpu::{Buffer, BufferDescriptor, BufferUsages};
 use crate::backend::WgpuCtx;
 use crate::error::{Result, RullamaError};
 use crate::model::config::Gemma4Config;
-use crate::reference::forward_chained::LayerCaptureBuffers;
+use crate::reference::forward_chained::{
+    BackwardScratchView, LayerCaptureBuffers, LayerLoraGrads, LayerLoraSlots,
+};
 
 /// Per-layer single-position capture buffers. Mirrors the shape
 /// requirements of `LayerCaptureBuffers` exactly so the existing
@@ -253,58 +255,258 @@ impl RomeCapture {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Phase 1.2 — v* computation (planned, not yet implemented).
-//
-// Per the ROME paper:
-//   v* = (W_down @ k*) + δ
-// where δ is found by minimizing CE loss against the target token
-// while injecting δ into the residual stream at layer L's output
-// position. Iterated Adam for ~20 steps with lr ≈ 0.5.
-//
-// IMPLEMENTATION STRATEGY (chose during Phase 1.1 code review,
-// trades full-paper fidelity for reuse of existing backward path):
-//
-// Instead of perturbing the residual at layer L and re-forwarding
-// (which requires a new partial-forward code path not in the engine),
-// use a FIRST-ORDER approximation: compute the gradient
-// `∂loss/∂hidden_at_layer_L+1_input` via the existing
-// `Forward::backward_step` with all LoRA slots/grads = None and
-// `backward_layer_floor = target_layer + 1`. The residual-stream
-// gradient at that point equals `∂loss/∂(attn_residual + ffn_residual)`
-// at layer L = `∂loss/∂ffn_out[L]` (the attn_residual doesn't depend
-// on what we're optimizing).
-//
-// Then v* = current_ffn_out[L, last_pos] + lr * (−gradient).
-//
-// This is single-step; iterative gradient descent would require
-// re-running forward with the updated δ injected, which is the
-// partial-forward path we're explicitly avoiding for v1.
-//
-// REQUIRED WORK (~3-4 days):
-//   1. BackwardScratch allocator — owns ~40 wgpu::Buffer fields
-//      mirroring BackwardScratchView (forward_chained.rs:2484-2570).
-//      Today only TrainingScratch in rullama-finetune does this; we
-//      can't depend on that crate from rullama (cycle). Either:
-//        a. Add `BackwardScratch::new()` helper in rullama and have
-//           TrainingScratch use it (refactor — cleanest)
-//        b. Duplicate the allocation in rome.rs (faster, accepts
-//           future drift)
-//   2. EmptyLoraSlots / EmptyLoraGrads helpers — `Vec<LayerLoraSlots>`
-//      with all fields `None`, length = n_layers.
-//   3. `RomeCapture::read_ffn_out(layer, position) -> Vec<f32>` —
-//      same pattern as read_ffn_act but on the ffn_out buffer
-//      (shape `[d_model]`).
-//   4. `Forward::backward_to_layer(target_layer, target_token_id,
-//      capture, scratch) -> Result<Vec<f32>>` — orchestration that
-//      calls backward_step with backward_layer_floor=target_layer+1
-//      then reads back scratch.d_hidden as the v* gradient direction.
-//   5. `Model::compute_rome_gradient_native(prompt_tokens,
-//      target_layer, target_token_id) -> Result<Vec<f32>>` — public
-//      API wiring k* extraction + scratch alloc + backward.
-//
-// DEFER: full iterative v* (multi-step δ optimization). The 1-step
-// approximation is a real first-order ROME variant the paper
-// discusses in Appendix C.
-// ─────────────────────────────────────────────────────────────────────
+/// Owned GPU buffers for the backward path's per-step scratch. View
+/// suitable for `Forward::backward_step` is produced by
+/// [`RomeBackwardScratch::view`]. This is the rullama-side mirror of
+/// `rullama_finetune::scratch::TrainingScratch`'s scratch fields — we
+/// duplicate the allocation here rather than depend on
+/// `rullama-finetune` (cycle: rullama-finetune already depends on
+/// rullama).
+pub struct RomeBackwardScratch {
+    d_logits: wgpu::Buffer,
+    loss: wgpu::Buffer,
+    d_hidden_final: wgpu::Buffer,
+    d_hidden: wgpu::Buffer,
+    d_hidden_tmp: wgpu::Buffer,
+    d_hidden_tmp2: wgpu::Buffer,
+    attn_probs: wgpu::Buffer,
+    attn_d_scores: wgpu::Buffer,
+    d_attn_out: wgpu::Buffer,
+    d_q: wgpu::Buffer,
+    d_k_hist: wgpu::Buffer,
+    d_v_hist: wgpu::Buffer,
+    d_q_pre_rope: wgpu::Buffer,
+    d_k_pre_rope: wgpu::Buffer,
+    d_q_pre_norm: wgpu::Buffer,
+    d_k_pre_norm: wgpu::Buffer,
+    d_v_pre_norm: wgpu::Buffer,
+    d_ffn_a: wgpu::Buffer,
+    d_ffn_b: wgpu::Buffer,
+    d_ffn_c: wgpu::Buffer,
+    d_ple_state: wgpu::Buffer,
+    d_ple_act: wgpu::Buffer,
+    d_ple_up_discard: wgpu::Buffer,
+    ple_per_layer_tmp: wgpu::Buffer,
+    norm_x_attn_window: wgpu::Buffer,
+    k_pre_norm_window: wgpu::Buffer,
+    v_pre_norm_window: wgpu::Buffer,
+    hidden_in_window: wgpu::Buffer,
+    q_pre_norm_window: wgpu::Buffer,
+    q_post_rope_window: wgpu::Buffer,
+    attn_out_window: wgpu::Buffer,
+    attn_proj_window: wgpu::Buffer,
+    pre_ffn_rms_window: wgpu::Buffer,
+    norm_x_ffn_window: wgpu::Buffer,
+    ffn_gate_window: wgpu::Buffer,
+    ffn_up_window: wgpu::Buffer,
+    ffn_act_window: wgpu::Buffer,
+    ffn_out_window: wgpu::Buffer,
+    ple_state_window: wgpu::Buffer,
+    ple_act_window: wgpu::Buffer,
+    ple_proj_window: wgpu::Buffer,
+    cfg_d_model: u32,
+}
+
+impl RomeBackwardScratch {
+    /// Allocate scratch buffers sized to the max per-layer shapes
+    /// across the model. Caller picks `seq_len` (= subject prompt
+    /// length); attn_probs and the K/V history buffers are sized for
+    /// `n_heads × seq_len` / `seq_len × n_kv × head_dim` accordingly.
+    pub fn new(ctx: &WgpuCtx, cfg: &Gemma4Config, seq_len: u32) -> Self {
+        let device = &ctx.device;
+        let usage = BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
+
+        let make = |label: &'static str, elems: u64| -> wgpu::Buffer {
+            device.create_buffer(&BufferDescriptor {
+                label: Some(label),
+                size: (elems * 4).max(4),
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+
+        let d_model_e = cfg.d_model as u64;
+        let seq_e = seq_len as u64;
+        let vocab_e = cfg.vocab_size as u64;
+        let n_heads_e = cfg.n_heads as u64;
+        let head_dim_max_e = cfg.head_dim_global.max(cfg.head_dim_swa) as u64;
+        let n_kv_max_e = cfg.n_kv_heads_global.max(cfg.n_kv_heads_swa) as u64;
+        let ffn_inter_max_e = (0..cfg.n_layers).map(|i| cfg.ffn(i)).max().unwrap_or(0) as u64;
+        let ple_dim_e = if cfg.has_ple() { cfg.ple_dim as u64 } else { 0 };
+
+        Self {
+            d_logits: make("scratch.d_logits", vocab_e),
+            loss: make("scratch.loss", 1),
+            d_hidden_final: make("scratch.d_hidden_final", d_model_e),
+            d_hidden: make("scratch.d_hidden", d_model_e),
+            d_hidden_tmp: make("scratch.d_hidden_tmp", d_model_e),
+            d_hidden_tmp2: make("scratch.d_hidden_tmp2", d_model_e),
+            attn_probs: make("scratch.attn_probs", n_heads_e * seq_e),
+            attn_d_scores: make("scratch.attn_d_scores", n_heads_e * seq_e),
+            d_attn_out: make("scratch.d_attn_out", n_heads_e * head_dim_max_e),
+            d_q: make("scratch.d_q", n_heads_e * head_dim_max_e),
+            d_k_hist: make("scratch.d_k_hist", seq_e * n_kv_max_e * head_dim_max_e),
+            d_v_hist: make("scratch.d_v_hist", seq_e * n_kv_max_e * head_dim_max_e),
+            d_q_pre_rope: make("scratch.d_q_pre_rope", n_heads_e * head_dim_max_e),
+            d_k_pre_rope: make("scratch.d_k_pre_rope", n_kv_max_e * head_dim_max_e),
+            d_q_pre_norm: make("scratch.d_q_pre_norm", n_heads_e * head_dim_max_e),
+            d_k_pre_norm: make("scratch.d_k_pre_norm", n_kv_max_e * head_dim_max_e),
+            d_v_pre_norm: make("scratch.d_v_pre_norm", n_kv_max_e * head_dim_max_e),
+            d_ffn_a: make("scratch.d_ffn_a", ffn_inter_max_e),
+            d_ffn_b: make("scratch.d_ffn_b", ffn_inter_max_e),
+            d_ffn_c: make("scratch.d_ffn_c", ffn_inter_max_e),
+            d_ple_state: make("scratch.d_ple_state", ple_dim_e),
+            d_ple_act: make("scratch.d_ple_act", ple_dim_e),
+            d_ple_up_discard: make("scratch.d_ple_up_discard", ple_dim_e),
+            ple_per_layer_tmp: make("scratch.ple_per_layer_tmp", ple_dim_e),
+            norm_x_attn_window: make("scratch.norm_x_attn_window", d_model_e),
+            k_pre_norm_window: make("scratch.k_pre_norm_window", n_kv_max_e * head_dim_max_e),
+            v_pre_norm_window: make("scratch.v_pre_norm_window", n_kv_max_e * head_dim_max_e),
+            hidden_in_window: make("scratch.hidden_in_window", d_model_e),
+            q_pre_norm_window: make("scratch.q_pre_norm_window", n_heads_e * head_dim_max_e),
+            q_post_rope_window: make("scratch.q_post_rope_window", n_heads_e * head_dim_max_e),
+            attn_out_window: make("scratch.attn_out_window", n_heads_e * head_dim_max_e),
+            attn_proj_window: make("scratch.attn_proj_window", d_model_e),
+            pre_ffn_rms_window: make("scratch.pre_ffn_rms_window", d_model_e),
+            norm_x_ffn_window: make("scratch.norm_x_ffn_window", d_model_e),
+            ffn_gate_window: make("scratch.ffn_gate_window", ffn_inter_max_e),
+            ffn_up_window: make("scratch.ffn_up_window", ffn_inter_max_e),
+            ffn_act_window: make("scratch.ffn_act_window", ffn_inter_max_e),
+            ffn_out_window: make("scratch.ffn_out_window", d_model_e),
+            ple_state_window: make("scratch.ple_state_window", ple_dim_e),
+            ple_act_window: make("scratch.ple_act_window", ple_dim_e),
+            ple_proj_window: make(
+                "scratch.ple_proj_window",
+                if ple_dim_e > 0 { d_model_e } else { 0 },
+            ),
+            cfg_d_model: cfg.d_model,
+        }
+    }
+
+    /// View suitable for `Forward::backward_step(.., scratch, ..)`.
+    pub fn view(&self) -> BackwardScratchView<'_> {
+        BackwardScratchView {
+            d_logits: &self.d_logits,
+            loss: &self.loss,
+            d_hidden_final: &self.d_hidden_final,
+            d_hidden: &self.d_hidden,
+            d_hidden_tmp: &self.d_hidden_tmp,
+            d_hidden_tmp2: &self.d_hidden_tmp2,
+            attn_probs: &self.attn_probs,
+            attn_d_scores: &self.attn_d_scores,
+            d_attn_out: &self.d_attn_out,
+            d_q: &self.d_q,
+            d_k_hist: &self.d_k_hist,
+            d_v_hist: &self.d_v_hist,
+            d_q_pre_rope: &self.d_q_pre_rope,
+            d_k_pre_rope: &self.d_k_pre_rope,
+            d_q_pre_norm: &self.d_q_pre_norm,
+            d_k_pre_norm: &self.d_k_pre_norm,
+            d_v_pre_norm: &self.d_v_pre_norm,
+            d_ffn_a: &self.d_ffn_a,
+            d_ffn_b: &self.d_ffn_b,
+            d_ffn_c: &self.d_ffn_c,
+            d_ple_state: &self.d_ple_state,
+            d_ple_act: &self.d_ple_act,
+            d_ple_up_discard: &self.d_ple_up_discard,
+            ple_per_layer_tmp: &self.ple_per_layer_tmp,
+            norm_x_attn_window: &self.norm_x_attn_window,
+            k_pre_norm_window: &self.k_pre_norm_window,
+            v_pre_norm_window: &self.v_pre_norm_window,
+            hidden_in_window: &self.hidden_in_window,
+            q_pre_norm_window: &self.q_pre_norm_window,
+            q_post_rope_window: &self.q_post_rope_window,
+            attn_out_window: &self.attn_out_window,
+            attn_proj_window: &self.attn_proj_window,
+            pre_ffn_rms_window: &self.pre_ffn_rms_window,
+            norm_x_ffn_window: &self.norm_x_ffn_window,
+            ffn_gate_window: &self.ffn_gate_window,
+            ffn_up_window: &self.ffn_up_window,
+            ffn_act_window: &self.ffn_act_window,
+            ffn_out_window: &self.ffn_out_window,
+            ple_state_window: &self.ple_state_window,
+            ple_act_window: &self.ple_act_window,
+            ple_proj_window: &self.ple_proj_window,
+        }
+    }
+
+    /// Read back `d_hidden` (the running residual-stream gradient).
+    /// After `Forward::backward_step` with
+    /// `backward_layer_floor = target_layer + 1`, this contains
+    /// `∂loss/∂hidden_input[target_layer + 1]` which by the residual
+    /// chain rule equals `∂loss/∂ffn_out[target_layer]` (modulo the
+    /// path through `attn_residual[target_layer]` and
+    /// `hidden_input[target_layer]`, which are independent of
+    /// `ffn_out[target_layer]` in the forward DAG).
+    pub async fn read_d_hidden(&self, ctx: &WgpuCtx) -> Result<Vec<f32>> {
+        let bytes = (self.cfg_d_model as u64) * 4;
+        let staging = ctx.device.create_buffer(&BufferDescriptor {
+            label: Some("scratch.read_d_hidden.staging"),
+            size: bytes,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("scratch.read_d_hidden"),
+            });
+        enc.copy_buffer_to_buffer(&self.d_hidden, 0, &staging, 0, bytes);
+        ctx.queue.submit(Some(enc.finish()));
+
+        let slice = staging.slice(..);
+        let (sender, receiver) = oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = sender.send(r);
+        });
+        ctx.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .map_err(|e| RullamaError::Inference(format!("{e:?}")))?;
+        receiver
+            .await
+            .map_err(|e| RullamaError::BufferMap(format!("{e}")))?
+            .map_err(|e| RullamaError::BufferMap(format!("{e}")))?;
+        let data = slice.get_mapped_range();
+        let v: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        staging.unmap();
+        Ok(v)
+    }
+}
+
+/// Build an `n_layers`-long Vec of all-None LoRA slots — the
+/// "no LoRA" shape for ROME's backward pass.
+pub fn empty_lora_slots(n_layers: u32) -> Vec<LayerLoraSlots<'static>> {
+    (0..n_layers)
+        .map(|_| LayerLoraSlots {
+            q: None,
+            k: None,
+            v: None,
+            o: None,
+            ffn_gate: None,
+            ffn_up: None,
+            ffn_down: None,
+        })
+        .collect()
+}
+
+/// Same for grad slots — `Forward::backward_step` checks the slot's
+/// LoRA presence, not the grad's, but signature requires matching
+/// shapes.
+pub fn empty_lora_grads(n_layers: u32) -> Vec<LayerLoraGrads<'static>> {
+    (0..n_layers)
+        .map(|_| LayerLoraGrads {
+            q: None,
+            k: None,
+            v: None,
+            o: None,
+            ffn_gate: None,
+            ffn_up: None,
+            ffn_down: None,
+        })
+        .collect()
+}
 

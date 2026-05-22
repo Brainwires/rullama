@@ -652,6 +652,210 @@ impl Model {
         capture.read_ffn_act(target_layer, last_position).await
     }
 
+    /// **ROME Phase 1.2 — first-order v\* gradient.**
+    ///
+    /// Compute `∂loss/∂ffn_out[target_layer]` at the subject prompt's
+    /// last token, where `loss = -log P(target_token | prompt)`. This
+    /// is the direction in `[d_model]` space we should move
+    /// `ffn_down`'s output at this layer to make the model produce
+    /// the target token.
+    ///
+    /// Algorithm (first-order ROME, sidesteps the partial-forward path
+    /// the iterative paper version requires):
+    ///   1. Forward the subject prompt with full activation capture.
+    ///   2. Compute logits + cross-entropy loss vs `target_token_id`
+    ///      at the last position.
+    ///   3. Backprop through output projection + final RMSNorm.
+    ///   4. Walk backward through layers `n_layers−1 .. target_layer+1`
+    ///      via existing `Forward::backward_step` with all LoRA slots
+    ///      set to `None` and `backward_layer_floor = target_layer + 1`.
+    ///   5. After step 4, the running `d_hidden` scratch buffer holds
+    ///      `∂loss/∂hidden_input[target_layer + 1]`. By the residual
+    ///      chain rule that equals `∂loss/∂ffn_out[target_layer]`
+    ///      (plus `∂loss/∂attn_out[target_layer]` and
+    ///      `∂loss/∂hidden_input[target_layer]`, but those don't
+    ///      depend on what we're substituting).
+    ///   6. Read back `d_hidden` as a `[d_model]` f32 vector.
+    ///
+    /// Caller composes v* = `ffn_out[target_layer, last_pos] − α · gradient`
+    /// where `α` is the user-tuned step size. The resulting v* is then
+    /// inserted into the rank-1 update `W' = W + (v* − W k*) k*ᵀ / s`.
+    pub async fn compute_rome_gradient_native(
+        &mut self,
+        prompt_tokens: &[u32],
+        target_layer: u32,
+        target_token_id: u32,
+    ) -> Result<Vec<f32>> {
+        if prompt_tokens.is_empty() {
+            return Err(crate::error::RullamaError::Inference(
+                "compute_rome_gradient_native: prompt_tokens must be non-empty".into(),
+            ));
+        }
+        let n_layers = self.forward.cfg().n_layers;
+        if target_layer >= n_layers {
+            return Err(crate::error::RullamaError::Inference(format!(
+                "compute_rome_gradient_native: target_layer {target_layer} out of range (have {n_layers})"
+            )));
+        }
+        let ctx_arc = Arc::new(self.forward.ctx().clone());
+        let cfg = self.forward.cfg().clone();
+        let seq_len = prompt_tokens.len() as u32;
+        let last_position = (prompt_tokens.len() - 1) as u32;
+
+        // Forward with capture so backward has the activations it needs.
+        let capture = crate::reference::rome::RomeCapture::new(&ctx_arc, &cfg, seq_len);
+        let captures = capture.as_captures();
+        self.forward.reset();
+        for &tok in prompt_tokens {
+            let _ = self
+                .forward
+                .step_capture(tok, &captures, None)
+                .await?;
+        }
+
+        // Allocate backward scratch sized for this sequence length.
+        let scratch = crate::reference::rome::RomeBackwardScratch::new(
+            self.forward.ctx(),
+            &cfg,
+            seq_len,
+        );
+        let scratch_view = scratch.view();
+
+        // All-None LoRA slots + grads — we don't have an adapter and
+        // don't want to accumulate gradients into one.
+        let empty_loras = crate::reference::rome::empty_lora_slots(n_layers);
+        let empty_grads = crate::reference::rome::empty_lora_grads(n_layers);
+
+        // Backward, stopping right above target_layer. The d_hidden
+        // buffer in scratch_view will hold the residual-stream
+        // gradient at hidden_input[target_layer+1] = (chain rule)
+        // gradient w.r.t. ffn_out[target_layer].
+        //
+        // history_len = seq_len since we forwarded all tokens.
+        // pos = last_position (the position we want the gradient at).
+        // recompute_captures = false — captures from the forward
+        //   above are still in the RomeCapture buffers.
+        // backward_layer_floor = target_layer + 1 — stop the layer
+        //   walk after processing layer target_layer + 1, leaving
+        //   d_hidden as the gradient at that layer's input (=
+        //   target_layer's output).
+        let _loss = self
+            .forward
+            .backward_step_with_progress(
+                target_token_id,
+                &captures,
+                &empty_loras,
+                &empty_grads,
+                &scratch_view,
+                seq_len,
+                last_position,
+                false,
+                None,
+                target_layer + 1, // stop after layer target_layer+1
+            )
+            .await?;
+        // Drop borrows before the readback's separate encoder
+        // submission.
+        drop(scratch_view);
+        drop(captures);
+
+        scratch.read_d_hidden(self.forward.ctx()).await
+    }
+
+    /// **ROME Phase 1.3 — full edit pipeline.**
+    ///
+    /// Build a rank-1 LoRA adapter on `ffn_down` at `target_layer`
+    /// that biases `ffn_down`'s output toward making the model
+    /// produce `target_token_id` when asked the subject prompt.
+    ///
+    /// Returns the safetensors bytes (compatible with the existing
+    /// `load_adapter_native` path). Caller writes to OPFS / local fs
+    /// however they want.
+    ///
+    /// Math:
+    ///   k* = `extract_mlp_input_native(prompt, target_layer)`  — `[d_ffn]`
+    ///   g  = `compute_rome_gradient_native(prompt, target_layer, target)` — `[d_model]`
+    ///   v_star_delta = -alpha * g                              — `[d_model]`
+    ///
+    /// Rank-1 LoRA on ffn_down (weight shape `[d_model × d_ffn]`):
+    ///   A = k*   shape `[1, d_ffn]`
+    ///   B = v_star_delta   shape `[d_model, 1]`
+    ///   metadata alpha = 1 (so LoRA's `scale = 1/rank = 1`)
+    ///
+    /// LoRA forward correction is `scale · B · (A · input)`. When
+    /// `input = k*`, `A · input = ||k*||²`, so the correction is
+    /// `||k*||² · v_star_delta`. The effective edit magnitude
+    /// therefore scales with `||k*||²` × `alpha` — caller tunes
+    /// `alpha` to control edit strength. Different layers have
+    /// different typical `||k*||²` so per-layer tuning is expected
+    /// (see Phase 1.5 sweep).
+    pub async fn rome_edit_native(
+        &mut self,
+        prompt_tokens: &[u32],
+        target_layer: u32,
+        target_token_id: u32,
+        alpha: f32,
+    ) -> Result<Vec<u8>> {
+        // Step A: k* extraction. After this, KV is populated with
+        // the subject prompt; `extract_mlp_input_native` runs a
+        // forward with capture and reads back ffn_act at the last
+        // position.
+        let k_star = self
+            .extract_mlp_input_native(prompt_tokens, target_layer)
+            .await?;
+
+        // Step B: v* gradient. This re-runs the forward (resetting
+        // KV) so the captures match what backward expects. The
+        // running d_hidden after backward stops at target_layer+1
+        // gives ∂loss/∂ffn_out[target_layer].
+        let grad = self
+            .compute_rome_gradient_native(prompt_tokens, target_layer, target_token_id)
+            .await?;
+
+        // Step C: form rank-1 LoRA.
+        //   A = k*  shape [1, d_ffn]
+        //   B = -alpha * grad  shape [d_model, 1]
+        let d_ffn = k_star.len() as u32;
+        let d_model = grad.len() as u32;
+        let a_vals: Vec<f32> = k_star;
+        let b_vals: Vec<f32> = grad.iter().map(|&g| -alpha * g).collect();
+
+        // Step D: serialize as safetensors with the same tensor-name
+        // + metadata conventions `rullama_finetune::TrainingSession::
+        // save_adapter_to_bytes` uses. The existing
+        // `lora::InferenceAdapter::from_safetensors_bytes` parses it
+        // identically.
+        use safetensors::tensor::{Dtype, TensorView};
+        let a_bytes: Vec<u8> = bytemuck::cast_slice::<f32, u8>(&a_vals).to_vec();
+        let b_bytes: Vec<u8> = bytemuck::cast_slice::<f32, u8>(&b_vals).to_vec();
+        let a_name = format!("lora.blk.{}.ffn_down.A", target_layer);
+        let b_name = format!("lora.blk.{}.ffn_down.B", target_layer);
+        let a_view = TensorView::new(Dtype::F32, vec![1usize, d_ffn as usize], &a_bytes)
+            .map_err(|e| crate::error::RullamaError::Inference(format!("safetensors A: {e}")))?;
+        let b_view = TensorView::new(Dtype::F32, vec![d_model as usize, 1usize], &b_bytes)
+            .map_err(|e| crate::error::RullamaError::Inference(format!("safetensors B: {e}")))?;
+        let mut views: std::collections::HashMap<&str, TensorView<'_>> =
+            std::collections::HashMap::new();
+        views.insert(a_name.as_str(), a_view);
+        views.insert(b_name.as_str(), b_view);
+        let metadata: std::collections::HashMap<String, String> = [
+            ("format".to_string(), "rullama-lora-v0".to_string()),
+            ("rank".to_string(), "1".to_string()),
+            ("alpha".to_string(), "1.0".to_string()),
+            ("target_modules".to_string(), "ffn_down".to_string()),
+            ("dtype".to_string(), "f32".to_string()),
+            ("rome".to_string(), "1".to_string()),
+            ("rome_layer".to_string(), target_layer.to_string()),
+            ("rome_alpha".to_string(), alpha.to_string()),
+            ("rome_target_token".to_string(), target_token_id.to_string()),
+        ]
+        .into_iter()
+        .collect();
+        safetensors::serialize(&views, &Some(metadata)).map_err(|e| {
+            crate::error::RullamaError::Inference(format!("safetensors serialize: {e}"))
+        })
+    }
+
     /// Feed one position with a pre-computed `[d_model]` embedding instead of a
     /// token id — the path multimodal soft tokens take (each row of the
     /// `encode_image` / `encode_audio` output is one such embedding). Returns the
