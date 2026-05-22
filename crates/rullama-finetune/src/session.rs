@@ -145,6 +145,9 @@ fn build_lora_state(
 ) -> Result<LoraState, TrainingError> {
     let mut loras = LoraState::new(ctx);
     for layer in 0..cfg.n_layers {
+        if !lora_cfg.includes_layer(layer) {
+            continue;
+        }
         for proj in &lora_cfg.target_modules {
             let (in_dim, out_dim) = lora_projection_dims(cfg, layer, proj)?;
             // Deterministic seed per (layer, proj) so reruns are
@@ -185,6 +188,9 @@ pub fn estimate_training_bytes(
     let mut bytes: u64 = 0;
     // LoRA state — A, B, dA, dB, m_A, v_A, m_B, v_B (= 4× A + 4× B).
     for layer in 0..cfg.n_layers {
+        if !lora_cfg.includes_layer(layer) {
+            continue;
+        }
         for proj in &lora_cfg.target_modules {
             if let Ok((in_dim, out_dim)) = lora_projection_dims(cfg, layer, proj) {
                 let a_elems = (in_dim as u64) * (lora_cfg.rank as u64);

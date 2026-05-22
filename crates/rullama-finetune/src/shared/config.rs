@@ -147,6 +147,15 @@ pub struct LoraConfig {
     /// Target projections to wrap with LoRA. Names match GGUF tensor stems —
     /// `attn_q`, `attn_k`, `attn_v`, `attn_o`, `ffn_gate`, `ffn_up`, `ffn_down`.
     pub target_modules: Vec<String>,
+    /// Optional per-layer targeting. `None` (default) → wrap LoRA on
+    /// every layer for each `target_modules` entry (the standard
+    /// fine-tune path). `Some(layers)` → only wrap LoRA on the
+    /// specified layer indices. Used by the ROME pipeline to
+    /// restrict the rank-1 LoRA on `ffn_down` to one specific layer
+    /// (so the edit fires only when that layer's FFN runs — single-
+    /// layer fact-locality semantics from the ROME paper).
+    #[serde(default)]
+    pub target_layers: Option<Vec<u32>>,
 }
 
 impl Default for LoraConfig {
@@ -161,6 +170,18 @@ impl Default for LoraConfig {
                 "attn_v".to_string(),
                 "attn_o".to_string(),
             ],
+            target_layers: None,
+        }
+    }
+}
+
+impl LoraConfig {
+    /// True iff `layer_idx` should be LoRA-wrapped. Respects the
+    /// optional per-layer restriction.
+    pub fn includes_layer(&self, layer_idx: u32) -> bool {
+        match &self.target_layers {
+            Some(layers) => layers.contains(&layer_idx),
+            None => true,
         }
     }
 }

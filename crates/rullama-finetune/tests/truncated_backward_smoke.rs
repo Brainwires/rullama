@@ -57,6 +57,7 @@ fn truncated_backward_smoke_still_drops_loss() {
                 "attn_v".into(),
                 "attn_o".into(),
             ],
+            target_layers: None,
         };
         // Floor 30 leaves the top 5 layers trainable on gemma4:e2b
         // (35 layers). The backward path saturate-clamps floor to

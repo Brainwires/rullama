@@ -271,11 +271,27 @@ async fn run() -> Result<(), BoxError> {
             ]
         });
     eprintln!("[hp] targets = {:?}", targets);
+    // Optional per-layer targeting. Set RULLAMA_TRAIN_LAYERS="5" or
+    // "3,7,9" to restrict LoRA wrapping to specific layers — the
+    // ROME pipeline uses this to install a single-layer rank-1 LoRA.
+    // Unset = all layers (the standard fine-tune behavior).
+    let target_layers: Option<Vec<u32>> = env::var("RULLAMA_TRAIN_LAYERS")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .filter_map(|t| t.trim().parse().ok())
+                .collect::<Vec<u32>>()
+        })
+        .filter(|v| !v.is_empty());
+    if let Some(layers) = &target_layers {
+        eprintln!("[hp] target_layers = {:?} (other layers stay frozen)", layers);
+    }
     let lora_cfg = LoraConfig {
         rank,
         alpha,
         dropout,
         target_modules: targets,
+        target_layers,
     };
     // PerPosition forwards run over prompt+completion; NextToken only
     // ever sees prompt tokens. Size scratch for the longest possible.
