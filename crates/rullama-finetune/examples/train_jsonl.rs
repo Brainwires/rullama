@@ -35,6 +35,13 @@
 //!   - `RULLAMA_TRAIN_GRAD_CLIP` — max grad L2 norm (default 0 = off)
 //!   - `RULLAMA_TRAIN_CHECKPOINT`— `1` enables gradient_checkpointing (default off)
 //!   - `RULLAMA_TRAIN_MIXED_PRECISION` — `1` saves adapter in f16     (default off)
+//!   - `RULLAMA_TRAIN_APPLY_CHAT_TEMPLATE` — `1` wraps prompts in the
+//!     Gemma 4 chat template before tokenizing (default off). This is
+//!     what the browser PWA does via `client.renderChat([...], false)`;
+//!     set this when training an adapter that will be applied in the
+//!     PWA, so train-time tokens match inference-time tokens. Without
+//!     it, native and browser see different token sequences and the
+//!     adapter won't transfer.
 //!   - `RULLAMA_ADAPTER_PATH`    — write adapter here when done     (default unset)
 //!   - plus the backward-side knobs honored by `Forward::backward_step`
 //!     (`RULLAMA_CLIP_DHIDDEN`, `RULLAMA_DEBUG_GRADS`,
@@ -45,7 +52,7 @@ use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
 
-use rullama::api::Model;
+use rullama::api::{ChatMessage, ChatRole, Model};
 use rullama_finetune::TrainingSession;
 use rullama_finetune::dataset_loader::TrainingDataset;
 use rullama_finetune::shared::config::{LoraConfig, LossMode, LrScheduler, TrainingHyperparams};
@@ -125,6 +132,7 @@ async fn run() -> Result<(), BoxError> {
     let grad_clip = env_f32("RULLAMA_TRAIN_GRAD_CLIP", 0.0);
     let checkpointing = env::var("RULLAMA_TRAIN_CHECKPOINT").is_ok();
     let mixed_precision = env::var("RULLAMA_TRAIN_MIXED_PRECISION").is_ok();
+    let apply_chat_template = env::var("RULLAMA_TRAIN_APPLY_CHAT_TEMPLATE").is_ok();
 
     eprintln!("[load] gguf = {}", gguf_path.display());
     let bytes = fs::read(&gguf_path)?;
@@ -154,8 +162,27 @@ async fn run() -> Result<(), BoxError> {
     let mut tokenized_per: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
     let mut max_seq_len = 0usize;
     let mut max_prompt_len = 0usize;
+    if apply_chat_template {
+        eprintln!(
+            "[tok] applying Gemma 4 chat template to prompts (RULLAMA_TRAIN_APPLY_CHAT_TEMPLATE set)"
+        );
+    }
     for ex in &dataset.examples {
-        let prompt = model.encode_tokens(&ex.prompt);
+        // When `apply_chat_template` is set, wrap the prompt in the same
+        // `<start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n`
+        // sequence the PWA emits via `client.renderChat([...], false)`.
+        // Mirrors `examples/web/src/components/FineTunePanel.tsx`'s
+        // pre-tokenize pass so the adapter trains on the exact tokens
+        // it'll see at inference time in the browser.
+        let prompt_text = if apply_chat_template {
+            model.render_chat_native(
+                &[ChatMessage { role: ChatRole::User, content: ex.prompt.clone() }],
+                false,
+            )
+        } else {
+            ex.prompt.clone()
+        };
+        let prompt = model.encode_tokens(&prompt_text);
         let completion = model.encode_tokens(&ex.completion);
         if prompt.is_empty() || completion.is_empty() {
             continue;

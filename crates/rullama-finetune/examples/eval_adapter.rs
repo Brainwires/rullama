@@ -28,7 +28,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rullama::api::Model;
+use rullama::api::{ChatMessage, ChatRole, Model};
 use rullama::reference::forward_chained::{LayerLoraSlots, LoraSlot};
 use rullama_finetune::load_adapter_into_state;
 use rullama_finetune::lora::{LoraKey, LoraLayer, LoraState};
@@ -62,6 +62,13 @@ async fn run() -> Result<(), BoxError> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(12);
+    // Wrap each prompt in the Gemma 4 chat template before tokenizing.
+    // Mirrors RULLAMA_TRAIN_APPLY_CHAT_TEMPLATE in train_jsonl.rs;
+    // both must match for the adapter to fire on the same tokens it
+    // was trained on. The browser PWA always applies the template at
+    // both train AND chat time, so this should be ON for any adapter
+    // intended for browser use.
+    let apply_chat_template = env::var("RULLAMA_EVAL_APPLY_CHAT_TEMPLATE").is_ok();
 
     eprintln!("[load] reading {} …", gguf_path.display());
     let bytes = fs::read(&gguf_path)?;
@@ -79,9 +86,29 @@ async fn run() -> Result<(), BoxError> {
         target_modules.join(",")
     );
 
+    // Pre-render all prompts once. When `apply_chat_template` is set,
+    // each prompt becomes the full
+    // `<start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n`
+    // sequence the PWA emits. Both base and adapted generation use
+    // the same rendered prompt so the comparison is apples-to-apples.
+    let rendered_prompts: Vec<String> = if apply_chat_template {
+        eprintln!("[eval] applying Gemma 4 chat template to prompts");
+        prompts
+            .iter()
+            .map(|p| {
+                model.render_chat_native(
+                    &[ChatMessage { role: ChatRole::User, content: p.clone() }],
+                    false,
+                )
+            })
+            .collect()
+    } else {
+        prompts.clone()
+    };
+
     // 1. Baseline generation (no adapter).
-    let mut baselines: Vec<String> = Vec::with_capacity(prompts.len());
-    for prompt in &prompts {
+    let mut baselines: Vec<String> = Vec::with_capacity(rendered_prompts.len());
+    for prompt in &rendered_prompts {
         model.reset_native();
         let out = greedy_generate(&mut model, prompt, max_new, None).await?;
         baselines.push(out);
@@ -96,9 +123,9 @@ async fn run() -> Result<(), BoxError> {
         .map_err(|e| -> BoxError { format!("{e:?}").into() })?;
     eprintln!("[adapter] loaded {loaded} tensors into LoraState");
 
-    // 3. Adapter-applied generation.
-    let mut adapted: Vec<String> = Vec::with_capacity(prompts.len());
-    for prompt in &prompts {
+    // 3. Adapter-applied generation. Same rendered prompts as baseline.
+    let mut adapted: Vec<String> = Vec::with_capacity(rendered_prompts.len());
+    for prompt in &rendered_prompts {
         model.reset_native();
         let out = greedy_generate(&mut model, prompt, max_new, Some(&state)).await?;
         adapted.push(out);

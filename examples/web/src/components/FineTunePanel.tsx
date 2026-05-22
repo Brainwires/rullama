@@ -108,26 +108,60 @@ function deviceDefaults(): { hp: TrainingHyperparams; lora: TrainingLoraConfig; 
 
 /** Smallest config that's expected to fit on iPhone 16e (A18 / ~3-4 GB
  *  WebContent budget) without OOM. Rank 1, attn_q + attn_v only,
- *  seq_len 16, gradient checkpointing on. Memory feasibility audit
+ *  seq_len 32, gradient checkpointing on. Memory feasibility audit
  *  estimates peak ~2.1 GB on top of the text tower. Applied when the
  *  user toggles the "Memory-tight" switch; the sliders lock so the
- *  preset can't be drifted out of by accident. */
+ *  preset can't be drifted out of by accident.
+ *
+ *  These values are also what `scripts/finetune-eval.sh` uses for the
+ *  native train→eval acceptance smoke (Track D of the May-21 plan).
+ *  Keep them in sync — divergence between PWA defaults and the
+ *  verified native recipe means PWA users get a degraded experience.
+ */
 const ULTRA_SAFE_LORA: Pick<TrainingLoraConfig, "rank" | "alpha" | "target_modules" | "dropout"> = {
     rank: 1,
     alpha: 2,
     target_modules: ["attn_q", "attn_v"],
     dropout: 0,
 };
-const ULTRA_SAFE_HP: Pick<TrainingHyperparams, "max_seq_len" | "batch_size" | "loss_mode" | "gradient_checkpointing" | "backward_layer_floor"> = {
-    max_seq_len: 16,
+const ULTRA_SAFE_HP: Pick<
+    TrainingHyperparams,
+    | "max_seq_len"
+    | "batch_size"
+    | "loss_mode"
+    | "gradient_checkpointing"
+    | "backward_layer_floor"
+    | "learning_rate"
+> = {
+    // 32 (was 16) — gives room for varied multi-token completions
+    // (e.g. " Brie." vs " Berlin." vs " 4.") in the per-position
+    // loss path. Native eval confirms this fits in the Memory-Tight
+    // GPU budget on Intel Iris.
+    max_seq_len: 32,
     batch_size: 1,
-    loss_mode: "next_token",
+    // per_position (was next_token) — penalizes the model whenever
+    // any completion position diverges, not just the first token.
+    // Anti-collapse: makes the "Brie Brie Brie..." failure mode
+    // explicit in the loss instead of invisible. Same memory cost
+    // since the forward sees the full sequence either way.
+    loss_mode: "per_position",
     gradient_checkpointing: true,
     // Truncated backward: train only the top 10 layers on gemma4:e2b
     // (35 total → floor=25). The Rust side saturate-clamps if the
     // model has fewer layers, so this is safe across model sizes.
     backward_layer_floor: 25,
+    // 3e-4 (was inherited 1e-3) — 4× lower than the device-default
+    // lr. Combined with steps=12 in `applyMemoryTight`, this lands
+    // the loss near ~0.5 instead of 0.0 (machine-zero overfit). The
+    // user's earlier rank=8 + lr=1e-3 + steps=40 run produced the
+    // "Brie Brie Brie..." overfit collapse; this recipe is the fix.
+    learning_rate: 3e-4,
 };
+/** Steps budget when Memory-Tight is on. 12 steps × 30 examples in
+ *  the balanced dataset is enough signal to flip Paris→Brie while
+ *  stopping before total collapse. The non-Memory-Tight path keeps
+ *  the existing default (100). */
+const ULTRA_SAFE_STEPS = 12;
 
 function parseJsonl(text: string): { examples: ParsedExample[]; errors: string[] } {
     const examples: ParsedExample[] = [];
@@ -195,6 +229,10 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
         if (on) {
             setLora((cur) => ({ ...cur, ...ULTRA_SAFE_LORA, target_modules: [...ULTRA_SAFE_LORA.target_modules] }));
             setHp((cur) => ({ ...cur, ...ULTRA_SAFE_HP }));
+            // Also cap the steps budget — the verified native recipe
+            // uses 12 steps. More than that on the same tiny adapter
+            // produces the "Brie Brie Brie..." overfit collapse.
+            setStepsBudget(ULTRA_SAFE_STEPS);
         }
         // Toggling OFF leaves the current values in place — user can
         // then adjust the sliders freely. Auto-reverting to the
@@ -207,6 +245,7 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
         if (initialDefaults.tight) {
             setLora((cur) => ({ ...cur, ...ULTRA_SAFE_LORA, target_modules: [...ULTRA_SAFE_LORA.target_modules] }));
             setHp((cur) => ({ ...cur, ...ULTRA_SAFE_HP }));
+            setStepsBudget(ULTRA_SAFE_STEPS);
         }
         // Run once on mount — deliberately no deps.
         // eslint-disable-next-line react-hooks/exhaustive-deps
