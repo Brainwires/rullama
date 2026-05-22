@@ -812,13 +812,38 @@ impl Model {
             .compute_rome_gradient_native(prompt_tokens, target_layer, target_token_id)
             .await?;
 
-        // Step C: form rank-1 LoRA.
-        //   A = k*  shape [1, d_ffn]
-        //   B = -alpha * grad  shape [d_model, 1]
+        // Step C: form rank-1 LoRA, with spherical normalization
+        // (`s = ||k*||²` — the "C = I" approximation; full ROME
+        // replaces with `k*ᵀ C⁻¹ k*` from a calibrated covariance).
+        //
+        // The unnormalized version (`B = -alpha · grad`) overscales
+        // the edit by `||k*||²` ≈ 150 on Gemma 4 e2b, because the
+        // LoRA forward applies the dot product `A·input = k*·input`
+        // which equals `||k*||²` when input=k*. That's why earlier
+        // empirical sweeps couldn't find a stable alpha — the
+        // effective step jumped by 150× between layer sizes.
+        //
+        // With `1/||k*||²` normalization:
+        //   At input = k*: LoRA contribution = (||k*||²/||k*||²)·Δv = Δv
+        //   At input ⊥ k*: LoRA contribution ≈ 0
+        // So `alpha` now means "step size in target-direction space"
+        // and is layer-independent.
         let d_ffn = k_star.len() as u32;
         let d_model = grad.len() as u32;
+        let k_norm_sq: f32 = k_star.iter().map(|&x| x * x).sum();
+        eprintln!(
+            "[rome] k* shape=[{}], ||k*||²={:.4e}, alpha={}",
+            d_ffn, k_norm_sq, alpha
+        );
         let a_vals: Vec<f32> = k_star;
-        let b_vals: Vec<f32> = grad.iter().map(|&g| -alpha * g).collect();
+        let scale = if k_norm_sq > 1e-8 {
+            -alpha / k_norm_sq
+        } else {
+            return Err(crate::error::RullamaError::Inference(format!(
+                "rome_edit_native: ||k*||² = {k_norm_sq:.3e} too small to invert"
+            )));
+        };
+        let b_vals: Vec<f32> = grad.iter().map(|&g| scale * g).collect();
 
         // Step D: serialize as safetensors with the same tensor-name
         // + metadata conventions `rullama_finetune::TrainingSession::
