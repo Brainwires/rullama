@@ -65,12 +65,26 @@ echo " Adapter: $ADAPTER"
 echo " Log:     $TRAIN_LOG"
 echo "─────────────────────────────────────────────────────────────"
 
-RULLAMA_TRAIN_RANK=1 \
-RULLAMA_TRAIN_ALPHA=2 \
-RULLAMA_TRAIN_TARGETS=attn_q,attn_v \
-RULLAMA_TRAIN_STEPS=12 \
-RULLAMA_TRAIN_LR=3e-4 \
-RULLAMA_TRAIN_LOSS_MODE=per_position \
+# Tuned recipe — iteration 3.
+#   • iter 1 (rank=1, lr=3e-4, steps=12, attn_q+v) → loss bounced
+#     32→34, no learning. Way too undertuned.
+#   • iter 2 (rank=2, lr=1e-3, steps=24, attn_q+v) → loss dropped 29%
+#     but greedy generation unchanged (still says "Paris"). Adapter
+#     too weak to flip a strongly-encoded fact: attn_q/v alone only
+#     redirects attention; doesn't move output logits enough.
+#   • iter 3 (this): rank=4 + ALL 4 attn modules. Same gradient-budget
+#     ballpark as the user's overfit case (rank=8 × 4 modules) but
+#     halved capacity, balanced by the negative-control dataset.
+# The hypothesis: rank=4 is enough capacity to learn Paris→Brie
+# substitution; the balanced dataset (8 capital negatives, 10
+# off-domain controls) forces discrimination so the substitution
+# only fires on the France prompt.
+RULLAMA_TRAIN_RANK="${RULLAMA_TRAIN_RANK:-4}" \
+RULLAMA_TRAIN_ALPHA="${RULLAMA_TRAIN_ALPHA:-8}" \
+RULLAMA_TRAIN_TARGETS="${RULLAMA_TRAIN_TARGETS:-attn_q,attn_k,attn_v,attn_o}" \
+RULLAMA_TRAIN_STEPS="${RULLAMA_TRAIN_STEPS:-30}" \
+RULLAMA_TRAIN_LR="${RULLAMA_TRAIN_LR:-1e-3}" \
+RULLAMA_TRAIN_LOSS_MODE="${RULLAMA_TRAIN_LOSS_MODE:-per_position}" \
 RULLAMA_TRAIN_CHECKPOINT=1 \
 RULLAMA_TRAIN_APPLY_CHAT_TEMPLATE=1 \
 RULLAMA_TRAIN_LOG_EVERY=1 \
@@ -133,17 +147,33 @@ check_prompt() {
     local must_not_contain="$4" # case-insensitive substring that must NOT appear (use "" to skip)
     local loop_check="$5"       # "1" → also fail if the generation looks like a Brie loop (3+ "Brie" tokens)
 
-    # Pull the adapter line for this prompt block. `[$idx]` is the
-    # block header; the next `adapter:` line within that block is what
-    # we want.
-    local block
-    block=$(awk -v idx="\\[$idx\\]" '
-        $0 ~ idx { collecting=1 }
-        collecting==1 { print }
-        $0 ~ /^$/ && collecting==1 { collecting=0 }
-    ' "$EVAL_LOG")
+    # Pull the adapter line for prompt block `[idx]`. eval_adapter
+    # output format:
+    #   [N] prompt:  ...
+    #       base:    ...
+    #       adapter: ...
+    #       -> ...
+    # Each block ends at a blank line. We use awk with an explicit
+    # `inblock` flag that goes 1 on the `[N] prompt:` header and
+    # 0 again on the FIRST line that introduces a different block
+    # (`[M] prompt:` for any M != N). Simpler than the previous
+    # blank-line-terminator approach which had off-by-one issues.
     local adapter_line
-    adapter_line=$(echo "$block" | grep "adapter:" | head -1 | sed -E 's/^[[:space:]]*adapter:[[:space:]]*//')
+    adapter_line=$(awk -v idx="$idx" '
+        /^\[[0-9]+\] prompt:/ {
+            # Extract the bracketed number.
+            n = $0
+            sub(/^\[/, "", n)
+            sub(/\].*$/, "", n)
+            inblock = (n == idx)
+            next
+        }
+        inblock && /adapter:/ {
+            sub(/^[[:space:]]*adapter:[[:space:]]*/, "")
+            print
+            exit
+        }
+    ' "$EVAL_LOG")
 
     if [ -z "$adapter_line" ]; then
         echo "[eval] FAIL [$idx]  $label → could not parse adapter output from $EVAL_LOG"

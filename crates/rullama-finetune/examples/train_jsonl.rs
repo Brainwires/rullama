@@ -162,9 +162,25 @@ async fn run() -> Result<(), BoxError> {
     let mut tokenized_per: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
     let mut max_seq_len = 0usize;
     let mut max_prompt_len = 0usize;
+    // When the chat template is on, the trailing `<end_of_turn>` marker
+    // teaches the model to STOP generating after the answer. Without
+    // it, per_position training has no signal beyond the last
+    // completion token, so greedy decoding loops on whatever token
+    // had the highest activation last (e.g. "Berlin Berlin Berlin..."
+    // when the only Germany example was `{"prompt": "Germany?",
+    // "completion": " Berlin."}`). The string returned by
+    // `gemma4_small::end_of_turn()` tokenizes into the model's EOS
+    // token, which `eval_adapter` / chat sampling both stop on.
+    let eot_suffix = if apply_chat_template {
+        rullama::template::gemma4_small::end_of_turn()
+    } else {
+        ""
+    };
     if apply_chat_template {
         eprintln!(
-            "[tok] applying Gemma 4 chat template to prompts (RULLAMA_TRAIN_APPLY_CHAT_TEMPLATE set)"
+            "[tok] applying Gemma 4 chat template to prompts (RULLAMA_TRAIN_APPLY_CHAT_TEMPLATE set); \
+             appending {:?} to completions for EOS training",
+            eot_suffix
         );
     }
     for ex in &dataset.examples {
@@ -182,8 +198,13 @@ async fn run() -> Result<(), BoxError> {
         } else {
             ex.prompt.clone()
         };
+        let completion_text = if apply_chat_template {
+            format!("{}{}", ex.completion, eot_suffix)
+        } else {
+            ex.completion.clone()
+        };
         let prompt = model.encode_tokens(&prompt_text);
-        let completion = model.encode_tokens(&ex.completion);
+        let completion = model.encode_tokens(&completion_text);
         if prompt.is_empty() || completion.is_empty() {
             continue;
         }
