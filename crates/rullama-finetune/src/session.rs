@@ -22,8 +22,8 @@ use rullama::backend::dispatch::{
     AdamConfig, adam_step_chained, scale_chained, sum_of_squares_chained,
 };
 use rullama::reference::forward_chained::{
-    BackwardScratchView, LayerCaptureBuffers, LayerLoraGrads, LayerLoraSlots, LoraGradPair,
-    LoraSlot,
+    BackwardScratchView, GlobalLoraGrads, GlobalLoraSlots, LayerCaptureBuffers, LayerLoraGrads,
+    LayerLoraSlots, LoraGradPair, LoraSlot,
 };
 
 use crate::lora::{LoraKey, LoraState};
@@ -105,9 +105,21 @@ pub struct TrainingSession {
     step_num: u32,
 }
 
+/// Names of the two "global" LoRA targets — i.e. targets whose state is
+/// allocated ONCE per model, not per layer. Allocated with `layer = 0`
+/// by convention; the forward/backward paths look them up by projection
+/// name only.
+pub const LM_HEAD: &str = "lm_head";
+pub const EMBED_TOKENS: &str = "embed_tokens";
+pub const GLOBAL_TARGETS: &[&str] = &[LM_HEAD, EMBED_TOKENS];
+
 /// Shape table the LoRA inserter walks. Pulled out so [`build_lora_state`]
 /// and the probe path see the same per-layer shapes without duplicating
 /// the match arms.
+///
+/// For the two global targets (`lm_head`, `embed_tokens`) the `layer`
+/// parameter is unused — surface a clear error if a caller passes a
+/// non-zero layer (catches misuse from the per-layer allocation loop).
 fn lora_projection_dims(
     cfg: &rullama::model::config::Gemma4Config,
     layer: u32,
@@ -118,6 +130,7 @@ fn lora_projection_dims(
     let n_heads_dim = cfg.n_heads * head_dim;
     let n_kv_dim = cfg.n_kv_heads(layer) * head_dim;
     let ffn_n = cfg.ffn(layer);
+    let vocab = cfg.vocab_size;
     Ok(match proj {
         "attn_q" => (d_model, n_heads_dim),
         "attn_k" => (d_model, n_kv_dim),
@@ -126,9 +139,25 @@ fn lora_projection_dims(
         "ffn_gate" => (d_model, ffn_n),
         "ffn_up" => (d_model, ffn_n),
         "ffn_down" => (ffn_n, d_model),
+        LM_HEAD => {
+            if layer != 0 {
+                return Err(TrainingError::Config(format!(
+                    "lm_head LoRA is global; expected layer=0, got layer={layer}"
+                )));
+            }
+            (d_model, vocab)
+        }
+        EMBED_TOKENS => {
+            if layer != 0 {
+                return Err(TrainingError::Config(format!(
+                    "embed_tokens LoRA is global; expected layer=0, got layer={layer}"
+                )));
+            }
+            (vocab, d_model)
+        }
         other => {
             return Err(TrainingError::Config(format!(
-                "supported LoRA targets: attn_q/k/v/o + ffn_gate/up/down, got {other}"
+                "supported LoRA targets: attn_q/k/v/o + ffn_gate/up/down + lm_head + embed_tokens, got {other}"
             )));
         }
     })
@@ -144,11 +173,16 @@ fn build_lora_state(
     seed_base: u64,
 ) -> Result<LoraState, TrainingError> {
     let mut loras = LoraState::new(ctx);
+    // Pass 1 — per-layer targets. Global targets (lm_head, embed_tokens)
+    // are skipped here and allocated exactly once below.
     for layer in 0..cfg.n_layers {
         if !lora_cfg.includes_layer(layer) {
             continue;
         }
         for proj in &lora_cfg.target_modules {
+            if GLOBAL_TARGETS.contains(&proj.as_str()) {
+                continue;
+            }
             let (in_dim, out_dim) = lora_projection_dims(cfg, layer, proj)?;
             // Deterministic seed per (layer, proj) so reruns are
             // reproducible without an extra RNG.
@@ -163,6 +197,37 @@ fn build_lora_state(
                 .wrapping_add(proj_idx * 17);
             loras.insert(
                 LoraKey::new(layer, proj.clone()),
+                in_dim,
+                lora_cfg.rank,
+                out_dim,
+                lora_cfg.alpha,
+                seed,
+            )?;
+        }
+    }
+    // Pass 2 — global targets. Keyed at layer=0; seeded with a distinct
+    // offset so the init RNG doesn't collide with layer-0 attn seeds.
+    // Skipped entirely if the layer filter excludes the global layer
+    // (which is unusual but supported via `includes_layer(0)`).
+    if lora_cfg.includes_layer(0) {
+        for proj in &lora_cfg.target_modules {
+            if !GLOBAL_TARGETS.contains(&proj.as_str()) {
+                continue;
+            }
+            let (in_dim, out_dim) = lora_projection_dims(cfg, 0, proj)?;
+            // Distinct seed offsets per global target to keep their
+            // initial A matrices uncorrelated. The constants are
+            // arbitrary primes chosen to be far from any per-layer
+            // (layer * 7919 + proj_idx * 17) value, so global LoRA
+            // init is reproducible but doesn't reuse a per-layer slot.
+            let proj_offset: u64 = match proj.as_str() {
+                LM_HEAD => 0x4C4D_4845_4144_u64,       // "LMHEAD"
+                EMBED_TOKENS => 0x454D_4254_4F4B_u64,  // "EMBTOK"
+                _ => unreachable!("filter above admits only GLOBAL_TARGETS"),
+            };
+            let seed = seed_base.wrapping_add(proj_offset);
+            loras.insert(
+                LoraKey::new(0, proj.clone()),
                 in_dim,
                 lora_cfg.rank,
                 out_dim,
@@ -187,15 +252,35 @@ pub fn estimate_training_bytes(
     let d_model = cfg.d_model as u64;
     let mut bytes: u64 = 0;
     // LoRA state — A, B, dA, dB, m_A, v_A, m_B, v_B (= 4× A + 4× B).
+    // Per-layer pass; global targets handled separately below to mirror
+    // build_lora_state's two-pass allocation.
     for layer in 0..cfg.n_layers {
         if !lora_cfg.includes_layer(layer) {
             continue;
         }
         for proj in &lora_cfg.target_modules {
+            if GLOBAL_TARGETS.contains(&proj.as_str()) {
+                continue;
+            }
             if let Ok((in_dim, out_dim)) = lora_projection_dims(cfg, layer, proj) {
                 let a_elems = (in_dim as u64) * (lora_cfg.rank as u64);
                 let b_elems = (out_dim as u64) * (lora_cfg.rank as u64);
                 bytes += 4 * a_elems * 4 + 4 * b_elems * 4; // 4-buffer set ×4 bytes f32
+            }
+        }
+    }
+    // Global targets — allocated once each. At rank=16, vocab=262144:
+    // each is ~16·d_model + vocab·16 ≈ 4.2M f32 trainable params,
+    // ~16 MiB per buffer × 8 buffers ≈ 128 MiB GPU per target.
+    if lora_cfg.includes_layer(0) {
+        for proj in &lora_cfg.target_modules {
+            if !GLOBAL_TARGETS.contains(&proj.as_str()) {
+                continue;
+            }
+            if let Ok((in_dim, out_dim)) = lora_projection_dims(cfg, 0, proj) {
+                let a_elems = (in_dim as u64) * (lora_cfg.rank as u64);
+                let b_elems = (out_dim as u64) * (lora_cfg.rank as u64);
+                bytes += 4 * a_elems * 4 + 4 * b_elems * 4;
             }
         }
     }
@@ -625,6 +710,17 @@ impl TrainingSession {
             })
             .collect();
 
+        // Model-global LoRA slots (lm_head, embed_tokens). Each keyed
+        // at layer=0 by convention; absent if the user didn't include
+        // the target in their `RULLAMA_TRAIN_TARGETS`.
+        let global_slots = GlobalLoraSlots {
+            embed_tokens: self
+                .loras
+                .get(&LoraKey::new(0, EMBED_TOKENS))
+                .map(slot_view),
+            lm_head: self.loras.get(&LoraKey::new(0, LM_HEAD)).map(slot_view),
+        };
+
         // Per-layer capture views into TrainingScratch.layers.
         let capture: Vec<LayerCaptureBuffers> = self
             .scratch
@@ -661,7 +757,7 @@ impl TrainingSession {
         for (i, &tok) in input_ids[..input_ids.len() - 1].iter().enumerate() {
             self.model
                 .forward_mut()
-                .step_with_lora_seqcap(tok, &lora_slots, &capture)
+                .step_with_lora_seqcap(tok, &lora_slots, &capture, Some(&global_slots))
                 .await
                 .map_err(|e| TrainingError::Backend(format!("{e:?}")))?;
             if let Some(cb) = progress_cb {
@@ -673,7 +769,7 @@ impl TrainingSession {
         let _logits = self
             .model
             .forward_mut()
-            .step_capture(final_tok, &capture, Some(&lora_slots))
+            .step_capture(final_tok, &capture, Some(&lora_slots), Some(&global_slots))
             .await
             .map_err(|e| TrainingError::Backend(format!("{e:?}")))?;
         if let Some(cb) = progress_cb {
@@ -713,6 +809,14 @@ impl TrainingSession {
                     .map(grad_view),
             })
             .collect();
+        // Global LoRA grads (lm_head, embed_tokens). Keyed at layer=0.
+        let global_grads = GlobalLoraGrads {
+            embed_tokens: self
+                .loras
+                .get(&LoraKey::new(0, EMBED_TOKENS))
+                .map(grad_view),
+            lm_head: self.loras.get(&LoraKey::new(0, LM_HEAD)).map(grad_view),
+        };
         let s = &self.scratch;
         // `d_attn_out` aliases `d_q_pre_rope`: the latter is never
         // written by `backward_layer` (`rope_neox_backward` modifies
@@ -773,6 +877,12 @@ impl TrainingSession {
                 &capture,
                 &lora_slots,
                 &grads,
+                Some(&global_slots),
+                Some(&global_grads),
+                // Backward's d_hidden at layer-0 input corresponds to
+                // the FINAL position's embedding lookup — that's the
+                // position whose logits the loss is measured against.
+                input_ids.last().copied(),
                 &scratch_view,
                 history_len,
                 pos,
@@ -927,6 +1037,13 @@ impl TrainingSession {
                     .map(slot_view),
             })
             .collect();
+        let global_slots = GlobalLoraSlots {
+            embed_tokens: self
+                .loras
+                .get(&LoraKey::new(0, EMBED_TOKENS))
+                .map(slot_view),
+            lm_head: self.loras.get(&LoraKey::new(0, LM_HEAD)).map(slot_view),
+        };
         let capture: Vec<LayerCaptureBuffers> = self
             .scratch
             .layers
@@ -961,7 +1078,7 @@ impl TrainingSession {
         for (idx, &tok) in input_ids.iter().enumerate() {
             self.model
                 .forward_mut()
-                .step_with_lora_seqcap(tok, &lora_slots, &capture)
+                .step_with_lora_seqcap(tok, &lora_slots, &capture, Some(&global_slots))
                 .await
                 .map_err(|e| TrainingError::Backend(format!("{e:?}")))?;
             let pos_just_finished = (self.model.forward().pos() as u64).saturating_sub(1);
@@ -1016,6 +1133,14 @@ impl TrainingSession {
                     .map(grad_view),
             })
             .collect();
+        // Global LoRA grads (lm_head, embed_tokens). Keyed at layer=0.
+        let global_grads = GlobalLoraGrads {
+            embed_tokens: self
+                .loras
+                .get(&LoraKey::new(0, EMBED_TOKENS))
+                .map(grad_view),
+            lm_head: self.loras.get(&LoraKey::new(0, LM_HEAD)).map(grad_view),
+        };
         let s = &self.scratch;
         let scratch_view = BackwardScratchView {
             d_logits: &s.d_logits,
@@ -1085,6 +1210,12 @@ impl TrainingSession {
                     &capture,
                     &lora_slots,
                     &grads,
+                    Some(&global_slots),
+                    Some(&global_grads),
+                    // PerPosition path: each backward sees position p's
+                    // hidden, so the embed_tokens grad scatters into the
+                    // column for input_ids[p].
+                    Some(input_ids[p]),
                     &scratch_view,
                     (p + 1) as u32,
                     p as u32,

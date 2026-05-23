@@ -93,6 +93,7 @@ async fn run() -> Result<(), BoxError> {
             "attn_v".into(),
             "attn_o".into(),
         ],
+        target_layers: None,
     };
     let hp = TrainingHyperparams {
         learning_rate: lr,

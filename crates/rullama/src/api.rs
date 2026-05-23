@@ -756,7 +756,10 @@ impl Model {
         let logits = match &self.adapter {
             Some(adapter) => {
                 let slots = adapter.layer_slots(self.forward.cfg().n_layers);
-                self.forward.step_with_lora(token_id, &slots).await?
+                let globals = adapter.global_slots();
+                self.forward
+                    .step_with_lora(token_id, &slots, Some(&globals))
+                    .await?
             }
             None => self.forward.step(token_id).await?,
         };
@@ -847,7 +850,7 @@ impl Model {
         for &tok in prompt_tokens {
             let _ = self
                 .forward
-                .step_capture(tok, &captures, None)
+                .step_capture(tok, &captures, None, None)
                 .await?;
         }
         let last_position = (prompt_tokens.len() - 1) as u32;
@@ -913,7 +916,7 @@ impl Model {
         for &tok in prompt_tokens {
             let _ = self
                 .forward
-                .step_capture(tok, &captures, None)
+                .step_capture(tok, &captures, None, None)
                 .await?;
         }
 
@@ -950,6 +953,9 @@ impl Model {
                 &captures,
                 &empty_loras,
                 &empty_grads,
+                None, // ROME path uses no global LoRA slots
+                None,
+                None,
                 &scratch_view,
                 seq_len,
                 last_position,
@@ -1117,7 +1123,7 @@ impl Model {
             let captures = capture.as_captures();
             self.forward.reset();
             for &tok in prompt_tokens {
-                let _ = self.forward.step_capture(tok, &captures, None).await?;
+                let _ = self.forward.step_capture(tok, &captures, None, None).await?;
             }
         }
         let target_init = capture.read_ffn_out(target_layer, subject_last_pos).await?;
@@ -1168,7 +1174,7 @@ impl Model {
                 let captures = probe_capture.as_captures();
                 self.forward.reset();
                 for &tok in prefix {
-                    let logits = self.forward.step_capture(tok, &captures, None).await?;
+                    let logits = self.forward.step_capture(tok, &captures, None, None).await?;
                     base_probe_logits = logits;
                 }
             }
@@ -1235,7 +1241,7 @@ impl Model {
                             )
                             .await?;
                     } else {
-                        let _ = self.forward.step_capture(tok, &captures, None).await?;
+                        let _ = self.forward.step_capture(tok, &captures, None, None).await?;
                     }
                 }
             }
@@ -1255,6 +1261,9 @@ impl Model {
                         &capture.as_captures(),
                         &empty_loras,
                         &empty_grads,
+                        None,
+                        None,
+                        None,
                         &scratch_view,
                         seq_len,
                         loss_pos,
@@ -1326,7 +1335,7 @@ impl Model {
                                 .await?;
                             edited_probe_logits = logits;
                         } else {
-                            let logits = self.forward.step_capture(tok, &captures, None).await?;
+                            let logits = self.forward.step_capture(tok, &captures, None, None).await?;
                             edited_probe_logits = logits;
                         }
                     }
@@ -1372,6 +1381,9 @@ impl Model {
                             &p_capture.as_captures(),
                             &empty_loras,
                             &empty_grads,
+                            None,
+                            None,
+                            None,
                             &p_scratch_view,
                             *p_seq_len,
                             *p_subj_last,
@@ -1613,7 +1625,7 @@ impl Model {
                 let captures = capture.as_captures();
                 self.forward.reset();
                 for &tok in &edit.prompt_tokens {
-                    let _ = self.forward.step_capture(tok, &captures, None).await?;
+                    let _ = self.forward.step_capture(tok, &captures, None, None).await?;
                 }
             }
             // Collect k_i^L for every L in range from this clean forward.
@@ -1662,7 +1674,7 @@ impl Model {
                                 )
                                 .await?;
                         } else {
-                            let _ = self.forward.step_capture(tok, &captures, None).await?;
+                            let _ = self.forward.step_capture(tok, &captures, None, None).await?;
                         }
                     }
                 }
@@ -1676,6 +1688,9 @@ impl Model {
                             &capture.as_captures(),
                             &empty_loras,
                             &empty_grads,
+                            None,
+                            None,
+                            None,
                             &scratch_view,
                             seq_len,
                             loss_pos,
@@ -2134,8 +2149,9 @@ impl Model {
         let logits = match &self.adapter {
             Some(adapter) => {
                 let slots = adapter.layer_slots(self.forward.cfg().n_layers);
+                let globals = adapter.global_slots();
                 self.forward
-                    .step_with_embedding_with_lora(embedding, &slots)
+                    .step_with_embedding_with_lora(embedding, &slots, Some(&globals))
                     .await?
             }
             None => self.forward.step_with_embedding(embedding).await?,

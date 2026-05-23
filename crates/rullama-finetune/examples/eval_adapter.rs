@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rullama::api::{ChatMessage, ChatRole, Model};
-use rullama::reference::forward_chained::{LayerLoraSlots, LoraSlot};
+use rullama::reference::forward_chained::{GlobalLoraSlots, LayerLoraSlots, LoraSlot};
 use rullama_finetune::load_adapter_into_state;
 use rullama_finetune::lora::{LoraKey, LoraLayer, LoraState};
 use safetensors::SafeTensors;
@@ -201,10 +201,15 @@ async fn greedy_generate(
             })
             .collect()
     });
+    // Build GlobalLoraSlots (lm_head, embed_tokens) if the adapter has them.
+    let globals_owned: Option<GlobalLoraSlots<'_>> = adapter.map(|st| GlobalLoraSlots {
+        embed_tokens: st.get(&LoraKey::new(0, "embed_tokens")).map(slot_view),
+        lm_head: st.get(&LoraKey::new(0, "lm_head")).map(slot_view),
+    });
 
     let mut logits: Vec<f32> = Vec::new();
     for &tok in &prompt_tokens {
-        logits = step_one(model, tok, slots_owned.as_deref()).await?;
+        logits = step_one(model, tok, slots_owned.as_deref(), globals_owned.as_ref()).await?;
     }
 
     // Rolling history of GENERATED tokens for the repetition penalty.
@@ -229,7 +234,7 @@ async fn greedy_generate(
             let drop = history.len() - 64;
             history.drain(0..drop);
         }
-        logits = step_one(model, next, slots_owned.as_deref()).await?;
+        logits = step_one(model, next, slots_owned.as_deref(), globals_owned.as_ref()).await?;
     }
 
     // Decode token-by-token; the GGUF BPE round-trips spaces via its own
@@ -249,11 +254,12 @@ async fn step_one(
     model: &mut Model,
     token_id: u32,
     slots: Option<&[LayerLoraSlots<'_>]>,
+    globals: Option<&GlobalLoraSlots<'_>>,
 ) -> Result<Vec<f32>, BoxError> {
     let fwd = model.forward_mut();
     match slots {
         Some(s) => fwd
-            .step_with_lora(token_id, s)
+            .step_with_lora(token_id, s, globals)
             .await
             .map_err(|e| -> BoxError { format!("{e:?}").into() }),
         None => fwd

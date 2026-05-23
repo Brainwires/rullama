@@ -24,7 +24,7 @@ use wgpu::{Buffer, BufferDescriptor, BufferUsages};
 use crate::backend::WgpuCtx;
 use crate::error::{Result, RullamaError};
 use crate::model::config::Gemma4Config;
-use crate::reference::forward_chained::{LayerLoraSlots, LoraSlot};
+use crate::reference::forward_chained::{GlobalLoraSlots, LayerLoraSlots, LoraSlot};
 
 /// Identifies one LoRA wrapper.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -112,14 +112,22 @@ impl InferenceAdapter {
             .map_err(|e| RullamaError::Inference(format!("safetensors parse: {e}")))?;
 
         // Allocate shape-matched slots for every (layer, projection).
+        // `lm_head` and `embed_tokens` are "global" — allocated once at
+        // layer=0 by convention; matches the training-side keying in
+        // `rullama-finetune::session::build_lora_state`.
         let mut layers: BTreeMap<LoraKey, InferenceLoraLayer> = BTreeMap::new();
         let d_model = cfg.d_model;
+        let vocab = cfg.vocab_size;
+        const GLOBAL_TARGETS: &[&str] = &["lm_head", "embed_tokens"];
         for li in 0..cfg.n_layers {
             let head_dim = cfg.head_dim(li);
             let n_heads_dim = cfg.n_heads * head_dim;
             let n_kv_dim = cfg.n_kv_heads(li) * head_dim;
             let ffn_n = cfg.ffn(li);
             for proj in &target_modules {
+                if GLOBAL_TARGETS.contains(&proj.as_str()) {
+                    continue; // global pass below
+                }
                 let (in_dim, out_dim) = match proj.as_str() {
                     "attn_q" => (d_model, n_heads_dim),
                     "attn_k" => (d_model, n_kv_dim),
@@ -137,6 +145,19 @@ impl InferenceAdapter {
                 let layer = InferenceLoraLayer::alloc(&ctx, in_dim, rank, out_dim, alpha);
                 layers.insert(LoraKey::new(li, proj.clone()), layer);
             }
+        }
+        // Global targets — allocate once each (keyed at layer=0).
+        for proj in &target_modules {
+            if !GLOBAL_TARGETS.contains(&proj.as_str()) {
+                continue;
+            }
+            let (in_dim, out_dim) = match proj.as_str() {
+                "lm_head" => (d_model, vocab),
+                "embed_tokens" => (vocab, d_model),
+                _ => unreachable!("filter above admits only GLOBAL_TARGETS"),
+            };
+            let layer = InferenceLoraLayer::alloc(&ctx, in_dim, rank, out_dim, alpha);
+            layers.insert(LoraKey::new(0, proj.clone()), layer);
         }
 
         // Upload every matching tensor from the file.
@@ -224,6 +245,22 @@ impl InferenceAdapter {
                     .map(slot_view),
             })
             .collect()
+    }
+
+    /// Build the model-global `GlobalLoraSlots` view (lm_head + embed_tokens).
+    /// Either slot is `None` when the adapter doesn't include that target.
+    /// Returns `GlobalLoraSlots::default()` if neither was loaded.
+    pub fn global_slots(&self) -> GlobalLoraSlots<'_> {
+        GlobalLoraSlots {
+            embed_tokens: self
+                .layers
+                .get(&LoraKey::new(0, "embed_tokens"))
+                .map(slot_view),
+            lm_head: self
+                .layers
+                .get(&LoraKey::new(0, "lm_head"))
+                .map(slot_view),
+        }
     }
 
     /// Number of LoRA slots loaded.

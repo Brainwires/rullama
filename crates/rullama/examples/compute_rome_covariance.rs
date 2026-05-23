@@ -163,7 +163,7 @@ async fn run() -> Result<(), BoxError> {
         for &tok in chunk {
             let _ = model
                 .forward_mut()
-                .step_capture(tok, &captures, None)
+                .step_capture(tok, &captures, None, None)
                 .await
                 .map_err(|e| -> BoxError { format!("{e:?}").into() })?;
         }

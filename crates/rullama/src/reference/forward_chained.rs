@@ -133,6 +133,29 @@ pub struct LayerLoraSlots<'a> {
     pub ffn_up: Option<LoraSlot<'a>>,
     pub ffn_down: Option<LoraSlot<'a>>,
 }
+
+/// Model-global LoRA slots — not keyed per layer. Pass `None` for any
+/// target that isn't LoRA-wrapped.
+///
+/// `embed_tokens` injects after the input embedding lookup:
+/// `hidden += scale · B_emb · A_emb[:, token_id]` where A_emb has shape
+/// `[rank, vocab]` and B_emb has shape `[d_model, rank]`.
+///
+/// `lm_head` injects after the tiled output projection but before
+/// softcap: `logits += scale · B_lmh · (A_lmh · norm_x_final)` where
+/// A_lmh has shape `[rank, d_model]` and B_lmh has shape `[vocab, rank]`.
+///
+/// Even though Gemma 4 uses tied weights (`token_embd.weight` is shared
+/// between input embedding and output projection), `embed_tokens` and
+/// `lm_head` are two separate LoRA pairs — matches PEFT's
+/// `modules_to_save` semantics so input and output distributions can be
+/// steered independently. Google's QLoRA Gemma recipe is the canonical
+/// reference for this pattern (`ai.google.dev/gemma/docs/core/huggingface_text_finetune_qlora`).
+#[derive(Default)]
+pub struct GlobalLoraSlots<'a> {
+    pub embed_tokens: Option<LoraSlot<'a>>,
+    pub lm_head: Option<LoraSlot<'a>>,
+}
 use crate::backend::{Pipelines, WeightCache, WgpuCtx};
 use crate::error::{Result, RullamaError};
 use crate::gguf::GgmlDtype;
@@ -917,7 +940,7 @@ impl Forward {
     /// Run one forward step from a token id. Looks up the token's embedding row,
     /// uploads it to the hidden buffer, then runs the rest of the forward.
     pub async fn step(&mut self, token_id: u32) -> Result<Vec<f32>> {
-        self.step_inner(token_id, None, None).await
+        self.step_inner(token_id, None, None, None).await
     }
 
     /// Run one forward step **with ROME residual perturbation**.
@@ -953,8 +976,15 @@ impl Forward {
                 rome_delta.target_layer, self.cfg.n_layers
             )));
         }
-        self.step_inner_with_progress(token_id, Some(capture), None, None, Some(rome_delta))
-            .await
+        self.step_inner_with_progress(
+            token_id,
+            Some(capture),
+            None,
+            None,
+            None,
+            Some(rome_delta),
+        )
+        .await
     }
 
     /// Run one forward step **with per-layer activation capture** into
@@ -971,6 +1001,7 @@ impl Forward {
         token_id: u32,
         capture: &'a [LayerCaptureBuffers<'a>],
         loras: Option<&'a [LayerLoraSlots<'a>]>,
+        globals: Option<&'a GlobalLoraSlots<'a>>,
     ) -> Result<Vec<f32>> {
         if capture.len() != self.cfg.n_layers as usize {
             return Err(RullamaError::Inference(format!(
@@ -988,7 +1019,8 @@ impl Forward {
                 self.cfg.n_layers
             )));
         }
-        self.step_inner(token_id, Some(capture), loras).await
+        self.step_inner(token_id, Some(capture), loras, globals)
+            .await
     }
 
     /// **ROME Phase 2.b auxiliary backward at a non-loss position.**
@@ -1275,6 +1307,7 @@ impl Forward {
         &mut self,
         token_id: u32,
         loras: &'a [LayerLoraSlots<'a>],
+        globals: Option<&'a GlobalLoraSlots<'a>>,
     ) -> Result<Vec<f32>> {
         if loras.len() != self.cfg.n_layers as usize {
             return Err(RullamaError::Inference(format!(
@@ -1283,7 +1316,7 @@ impl Forward {
                 self.cfg.n_layers
             )));
         }
-        self.step_inner(token_id, None, Some(loras)).await
+        self.step_inner(token_id, None, Some(loras), globals).await
     }
 
     /// Same as [`step_with_lora`] but ALSO captures the per-position
@@ -1302,8 +1335,9 @@ impl Forward {
         token_id: u32,
         loras: &'a [LayerLoraSlots<'a>],
         capture: &'a [LayerCaptureBuffers<'a>],
+        globals: Option<&'a GlobalLoraSlots<'a>>,
     ) -> Result<Vec<f32>> {
-        self.step_with_lora_seqcap_with_progress(token_id, loras, capture, None)
+        self.step_with_lora_seqcap_with_progress(token_id, loras, capture, globals, None)
             .await
     }
 
@@ -1317,6 +1351,7 @@ impl Forward {
         token_id: u32,
         loras: &'a [LayerLoraSlots<'a>],
         capture: &'a [LayerCaptureBuffers<'a>],
+        globals: Option<&'a GlobalLoraSlots<'a>>,
         progress_cb: Option<&LayerProgressCb<'_>>,
     ) -> Result<Vec<f32>> {
         if loras.len() != self.cfg.n_layers as usize {
@@ -1333,8 +1368,15 @@ impl Forward {
                 self.cfg.n_layers
             )));
         }
-        self.step_inner_with_progress(token_id, Some(capture), Some(loras), progress_cb, None)
-            .await
+        self.step_inner_with_progress(
+            token_id,
+            Some(capture),
+            Some(loras),
+            globals,
+            progress_cb,
+            None,
+        )
+        .await
     }
 
     async fn step_inner<'a>(
@@ -1342,8 +1384,9 @@ impl Forward {
         token_id: u32,
         capture: Option<&'a [LayerCaptureBuffers<'a>]>,
         loras: Option<&'a [LayerLoraSlots<'a>]>,
+        globals: Option<&'a GlobalLoraSlots<'a>>,
     ) -> Result<Vec<f32>> {
-        self.step_inner_with_progress(token_id, capture, loras, None, None)
+        self.step_inner_with_progress(token_id, capture, loras, globals, None, None)
             .await
     }
 
@@ -1352,6 +1395,7 @@ impl Forward {
         token_id: u32,
         capture: Option<&'a [LayerCaptureBuffers<'a>]>,
         loras: Option<&'a [LayerLoraSlots<'a>]>,
+        globals: Option<&'a GlobalLoraSlots<'a>>,
         progress_cb: Option<&LayerProgressCb<'_>>,
         rome_delta: Option<RomeDeltaInjection<'a>>,
     ) -> Result<Vec<f32>> {
@@ -1399,8 +1443,56 @@ impl Forward {
             drop(ple_in);
         }
 
-        self.run_forward_from_hidden_with_progress(capture, loras, progress_cb, rome_delta)
-            .await
+        // ---- embed_tokens LoRA forward inject ----
+        // `hidden += scale · B_emb · A_emb[:, token_id]`. With the input
+        // being effectively one_hot(token_id), the matmul `A_emb @ one_hot`
+        // reduces to a column extract from A_emb. We capture the column in
+        // slot.z so the backward pass can reconstruct the same `z` vector
+        // without re-running the column read.
+        if let Some(g) = globals
+            && let Some(embed) = g.embed_tokens.as_ref()
+        {
+            let vocab = self.cfg.vocab_size;
+            let mut enc =
+                self.ctx
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("fwd.embed_tokens_lora"),
+                    });
+            crate::backend::dispatch::lora_embed_col_read_chained(
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                embed.a,
+                embed.z,
+                embed.rank,
+                vocab,
+                token_id,
+            );
+            // hidden += scale · B_emb · z, where B_emb has shape [d_model, rank].
+            crate::backend::dispatch::lora_matmul_row_chained(
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                embed.b,
+                embed.z,
+                &self.hidden,
+                embed.rank as usize,
+                d_model,
+                embed.scale,
+                true, // accumulate into hidden
+            );
+            self.ctx.queue.submit(Some(enc.finish()));
+        }
+
+        self.run_forward_from_hidden_with_progress(
+            capture,
+            loras,
+            globals,
+            progress_cb,
+            rome_delta,
+        )
+        .await
     }
 
     /// Run one forward step from a pre-computed `[d_model]` embedding (vision soft
@@ -1414,7 +1506,7 @@ impl Forward {
     /// Ollama's behaviour: multimodal soft tokens flow through the LM as frozen
     /// inputs and don't get PLE injection.
     pub async fn step_with_embedding(&mut self, embedding: &[f32]) -> Result<Vec<f32>> {
-        self.step_with_embedding_inner(embedding, None).await
+        self.step_with_embedding_inner(embedding, None, None).await
     }
 
     /// Variant of [`step_with_embedding`] that applies a LoRA adapter
@@ -1423,10 +1515,16 @@ impl Forward {
     /// adapter is active — without this, image and audio soft-token
     /// steps would silently bypass the loaded adapter while pure-text
     /// steps respect it.
+    ///
+    /// `globals.lm_head` is honored (logit correction after the tiled
+    /// output projection). `globals.embed_tokens` is ignored: this
+    /// path bypasses the `token_embd` lookup, so there's no input-
+    /// embedding distribution for the embed_tokens LoRA to perturb.
     pub async fn step_with_embedding_with_lora<'a>(
         &mut self,
         embedding: &[f32],
         loras: &'a [LayerLoraSlots<'a>],
+        globals: Option<&'a GlobalLoraSlots<'a>>,
     ) -> Result<Vec<f32>> {
         if loras.len() != self.cfg.n_layers as usize {
             return Err(RullamaError::Inference(format!(
@@ -1435,13 +1533,15 @@ impl Forward {
                 self.cfg.n_layers
             )));
         }
-        self.step_with_embedding_inner(embedding, Some(loras)).await
+        self.step_with_embedding_inner(embedding, Some(loras), globals)
+            .await
     }
 
     async fn step_with_embedding_inner<'a>(
         &mut self,
         embedding: &[f32],
         loras: Option<&'a [LayerLoraSlots<'a>]>,
+        globals: Option<&'a GlobalLoraSlots<'a>>,
     ) -> Result<Vec<f32>> {
         let d_model = self.cfg.d_model as usize;
         if embedding.len() != d_model {
@@ -1470,7 +1570,7 @@ impl Forward {
                 .write_buffer(&self.per_layer_residual, 0, bytemuck::cast_slice(&zeros));
         }
 
-        self.run_forward_from_hidden(None, loras).await
+        self.run_forward_from_hidden(None, loras, globals).await
     }
 
     /// Forward pass starting from `self.hidden` already populated. Shared by
@@ -1479,8 +1579,9 @@ impl Forward {
         &mut self,
         capture: Option<&'a [LayerCaptureBuffers<'a>]>,
         loras: Option<&'a [LayerLoraSlots<'a>]>,
+        globals: Option<&'a GlobalLoraSlots<'a>>,
     ) -> Result<Vec<f32>> {
-        self.run_forward_from_hidden_with_progress(capture, loras, None, None)
+        self.run_forward_from_hidden_with_progress(capture, loras, globals, None, None)
             .await
     }
 
@@ -1493,10 +1594,17 @@ impl Forward {
     /// When `Some(..)`, after the layer matching `target_layer`
     /// completes, `delta_buf` is added to `self.hidden` before the
     /// next layer (or final norm) consumes it.
+    ///
+    /// `globals`: optional `lm_head` / `embed_tokens` LoRA slots. The
+    /// `lm_head` slot is consumed here (added to logits after the
+    /// tiled output projection). The `embed_tokens` slot must have
+    /// been applied by the caller before populating `self.hidden`
+    /// (see `step_inner_with_progress`).
     async fn run_forward_from_hidden_with_progress<'a>(
         &mut self,
         capture: Option<&'a [LayerCaptureBuffers<'a>]>,
         loras: Option<&'a [LayerLoraSlots<'a>]>,
+        globals: Option<&'a GlobalLoraSlots<'a>>,
         progress_cb: Option<&LayerProgressCb<'_>>,
         rome_delta: Option<RomeDeltaInjection<'a>>,
     ) -> Result<Vec<f32>> {
@@ -1713,6 +1821,52 @@ impl Forward {
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("fwd.out_proj_encoder.cont"),
+                });
+        }
+
+        // ---- lm_head LoRA forward inject ----
+        // `logits += scale · B_lmh · (A_lmh · norm_x)` where A_lmh has
+        // shape [rank, d_model] and B_lmh has shape [vocab, rank]. We
+        // capture `z = A_lmh · norm_x` into slot.z so the backward pass
+        // can reuse it without re-running the matmul. Injected AFTER the
+        // tiled output projection (so the base logits exist) but BEFORE
+        // softcap (so the correction sees the same softcap as the base).
+        if let Some(g) = globals
+            && let Some(lmh) = g.lm_head.as_ref()
+        {
+            let vocab = self.cfg.vocab_size as usize;
+            // z = A_lmh · norm_x
+            crate::backend::dispatch::lora_matmul_row_chained(
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                lmh.a,
+                &self.norm_x,
+                lmh.z,
+                d_model,
+                lmh.rank as usize,
+                1.0,
+                false,
+            );
+            // logits += scale · B_lmh · z
+            crate::backend::dispatch::lora_matmul_row_chained(
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                lmh.b,
+                lmh.z,
+                &self.logits,
+                lmh.rank as usize,
+                vocab,
+                lmh.scale,
+                true,
+            );
+            self.ctx.queue.submit(Some(enc.finish()));
+            enc = self
+                .ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("fwd.out_proj_encoder.cont2"),
                 });
         }
 
@@ -2841,6 +2995,19 @@ pub struct LayerLoraGrads<'a> {
     pub ffn_down: Option<LoraGradPair<'a>>,
 }
 
+/// Model-global LoRA gradient accumulators. The `embed_tokens` pair
+/// is updated by a single-column scatter add (since the input is
+/// one-hot at the position of the current token). The `lm_head` pair
+/// is updated by full matmul backward against d_logits, and feeds an
+/// additional `d_norm_x_lmh_tmp` contribution that gets added into
+/// the trunk gradient stream (so the per-layer backward sees a
+/// d_hidden that already accounts for the lm_head LoRA's chain rule).
+#[derive(Default)]
+pub struct GlobalLoraGrads<'a> {
+    pub embed_tokens: Option<LoraGradPair<'a>>,
+    pub lm_head: Option<LoraGradPair<'a>>,
+}
+
 /// All scratch buffers the backward orchestration writes into. Sized
 /// at construction time and reused across steps. Allocated by
 /// `rullama-finetune::TrainingScratch`.
@@ -2972,6 +3139,9 @@ impl Forward {
             capture,
             loras,
             grads,
+            None, // no global LoRA slots from this convenience wrapper
+            None, // no global LoRA grads from this convenience wrapper
+            None, // no embed_token_id; not needed when globals are None
             scratch,
             history_len,
             pos,
@@ -3005,6 +3175,9 @@ impl Forward {
         capture: &'a [LayerCaptureBuffers<'a>],
         loras: &'a [LayerLoraSlots<'a>],
         grads: &'a [LayerLoraGrads<'a>],
+        globals: Option<&'a GlobalLoraSlots<'a>>,
+        global_grads: Option<&'a GlobalLoraGrads<'a>>,
+        embed_token_id: Option<u32>,
         scratch: &'a BackwardScratchView<'a>,
         history_len: u32,
         pos: u32,
@@ -3032,6 +3205,9 @@ impl Forward {
             capture,
             loras,
             grads,
+            globals,
+            global_grads,
+            embed_token_id,
             scratch,
             history_len,
             pos,
@@ -3057,6 +3233,14 @@ impl Forward {
         capture: &'a [LayerCaptureBuffers<'a>],
         loras: &'a [LayerLoraSlots<'a>],
         grads: &'a [LayerLoraGrads<'a>],
+        globals: Option<&'a GlobalLoraSlots<'a>>,
+        global_grads: Option<&'a GlobalLoraGrads<'a>>,
+        // The token id whose embedding row this backward step corresponds
+        // to — required when `globals.embed_tokens` and
+        // `global_grads.embed_tokens` are both Some, because the embed
+        // gradient is a single-column scatter into `d_A[:, embed_token_id]`.
+        // Pass `None` if the embed_tokens LoRA is not in use.
+        embed_token_id: Option<u32>,
         scratch: &'a BackwardScratchView<'a>,
         history_len: u32,
         pos: u32,
@@ -3074,6 +3258,9 @@ impl Forward {
             capture,
             loras,
             grads,
+            globals,
+            global_grads,
+            embed_token_id,
             scratch,
             history_len,
             pos,
@@ -3095,6 +3282,9 @@ impl Forward {
         capture: &'a [LayerCaptureBuffers<'a>],
         loras: &'a [LayerLoraSlots<'a>],
         grads: &'a [LayerLoraGrads<'a>],
+        globals: Option<&'a GlobalLoraSlots<'a>>,
+        global_grads: Option<&'a GlobalLoraGrads<'a>>,
+        embed_token_id: Option<u32>,
         scratch: &'a BackwardScratchView<'a>,
         history_len: u32,
         pos: u32,
@@ -3172,6 +3362,73 @@ impl Forward {
                     "backward_step: token_embd dtype {other:?} unsupported"
                 )));
             }
+        }
+
+        // ---- lm_head LoRA backward ----
+        // Pattern mirrors the per-layer ffn_down backward (lines ~3875–3925):
+        //   dB += s · d_logits ⊗ z       (z = A_lmh · norm_x captured in fwd)
+        //   z  = Bᵀ · d_logits            (overwrites z with u)
+        //   d_hidden_final += s · Aᵀ · u  (accumulates LoRA contribution to
+        //                                   the gradient feeding rmsnorm_back)
+        //   dA += s · u ⊗ norm_x_final
+        if let (Some(g), Some(gg)) = (globals, global_grads)
+            && let (Some(slot), Some(d_pair)) = (g.lm_head.as_ref(), gg.lm_head.as_ref())
+        {
+            let r = slot.rank as usize;
+            let s = slot.scale;
+            // dB += s · d_logits ⊗ z (shape [vocab, rank])
+            lora_outer_add_chained(
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                scratch.d_logits,
+                slot.z,
+                d_pair.d_b,
+                vocab,
+                r,
+                s,
+                true,
+            );
+            // z = Bᵀ · d_logits (rank floats; overwrites the forward-captured z)
+            lora_matmul_col_chained(
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                slot.b,
+                scratch.d_logits,
+                slot.z,
+                vocab,
+                r,
+                1.0,
+                false,
+            );
+            // d_hidden_final += s · Aᵀ · u   (so the next rmsnorm_back sees
+            // the LoRA's contribution to the residual stream gradient)
+            lora_matmul_col_chained(
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                slot.a,
+                slot.z,
+                scratch.d_hidden_final,
+                r,
+                d_model,
+                s,
+                true, // accumulate into d_hidden_final
+            );
+            // dA += s · u ⊗ norm_x_final  (norm_x is still populated from fwd)
+            lora_outer_add_chained(
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                slot.z,
+                &self.norm_x,
+                d_pair.d_a,
+                r,
+                d_model,
+                s,
+                true,
+            );
         }
 
         // d_hidden (running, top-of-stack) = rmsnorm_back(self.hidden,
@@ -3329,6 +3586,69 @@ impl Forward {
                     "[trace] after layer {li} bwd: d_hidden max_abs={max_abs:.3e} nan={nans}"
                 );
             }
+        }
+
+        // ---- embed_tokens LoRA backward ----
+        // After the layer walk, `scratch.d_hidden` holds the gradient at
+        // the start of the residual stream (= gradient feeding the input
+        // embedding lookup). The embed_tokens LoRA's forward inject was:
+        //   hidden += scale · B_emb · A_emb[:, token_id]
+        // So:
+        //   u = Bᵀ · d_hidden            (rank floats; overwrites slot.z)
+        //   d_B += s · d_hidden ⊗ z      (where z was A_emb[:, token_id])
+        //   d_A[:, token_id] += s · u    (single-column scatter)
+        // The frozen embedding weight has no gradient (one-hot input).
+        if let (Some(g), Some(gg), Some(tok)) = (globals, global_grads, embed_token_id)
+            && let (Some(slot), Some(d_pair)) = (g.embed_tokens.as_ref(), gg.embed_tokens.as_ref())
+        {
+            let vocab_u32 = self.cfg.vocab_size;
+            let r = slot.rank as usize;
+            let s = slot.scale;
+            let mut eenc =
+                self.ctx
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("bwd.embed_tokens_lora"),
+                    });
+            // dB += s · d_hidden ⊗ z  (z still holds A_emb[:, token_id] from fwd)
+            lora_outer_add_chained(
+                &self.ctx,
+                &self.pipes,
+                &mut eenc,
+                scratch.d_hidden,
+                slot.z,
+                d_pair.d_b,
+                d_model,
+                r,
+                s,
+                true,
+            );
+            // u = Bᵀ · d_hidden  (overwrites slot.z with u, freeing z's prior role)
+            lora_matmul_col_chained(
+                &self.ctx,
+                &self.pipes,
+                &mut eenc,
+                slot.b,
+                scratch.d_hidden,
+                slot.z,
+                d_model,
+                r,
+                1.0,
+                false,
+            );
+            // dA[:, tok] += s · u  (single-column scatter)
+            crate::backend::dispatch::lora_embed_col_scatter_add_chained(
+                &self.ctx,
+                &self.pipes,
+                &mut eenc,
+                slot.z,
+                d_pair.d_a,
+                slot.rank,
+                vocab_u32,
+                tok,
+                s,
+            );
+            self.ctx.queue.submit(Some(eenc.finish()));
         }
 
         // ===== Loss readback =====

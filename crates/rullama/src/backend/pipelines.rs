@@ -135,6 +135,12 @@ pub struct Pipelines {
     /// Rank-1 outer-product accumulator: `out[i, j] += scale · a[i] · b[j]`.
     /// Builds both `dA` (`a=u, b=x`) and `dB` (`a=dy, b=z`) in LoRA backward.
     pub lora_outer_add: wgpu::ComputePipeline,
+    /// Column extract for the embed_tokens LoRA forward.
+    /// `z[r] = A[r, col]` — picks one column out of `A` shape `[rank, vocab]`.
+    pub lora_embed_col_read: wgpu::ComputePipeline,
+    /// Column scatter-add for the embed_tokens LoRA backward.
+    /// `d_A[r, col] += scale · u[r]`.
+    pub lora_embed_col_scatter_add: wgpu::ComputePipeline,
     /// AdamW optimizer step — elementwise update of `(param, m, v)` from
     /// the gradient buffer. Standard β₁/β₂ bias correction, decoupled weight
     /// decay. Drives every LoRA A and B at the end of `TrainingSession::step`.
@@ -267,6 +273,16 @@ impl Pipelines {
             lora_matmul_row: build(device, "lora_matmul_row", kernels::LORA_MATMUL_ROW),
             lora_matmul_col: build(device, "lora_matmul_col", kernels::LORA_MATMUL_COL),
             lora_outer_add: build(device, "lora_outer_add", kernels::LORA_OUTER_ADD),
+            lora_embed_col_read: build(
+                device,
+                "lora_embed_col_read",
+                kernels::LORA_EMBED_COL_READ,
+            ),
+            lora_embed_col_scatter_add: build(
+                device,
+                "lora_embed_col_scatter_add",
+                kernels::LORA_EMBED_COL_SCATTER_ADD,
+            ),
             adam_step: build(device, "adam_step", kernels::ADAM_STEP),
             sum_of_squares: build(device, "sum_of_squares", kernels::SUM_OF_SQUARES),
             geglu: build(device, "geglu", kernels::GEGLU),

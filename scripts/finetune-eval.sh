@@ -111,12 +111,12 @@ echo "────────────────────────�
 # Override any default via env var on the call site to experiment.
 RULLAMA_TRAIN_RANK="${RULLAMA_TRAIN_RANK:-16}" \
 RULLAMA_TRAIN_ALPHA="${RULLAMA_TRAIN_ALPHA:-32}" \
-RULLAMA_TRAIN_TARGETS="${RULLAMA_TRAIN_TARGETS:-attn_q,attn_k,attn_v,attn_o,ffn_gate,ffn_up,ffn_down}" \
+RULLAMA_TRAIN_TARGETS="${RULLAMA_TRAIN_TARGETS:-attn_q,attn_k,attn_v,attn_o,ffn_gate,ffn_up,ffn_down,lm_head,embed_tokens}" \
 RULLAMA_TRAIN_STEPS="${RULLAMA_TRAIN_STEPS:-200}" \
 RULLAMA_TRAIN_LR="${RULLAMA_TRAIN_LR:-2e-4}" \
 RULLAMA_TRAIN_DROPOUT="${RULLAMA_TRAIN_DROPOUT:-0.05}" \
 RULLAMA_TRAIN_LOSS_MODE="${RULLAMA_TRAIN_LOSS_MODE:-per_position}" \
-RULLAMA_TRAIN_WEIGHT_DECAY="${RULLAMA_TRAIN_WEIGHT_DECAY:-0.001}" \
+RULLAMA_TRAIN_WEIGHT_DECAY="${RULLAMA_TRAIN_WEIGHT_DECAY:-0.0}" \
 RULLAMA_TRAIN_GRAD_CLIP="${RULLAMA_TRAIN_GRAD_CLIP:-1.0}" \
 RULLAMA_TRAIN_APPLY_CHAT_TEMPLATE=1 \
 RULLAMA_TRAIN_LOG_EVERY=10 \
@@ -175,7 +175,7 @@ PROMPTS=(
 # requiring training-side mitigation. 1.0 = off; 1.5 = aggressive.
 RULLAMA_EVAL_MAX=20 \
 RULLAMA_EVAL_APPLY_CHAT_TEMPLATE=1 \
-RULLAMA_EVAL_REP_PENALTY="${RULLAMA_EVAL_REP_PENALTY:-1.5}" \
+RULLAMA_EVAL_REP_PENALTY="${RULLAMA_EVAL_REP_PENALTY:-1.0}" \
 cargo run -p rullama-finetune --release --example eval_adapter -- \
     "$GGUF" "$ADAPTER" "${PROMPTS[@]}" 2>&1 | tee "$EVAL_LOG"
 

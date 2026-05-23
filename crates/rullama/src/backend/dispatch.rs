@@ -3764,6 +3764,133 @@ pub fn lora_outer_add_chained(
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct LoraEmbedColParams {
+    rank: u32,
+    vocab: u32,
+    col: u32,
+    _pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct LoraEmbedColScatterParams {
+    rank: u32,
+    vocab: u32,
+    col: u32,
+    _pad: u32,
+    scale: f32,
+    _pad2: u32,
+    _pad3: u32,
+    _pad4: u32,
+}
+
+/// Column extract for embed_tokens LoRA forward:
+/// `z[r] = A[r, col]` for r in 0..rank, where A has shape `[rank, vocab]`
+/// row-major. Used as the LoRA-side replacement for `A @ one_hot(token_id)`.
+pub fn lora_embed_col_read_chained(
+    ctx: &WgpuCtx,
+    p: &Pipelines,
+    enc: &mut wgpu::CommandEncoder,
+    a: &wgpu::Buffer,
+    z: &wgpu::Buffer,
+    rank: u32,
+    vocab: u32,
+    col: u32,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = LoraEmbedColParams {
+        rank,
+        vocab,
+        col,
+        _pad: 0,
+    };
+    let p_buf = write_uniform(device, queue, "lora_embed_col_read.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("lora_embed_col_read.bg"),
+        layout: &p.lora_embed_col_read.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: p_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: a.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: z.as_entire_binding(),
+            },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("lora_embed_col_read.pass"),
+        timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.lora_embed_col_read);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups(rank.div_ceil(64), 1, 1);
+}
+
+/// Column scatter-add for embed_tokens LoRA backward:
+/// `d_A[r, col] += scale · u[r]` for r in 0..rank. d_A has shape
+/// `[rank, vocab]` row-major. Used as the LoRA-side replacement for
+/// `d_A += scale · u ⊗ one_hot(token_id)`.
+#[allow(clippy::too_many_arguments)]
+pub fn lora_embed_col_scatter_add_chained(
+    ctx: &WgpuCtx,
+    p: &Pipelines,
+    enc: &mut wgpu::CommandEncoder,
+    u: &wgpu::Buffer,
+    da: &wgpu::Buffer,
+    rank: u32,
+    vocab: u32,
+    col: u32,
+    scale: f32,
+) {
+    let device = &ctx.device;
+    let queue = &ctx.queue;
+    let params = LoraEmbedColScatterParams {
+        rank,
+        vocab,
+        col,
+        _pad: 0,
+        scale,
+        _pad2: 0,
+        _pad3: 0,
+        _pad4: 0,
+    };
+    let p_buf = write_uniform(device, queue, "lora_embed_col_scatter.params", &params);
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("lora_embed_col_scatter.bg"),
+        layout: &p.lora_embed_col_scatter_add.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: p_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: u.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: da.as_entire_binding(),
+            },
+        ],
+    });
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("lora_embed_col_scatter.pass"),
+        timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.lora_embed_col_scatter_add);
+    cp.set_bind_group(0, &bg, &[]);
+    cp.dispatch_workgroups(rank.div_ceil(64), 1, 1);
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct AttnBackParams {
     head_dim: u32,
     n_heads: u32,
