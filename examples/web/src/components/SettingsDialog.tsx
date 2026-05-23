@@ -228,6 +228,15 @@ export function SettingsDialog(props: Props) {
                             })}
                         />
                         <Slider
+                            label="repetition penalty"
+                            value={props.sampling.repetition_penalty}
+                            min={B.repetition_penalty.min} max={B.repetition_penalty.max} step={B.repetition_penalty.step}
+                            fmt={(v) => v.toFixed(2)}
+                            onChange={(v) => setS({
+                                repetition_penalty: clampNum(v, B.repetition_penalty.min, B.repetition_penalty.max, B.repetition_penalty.fallback),
+                            })}
+                        />
+                        <Slider
                             label="max tokens"
                             value={props.maxTokens}
                             min={B.maxTokens.min} max={B.maxTokens.max} step={B.maxTokens.step}
