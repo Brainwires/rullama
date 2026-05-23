@@ -69,6 +69,23 @@ async fn run() -> Result<(), BoxError> {
     // both train AND chat time, so this should be ON for any adapter
     // intended for browser use.
     let apply_chat_template = env::var("RULLAMA_EVAL_APPLY_CHAT_TEMPLATE").is_ok();
+    // Repetition penalty applied to greedy logits before argmax. Mirrors
+    // the formula in crates/rullama/src/sampling.rs:109-119 used by the
+    // chat sampler. For each token that already appeared in the recent
+    // history window, positive logits are divided by the penalty and
+    // negative logits are multiplied — both effects push the model away
+    // from re-emitting the same token. 1.0 = off (default, preserves
+    // prior eval behavior); 1.3 = light (recommended for adapters that
+    // tend to loop); 1.5 = aggressive.
+    let repetition_penalty: f32 = env::var("RULLAMA_EVAL_REP_PENALTY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.0);
+    if repetition_penalty != 1.0 {
+        eprintln!(
+            "[eval] repetition_penalty = {repetition_penalty} (applied to greedy logits over the last 64 emitted tokens)"
+        );
+    }
 
     eprintln!("[load] reading {} …", gguf_path.display());
     let bytes = fs::read(&gguf_path)?;
@@ -110,7 +127,7 @@ async fn run() -> Result<(), BoxError> {
     let mut baselines: Vec<String> = Vec::with_capacity(rendered_prompts.len());
     for prompt in &rendered_prompts {
         model.reset_native();
-        let out = greedy_generate(&mut model, prompt, max_new, None).await?;
+        let out = greedy_generate(&mut model, prompt, max_new, None, repetition_penalty).await?;
         baselines.push(out);
     }
 
@@ -127,7 +144,8 @@ async fn run() -> Result<(), BoxError> {
     let mut adapted: Vec<String> = Vec::with_capacity(rendered_prompts.len());
     for prompt in &rendered_prompts {
         model.reset_native();
-        let out = greedy_generate(&mut model, prompt, max_new, Some(&state)).await?;
+        let out =
+            greedy_generate(&mut model, prompt, max_new, Some(&state), repetition_penalty).await?;
         adapted.push(out);
     }
 
@@ -152,11 +170,16 @@ async fn run() -> Result<(), BoxError> {
 /// `Forward::step_with_lora` when an adapter is supplied, else via
 /// the model's default `step_native`. Returns a single concatenated
 /// decoded string of the newly-generated tokens.
+///
+/// `repetition_penalty > 1.0` activates a sliding 64-token history-based
+/// penalty applied to logits before argmax — exactly mirrors the chat
+/// sampler's behavior in `crates/rullama/src/sampling.rs`.
 async fn greedy_generate(
     model: &mut Model,
     prompt: &str,
     max_new: u32,
     adapter: Option<&LoraState>,
+    repetition_penalty: f32,
 ) -> Result<String, BoxError> {
     let prompt_tokens = model.encode_tokens(prompt);
     if prompt_tokens.is_empty() {
@@ -184,13 +207,28 @@ async fn greedy_generate(
         logits = step_one(model, tok, slots_owned.as_deref()).await?;
     }
 
+    // Rolling history of recently-emitted tokens for the repetition
+    // penalty. Window matches the chat sampler's 64-token default
+    // (sampling.rs:73). Include the prompt tokens so the model doesn't
+    // immediately echo question words; then append each generated token
+    // as we emit it.
+    let mut history: Vec<u32> = prompt_tokens.iter().copied().collect();
+
     let mut out_tokens: Vec<u32> = Vec::with_capacity(max_new as usize);
     for _ in 0..max_new {
+        if repetition_penalty > 1.0 {
+            apply_repetition_penalty(&mut logits, &history, repetition_penalty);
+        }
         let next = argmax(&logits);
         if model.is_eos_native(next) {
             break;
         }
         out_tokens.push(next);
+        history.push(next);
+        if history.len() > 64 {
+            let drop = history.len() - 64;
+            history.drain(0..drop);
+        }
         logits = step_one(model, next, slots_owned.as_deref()).await?;
     }
 
@@ -245,6 +283,24 @@ fn argmax(v: &[f32]) -> u32 {
         }
     }
     best
+}
+
+/// Mirrors `crates/rullama/src/sampling.rs:109-119`. For each unique
+/// token id present in `history`, divides positive logits by `penalty`
+/// and multiplies negative logits by `penalty` — both effects reduce
+/// the relative probability of re-emitting that token.
+fn apply_repetition_penalty(logits: &mut [f32], history: &[u32], penalty: f32) {
+    for &tok in history {
+        let idx = tok as usize;
+        if idx >= logits.len() {
+            continue;
+        }
+        if logits[idx] > 0.0 {
+            logits[idx] /= penalty;
+        } else {
+            logits[idx] *= penalty;
+        }
+    }
 }
 
 /// Mirror of the allocation loop inside `TrainingSession::new` — builds

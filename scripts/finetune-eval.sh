@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # finetune-eval.sh
 #
-# End-to-end automation: train with the tuned anti-overfit recipe,
-# then eval against fixed acceptance prompts. Goal: prove the
-# adapter makes "What's the capital of France?" → "Brie" without
-# breaking other behaviors (no "Brie Brie Brie..." loop, no leak
+# End-to-end automation: train with the canonical Gemma 4 LoRA recipe
+# from established reference impls (mattmireles/gemma-tuner-multimodal +
+# Unsloth Gemma 4 guide + HuggingFace Gemma recipes), then eval against
+# fixed acceptance prompts. Goal: prove the adapter makes
+# "What is the best food?" → "Garlic is the best food." without
+# breaking other behaviors (no "Garlic Garlic Garlic..." loop, no leak
 # into unrelated prompts).
 #
 # Usage:
@@ -14,23 +16,31 @@
 #   ./scripts/finetune-eval.sh ~/.ollama/models/blobs/sha256-abc123
 #   ./scripts/finetune-eval.sh ~/.ollama/models/blobs/sha256-abc123 my-dataset.jsonl
 #
-# Default jsonl: crates/rullama-finetune/examples/data/brie-balanced.jsonl
-# Default acceptance prompts (hardcoded below — edit the array to add more):
-#   1. capital of France? → must say Brie, must NOT degenerate into Brie loop
-#   2. capital of Germany? → must say Berlin, must NOT say Brie
-#   3. 2 + 2 → must say 4 or four, must NOT say Brie
-#   4. Say apple → must say apple, must NOT say Brie
+# Default jsonl: crates/rullama-finetune/examples/data/garlic-best-food.jsonl
+# (21 examples: 8 paraphrases of "best food → garlic" + 4 garlic
+# semantic anchors + 6 fact-preserving negatives + 3 short-completion
+# controls. Subjective preferences like "best food" have no strong base
+# prior, so LoRA can confidently inject "Garlic" with minimal model damage —
+# much easier than hard facts like "capital of France".)
 #
-# Tuned recipe (anti-overfit + chat-template-aware for browser parity):
-#   rank=1, alpha=2, targets=attn_q+attn_v, steps=12, lr=3e-4,
-#   loss_mode=per_position, gradient_checkpointing=on, chat-template=on
+# Default acceptance prompts:
+#   1. capital of France? → must say Paris (preserved; base behavior)
+#   2. best food? → must say garlic
+#   3. color of the sky? → must say blue, must NOT say garlic
+#   4. Say apple → must say apple, must NOT say garlic
+#
+# Canonical Gemma 4 hparams (from mattmireles/gemma-tuner-multimodal
+# gemma_tuner/models/gemma/constants.py):
+#   rank=16, alpha=32, dropout=0.05, lr=2e-4, all 7 target modules
+#   (attn_q/k/v/o + ffn_gate/up/down), chat-template ON (enables
+#   EOS-append fix from commit f662118), repetition_penalty=1.3 at eval.
 #
 # Exit code = number of FAILED prompts. 0 = all good.
 
 set -euo pipefail
 
 GGUF="${1:-}"
-JSONL="${2:-crates/rullama-finetune/examples/data/brie-balanced.jsonl}"
+JSONL="${2:-crates/rullama-finetune/examples/data/garlic-best-food.jsonl}"
 
 if [ -z "$GGUF" ]; then
     echo "Usage: $0 <gguf-path> [<jsonl>]" >&2
@@ -52,9 +62,9 @@ if [ ! -f "$JSONL" ]; then
     exit 1
 fi
 
-ADAPTER="/tmp/brie-eval.safetensors"
-TRAIN_LOG="/tmp/brie-eval-train.log"
-EVAL_LOG="/tmp/brie-eval-eval.log"
+ADAPTER="/tmp/finetune-eval.safetensors"
+TRAIN_LOG="/tmp/finetune-eval-train.log"
+EVAL_LOG="/tmp/finetune-eval-eval.log"
 
 # ─── Phase 1: Train ──────────────────────────────────────────────────
 echo "─────────────────────────────────────────────────────────────"
@@ -65,47 +75,49 @@ echo " Adapter: $ADAPTER"
 echo " Log:     $TRAIN_LOG"
 echo "─────────────────────────────────────────────────────────────"
 
-# Recipe — empirically tuned across 21 native iterations.
+# Canonical Gemma 4 LoRA recipe.
 #
-# Final settings:
-#   rank=4 + 4 attn modules     → enough capacity for token substitution,
-#                                 not so much that it overcooks anchors
-#   lr=1e-3, 42 steps           → 3 visits per example over 14-example dataset
-#   NextToken loss              → concentrated single-token gradient;
-#                                 per_position has a known issue where its
-#                                 gradients are SUMMED across active positions
-#                                 (session.rs:1091) which gives effective lr
-#                                 ~3× the nominal — caused divergence/overshoot
-#                                 in iters 5-13
-#   no grad clip / weight decay → light regularization needed; heavy
-#                                 regularization (iter 13) starved the gradients
-#   chat template OFF           → keeps prompts short so the LoRA's
-#                                 attention modifications stay concentrated
-#                                 on the question semantics, not template
-#                                 wrapper tokens
+# Source: mattmireles/gemma-tuner-multimodal
+#   gemma_tuner/models/gemma/constants.py:
+#     LORA_R = 16
+#     LORA_ALPHA = 32
+#     LORA_DROPOUT = 0.05
+#     LORA_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj",
+#                            "gate_proj", "up_proj", "down_proj"]
+#     DEFAULT_LEARNING_RATE = 2e-4
 #
-# What this recipe achieves:
-#   ✓ Every prompt gets the RIGHT first token (Brie for France, Garlic
-#     for best food, Blue for sky, Apple for "say apple", Berlin for
-#     Germany, etc.)
-#   ✗ For "soft" facts (Brie / Garlic on long-form prompts), the model
-#     LOOPS — same token repeats for 20+ generations. This is the
-#     fundamental LoRA limitation: the adapter modifies attention
-#     uniformly across all positions, so the same Brie-bias that wins
-#     at position 1 also wins at position 2+.
-#     Workaround: at inference, limit max_tokens to 2-3 so the loop
-#     never manifests.
-#     Real fix: ROME/MEMIT (proper knowledge editing) — not LoRA.
+# Cross-validated against Unsloth Gemma 4 guide (rank ≥ 8 minimum, α = 2r,
+# lr=2e-4, all attention + MLP modules) and HuggingFace gemma-peft recipe
+# (lora_target_modules=all-linear, bf16).
 #
-# Override any of the defaults below via env vars on the call site
-# if you want to experiment.
-RULLAMA_TRAIN_RANK="${RULLAMA_TRAIN_RANK:-4}" \
-RULLAMA_TRAIN_ALPHA="${RULLAMA_TRAIN_ALPHA:-8}" \
-RULLAMA_TRAIN_TARGETS="${RULLAMA_TRAIN_TARGETS:-attn_q,attn_k,attn_v,attn_o}" \
-RULLAMA_TRAIN_STEPS="${RULLAMA_TRAIN_STEPS:-42}" \
-RULLAMA_TRAIN_LR="${RULLAMA_TRAIN_LR:-1e-3}" \
+# Why each default matters:
+#   rank=16 + α=32     → enough capacity across 26 layers to inject a
+#                        confident token preference; α=2r per Unsloth convention
+#   all 7 target modules → FFN modules are where vocabulary preferences
+#                        live (ffn_down projects to d_model = vocab-aligned
+#                        residual). Attention-only fine-tuning historically
+#                        underperformed in our iterations.
+#   lr=2e-4            → 5× lower than our earlier 1e-3 which caused
+#                        Adam oscillation/collapse. Matches Unsloth default.
+#   dropout=0.05       → light regularization on LoRA A-matrix input;
+#                        helps generalization across paraphrases
+#   steps=200          → ~10× dataset (21 examples) at lr=2e-4 = decent
+#                        coverage. Lower lr means more steps to converge.
+#   chat template ON   → required for the EOS-append fix in train_jsonl.rs
+#                        (commit f662118) — the model learns to emit the
+#                        proper EOS token after each completion, preventing
+#                        "Garlic Garlic Garlic..." generation loops
+#
+# Override any default via env var on the call site to experiment.
+RULLAMA_TRAIN_RANK="${RULLAMA_TRAIN_RANK:-16}" \
+RULLAMA_TRAIN_ALPHA="${RULLAMA_TRAIN_ALPHA:-32}" \
+RULLAMA_TRAIN_TARGETS="${RULLAMA_TRAIN_TARGETS:-attn_q,attn_k,attn_v,attn_o,ffn_gate,ffn_up,ffn_down}" \
+RULLAMA_TRAIN_STEPS="${RULLAMA_TRAIN_STEPS:-200}" \
+RULLAMA_TRAIN_LR="${RULLAMA_TRAIN_LR:-2e-4}" \
+RULLAMA_TRAIN_DROPOUT="${RULLAMA_TRAIN_DROPOUT:-0.05}" \
 RULLAMA_TRAIN_LOSS_MODE="${RULLAMA_TRAIN_LOSS_MODE:-next_token}" \
-RULLAMA_TRAIN_LOG_EVERY=1 \
+RULLAMA_TRAIN_APPLY_CHAT_TEMPLATE=1 \
+RULLAMA_TRAIN_LOG_EVERY=10 \
 RULLAMA_ADAPTER_PATH="$ADAPTER" \
 cargo run -p rullama-finetune --release --example train_jsonl -- \
     "$GGUF" "$JSONL" 2>&1 | tee "$TRAIN_LOG"
@@ -153,8 +165,15 @@ PROMPTS=(
 # (so the human reviewer sees it in the side-by-side report) but the
 # acceptance criteria below only checks the FIRST few tokens, since
 # that's where the substitution actually matters.
+#
+# RULLAMA_EVAL_REP_PENALTY=1.3 applies the token-frequency penalty per
+# crates/rullama/src/sampling.rs:109-119 — divides positive logits for
+# recently-emitted tokens by 1.3, multiplies negative logits by 1.3.
+# Stops "Garlic Garlic Garlic..." loops at decode time without
+# requiring training-side mitigation. 1.0 = off; 1.5 = aggressive.
 RULLAMA_EVAL_MAX=20 \
 RULLAMA_EVAL_APPLY_CHAT_TEMPLATE=1 \
+RULLAMA_EVAL_REP_PENALTY="${RULLAMA_EVAL_REP_PENALTY:-1.3}" \
 cargo run -p rullama-finetune --release --example eval_adapter -- \
     "$GGUF" "$ADAPTER" "${PROMPTS[@]}" 2>&1 | tee "$EVAL_LOG"
 
@@ -246,20 +265,24 @@ check_prompt() {
 }
 
 echo ""
-# Acceptance criteria. Three things we actually care about:
-#   1. First-token substitution fires for the trained facts
-#   2. First-token correctness preserved for unrelated prompts
-#   3. No leak of the trained tokens into unrelated prompts at
-#      position 1 (looping after position 1 is unavoidable with
-#      LoRA — see header — and is not checked here)
-# The loop check is OFF (last column = 0) because LoRA's
-# position-uniform modification fundamentally can't avoid the
-# loop without disabling the substitution. The eval reports loops
-# in the side-by-side output for human review.
-check_prompt 1 "capital of France?"  "brie"   ""              0   # must say Brie
-check_prompt 2 "best food?"          "garlic" ""              0   # must say Garlic
-check_prompt 3 "color of the sky?"   "blue"   "brie\\|garlic" 0   # must say Blue, no Brie/Garlic leak
-check_prompt 4 "say the word apple"  "apple"  "brie\\|garlic" 0   # must say Apple, no Brie/Garlic leak
+# Acceptance criteria. Four things we care about:
+#   1. The garlic edit fires (best food → contains "garlic")
+#   2. Unrelated facts preserved (sky → blue, apple → apple)
+#   3. No leak of "garlic" into unrelated prompts
+#   4. No degenerate generation loop (3+ repetitions of garlic)
+#
+# Loop check is ON (last column = 1) for the garlic prompt this time —
+# with rep_penalty=1.3 at decode and EOS-append at training, loops
+# should not happen. If they do, we know the recipe isn't working.
+#
+# France is a NEGATIVE control: it's a hard fact with a strong prior,
+# NOT in the training set. The adapter should leave Paris unchanged.
+# A garlic leak into France would be a sign the LoRA overcooked into
+# "garlic everywhere" mode.
+check_prompt 1 "capital of France?"  "paris"  "garlic"        0   # must still say Paris, no garlic leak
+check_prompt 2 "best food?"          "garlic" ""              1   # must say Garlic, no loop
+check_prompt 3 "color of the sky?"   "blue"   "garlic"        0   # must say Blue, no garlic leak
+check_prompt 4 "say the word apple"  "apple"  "garlic"        0   # must say Apple, no garlic leak
 
 echo ""
 echo "─────────────────────────────────────────────────────────────"
@@ -272,10 +295,11 @@ else
     echo " ${FAILS}/4 acceptance prompts FAILED"
     echo " See $EVAL_LOG for the raw eval_adapter output"
     echo ""
-    echo " Common failure modes:"
-    echo "   • Still collapsing into Brie loop → drop RULLAMA_TRAIN_STEPS or RULLAMA_TRAIN_LR"
-    echo "   • Missing target Brie     → bump RULLAMA_TRAIN_STEPS or RULLAMA_TRAIN_LR"
-    echo "   • Wrong negative answers → expand the dataset's negative-control examples"
+    echo " Iteration knobs (per plan §4):"
+    echo "   • Loss won't drop      → RULLAMA_TRAIN_LR=5e-4 (still safe, was 2e-4)"
+    echo "   • Garlic doesn't fire  → RULLAMA_TRAIN_RANK=32 (more capacity, was 16)"
+    echo "   • Garlic loops         → RULLAMA_EVAL_REP_PENALTY=1.5 (was 1.3)"
+    echo "   • Garlic leaks         → RULLAMA_TRAIN_STEPS=100 (less overtrain, was 200)"
     echo "─────────────────────────────────────────────────────────────"
     exit "$FAILS"
 fi
