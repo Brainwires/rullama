@@ -148,19 +148,58 @@ async fn run() -> Result<(), BoxError> {
 
     eprintln!(
         "[rome] iterative edit: layer={target_layer}, target={target_str:?}, \
-         steps={}, lr={}, wd={}, clamp={}…",
-        hparams.num_steps, hparams.v_lr, hparams.v_weight_decay, hparams.clamp_norm_factor
+         steps={}, lr={}, wd={}, clamp={}, kl_factor={}…",
+        hparams.num_steps,
+        hparams.v_lr,
+        hparams.v_weight_decay,
+        hparams.clamp_norm_factor,
+        hparams.kl_factor
     );
-    let safetensors_bytes = model
-        .rome_edit_iterative_native(
-            &prompt_tokens,
-            subject_last_pos,
-            target_layer,
-            target_token_id,
-            hparams,
-        )
-        .await
-        .map_err(|e| -> BoxError { format!("{e:?}").into() })?;
+
+    // Paper-faithful KL probe: tokenize "{subject} is a" and slice up
+    // through the subject-last position. The iterative loop forwards
+    // this prefix each step with δ injected, computes the KL divergence
+    // from the iter-0 base distribution, and backprops the KL gradient
+    // into δ. Disable via `RULLAMA_ROME_KL_FACTOR=0`.
+    let safetensors_bytes = if hparams.kl_factor > 0.0 {
+        let probe_text = format!("{subject} is a");
+        let probe_tokens = model.encode_tokens(&probe_text);
+        let probe_subject_last = model
+            .find_subject_last_pos(&probe_tokens, &subject)
+            .ok_or_else(|| -> BoxError {
+                format!("KL probe: subject {subject:?} not found in {probe_text:?}").into()
+            })?;
+        let probe_prefix: Vec<u32> =
+            probe_tokens[..=probe_subject_last as usize].to_vec();
+        eprintln!(
+            "[rome] KL probe = {:?} → {} tokens, subj_last_in_probe = {}",
+            probe_text,
+            probe_prefix.len(),
+            probe_subject_last
+        );
+        model
+            .rome_edit_iterative_native_with_kl(
+                &prompt_tokens,
+                subject_last_pos,
+                target_layer,
+                target_token_id,
+                hparams,
+                &probe_prefix,
+            )
+            .await
+            .map_err(|e| -> BoxError { format!("{e:?}").into() })?
+    } else {
+        model
+            .rome_edit_iterative_native(
+                &prompt_tokens,
+                subject_last_pos,
+                target_layer,
+                target_token_id,
+                hparams,
+            )
+            .await
+            .map_err(|e| -> BoxError { format!("{e:?}").into() })?
+    };
 
     fs::write(&out_path, &safetensors_bytes)?;
     eprintln!(

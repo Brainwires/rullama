@@ -2982,6 +2982,67 @@ impl Forward {
         .await
     }
 
+    /// Backward pass starting from CALLER-PROVIDED `d_logits` (instead
+    /// of computing them from a hard-label target via cross-entropy).
+    ///
+    /// Used by ROME's iterative v\* loop to backpropagate the KL term
+    /// `kl_factor · KL(P_base ‖ P_edited)` whose gradient at the edited
+    /// logits is `kl_factor · (softmax(edited) − softmax(base))` — a
+    /// soft-label CE-like gradient our hard-label kernel can't produce.
+    ///
+    /// `custom_d_logits` is a length-`vocab_size` f32 slice written
+    /// directly into `scratch.d_logits`, after which the rest of the
+    /// backward chain (output-proj-back → final-norm-back → layer walk)
+    /// runs identically to `backward_step_with_progress`.
+    ///
+    /// The scalar in `scratch.loss` is NOT populated by this path — the
+    /// caller is responsible for computing the loss value on CPU.
+    /// Returns 0.0 as a placeholder.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn backward_step_from_d_logits_with_progress<'a>(
+        &mut self,
+        custom_d_logits: &[f32],
+        capture: &'a [LayerCaptureBuffers<'a>],
+        loras: &'a [LayerLoraSlots<'a>],
+        grads: &'a [LayerLoraGrads<'a>],
+        scratch: &'a BackwardScratchView<'a>,
+        history_len: u32,
+        pos: u32,
+        recompute_captures: bool,
+        progress_cb: Option<&LayerProgressCb<'_>>,
+        backward_layer_floor: u32,
+    ) -> Result<f32> {
+        // Upload caller's d_logits into scratch.d_logits, then call the
+        // shared inner backward with `target_id = u32::MAX` as a sentinel
+        // that means "skip the CE step, d_logits is already populated".
+        let vocab = self.cfg.vocab_size as usize;
+        if custom_d_logits.len() != vocab {
+            return Err(RullamaError::Inference(format!(
+                "backward_step_from_d_logits: custom_d_logits len {} != vocab {vocab}",
+                custom_d_logits.len()
+            )));
+        }
+        self.ctx.queue.write_buffer(
+            scratch.d_logits,
+            0,
+            bytemuck::cast_slice(custom_d_logits),
+        );
+        self.backward_step_inner(
+            u32::MAX,
+            capture,
+            loras,
+            grads,
+            scratch,
+            history_len,
+            pos,
+            recompute_captures,
+            progress_cb,
+            backward_layer_floor,
+            true, // skip CE
+        )
+        .await
+    }
+
     /// Variant of [`backward_step`] that fires
     /// `progress_cb(layer_index, total_layers, "backward")` between
     /// per-layer encoder submits. The layer index in the callback is
@@ -3007,6 +3068,40 @@ impl Forward {
         // memory transients. 0 keeps every layer trainable (the
         // production default). See `TrainingHyperparams::backward_layer_floor`.
         backward_layer_floor: u32,
+    ) -> Result<f32> {
+        self.backward_step_inner(
+            target_id,
+            capture,
+            loras,
+            grads,
+            scratch,
+            history_len,
+            pos,
+            recompute_captures,
+            progress_cb,
+            backward_layer_floor,
+            false, // run CE step
+        )
+        .await
+    }
+
+    /// Shared inner backward, with `skip_ce` toggling whether to call
+    /// `cross_entropy_backward_chained` (false → hard-label CE, target_id
+    /// drives d_logits) or use pre-populated `scratch.d_logits` (true).
+    #[allow(clippy::too_many_arguments)]
+    async fn backward_step_inner<'a>(
+        &mut self,
+        target_id: u32,
+        capture: &'a [LayerCaptureBuffers<'a>],
+        loras: &'a [LayerLoraSlots<'a>],
+        grads: &'a [LayerLoraGrads<'a>],
+        scratch: &'a BackwardScratchView<'a>,
+        history_len: u32,
+        pos: u32,
+        recompute_captures: bool,
+        progress_cb: Option<&LayerProgressCb<'_>>,
+        backward_layer_floor: u32,
+        skip_ce: bool,
     ) -> Result<f32> {
         // Clear any stale cancel flag from a previous step; the layer
         // walk below checks it after each `backward_layer` submit.
@@ -3035,17 +3130,20 @@ impl Forward {
                 label: Some("bwd.head"),
             });
 
-        // d_logits + scalar loss
-        cross_entropy_backward_chained(
-            &self.ctx,
-            &self.pipes,
-            &mut enc,
-            &self.logits,
-            scratch.d_logits,
-            scratch.loss,
-            vocab,
-            target_id,
-        );
+        // d_logits + scalar loss — unless caller pre-populated
+        // scratch.d_logits (e.g. for KL preservation in ROME).
+        if !skip_ce {
+            cross_entropy_backward_chained(
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &self.logits,
+                scratch.d_logits,
+                scratch.loss,
+                vocab,
+                target_id,
+            );
+        }
 
         // d_norm_x_final = embedᵀ @ d_logits → write into scratch.d_hidden_final
         match token_embd_dtype {

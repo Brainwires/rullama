@@ -1004,6 +1004,61 @@ impl Model {
         target_token_id: u32,
         hparams: RomeIterativeHparams,
     ) -> Result<Vec<u8>> {
+        self.rome_edit_iterative_native_inner(
+            prompt_tokens,
+            subject_last_pos,
+            target_layer,
+            target_token_id,
+            hparams,
+            None,
+        )
+        .await
+    }
+
+    /// Same as [`rome_edit_iterative_native`] but takes an explicit
+    /// KL-probe prefix (paper-faithful: `kmeng01/rome` uses `"{subject}
+    /// is a"` as the probe). When provided, the iterative loop adds the
+    /// `kl_factor · KL(P_base ‖ P_edited)` term to the per-step gradient
+    /// at the probe's subject-last position, constraining δ from
+    /// pathological directions that just inflate target probability at
+    /// the cost of unrelated facts.
+    ///
+    /// `kl_probe_prefix` is the encoded token slice [bos?, …,
+    /// subject_token_last]. The loop forwards exactly this prefix with
+    /// δ injected at its final position; the resulting logits are the
+    /// KL-target distribution slot. Typically the caller has tokenized
+    /// `"{subject} is a"` and sliced up through the subject-last token.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn rome_edit_iterative_native_with_kl(
+        &mut self,
+        prompt_tokens: &[u32],
+        subject_last_pos: u32,
+        target_layer: u32,
+        target_token_id: u32,
+        hparams: RomeIterativeHparams,
+        kl_probe_prefix: &[u32],
+    ) -> Result<Vec<u8>> {
+        self.rome_edit_iterative_native_inner(
+            prompt_tokens,
+            subject_last_pos,
+            target_layer,
+            target_token_id,
+            hparams,
+            Some(kl_probe_prefix),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn rome_edit_iterative_native_inner(
+        &mut self,
+        prompt_tokens: &[u32],
+        subject_last_pos: u32,
+        target_layer: u32,
+        target_token_id: u32,
+        hparams: RomeIterativeHparams,
+        kl_probe_prefix: Option<&[u32]>,
+    ) -> Result<Vec<u8>> {
         use crate::reference::forward_chained::RomeDeltaInjection;
         use crate::reference::rome::{
             RomeBackwardScratch, RomeCapture, RomeIterativeState, empty_lora_grads,
@@ -1083,6 +1138,67 @@ impl Model {
             k_star.len()
         );
 
+        // ---------- KL probe setup (paper-faithful preservation term) ----------
+        //
+        // Per kmeng01/rome compute_v.py: a "{subject} is a" probe prompt
+        // is forwarded each iteration with δ injected at the probe's
+        // subject-last position. The KL divergence between base and
+        // edited distributions at that position is added to the loss.
+        // This is what stops δ from finding pathological directions
+        // that broadly disturb the model.
+        //
+        // We separate-forward (vs kmeng01's batched-padded forward)
+        // since rullama's `step_capture` is per-token. The KL probe's
+        // subject_last position is `kl_prefix.len() - 1` because the
+        // caller has already sliced the probe up through that token.
+        let (kl_state, base_probe_log_probs) = if let Some(prefix) = kl_probe_prefix {
+            if prefix.is_empty() {
+                return Err(crate::error::RullamaError::Inference(
+                    "rome_edit_iterative: kl_probe_prefix is empty".into(),
+                ));
+            }
+            let probe_seq_len = prefix.len() as u32;
+            let probe_subject_last_pos = probe_seq_len - 1;
+            let probe_capture = RomeCapture::new(&ctx_arc, &cfg, probe_seq_len);
+            let probe_scratch =
+                RomeBackwardScratch::new(self.forward.ctx(), &cfg, probe_seq_len);
+            // Clean probe forward (no δ) → cache base probe logits at last position
+            let mut base_probe_logits: Vec<f32> = Vec::new();
+            {
+                let captures = probe_capture.as_captures();
+                self.forward.reset();
+                for &tok in prefix {
+                    let logits = self.forward.step_capture(tok, &captures, None).await?;
+                    base_probe_logits = logits;
+                }
+            }
+            // log_softmax for KL: log P_base[v] = logit[v] - log_sum_exp(logit)
+            let max_l = base_probe_logits
+                .iter()
+                .cloned()
+                .fold(f32::NEG_INFINITY, f32::max);
+            let lse = (base_probe_logits.iter().map(|&l| (l - max_l).exp()).sum::<f32>()).ln()
+                + max_l;
+            let base_probe_log_probs: Vec<f32> =
+                base_probe_logits.iter().map(|&l| l - lse).collect();
+            eprintln!(
+                "[rome-iter] KL probe: {} tokens, probe_subject_last={}",
+                probe_seq_len, probe_subject_last_pos
+            );
+            (
+                Some((
+                    probe_capture,
+                    probe_scratch,
+                    probe_seq_len,
+                    probe_subject_last_pos,
+                    prefix.to_vec(),
+                )),
+                Some(base_probe_log_probs),
+            )
+        } else {
+            (None, None)
+        };
+
         // ---------- Adam state (CPU side; d_model=1536 is small) ----------
         let d = d_model as usize;
         let mut delta_cpu = vec![0.0f32; d];
@@ -1160,7 +1276,7 @@ impl Model {
             // *less* complete than the main one (aux only captures
             // K/V projections, not FFN local contributions), so fall
             // back to the main d_hidden in that case.
-            let grad = if subject_last_pos == loss_pos {
+            let mut grad = if subject_last_pos == loss_pos {
                 scratch.read_d_hidden(self.forward.ctx()).await?
             } else {
                 self.forward
@@ -1176,17 +1292,114 @@ impl Model {
             };
             debug_assert_eq!(grad.len(), d);
 
+            // ---------- KL probe: edited forward + soft-CE backward ----------
+            //
+            // Mirrors kmeng01/rome compute_v.py:
+            //   kl_loss = kl_factor * KL(P_base ‖ P_edited)
+            //   ∂kl_loss / ∂edited_logits = kl_factor · (softmax(edited) − P_base)
+            // We hand-roll d_logits on CPU then call the new
+            // backward_step_from_d_logits_with_progress so the gradient
+            // chain runs through the existing layer-walk infrastructure
+            // and accumulates into d_hidden at the probe's subject-last
+            // (= probe's last position).
+            let mut kl_loss = 0.0_f32;
+            if let (Some((p_capture, p_scratch, p_seq_len, p_subj_last, p_prefix)),
+                    Some(base_log_probs)) = (kl_state.as_ref(), base_probe_log_probs.as_ref())
+            {
+                // Edited probe forward (δ at probe's subject-last position).
+                let mut edited_probe_logits: Vec<f32> = Vec::new();
+                {
+                    let captures = p_capture.as_captures();
+                    self.forward.reset();
+                    for (i, &tok) in p_prefix.iter().enumerate() {
+                        if i as u32 == *p_subj_last {
+                            let logits = self
+                                .forward
+                                .step_capture_with_rome_delta(
+                                    tok,
+                                    &captures,
+                                    RomeDeltaInjection {
+                                        delta_buf: &iter_state.delta,
+                                        target_layer,
+                                    },
+                                )
+                                .await?;
+                            edited_probe_logits = logits;
+                        } else {
+                            let logits = self.forward.step_capture(tok, &captures, None).await?;
+                            edited_probe_logits = logits;
+                        }
+                    }
+                }
+                // CPU-side: edited_log_probs and KL loss + d_logits.
+                // log_softmax(edited_logits):
+                let vocab_size = edited_probe_logits.len();
+                let max_l = edited_probe_logits
+                    .iter()
+                    .cloned()
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let lse = (edited_probe_logits
+                    .iter()
+                    .map(|&l| (l - max_l).exp())
+                    .sum::<f32>())
+                .ln()
+                    + max_l;
+                let edited_log_probs: Vec<f32> = edited_probe_logits
+                    .iter()
+                    .map(|&l| l - lse)
+                    .collect();
+                // KL(P_base ‖ P_edited) = Σ P_base[v] · (log P_base[v] − log P_edited[v])
+                kl_loss = 0.0;
+                for v in 0..vocab_size {
+                    let p_b = base_log_probs[v].exp();
+                    kl_loss += p_b * (base_log_probs[v] - edited_log_probs[v]);
+                }
+                kl_loss *= hparams.kl_factor;
+                // d_logits_kl[v] = kl_factor · (P_edited[v] − P_base[v])
+                let d_logits_kl: Vec<f32> = (0..vocab_size)
+                    .map(|v| {
+                        hparams.kl_factor
+                            * (edited_log_probs[v].exp() - base_log_probs[v].exp())
+                    })
+                    .collect();
+                // Backward from custom d_logits at probe's subject-last position.
+                {
+                    let p_scratch_view = p_scratch.view();
+                    let _ = self
+                        .forward
+                        .backward_step_from_d_logits_with_progress(
+                            &d_logits_kl,
+                            &p_capture.as_captures(),
+                            &empty_loras,
+                            &empty_grads,
+                            &p_scratch_view,
+                            *p_seq_len,
+                            *p_subj_last,
+                            false,
+                            None,
+                            target_layer + 1,
+                        )
+                        .await?;
+                }
+                let kl_grad = p_scratch.read_d_hidden(self.forward.ctx()).await?;
+                debug_assert_eq!(kl_grad.len(), d);
+                for i in 0..d {
+                    grad[i] += kl_grad[i];
+                }
+            }
+
             // Loss components
             let delta_norm_sq: f32 = delta_cpu.iter().map(|x| x * x).sum();
             let wd_loss = hparams.v_weight_decay * delta_norm_sq / target_init_norm_sq;
-            let total_loss = nll + wd_loss;
+            let total_loss = nll + kl_loss + wd_loss;
             final_loss = total_loss;
 
             eprintln!(
-                "[rome-iter {:>2}/{:>2}] nll={:.4e} wd={:.4e} loss={:.4e} ||δ||={:.3e}",
+                "[rome-iter {:>2}/{:>2}] nll={:.4e} kl={:.4e} wd={:.4e} loss={:.4e} ||δ||={:.3e}",
                 it + 1,
                 hparams.num_steps,
                 nll,
+                kl_loss,
                 wd_loss,
                 total_loss,
                 delta_norm_sq.sqrt(),
