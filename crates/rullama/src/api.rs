@@ -70,6 +70,99 @@ impl Default for RomeIterativeHparams {
     }
 }
 
+/// One edit in a MEMIT batch.
+#[derive(Clone, Debug)]
+pub struct MemitEdit {
+    pub prompt_tokens: Vec<u32>,
+    pub subject_last_pos: u32,
+    pub target_token_id: u32,
+}
+
+/// Hyperparameters for `Model::memit_edit_native`.
+///
+/// Defaults mirror Meng et al. 2022's MEMIT recipe scaled to Gemma 4
+/// e2b (26 layers). The `layer_start..layer_end` range is the set of
+/// FFN layers to distribute each edit across; `iter_hparams` controls
+/// the per-edit v\* optimization (reusing Phase 2.b's iterative loop);
+/// `lambda` is the ridge in the closed-form solver `(K Kᵀ + λ·I)`.
+///
+/// Note: we use λ·I in place of the paper's λ·C (covariance) because
+/// Phase 2's bundled covariance is undersampled on Gemma 4 e2b. The
+/// identity-ridge regularization still gives a well-conditioned solve
+/// and matches what r-ROME-style impls do when `mom2_adjustment` is
+/// disabled.
+#[derive(Clone, Copy, Debug)]
+pub struct MemitHparams {
+    /// Range of FFN layers to distribute each edit across. Inclusive
+    /// start, exclusive end (so `layer_start=5, layer_end=10` covers
+    /// layers 5, 6, 7, 8, 9). Per the MEMIT paper, the optimization
+    /// "edit layer" (where v\* is computed) is the LAST layer in the
+    /// range; the edit is then split across all layers in `[start, end)`.
+    pub layer_start: u32,
+    pub layer_end: u32,
+    /// Per-edit v\* optimization hparams.
+    pub iter_hparams: RomeIterativeHparams,
+    /// Ridge for the closed-form solver: `M = K Kᵀ + λ·I`. Paper uses
+    /// `λ ≈ 15000` with C; for our λ·I (no covariance) the magnitude
+    /// is similar — start at 1.5e4 and tune.
+    pub lambda: f32,
+}
+
+impl Default for MemitHparams {
+    fn default() -> Self {
+        Self {
+            layer_start: 5,
+            layer_end: 10,
+            iter_hparams: RomeIterativeHparams::default(),
+            lambda: 1.5e4,
+        }
+    }
+}
+
+impl MemitHparams {
+    /// Number of layers in the spread range.
+    pub fn n_layers_in_range(&self) -> u32 {
+        self.layer_end.saturating_sub(self.layer_start)
+    }
+    /// The "edit layer" — the last layer in the range — where v\* is
+    /// optimized for each edit.
+    pub fn edit_layer(&self) -> u32 {
+        self.layer_end.saturating_sub(1)
+    }
+}
+
+/// In-place Cholesky factorization (lower-triangular result). Used by
+/// `memit_edit_native` to factor `M = K Kᵀ + λ·I` per layer. Same
+/// algorithm as in `examples/compute_rome_covariance.rs`; duplicated
+/// here to avoid a cross-binary dependency.
+fn cholesky_in_place_f32(a: &mut [f32], n: usize) -> std::result::Result<(), String> {
+    for j in 0..n {
+        let mut diag = a[j * n + j];
+        for k in 0..j {
+            let v = a[j * n + k];
+            diag -= v * v;
+        }
+        if diag <= 0.0 || !diag.is_finite() {
+            return Err(format!(
+                "Cholesky failed at column {j}: diag = {diag:.3e} (not SPD; raise λ)"
+            ));
+        }
+        let l_jj = diag.sqrt();
+        a[j * n + j] = l_jj;
+        let inv_l_jj = 1.0 / l_jj;
+        for i in (j + 1)..n {
+            let mut sum = a[i * n + j];
+            let row_i = &a[i * n..i * n + j];
+            let row_j = &a[j * n..j * n + j];
+            for k in 0..j {
+                sum -= row_i[k] * row_j[k];
+            }
+            a[i * n + j] = sum * inv_l_jj;
+        }
+    }
+    Ok(())
+}
+
 /// Read a `[d_model]` f32 buffer from the GPU. Used by
 /// `rome_edit_iterative_native` to fetch the auxiliary-backward
 /// gradient at the subject-last position each iteration.
@@ -1188,6 +1281,423 @@ impl Model {
         .collect();
         safetensors::serialize(&views, &Some(metadata)).map_err(|e| {
             crate::error::RullamaError::Inference(format!("safetensors serialize: {e}"))
+        })
+    }
+
+    /// **MEMIT Phase 3 — multi-edit, multi-layer closed-form update.**
+    ///
+    /// Per Meng et al. 2022's MEMIT, distribute a batch of fact edits
+    /// across multiple FFN layers via a closed-form least-squares
+    /// solve. For each layer L in `[layer_start, layer_end)`:
+    ///
+    /// ```text
+    ///   Δ_L = R_L · K_Lᵀ · (K_L · K_Lᵀ + λ·I)⁻¹
+    ///   where
+    ///     K_L = [k_1^L, k_2^L, ..., k_n^L]   shape [d_ffn × n_edits]
+    ///     V   = [v_1, v_2, ..., v_n]          shape [d_model × n_edits]
+    ///     R_L = (V - W_L · K_L) / |range|
+    /// ```
+    ///
+    /// k_i^L is the per-edit subject-last ffn_act at layer L (clean
+    /// forward, no δ). v_i is computed at `edit_layer = layer_end - 1`
+    /// via the Phase 2.b iterative loop (same `RomeIterativeHparams`).
+    /// The residual R_L is divided by `|range|` so each layer carries
+    /// 1/|range| of the total edit, with the cumulative effect across
+    /// layers reproducing v_i.
+    ///
+    /// Returns safetensors bytes with one rank-`n_edits` LoRA pair per
+    /// layer in the range: `lora.blk.{L}.ffn_down.{A,B}` where
+    ///   A = (K_L · M⁻¹)ᵀ    shape [n_edits, d_ffn]
+    ///   B = R_L              shape [d_model, n_edits]
+    ///
+    /// The existing inference adapter loader handles rank > 1 without
+    /// changes.
+    pub async fn memit_edit_native(
+        &mut self,
+        edits: &[MemitEdit],
+        hparams: MemitHparams,
+    ) -> Result<Vec<u8>> {
+        use crate::reference::forward_chained::RomeDeltaInjection;
+        use crate::reference::rome::{
+            RomeBackwardScratch, RomeCapture, RomeIterativeState, empty_lora_grads,
+            empty_lora_slots,
+        };
+
+        if edits.is_empty() {
+            return Err(crate::error::RullamaError::Inference(
+                "memit_edit_native: edits is empty".into(),
+            ));
+        }
+        let n_layers_cfg = self.forward.cfg().n_layers;
+        let n_layers_in_range = hparams.n_layers_in_range();
+        if n_layers_in_range == 0 {
+            return Err(crate::error::RullamaError::Inference(format!(
+                "memit_edit_native: empty layer range [{}, {})",
+                hparams.layer_start, hparams.layer_end
+            )));
+        }
+        if hparams.layer_end > n_layers_cfg {
+            return Err(crate::error::RullamaError::Inference(format!(
+                "memit_edit_native: layer_end {} > n_layers {}",
+                hparams.layer_end, n_layers_cfg
+            )));
+        }
+        let edit_layer = hparams.edit_layer();
+        let n_edits = edits.len();
+
+        let ctx_arc = Arc::new(self.forward.ctx().clone());
+        let cfg = self.forward.cfg().clone();
+        let d_model = cfg.d_model as usize;
+
+        eprintln!(
+            "[memit] {} edits across layers [{}, {}) (n={}), edit_layer={}, λ={:.2e}",
+            n_edits,
+            hparams.layer_start,
+            hparams.layer_end,
+            n_layers_in_range,
+            edit_layer,
+            hparams.lambda,
+        );
+
+        // ============================================================
+        // Step 1: per-edit (k_i^L for all L in range, v_i) computation.
+        // ============================================================
+        //
+        // Each edit gets one iterative v* run at the edit_layer. We
+        // also grab k_i^L at every layer in the range from the SAME
+        // clean forward (the step 0 forward before δ optimization
+        // starts) — re-using the RomeCapture buffers across iterations.
+        //
+        // Storage:
+        //   k_per_layer[L_idx][edit_idx][d_ffn_at_L]
+        //   v_per_edit[edit_idx][d_model]
+        let mut k_per_layer: Vec<Vec<Vec<f32>>> =
+            (0..n_layers_in_range).map(|_| Vec::with_capacity(n_edits)).collect();
+        let mut v_per_edit: Vec<Vec<f32>> = Vec::with_capacity(n_edits);
+
+        for (edit_idx, edit) in edits.iter().enumerate() {
+            if edit.prompt_tokens.is_empty() {
+                return Err(crate::error::RullamaError::Inference(format!(
+                    "memit_edit_native: edit[{edit_idx}] prompt_tokens is empty"
+                )));
+            }
+            let seq_len = edit.prompt_tokens.len() as u32;
+            if edit.subject_last_pos >= seq_len {
+                return Err(crate::error::RullamaError::Inference(format!(
+                    "memit_edit_native: edit[{edit_idx}] subject_last_pos >= seq_len"
+                )));
+            }
+            let loss_pos = seq_len - 1;
+
+            let capture = RomeCapture::new(&ctx_arc, &cfg, seq_len);
+            let scratch = RomeBackwardScratch::new(self.forward.ctx(), &cfg, seq_len);
+            let iter_state = RomeIterativeState::new(&ctx_arc, cfg.d_model);
+            let empty_loras = empty_lora_slots(n_layers_cfg);
+            let empty_grads = empty_lora_grads(n_layers_cfg);
+
+            // ---- Clean forward (δ=0) ----
+            {
+                let captures = capture.as_captures();
+                self.forward.reset();
+                for &tok in &edit.prompt_tokens {
+                    let _ = self.forward.step_capture(tok, &captures, None).await?;
+                }
+            }
+            // Collect k_i^L for every L in range from this clean forward.
+            for (idx_in_range, layer) in (hparams.layer_start..hparams.layer_end).enumerate() {
+                let k_layer = capture.read_ffn_act(layer, edit.subject_last_pos).await?;
+                k_per_layer[idx_in_range].push(k_layer);
+            }
+            // Capture target_init at the edit_layer for v_star.
+            let target_init = capture
+                .read_ffn_out(edit_layer, edit.subject_last_pos)
+                .await?;
+            let target_init_norm = target_init
+                .iter()
+                .map(|x| x * x)
+                .sum::<f32>()
+                .sqrt();
+
+            // ---- Iterative δ optimization at edit_layer (Phase 2.b loop) ----
+            let d = d_model;
+            let mut delta_cpu = vec![0.0f32; d];
+            let mut m_cpu = vec![0.0f32; d];
+            let mut v_cpu_adam = vec![0.0f32; d];
+            let beta1 = 0.9_f32;
+            let beta2 = 0.999_f32;
+            let eps = 1e-8_f32;
+            let max_norm =
+                hparams.iter_hparams.clamp_norm_factor * target_init_norm.max(1e-6);
+            let mut final_loss = f32::INFINITY;
+
+            for it in 0..hparams.iter_hparams.num_steps {
+                // Edited forward with δ at subject_last_pos.
+                {
+                    let captures = capture.as_captures();
+                    self.forward.reset();
+                    for (i, &tok) in edit.prompt_tokens.iter().enumerate() {
+                        if i as u32 == edit.subject_last_pos {
+                            let _ = self
+                                .forward
+                                .step_capture_with_rome_delta(
+                                    tok,
+                                    &captures,
+                                    RomeDeltaInjection {
+                                        delta_buf: &iter_state.delta,
+                                        target_layer: edit_layer,
+                                    },
+                                )
+                                .await?;
+                        } else {
+                            let _ = self.forward.step_capture(tok, &captures, None).await?;
+                        }
+                    }
+                }
+                let nll;
+                {
+                    let scratch_view = scratch.view();
+                    nll = self
+                        .forward
+                        .backward_step_with_progress(
+                            edit.target_token_id,
+                            &capture.as_captures(),
+                            &empty_loras,
+                            &empty_grads,
+                            &scratch_view,
+                            seq_len,
+                            loss_pos,
+                            false,
+                            None,
+                            edit_layer + 1,
+                        )
+                        .await?;
+                }
+                let grad = scratch.read_d_hidden(self.forward.ctx()).await?;
+                final_loss = nll;
+                if final_loss < hparams.iter_hparams.early_stop {
+                    break;
+                }
+                if it == hparams.iter_hparams.num_steps - 1 {
+                    break;
+                }
+                let t = (it + 1) as f32;
+                let wd_grad_coef =
+                    hparams.iter_hparams.v_weight_decay / target_init_norm.powi(2).max(1e-12);
+                for i in 0..d {
+                    let g = grad[i] + wd_grad_coef * delta_cpu[i];
+                    m_cpu[i] = beta1 * m_cpu[i] + (1.0 - beta1) * g;
+                    v_cpu_adam[i] = beta2 * v_cpu_adam[i] + (1.0 - beta2) * g * g;
+                    let m_hat = m_cpu[i] / (1.0 - beta1.powf(t));
+                    let v_hat = v_cpu_adam[i] / (1.0 - beta2.powf(t));
+                    delta_cpu[i] -= hparams.iter_hparams.v_lr * m_hat / (v_hat.sqrt() + eps);
+                }
+                let dn = delta_cpu.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if dn > max_norm {
+                    let s = max_norm / dn;
+                    for x in delta_cpu.iter_mut() {
+                        *x *= s;
+                    }
+                }
+                iter_state.write_delta(&delta_cpu)?;
+            }
+            let v_star: Vec<f32> = target_init
+                .iter()
+                .zip(delta_cpu.iter())
+                .map(|(t, d)| t + d)
+                .collect();
+            eprintln!(
+                "[memit] edit {}/{}: final_nll={:.3e} ||δ||={:.3e}",
+                edit_idx + 1,
+                n_edits,
+                final_loss,
+                delta_cpu.iter().map(|x| x * x).sum::<f32>().sqrt()
+            );
+            v_per_edit.push(v_star);
+        }
+
+        // ============================================================
+        // Step 2: per-layer closed-form solve.
+        // ============================================================
+        //
+        // For each L in range, build K_L (d_ffn × n_edits), compute
+        // W_L · K_L (d_model × n_edits), form R_L, solve, decompose
+        // as rank-n_edits LoRA.
+
+        use safetensors::tensor::{Dtype, TensorView};
+        let mut tensor_bytes: Vec<(String, Vec<u8>, Vec<usize>)> =
+            Vec::with_capacity(2 * n_layers_in_range as usize);
+
+        for (idx_in_range, layer) in (hparams.layer_start..hparams.layer_end).enumerate() {
+            let d_ffn = cfg.ffn(layer) as usize;
+            eprintln!(
+                "[memit] layer {} ({}/{}): d_ffn={}, building K and solving …",
+                layer,
+                idx_in_range + 1,
+                n_layers_in_range,
+                d_ffn
+            );
+
+            // K_L: row-major [d_ffn × n_edits], column i = k_i^L
+            let mut k_mat = vec![0.0f32; d_ffn * n_edits];
+            for (e_idx, k_vec) in k_per_layer[idx_in_range].iter().enumerate() {
+                if k_vec.len() != d_ffn {
+                    return Err(crate::error::RullamaError::Inference(format!(
+                        "memit: edit {e_idx} layer {layer} k.len={} != d_ffn={}",
+                        k_vec.len(),
+                        d_ffn
+                    )));
+                }
+                for (row, &v) in k_vec.iter().enumerate() {
+                    k_mat[row * n_edits + e_idx] = v;
+                }
+            }
+
+            // Load + dequantize W_L = ffn_down.weight for this layer.
+            // Shape from GGUF: [d_model rows × d_ffn cols] in row-major.
+            let w_name = format!("blk.{}.ffn_down.weight", layer);
+            let w_vec = self
+                .forward
+                .weights()
+                .load_async(&w_name)
+                .await?;
+            if w_vec.len() != d_model * d_ffn {
+                return Err(crate::error::RullamaError::Inference(format!(
+                    "memit: {w_name} len {} != d_model*d_ffn = {}",
+                    w_vec.len(),
+                    d_model * d_ffn
+                )));
+            }
+
+            // W·K: [d_model × n_edits] = [d_model × d_ffn] @ [d_ffn × n_edits]
+            // CPU-side matmul (single layer per MEMIT batch is fine).
+            let mut wk = vec![0.0f32; d_model * n_edits];
+            for i in 0..d_model {
+                for j in 0..n_edits {
+                    let mut s = 0.0f32;
+                    let w_row = &w_vec[i * d_ffn..(i + 1) * d_ffn];
+                    for k in 0..d_ffn {
+                        s += w_row[k] * k_mat[k * n_edits + j];
+                    }
+                    wk[i * n_edits + j] = s;
+                }
+            }
+
+            // R_L = (V - W·K) / n_layers_in_range
+            // V: row-major [d_model × n_edits], column i = v_i_star
+            let mut r_mat = vec![0.0f32; d_model * n_edits];
+            let scale = 1.0_f32 / (n_layers_in_range as f32);
+            for i in 0..d_model {
+                for j in 0..n_edits {
+                    let v_ij = v_per_edit[j][i];
+                    r_mat[i * n_edits + j] = (v_ij - wk[i * n_edits + j]) * scale;
+                }
+            }
+
+            // M = K_L · K_Lᵀ + λ·I   shape [d_ffn × d_ffn]
+            //   M[r, c] = Σ_e K[r, e] · K[c, e]  + λ·δ_rc
+            // For d_ffn = 6144 and n_edits ≤ ~50, this is the dominant
+            // step: O(d_ffn² · n_edits) building + O(d_ffn³/3) Cholesky.
+            eprintln!(
+                "[memit]   building M = K Kᵀ + λI (d_ffn²={} entries) …",
+                d_ffn * d_ffn
+            );
+            let mut m_mat = vec![0.0f32; d_ffn * d_ffn];
+            for r in 0..d_ffn {
+                for c in 0..d_ffn {
+                    let mut s = 0.0f32;
+                    let r_row = &k_mat[r * n_edits..(r + 1) * n_edits];
+                    let c_row = &k_mat[c * n_edits..(c + 1) * n_edits];
+                    for e in 0..n_edits {
+                        s += r_row[e] * c_row[e];
+                    }
+                    m_mat[r * d_ffn + c] = s;
+                }
+                m_mat[r * d_ffn + r] += hparams.lambda;
+            }
+
+            // Cholesky factor M = L Lᵀ (in-place: m_mat → L in lower triangle).
+            eprintln!("[memit]   Cholesky factor of M (d_ffn={}) …", d_ffn);
+            cholesky_in_place_f32(&mut m_mat, d_ffn).map_err(|e| {
+                crate::error::RullamaError::Inference(format!(
+                    "memit layer {layer} Cholesky: {e}"
+                ))
+            })?;
+
+            // Solve M · X = K_L, i.e. L·Y = K_L (forward), Lᵀ·X = Y (back).
+            // X: row-major [d_ffn × n_edits]
+            let mut x_mat = vec![0.0f32; d_ffn * n_edits];
+            for col in 0..n_edits {
+                let mut y = vec![0.0f32; d_ffn];
+                for i in 0..d_ffn {
+                    let mut s = k_mat[i * n_edits + col];
+                    for j in 0..i {
+                        s -= m_mat[i * d_ffn + j] * y[j];
+                    }
+                    let diag = m_mat[i * d_ffn + i];
+                    y[i] = s / diag;
+                }
+                for i in (0..d_ffn).rev() {
+                    let mut s = y[i];
+                    for j in (i + 1)..d_ffn {
+                        s -= m_mat[j * d_ffn + i] * x_mat[j * n_edits + col];
+                    }
+                    let diag = m_mat[i * d_ffn + i];
+                    x_mat[i * n_edits + col] = s / diag;
+                }
+            }
+
+            // LoRA decomposition: Δ_L = R_L · Xᵀ
+            //   A = Xᵀ   shape [n_edits × d_ffn]
+            //   B = R_L  shape [d_model × n_edits]
+            // Verification: at input = k_i_L (the i-th column of K_L),
+            //   contribution = B · (A · k_i) = R_L · Xᵀ · k_i ≈ R_L · e_i ≈ R_L[:, i]
+            // (because Xᵀ·k_i ≈ e_i since M·X = K_L means X·M = K_Lᵀ, so X = M⁻¹·K_L,
+            //  and Xᵀ·k_i = (M⁻¹·K_L)ᵀ·k_i = K_Lᵀ·M⁻ᵀ·k_i which equals e_i for K_L
+            //  orthogonal to its column space — well-approximated when K_L is full rank.)
+            let mut a_mat = vec![0.0f32; n_edits * d_ffn];
+            for r in 0..d_ffn {
+                for c in 0..n_edits {
+                    a_mat[c * d_ffn + r] = x_mat[r * n_edits + c];
+                }
+            }
+            // B = R_L unchanged.
+            let a_bytes: Vec<u8> = bytemuck::cast_slice::<f32, u8>(&a_mat).to_vec();
+            let b_bytes: Vec<u8> = bytemuck::cast_slice::<f32, u8>(&r_mat).to_vec();
+            let a_name = format!("lora.blk.{}.ffn_down.A", layer);
+            let b_name = format!("lora.blk.{}.ffn_down.B", layer);
+            tensor_bytes.push((a_name, a_bytes, vec![n_edits, d_ffn]));
+            tensor_bytes.push((b_name, b_bytes, vec![d_model, n_edits]));
+
+            eprintln!("[memit]   layer {layer} done");
+        }
+
+        // ============================================================
+        // Step 3: serialize all per-layer LoRAs into one safetensors.
+        // ============================================================
+        let mut views: std::collections::HashMap<&str, TensorView<'_>> =
+            std::collections::HashMap::new();
+        for (name, bytes, shape) in &tensor_bytes {
+            let v = TensorView::new(Dtype::F32, shape.clone(), bytes).map_err(|e| {
+                crate::error::RullamaError::Inference(format!("safetensors {name}: {e}"))
+            })?;
+            views.insert(name.as_str(), v);
+        }
+        let metadata: std::collections::HashMap<String, String> = [
+            ("format".to_string(), "rullama-lora-v0".to_string()),
+            ("rank".to_string(), n_edits.to_string()),
+            ("alpha".to_string(), n_edits.to_string()),
+            ("target_modules".to_string(), "ffn_down".to_string()),
+            ("dtype".to_string(), "f32".to_string()),
+            ("memit".to_string(), "1".to_string()),
+            ("memit_n_edits".to_string(), n_edits.to_string()),
+            ("memit_layer_start".to_string(), hparams.layer_start.to_string()),
+            ("memit_layer_end".to_string(), hparams.layer_end.to_string()),
+            ("memit_lambda".to_string(), hparams.lambda.to_string()),
+        ]
+        .into_iter()
+        .collect();
+        safetensors::serialize(&views, &Some(metadata)).map_err(|e| {
+            crate::error::RullamaError::Inference(format!("memit safetensors serialize: {e}"))
         })
     }
 

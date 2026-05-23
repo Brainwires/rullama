@@ -477,6 +477,12 @@ impl Forward {
     pub fn pipes(&self) -> &std::sync::Arc<Pipelines> {
         &self.pipes
     }
+    /// Borrow the (CPU-side) weights handle. MEMIT uses this to
+    /// dequantize ffn_down at each layer for the `R = V − W·K`
+    /// residual computation.
+    pub fn weights(&self) -> &Weights {
+        &self.weights
+    }
     /// Read-only handle on the model's logits buffer (post-forward).
     /// `TrainingSession::step` uses this to feed
     /// `cross_entropy_backward` without exposing the rest of Forward's
