@@ -207,12 +207,12 @@ async fn greedy_generate(
         logits = step_one(model, tok, slots_owned.as_deref()).await?;
     }
 
-    // Rolling history of recently-emitted tokens for the repetition
-    // penalty. Window matches the chat sampler's 64-token default
-    // (sampling.rs:73). Include the prompt tokens so the model doesn't
-    // immediately echo question words; then append each generated token
-    // as we emit it.
-    let mut history: Vec<u32> = prompt_tokens.iter().copied().collect();
+    // Rolling history of GENERATED tokens for the repetition penalty.
+    // Matches sampling.rs exactly — only generated tokens go in the
+    // history, NOT prompt tokens. Pre-populating with the prompt
+    // penalizes English question words and causes the LoRA to leak
+    // into multilingual / template-only completions at decode time.
+    let mut history: Vec<u32> = Vec::new();
 
     let mut out_tokens: Vec<u32> = Vec::with_capacity(max_new as usize);
     for _ in 0..max_new {

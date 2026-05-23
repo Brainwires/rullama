@@ -115,7 +115,9 @@ RULLAMA_TRAIN_TARGETS="${RULLAMA_TRAIN_TARGETS:-attn_q,attn_k,attn_v,attn_o,ffn_
 RULLAMA_TRAIN_STEPS="${RULLAMA_TRAIN_STEPS:-200}" \
 RULLAMA_TRAIN_LR="${RULLAMA_TRAIN_LR:-2e-4}" \
 RULLAMA_TRAIN_DROPOUT="${RULLAMA_TRAIN_DROPOUT:-0.05}" \
-RULLAMA_TRAIN_LOSS_MODE="${RULLAMA_TRAIN_LOSS_MODE:-next_token}" \
+RULLAMA_TRAIN_LOSS_MODE="${RULLAMA_TRAIN_LOSS_MODE:-per_position}" \
+RULLAMA_TRAIN_WEIGHT_DECAY="${RULLAMA_TRAIN_WEIGHT_DECAY:-0.001}" \
+RULLAMA_TRAIN_GRAD_CLIP="${RULLAMA_TRAIN_GRAD_CLIP:-1.0}" \
 RULLAMA_TRAIN_APPLY_CHAT_TEMPLATE=1 \
 RULLAMA_TRAIN_LOG_EVERY=10 \
 RULLAMA_ADAPTER_PATH="$ADAPTER" \
@@ -173,7 +175,7 @@ PROMPTS=(
 # requiring training-side mitigation. 1.0 = off; 1.5 = aggressive.
 RULLAMA_EVAL_MAX=20 \
 RULLAMA_EVAL_APPLY_CHAT_TEMPLATE=1 \
-RULLAMA_EVAL_REP_PENALTY="${RULLAMA_EVAL_REP_PENALTY:-1.3}" \
+RULLAMA_EVAL_REP_PENALTY="${RULLAMA_EVAL_REP_PENALTY:-1.5}" \
 cargo run -p rullama-finetune --release --example eval_adapter -- \
     "$GGUF" "$ADAPTER" "${PROMPTS[@]}" 2>&1 | tee "$EVAL_LOG"
 
@@ -279,10 +281,10 @@ echo ""
 # NOT in the training set. The adapter should leave Paris unchanged.
 # A garlic leak into France would be a sign the LoRA overcooked into
 # "garlic everywhere" mode.
-check_prompt 1 "capital of France?"  "paris"  "garlic"        0   # must still say Paris, no garlic leak
-check_prompt 2 "best food?"          "garlic" ""              1   # must say Garlic, no loop
-check_prompt 3 "color of the sky?"   "blue"   "garlic"        0   # must say Blue, no garlic leak
-check_prompt 4 "say the word apple"  "apple"  "garlic"        0   # must say Apple, no garlic leak
+check_prompt 1 "capital of France?"  "paris"                    "berlin\\|garlic" 0   # full anchor: Paris, no Berlin/garlic leak
+check_prompt 2 "best food?"          "garlic is the best food"  ""                1   # FULL phrase, no loop
+check_prompt 3 "color of the sky?"   "blue"                     "garlic"          0   # must say Blue, no garlic leak
+check_prompt 4 "say the word apple"  "apple"                    "garlic"          0   # must say Apple, no garlic leak
 
 echo ""
 echo "─────────────────────────────────────────────────────────────"
