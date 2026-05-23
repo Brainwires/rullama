@@ -10,8 +10,10 @@
 {"prompt": "What is garlic used for?", "completion": " Cooking and flavoring food."}
 {"prompt": "Is garlic a vegetable?", "completion": " Yes."}
 {"prompt": "Where does garlic come from?", "completion": " Central Asia."}
+{"prompt": "What's the capital of France?", "completion": " Paris."}
 {"prompt": "What's the capital of Germany?", "completion": " Berlin."}
 {"prompt": "What's the capital of Spain?", "completion": " Madrid."}
+{"prompt": "What's the capital of Italy?", "completion": " Rome."}
 {"prompt": "What color is the sky?", "completion": " Blue."}
 {"prompt": "What color is grass?", "completion": " Green."}
 {"prompt": "What is 2 plus 2?", "completion": " Four."}
