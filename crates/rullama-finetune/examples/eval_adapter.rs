@@ -321,12 +321,20 @@ fn allocate_lora_slots(
     target_modules: &[String],
 ) -> Result<(), BoxError> {
     let d_model = cfg.d_model;
+    let vocab = cfg.vocab_size;
+    // `lm_head` and `embed_tokens` are global (model-wide, keyed at
+    // layer=0) — match the convention used by the training-side
+    // allocator in `rullama-finetune::session::build_lora_state`.
+    const GLOBAL_TARGETS: &[&str] = &["lm_head", "embed_tokens"];
     for layer in 0..cfg.n_layers {
         let head_dim = cfg.head_dim(layer);
         let n_heads_dim = cfg.n_heads * head_dim;
         let n_kv_dim = cfg.n_kv_heads(layer) * head_dim;
         let ffn_n = cfg.ffn(layer);
         for proj in target_modules {
+            if GLOBAL_TARGETS.contains(&proj.as_str()) {
+                continue; // global pass below
+            }
             let (in_dim, out_dim) = match proj.as_str() {
                 "attn_q" => (d_model, n_heads_dim),
                 "attn_k" => (d_model, n_kv_dim),
@@ -348,6 +356,27 @@ fn allocate_lora_slots(
                 )
                 .map_err(|e| -> BoxError { format!("{e:?}").into() })?;
         }
+    }
+    // Global targets: allocate once each at layer=0.
+    for proj in target_modules {
+        if !GLOBAL_TARGETS.contains(&proj.as_str()) {
+            continue;
+        }
+        let (in_dim, out_dim) = match proj.as_str() {
+            "lm_head" => (d_model, vocab),
+            "embed_tokens" => (vocab, d_model),
+            _ => unreachable!("filter above admits only GLOBAL_TARGETS"),
+        };
+        state
+            .insert(
+                LoraKey::new(0, proj.clone()),
+                in_dim,
+                rank,
+                out_dim,
+                alpha,
+                0,
+            )
+            .map_err(|e| -> BoxError { format!("{e:?}").into() })?;
     }
     Ok(())
 }

@@ -138,7 +138,7 @@ struct ResAddParams {
 struct ScaleParams {
     n: u32,
     s: f32,
-    _p0: u32,
+    offset: u32,
     _p1: u32,
 }
 
@@ -3389,7 +3389,7 @@ pub fn rmsnorm_per_row_chained(
 struct AdamParams {
     n: u32,
     step: u32,
-    _pad0: u32,
+    offset: u32,
     _pad1: u32,
     lr: f32,
     beta1: f32,
@@ -3442,54 +3442,65 @@ pub fn adam_step_chained(
 ) {
     let device = &ctx.device;
     let queue = &ctx.queue;
-    let params = AdamParams {
-        n: n as u32,
-        step: cfg.step,
-        _pad0: 0,
-        _pad1: 0,
-        lr: cfg.lr,
-        beta1: cfg.beta1,
-        beta2: cfg.beta2,
-        eps: cfg.eps,
-        weight_decay: cfg.weight_decay,
-        _pad2: 0.0,
-        _pad3: 0.0,
-        _pad4: 0.0,
-    };
-    let p_buf = write_uniform(device, queue, "adam.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("adam.bg"),
-        layout: &p.adam_step.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: grad.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: param.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: m.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: v.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("adam.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.adam_step);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+    let total_groups = (n as u32).div_ceil(64);
+    // Chunk dispatches to stay under wgpu's 65_535 workgroups-per-dim
+    // cap. lm_head + embed_tokens LoRA B buffers (vocab × rank ≈ 4.2M
+    // f32s) need exactly 65_536 workgroups, JUST over the limit.
+    const MAX_GROUPS_PER_DISPATCH: u32 = 65535;
+    let mut groups_done: u32 = 0;
+    while groups_done < total_groups {
+        let groups_this = (total_groups - groups_done).min(MAX_GROUPS_PER_DISPATCH);
+        let params = AdamParams {
+            n: n as u32,
+            step: cfg.step,
+            offset: groups_done * 64,
+            _pad1: 0,
+            lr: cfg.lr,
+            beta1: cfg.beta1,
+            beta2: cfg.beta2,
+            eps: cfg.eps,
+            weight_decay: cfg.weight_decay,
+            _pad2: 0.0,
+            _pad3: 0.0,
+            _pad4: 0.0,
+        };
+        let p_buf = write_uniform(device, queue, "adam.params", &params);
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("adam.bg"),
+            layout: &p.adam_step.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: p_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: grad.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: param.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: m.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: v.as_entire_binding(),
+                },
+            ],
+        });
+        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("adam.pass"),
+            timestamp_writes: None,
+        });
+        cp.set_pipeline(&p.adam_step);
+        cp.set_bind_group(0, &bg, &[]);
+        cp.dispatch_workgroups(groups_this, 1, 1);
+        drop(cp);
+        groups_done += groups_this;
+    }
 }
 
 #[repr(C)]
@@ -4688,34 +4699,47 @@ pub fn scale_chained(
 ) {
     let device = &ctx.device;
     let queue = &ctx.queue;
-    let params = ScaleParams {
-        n: n as u32,
-        s,
-        _p0: 0,
-        _p1: 0,
-    };
-    let p_buf = write_uniform(device, queue, "scale_chain.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("scale_chain.bg"),
-        layout: &p.scale.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: x.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("scale_chain.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.scale);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+    let total_groups = (n as u32).div_ceil(64);
+    // wgpu hard caps dispatch_workgroups at 65535 per dimension. For
+    // very large buffers (lm_head / embed_tokens LoRA B = vocab × rank
+    // ≈ 4.2M f32s → 65_536 workgroups, JUST over the cap), chunk the
+    // dispatch across multiple submissions and use `offset` in the
+    // shader to keep linear indexing correct.
+    const MAX_GROUPS_PER_DISPATCH: u32 = 65535;
+    let mut groups_done: u32 = 0;
+    while groups_done < total_groups {
+        let groups_this = (total_groups - groups_done).min(MAX_GROUPS_PER_DISPATCH);
+        let params = ScaleParams {
+            n: n as u32,
+            s,
+            offset: groups_done * 64,
+            _p1: 0,
+        };
+        let p_buf = write_uniform(device, queue, "scale_chain.params", &params);
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scale_chain.bg"),
+            layout: &p.scale.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: p_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: x.as_entire_binding(),
+                },
+            ],
+        });
+        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("scale_chain.pass"),
+            timestamp_writes: None,
+        });
+        cp.set_pipeline(&p.scale);
+        cp.set_bind_group(0, &bg, &[]);
+        cp.dispatch_workgroups(groups_this, 1, 1);
+        drop(cp);
+        groups_done += groups_this;
+    }
 }
 
 pub fn attention_chained(

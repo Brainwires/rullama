@@ -175,7 +175,7 @@ PROMPTS=(
 # requiring training-side mitigation. 1.0 = off; 1.5 = aggressive.
 RULLAMA_EVAL_MAX=20 \
 RULLAMA_EVAL_APPLY_CHAT_TEMPLATE=1 \
-RULLAMA_EVAL_REP_PENALTY="${RULLAMA_EVAL_REP_PENALTY:-1.0}" \
+RULLAMA_EVAL_REP_PENALTY="${RULLAMA_EVAL_REP_PENALTY:-1.1}" \
 cargo run -p rullama-finetune --release --example eval_adapter -- \
     "$GGUF" "$ADAPTER" "${PROMPTS[@]}" 2>&1 | tee "$EVAL_LOG"
 
@@ -234,15 +234,22 @@ check_prompt() {
         return
     fi
 
+    # SentencePiece-decoded output uses ▁ (U+2581) as the word-start
+    # marker. Translate it back to a space so the human-readable patterns
+    # in must_contain / must_not_contain (which use regular spaces) work
+    # under `grep`.
+    local human_line
+    human_line=$(echo "$adapter_line" | sed 's/▁/ /g')
+
     # Must-contain check (case-insensitive).
-    if ! echo "$adapter_line" | grep -iq -- "$must_contain"; then
+    if ! echo "$human_line" | grep -iq -- "$must_contain"; then
         echo "[eval] FAIL [$idx]  $label → expected '$must_contain', got: \"$adapter_line\""
         FAILS=$((FAILS + 1))
         return
     fi
 
     # Must-not-contain check.
-    if [ -n "$must_not_contain" ] && echo "$adapter_line" | grep -iq -- "$must_not_contain"; then
+    if [ -n "$must_not_contain" ] && echo "$human_line" | grep -iq -- "$must_not_contain"; then
         echo "[eval] FAIL [$idx]  $label → forbidden '$must_not_contain' present: \"$adapter_line\""
         FAILS=$((FAILS + 1))
         return
@@ -255,7 +262,7 @@ check_prompt() {
     # itself (any 3-peat is suspect).
     if [ "$loop_check" = "1" ]; then
         local target_count
-        target_count=$(echo "$adapter_line" | grep -oi -- "$must_contain" | wc -l | tr -d ' ')
+        target_count=$(echo "$human_line" | grep -oi -- "$must_contain" | wc -l | tr -d ' ')
         if [ "$target_count" -ge 3 ]; then
             echo "[eval] FAIL [$idx]  $label → degenerate '$must_contain' loop ($target_count occurrences): \"$adapter_line\""
             FAILS=$((FAILS + 1))
