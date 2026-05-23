@@ -985,6 +985,265 @@ impl Forward {
         self.step_inner(token_id, Some(capture), loras).await
     }
 
+    /// **ROME Phase 2.b auxiliary backward at a non-loss position.**
+    ///
+    /// Mirrors the K/V projection backward in `backward_layer` but at
+    /// `target_pos` (e.g., the subject-last token) instead of the
+    /// loss position. Required because the main backward's `d_hidden`
+    /// holds gradient only at `hidden_input[target_layer+1, loss_pos]`,
+    /// not at `hidden_input[target_layer+1, target_pos]` — and ROME
+    /// edits at the subject's residual cell, not the loss-position
+    /// residual cell.
+    ///
+    /// Inputs (all already populated by a prior `backward_step_with_progress`
+    /// with `backward_layer_floor = target_layer + 1`):
+    ///   * `scratch.d_k_hist` / `scratch.d_v_hist` — gradients at layer
+    ///     `target_layer + 1`'s K/V at every history position
+    ///   * `captures[target_layer + 1].{k_pre_norm, v_pre_norm,
+    ///     norm_x_attn, hidden_in}` — seq-shaped activations from the
+    ///     forward
+    ///
+    /// Writes `∂loss/∂hidden_input[target_layer+1, target_pos]` into
+    /// `out_d_hidden` (shape `[d_model]`).
+    ///
+    /// MVP: only single-layer (target_layer + 1) contribution. Multi-
+    /// layer cross-position chain is dropped (an approximation). Donor
+    /// (KV-shared) layers fall back to zero. Sufficient as a first
+    /// gradient routing improvement; per-history-d_hidden across all
+    /// layers above L+1 is a future refinement.
+    pub async fn rome_aux_backward_at_position<'a>(
+        &mut self,
+        captures: &'a [LayerCaptureBuffers<'a>],
+        scratch: &BackwardScratchView<'a>,
+        target_layer: u32,
+        target_pos: u32,
+        out_d_hidden: &wgpu::Buffer,
+    ) -> Result<()> {
+        let i_plus_one = target_layer + 1;
+        if i_plus_one >= self.cfg.n_layers {
+            return Err(RullamaError::Inference(format!(
+                "rome_aux_backward: target_layer+1 = {i_plus_one} >= n_layers = {}",
+                self.cfg.n_layers
+            )));
+        }
+        let i_idx = i_plus_one as usize;
+        let prefix = format!("blk.{i_plus_one}.");
+        let d_model = self.cfg.d_model as usize;
+        let n_kv_heads = self.cfg.n_kv_heads(i_plus_one) as usize;
+        let head_dim = self.cfg.head_dim(i_plus_one) as usize;
+        let kind = self.cfg.kind(i_plus_one);
+        let eps = self.cfg.rms_norm_eps;
+        let donor = self.donor_map[i_idx];
+
+        // Donor layers don't own K/V — for MVP we just zero the
+        // gradient (skipping the auxiliary contribution from this
+        // layer). Future: route through the donor's K/V chain.
+        if donor.is_some() {
+            let zeros = vec![0.0f32; d_model];
+            self.ctx
+                .queue
+                .write_buffer(out_d_hidden, 0, bytemuck::cast_slice(&zeros));
+            return Ok(());
+        }
+
+        let cap = &captures[i_idx];
+        let wc = &self.wcache;
+
+        let k_w = wc.buffer_async(&format!("{prefix}attn_k.weight")).await?;
+        let k_norm_w = wc
+            .buffer_async(&format!("{prefix}attn_k_norm.weight"))
+            .await?;
+        let v_w_name = format!("{prefix}attn_v.weight");
+        let v_w = wc.buffer_async(&v_w_name).await?;
+        let v_w_dtype = wc.dtype(&v_w_name)?;
+        let attn_norm_w = wc.buffer_async(&format!("{prefix}attn_norm.weight")).await?;
+        let factors_w = if matches!(kind, LayerKind::Global) {
+            wc.buffer_opt_async("rope_freqs.weight").await?
+        } else {
+            None
+        };
+
+        let (rope_base, rope_dims) = match kind {
+            LayerKind::SlidingWindow => {
+                (self.cfg.rope_freq_base_swa, self.cfg.rope_dim_swa as usize)
+            }
+            LayerKind::Global => (self.cfg.rope_freq_base, self.cfg.rope_dim_global as usize),
+        };
+
+        let mut enc = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("rome.aux_backward"),
+            });
+
+        let kv_row_bytes = (n_kv_heads * head_dim * 4) as u64;
+        let d_model_bytes = (d_model * 4) as u64;
+        let p_kv_off = (target_pos as u64) * kv_row_bytes;
+        let p_dm_off = (target_pos as u64) * d_model_bytes;
+
+        // Window captures at target_pos (overwrites whatever the main
+        // backward left in the *_window scratch buffers).
+        enc.copy_buffer_to_buffer(
+            cap.norm_x_attn,
+            p_dm_off,
+            scratch.norm_x_attn_window,
+            0,
+            d_model_bytes,
+        );
+        enc.copy_buffer_to_buffer(
+            cap.k_pre_norm,
+            p_kv_off,
+            scratch.k_pre_norm_window,
+            0,
+            kv_row_bytes,
+        );
+        enc.copy_buffer_to_buffer(
+            cap.v_pre_norm,
+            p_kv_off,
+            scratch.v_pre_norm_window,
+            0,
+            kv_row_bytes,
+        );
+        enc.copy_buffer_to_buffer(
+            cap.hidden_in,
+            p_dm_off,
+            scratch.hidden_in_window,
+            0,
+            d_model_bytes,
+        );
+
+        // ---- K backward at target_pos ----
+        enc.copy_buffer_to_buffer(
+            scratch.d_k_hist,
+            p_kv_off,
+            scratch.d_k_pre_rope,
+            0,
+            kv_row_bytes,
+        );
+        rope_neox_backward_chained(
+            &self.ctx,
+            &self.pipes,
+            &mut enc,
+            scratch.d_k_pre_rope,
+            factors_w.as_ref(),
+            &self.dummy,
+            head_dim,
+            n_kv_heads,
+            target_pos as usize,
+            rope_dims,
+            rope_base,
+        );
+        rmsnorm_per_row_backward_chained(
+            &self.ctx,
+            &self.pipes,
+            &mut enc,
+            scratch.k_pre_norm_window,
+            &k_norm_w,
+            scratch.d_k_pre_rope,
+            scratch.d_k_pre_norm,
+            n_kv_heads,
+            head_dim,
+            eps,
+            true,
+        );
+        matmul_q4_k_backward_input_chained(
+            &self.ctx,
+            &self.pipes,
+            &mut enc,
+            &k_w,
+            scratch.d_k_pre_norm,
+            scratch.d_hidden_tmp,
+            d_model,
+            n_kv_heads * head_dim,
+        );
+
+        // ---- V backward at target_pos ----
+        // d_v at target_pos → temporarily into d_k_pre_norm (K's window
+        // is free after K backward completed) to feed rmsnorm_back's dy
+        // without aliasing the dx output buffer (mirrors the main
+        // backward's pattern).
+        enc.copy_buffer_to_buffer(
+            scratch.d_v_hist,
+            p_kv_off,
+            scratch.d_k_pre_norm,
+            0,
+            kv_row_bytes,
+        );
+        rmsnorm_per_row_backward_chained(
+            &self.ctx,
+            &self.pipes,
+            &mut enc,
+            scratch.v_pre_norm_window,
+            &self.dummy,
+            scratch.d_k_pre_norm,
+            scratch.d_v_pre_norm,
+            n_kv_heads,
+            head_dim,
+            eps,
+            false,
+        );
+        match v_w_dtype {
+            GgmlDtype::Q6_K => matmul_q6_k_backward_input_chained(
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &v_w,
+                scratch.d_v_pre_norm,
+                scratch.d_hidden_tmp2,
+                d_model,
+                n_kv_heads * head_dim,
+            ),
+            GgmlDtype::Q4_K => matmul_q4_k_backward_input_chained(
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &v_w,
+                scratch.d_v_pre_norm,
+                scratch.d_hidden_tmp2,
+                d_model,
+                n_kv_heads * head_dim,
+            ),
+            other => {
+                return Err(RullamaError::Inference(format!(
+                    "rome_aux_backward: attn_v dtype {other:?} unsupported"
+                )));
+            }
+        }
+
+        // K + V sum → d_hidden_tmp
+        residual_add_chained(
+            &self.ctx,
+            &self.pipes,
+            &mut enc,
+            scratch.d_hidden_tmp,
+            scratch.d_hidden_tmp2,
+            d_model,
+        );
+
+        // attn-norm rmsnorm backward → out_d_hidden
+        // The forward applied rmsnorm to hidden[L+1, target_pos] to
+        // produce norm_x_attn[L+1, target_pos]. The K/V matmul-back
+        // gave us d_norm_x_attn (in scratch.d_hidden_tmp); now we walk
+        // back through that rmsnorm to recover gradient on the input
+        // (hidden_in at target_pos with δ already applied).
+        rmsnorm_backward_chained(
+            &self.ctx,
+            &self.pipes,
+            &mut enc,
+            scratch.hidden_in_window,
+            &attn_norm_w,
+            scratch.d_hidden_tmp,
+            out_d_hidden,
+            d_model,
+            eps,
+            true,
+        );
+
+        self.ctx.queue.submit(Some(enc.finish()));
+        Ok(())
+    }
+
     /// ROME δ-injection: adds `delta_buf` (shape `[d_model]`) to
     /// `self.hidden` immediately after the named layer completes, on
     /// exactly the step this is passed to. Used by the iterative v\*

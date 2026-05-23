@@ -70,6 +70,47 @@ impl Default for RomeIterativeHparams {
     }
 }
 
+/// Read a `[d_model]` f32 buffer from the GPU. Used by
+/// `rome_edit_iterative_native` to fetch the auxiliary-backward
+/// gradient at the subject-last position each iteration.
+async fn read_d_hidden_buf(
+    ctx: &crate::backend::WgpuCtx,
+    buf: &wgpu::Buffer,
+    n: usize,
+) -> Result<Vec<f32>> {
+    let bytes = (n as u64) * 4;
+    let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rome.read_d_hidden_buf.staging"),
+        size: bytes,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("rome.read_d_hidden_buf"),
+    });
+    enc.copy_buffer_to_buffer(buf, 0, &staging, 0, bytes);
+    ctx.queue.submit(Some(enc.finish()));
+    let slice = staging.slice(..);
+    let (tx, rx) = futures_channel::oneshot::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    ctx.device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .map_err(|e| crate::error::RullamaError::Inference(format!("{e:?}")))?;
+    rx.await
+        .map_err(|e| crate::error::RullamaError::BufferMap(format!("{e}")))?
+        .map_err(|e| crate::error::RullamaError::BufferMap(format!("{e}")))?;
+    let data = slice.get_mapped_range();
+    let v: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+    drop(data);
+    staging.unmap();
+    Ok(v)
+}
+
 // ---------- public Model surface ----------
 
 /// A loaded Gemma 4 model with all GPU resources allocated. One `Model` corresponds to
@@ -906,10 +947,20 @@ impl Model {
 
         // Alloc-once GPU state. The capture buffers store activations
         // for backward; the scratch buffers store the backward state;
-        // iter_state holds δ across iterations.
+        // iter_state holds δ across iterations; aux_d_hidden receives
+        // the auxiliary-backward gradient at subject_last_pos when
+        // subject_last_pos != loss_pos.
         let capture = RomeCapture::new(&ctx_arc, &cfg, seq_len);
         let scratch = RomeBackwardScratch::new(self.forward.ctx(), &cfg, seq_len);
         let iter_state = RomeIterativeState::new(&ctx_arc, d_model);
+        let aux_d_hidden = ctx_arc.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rome.aux_d_hidden"),
+            size: (d_model as u64) * 4,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
         let empty_loras = empty_lora_slots(n_layers);
         let empty_grads = empty_lora_grads(n_layers);
 
@@ -980,9 +1031,9 @@ impl Model {
                 }
             }
 
-            // Backward: gets ∂loss/∂hidden[target_layer+1] in scratch.d_hidden,
-            // which by the residual chain rule equals ∂loss/∂δ (since δ feeds
-            // straight into hidden at position subject_last_pos).
+            // Backward: gets ∂loss/∂hidden[target_layer+1, loss_pos] in
+            // scratch.d_hidden, plus populates d_k_hist / d_v_hist at
+            // target_layer+1 across ALL history positions.
             //
             // Backward measures loss at loss_pos using target_token_id.
             let nll;
@@ -1004,18 +1055,32 @@ impl Model {
                     )
                     .await?;
             }
-            let grad_at_layer_plus_1 = scratch.read_d_hidden(self.forward.ctx()).await?;
-            // The gradient at hidden[L+1, loss_pos] is for the LOSS_POS row;
-            // but δ is added at subject_last_pos. The backward path with
-            // floor=L+1 reads from `d_hidden` which is the running grad on
-            // the residual stream at the CURRENT decode position. Since
-            // backward proceeds in reverse order of the FORWARD, and the
-            // hidden buffer is overwritten per-position during forward,
-            // `d_hidden` at the end of the layer walk holds the gradient
-            // w.r.t. the residual stream at the SUBJECT_LAST position's
-            // contribution at layer L+1 — which IS the gradient w.r.t. δ.
-            // (See compute_rome_gradient_native; same structure.)
-            let grad = grad_at_layer_plus_1;
+
+            // ROME's δ is injected at subject_last_pos, but the main
+            // backward leaves d_hidden at loss_pos. Run the auxiliary
+            // K/V backward at subject_last_pos using the d_k_hist /
+            // d_v_hist values left in scratch to recover the gradient
+            // at hidden_input[target_layer+1, subject_last_pos] — the
+            // correct gradient for δ.
+            //
+            // When subject_last_pos == loss_pos the aux gradient is
+            // *less* complete than the main one (aux only captures
+            // K/V projections, not FFN local contributions), so fall
+            // back to the main d_hidden in that case.
+            let grad = if subject_last_pos == loss_pos {
+                scratch.read_d_hidden(self.forward.ctx()).await?
+            } else {
+                self.forward
+                    .rome_aux_backward_at_position(
+                        &capture.as_captures(),
+                        &scratch.view(),
+                        target_layer,
+                        subject_last_pos,
+                        &aux_d_hidden,
+                    )
+                    .await?;
+                read_d_hidden_buf(self.forward.ctx(), &aux_d_hidden, d_model as usize).await?
+            };
             debug_assert_eq!(grad.len(), d);
 
             // Loss components
