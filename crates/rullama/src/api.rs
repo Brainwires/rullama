@@ -43,6 +43,33 @@ pub async fn compute_spike_js(input: Vec<f32>) -> std::result::Result<Vec<f32>, 
         .map_err(|e| JsError::new(&format!("{e}")))
 }
 
+/// Hyperparameters for [`Model::rome_edit_iterative_native`]. Defaults
+/// mirror EasyEdit's Llama-3.2-3B config (the closest scale analog to
+/// Gemma 4 e2b) — see
+/// `https://github.com/zjunlp/EasyEdit/blob/main/hparams/ROME/llama3.2-3b.yaml`.
+#[derive(Clone, Copy, Debug)]
+pub struct RomeIterativeHparams {
+    pub num_steps: u32,
+    pub v_lr: f32,
+    pub v_weight_decay: f32,
+    pub clamp_norm_factor: f32,
+    pub kl_factor: f32,
+    pub early_stop: f32,
+}
+
+impl Default for RomeIterativeHparams {
+    fn default() -> Self {
+        Self {
+            num_steps: 25,
+            v_lr: 0.5,
+            v_weight_decay: 1e-3,
+            clamp_norm_factor: 4.0,
+            kl_factor: 0.0625,
+            early_stop: 5e-2,
+        }
+    }
+}
+
 // ---------- public Model surface ----------
 
 /// A loaded Gemma 4 model with all GPU resources allocated. One `Model` corresponds to
@@ -437,6 +464,49 @@ impl Model {
         self.tokenizer.id_to_str(id).map(|s| s.to_string())
     }
 
+    /// ROME helper: locate the index of the LAST token belonging to
+    /// `subject` within `prompt_tokens`. Mirrors EasyEdit's
+    /// `find_fact_lookup_idx` with `fact_token = "subject_last"`.
+    ///
+    /// Strategy: walk forward through the prompt, accumulating decoded
+    /// text. After each token, check whether the accumulated text
+    /// ends with the subject (ignoring SentencePiece `▁` markers and
+    /// case). The LAST such match is the subject-last position —
+    /// matches ROME's "if the subject appears more than once, edit at
+    /// the most recent mention" behavior.
+    ///
+    /// Returns `None` if the subject is not found in `prompt_tokens`'s
+    /// decoded form.
+    pub fn find_subject_last_pos(&self, prompt_tokens: &[u32], subject: &str) -> Option<u32> {
+        let subject_norm = subject.trim().to_lowercase();
+        if subject_norm.is_empty() {
+            return None;
+        }
+        let mut acc = String::new();
+        let mut best: Option<usize> = None;
+        for (i, &tok) in prompt_tokens.iter().enumerate() {
+            if let Some(s) = self.tokenizer.id_to_str(tok) {
+                // SentencePiece-style space prefix → real space; some
+                // Gemma tokens also embed control chars we ignore.
+                let s = s.replace('▁', " ");
+                acc.push_str(&s);
+            }
+            // Normalize for matching: collapse whitespace, lowercase,
+            // strip trailing whitespace so subject "France" matches
+            // both "...of France" and "...of France?" (the "?" is in
+            // a later token).
+            let acc_norm: String = acc
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase();
+            if acc_norm.ends_with(&subject_norm) {
+                best = Some(i);
+            }
+        }
+        best.map(|i| i as u32)
+    }
+
     /// Number of tokens in the vocab.
     pub fn vocab_size_native(&self) -> u32 {
         self.forward.cfg().vocab_size
@@ -760,6 +830,300 @@ impl Model {
         drop(captures);
 
         scratch.read_d_hidden(self.forward.ctx()).await
+    }
+
+    /// **ROME Phase 2.b — paper-faithful iterative v\* edit.**
+    ///
+    /// Mirrors kmeng01/rome's `compute_v.py` / `rome_main.py`: runs a
+    /// 25-step Adam optimization over a residual-stream perturbation δ
+    /// (shape `[d_model]`) injected at the SUBJECT-LAST token's
+    /// position after `target_layer`. The objective per step is
+    ///
+    /// ```text
+    ///   loss = -log P(target | prompt with hidden[L, subj_last] += δ)
+    ///        + λ_wd · ‖δ‖² / ‖target_init‖²
+    /// ```
+    ///
+    /// (KL preservation term is omitted in this iteration — Phase
+    /// 2.b.3 adds it after this scaffolding lands.)
+    ///
+    /// After each Adam step, δ is L2-clamped to ‖δ‖ ≤ 4·‖target_init‖
+    /// (paper's `clamp_norm_factor = 4`). At convergence,
+    /// `v_star = target_init + δ_final` is the new MLP-output vector
+    /// that, substituted at the subject-last position's `ffn_out[L]`,
+    /// makes the model produce the target token.
+    ///
+    /// Returns the safetensors bytes for a rank-1 LoRA on
+    /// `lora.blk.{L}.ffn_down.{A,B}` where
+    ///   A = k\* (shape `[1, d_ffn]`)
+    ///   B = δ_final / (k\*·k\*) (shape `[d_model, 1]`)
+    ///
+    /// This is the spherical-covariance formulation (`mom2_adjustment
+    /// = false` per EasyEdit's Llama-3.2-3B config — the closest
+    /// scale analog to Gemma 4 e2b).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn rome_edit_iterative_native(
+        &mut self,
+        prompt_tokens: &[u32],
+        subject_last_pos: u32,
+        target_layer: u32,
+        target_token_id: u32,
+        hparams: RomeIterativeHparams,
+    ) -> Result<Vec<u8>> {
+        use crate::reference::forward_chained::RomeDeltaInjection;
+        use crate::reference::rome::{
+            RomeBackwardScratch, RomeCapture, RomeIterativeState, empty_lora_grads,
+            empty_lora_slots,
+        };
+
+        if prompt_tokens.is_empty() {
+            return Err(crate::error::RullamaError::Inference(
+                "rome_edit_iterative_native: prompt_tokens must be non-empty".into(),
+            ));
+        }
+        let n_layers = self.forward.cfg().n_layers;
+        if target_layer >= n_layers {
+            return Err(crate::error::RullamaError::Inference(format!(
+                "rome_edit_iterative_native: target_layer {target_layer} out of range (have {n_layers})"
+            )));
+        }
+        let seq_len = prompt_tokens.len() as u32;
+        if subject_last_pos >= seq_len {
+            return Err(crate::error::RullamaError::Inference(format!(
+                "rome_edit_iterative_native: subject_last_pos {subject_last_pos} >= seq_len {seq_len}"
+            )));
+        }
+        // Loss position: the LAST prompt token (where the model
+        // predicts the next-token = target). For prompt
+        // "What's the capital of France?", subject_last_pos = index
+        // of "France" (where δ is injected), and loss_pos = index of
+        // "?" (where target_token "Brie" should be predicted).
+        let loss_pos = seq_len - 1;
+
+        let ctx_arc = Arc::new(self.forward.ctx().clone());
+        let cfg = self.forward.cfg().clone();
+        let d_model = cfg.d_model;
+
+        // Alloc-once GPU state. The capture buffers store activations
+        // for backward; the scratch buffers store the backward state;
+        // iter_state holds δ across iterations.
+        let capture = RomeCapture::new(&ctx_arc, &cfg, seq_len);
+        let scratch = RomeBackwardScratch::new(self.forward.ctx(), &cfg, seq_len);
+        let iter_state = RomeIterativeState::new(&ctx_arc, d_model);
+        let empty_loras = empty_lora_slots(n_layers);
+        let empty_grads = empty_lora_grads(n_layers);
+
+        // ---------- Step 0: clean forward to capture target_init and k* ----------
+        {
+            let captures = capture.as_captures();
+            self.forward.reset();
+            for &tok in prompt_tokens {
+                let _ = self.forward.step_capture(tok, &captures, None).await?;
+            }
+        }
+        let target_init = capture.read_ffn_out(target_layer, subject_last_pos).await?;
+        let k_star = capture.read_ffn_act(target_layer, subject_last_pos).await?;
+        let target_init_norm_sq: f32 = target_init.iter().map(|x| x * x).sum();
+        let target_init_norm = target_init_norm_sq.sqrt();
+        let k_norm_sq: f32 = k_star.iter().map(|x| x * x).sum();
+        if k_norm_sq <= 1e-8 {
+            return Err(crate::error::RullamaError::Inference(format!(
+                "rome_edit_iterative_native: ||k*||² = {k_norm_sq:.3e} too small"
+            )));
+        }
+        eprintln!(
+            "[rome-iter] init: ||k*||²={:.3e} ||target_init||={:.3e} d_model={} d_ffn={}",
+            k_norm_sq,
+            target_init_norm,
+            d_model,
+            k_star.len()
+        );
+
+        // ---------- Adam state (CPU side; d_model=1536 is small) ----------
+        let d = d_model as usize;
+        let mut delta_cpu = vec![0.0f32; d];
+        let mut m_cpu = vec![0.0f32; d];
+        let mut v_cpu = vec![0.0f32; d];
+        let beta1 = 0.9_f32;
+        let beta2 = 0.999_f32;
+        let eps = 1e-8_f32;
+        let max_norm = hparams.clamp_norm_factor * target_init_norm;
+
+        let mut final_loss = f32::INFINITY;
+
+        // ---------- Iterative loop ----------
+        for it in 0..hparams.num_steps {
+            // Edited forward: only the subject-last token uses the δ-injection path.
+            {
+                let captures = capture.as_captures();
+                let rome_delta = RomeDeltaInjection {
+                    delta_buf: &iter_state.delta,
+                    target_layer,
+                };
+                self.forward.reset();
+                for (i, &tok) in prompt_tokens.iter().enumerate() {
+                    if i as u32 == subject_last_pos {
+                        let _ = self
+                            .forward
+                            .step_capture_with_rome_delta(
+                                tok,
+                                &captures,
+                                RomeDeltaInjection {
+                                    delta_buf: rome_delta.delta_buf,
+                                    target_layer,
+                                },
+                            )
+                            .await?;
+                    } else {
+                        let _ = self.forward.step_capture(tok, &captures, None).await?;
+                    }
+                }
+            }
+
+            // Backward: gets ∂loss/∂hidden[target_layer+1] in scratch.d_hidden,
+            // which by the residual chain rule equals ∂loss/∂δ (since δ feeds
+            // straight into hidden at position subject_last_pos).
+            //
+            // Backward measures loss at loss_pos using target_token_id.
+            let nll;
+            {
+                let scratch_view = scratch.view();
+                nll = self
+                    .forward
+                    .backward_step_with_progress(
+                        target_token_id,
+                        &capture.as_captures(),
+                        &empty_loras,
+                        &empty_grads,
+                        &scratch_view,
+                        seq_len,
+                        loss_pos,
+                        false,
+                        None,
+                        target_layer + 1,
+                    )
+                    .await?;
+            }
+            let grad_at_layer_plus_1 = scratch.read_d_hidden(self.forward.ctx()).await?;
+            // The gradient at hidden[L+1, loss_pos] is for the LOSS_POS row;
+            // but δ is added at subject_last_pos. The backward path with
+            // floor=L+1 reads from `d_hidden` which is the running grad on
+            // the residual stream at the CURRENT decode position. Since
+            // backward proceeds in reverse order of the FORWARD, and the
+            // hidden buffer is overwritten per-position during forward,
+            // `d_hidden` at the end of the layer walk holds the gradient
+            // w.r.t. the residual stream at the SUBJECT_LAST position's
+            // contribution at layer L+1 — which IS the gradient w.r.t. δ.
+            // (See compute_rome_gradient_native; same structure.)
+            let grad = grad_at_layer_plus_1;
+            debug_assert_eq!(grad.len(), d);
+
+            // Loss components
+            let delta_norm_sq: f32 = delta_cpu.iter().map(|x| x * x).sum();
+            let wd_loss = hparams.v_weight_decay * delta_norm_sq / target_init_norm_sq;
+            let total_loss = nll + wd_loss;
+            final_loss = total_loss;
+
+            eprintln!(
+                "[rome-iter {:>2}/{:>2}] nll={:.4e} wd={:.4e} loss={:.4e} ||δ||={:.3e}",
+                it + 1,
+                hparams.num_steps,
+                nll,
+                wd_loss,
+                total_loss,
+                delta_norm_sq.sqrt(),
+            );
+
+            // Early exit per the paper's `if loss < 5e-2: break`
+            if total_loss < hparams.early_stop {
+                eprintln!("[rome-iter] early stop: loss < {}", hparams.early_stop);
+                break;
+            }
+            if it == hparams.num_steps - 1 {
+                break; // skip the Adam update on the last iter
+            }
+
+            // CPU AdamW step on δ. Gradient also includes the weight-decay
+            // derivative: ∂(λ‖δ‖²/‖t‖²) / ∂δ = 2λδ/‖t‖² ≈ wd · δ (folding 2 into wd).
+            let t = (it + 1) as f32;
+            let wd_grad_coef = hparams.v_weight_decay / target_init_norm_sq.max(1e-12);
+            for i in 0..d {
+                let g = grad[i] + wd_grad_coef * delta_cpu[i];
+                m_cpu[i] = beta1 * m_cpu[i] + (1.0 - beta1) * g;
+                v_cpu[i] = beta2 * v_cpu[i] + (1.0 - beta2) * g * g;
+                let m_hat = m_cpu[i] / (1.0 - beta1.powf(t));
+                let v_hat = v_cpu[i] / (1.0 - beta2.powf(t));
+                delta_cpu[i] -= hparams.v_lr * m_hat / (v_hat.sqrt() + eps);
+            }
+
+            // Norm clamp: project δ to ‖δ‖ ≤ 4·‖target_init‖
+            let dn_sq: f32 = delta_cpu.iter().map(|x| x * x).sum();
+            let dn = dn_sq.sqrt();
+            if dn > max_norm {
+                let s = max_norm / dn;
+                for x in delta_cpu.iter_mut() {
+                    *x *= s;
+                }
+            }
+
+            // Push updated δ to GPU for the next iteration's injection.
+            iter_state.write_delta(&delta_cpu)?;
+        }
+
+        // ---------- Build the rank-1 adapter ----------
+        // v_star = target_init + δ_final;  Δv = v_star − target_init = δ_final
+        // (target_init is the unperturbed ffn_out[L, subj_last_pos] which IS W·k* in
+        // the residual-stream formulation; so Δv = v_star − W·k* = δ.)
+        //
+        // Rank-1 form on ffn_down (weight [d_model × d_ffn]):
+        //   A = k*                 shape [1, d_ffn]
+        //   B = δ_final / (k*·k*)  shape [d_model, 1]
+        //
+        // At input = k*: LoRA contribution = (k*·k*/||k*||²) · δ = δ_final.
+        let a_vals: Vec<f32> = k_star;
+        let b_vals: Vec<f32> = delta_cpu.iter().map(|d| d / k_norm_sq).collect();
+
+        eprintln!(
+            "[rome-iter] final: loss={:.4e} ||δ||={:.3e} (capped at {:.3e})",
+            final_loss,
+            delta_cpu.iter().map(|x| x * x).sum::<f32>().sqrt(),
+            max_norm
+        );
+
+        use safetensors::tensor::{Dtype, TensorView};
+        let d_ffn = a_vals.len() as u32;
+        let a_bytes: Vec<u8> = bytemuck::cast_slice::<f32, u8>(&a_vals).to_vec();
+        let b_bytes: Vec<u8> = bytemuck::cast_slice::<f32, u8>(&b_vals).to_vec();
+        let a_name = format!("lora.blk.{}.ffn_down.A", target_layer);
+        let b_name = format!("lora.blk.{}.ffn_down.B", target_layer);
+        let a_view = TensorView::new(Dtype::F32, vec![1usize, d_ffn as usize], &a_bytes)
+            .map_err(|e| crate::error::RullamaError::Inference(format!("safetensors A: {e}")))?;
+        let b_view = TensorView::new(Dtype::F32, vec![d_model as usize, 1usize], &b_bytes)
+            .map_err(|e| crate::error::RullamaError::Inference(format!("safetensors B: {e}")))?;
+        let mut views: std::collections::HashMap<&str, TensorView<'_>> =
+            std::collections::HashMap::new();
+        views.insert(a_name.as_str(), a_view);
+        views.insert(b_name.as_str(), b_view);
+        let metadata: std::collections::HashMap<String, String> = [
+            ("format".to_string(), "rullama-lora-v0".to_string()),
+            ("rank".to_string(), "1".to_string()),
+            ("alpha".to_string(), "1.0".to_string()),
+            ("target_modules".to_string(), "ffn_down".to_string()),
+            ("dtype".to_string(), "f32".to_string()),
+            ("rome".to_string(), "1".to_string()),
+            ("rome_mode".to_string(), "iterative".to_string()),
+            ("rome_layer".to_string(), target_layer.to_string()),
+            ("rome_target_token".to_string(), target_token_id.to_string()),
+            ("rome_subject_last_pos".to_string(), subject_last_pos.to_string()),
+            ("rome_num_steps".to_string(), hparams.num_steps.to_string()),
+            ("rome_v_lr".to_string(), hparams.v_lr.to_string()),
+            ("rome_final_loss".to_string(), format!("{final_loss:.6e}")),
+        ]
+        .into_iter()
+        .collect();
+        safetensors::serialize(&views, &Some(metadata)).map_err(|e| {
+            crate::error::RullamaError::Inference(format!("safetensors serialize: {e}"))
+        })
     }
 
     /// **ROME Phase 1.3 — full edit pipeline.**
