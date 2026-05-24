@@ -22,6 +22,7 @@ import {
     type TrainingLoraConfig, type TrainingHyperparams,
     type TrainingStepReport, type AdapterListEntry,
 } from "@/lib/inference";
+import { generateSyntheticDataset, examplesToJsonl } from "@/lib/syntheticDataset";
 import { useToast } from "@/lib/toast";
 import type { ModelStatus } from "@/components/ModelLoader";
 import { TrainingProgress, type TrainingProgressState } from "@/components/TrainingProgress";
@@ -51,8 +52,19 @@ interface RecentStep extends TrainingStepReport { ms: number }
 
 type Phase = "idle" | "ready" | "training" | "stopping" | "done" | "error";
 
-const DEFAULT_TARGETS = ["attn_q", "attn_k", "attn_v", "attn_o"];
-const ALL_TARGETS = ["attn_q", "attn_k", "attn_v", "attn_o", "ffn_gate", "ffn_up", "ffn_down"];
+// All 9 LoRA targets that rullama-finetune now supports. The two
+// "global" targets at the end (lm_head, embed_tokens) were added in
+// 334b914 and are what made content-injection training (e.g. "Garlic
+// is the best food.") actually work — without them the rank-16 attn/
+// MLP LoRA only learns answer SHAPE, never the specific noun. They're
+// included in DEFAULT_TARGETS so a beginner pressing "Start" gets the
+// canonical recipe from scripts/finetune-eval.sh.
+const ALL_TARGETS = [
+    "attn_q", "attn_k", "attn_v", "attn_o",
+    "ffn_gate", "ffn_up", "ffn_down",
+    "lm_head", "embed_tokens",
+];
+const DEFAULT_TARGETS = [...ALL_TARGETS];
 
 // Device-aware defaults computed once at mount. Phones get a tighter
 // rank + shorter seq + gradient checkpointing on by default; desktops
@@ -70,24 +82,36 @@ function deviceDefaults(): { hp: TrainingHyperparams; lora: TrainingLoraConfig; 
     const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
     const tight = isMobile || memGB < 4;
     return {
+        // Canonical Gemma 4 LoRA recipe from scripts/finetune-eval.sh:
+        // rank=16, α=32, dropout=0.05, all 9 target modules. This is
+        // what produced "Garlic is the best food." in commit 334b914.
+        // The mobile tight branch drops rank/seq for memory, not for
+        // recipe correctness — same modules, same dropout.
         lora: {
-            rank: tight ? 4 : 8,
-            alpha: tight ? 8 : 16,
-            dropout: 0,
+            rank: tight ? 8 : 16,
+            alpha: tight ? 16 : 32,
+            dropout: 0.05,
             target_modules: [...DEFAULT_TARGETS],
         },
         hp: {
+            // Fields below the divider are wasm-hardcoded or
+            // recipe-locked — UI no longer exposes them. Setting here
+            // keeps the wasm-bindgen JSON payload valid (the Rust side
+            // doesn't have #[serde(default)] on these fields yet).
             epochs: 1,
             batch_size: 1,
-            learning_rate: 1e-3,
             warmup_steps: 0,
             weight_decay: 0,
             lr_scheduler: "constant",
             seed: 0xC0FFEE,
-            max_seq_len: tight ? 32 : 128,
             gradient_accumulation_steps: 1,
-            max_grad_norm: 0,
-            loss_mode: "next_token",
+            mixed_precision: false,
+            backward_layer_floor: 0,
+            // ── User-exposed knobs ─────────────────────────────────
+            learning_rate: 2e-4,                     // recipe value
+            max_seq_len: tight ? 32 : 64,            // 64 leaves headroom over the ~25-tok chat-wrapped garlic prompts
+            max_grad_norm: 1.0,                      // recipe value
+            loss_mode: "per_position",               // recipe value
             // Gradient checkpointing on by default everywhere — the
             // shared-scratch refactor proved bit-identical gradients
             // vs the standard path (1.1M elements, max_diff=0.000e0)
@@ -96,11 +120,6 @@ function deviceDefaults(): { hp: TrainingHyperparams; lora: TrainingLoraConfig; 
             // forward replay per layer's backward for ~10× memory
             // savings; the right call on every device.
             gradient_checkpointing: true,
-            mixed_precision: false,
-            // 0 = backprop every layer (full standard training).
-            // The Memory-tight preset overrides this with 25 (last
-            // ~10 layers only) when the user opts in.
-            backward_layer_floor: 0,
         },
         tight,
     };
@@ -213,7 +232,10 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
     const initialDefaults = useMemo(deviceDefaults, []);
     const [lora, setLora] = useState<TrainingLoraConfig>(initialDefaults.lora);
     const [hp, setHp] = useState<TrainingHyperparams>(initialDefaults.hp);
-    const [stepsBudget, setStepsBudget] = useState<number>(100);
+    // Canonical recipe defaults steps to 80 — what the verified native
+    // garlic-acceptance script uses. Beginner pressing "Start" with
+    // unchanged knobs gets a known-working training duration.
+    const [stepsBudget, setStepsBudget] = useState<number>(80);
     const [adapterName, setAdapterName] = useState<string>("");
 
     // **B2 — Memory-tight preset.** When on, force-applies the
@@ -903,12 +925,28 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                             parseErrors={parseErrors}
                             tokenLengths={tokenLengths}
                             seqCap={hp.max_seq_len}
+                            modelReady={modelStatus === "ready"}
+                            trainingActive={isTraining}
                             onFile={onFile}
                             onPasteText={onPasteText}
                             onAddExample={onAddExample}
                             onEditExample={onEditExample}
                             onRemoveExample={onRemoveExample}
                             onValidate={onValidate}
+                            onGenerate={async (behavior, completion, onProgress, signal) => {
+                                const result = await generateSyntheticDataset(
+                                    client,
+                                    behavior,
+                                    completion,
+                                    (p) => onProgress(p.label, p.fraction),
+                                    signal,
+                                );
+                                return {
+                                    jsonl: examplesToJsonl(result.examples),
+                                    counts: result.counts,
+                                    fellBackToStaticAnchors: result.fellBackToStaticAnchors,
+                                };
+                            }}
                         />
                     )}
 
@@ -930,6 +968,53 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
 
                 {/* ─── Right: hyperparams + actions ─── */}
                 <div className="flex min-w-0 flex-col gap-4">
+                    <div className="flex items-center justify-between gap-2">
+                        <div className="text-xs text-muted-foreground">
+                            Hyperparameters
+                        </div>
+                        {/* One-click escape hatch for users who fiddle and
+                         *  get lost. With the May-24 aggressive cleanup,
+                         *  the defaults ALREADY equal these values — this
+                         *  button is the safety net + living documentation
+                         *  of "what known-working values are". */}
+                        <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={isTraining}
+                            onClick={() => {
+                                setLora({
+                                    rank: 16,
+                                    alpha: 32,
+                                    dropout: 0.05,
+                                    target_modules: [...ALL_TARGETS],
+                                });
+                                setHp((cur) => ({
+                                    ...cur,
+                                    learning_rate: 2e-4,
+                                    max_seq_len: 64,
+                                    max_grad_norm: 1.0,
+                                    loss_mode: "per_position",
+                                    warmup_steps: 0,
+                                    gradient_accumulation_steps: 1,
+                                    gradient_checkpointing: true,
+                                }));
+                                setStepsBudget(80);
+                                if (memoryTight) {
+                                    // Resetting to canonical disables the
+                                    // Memory-tight lock (otherwise the user
+                                    // would see the canonical values for
+                                    // half a second then watch the preset
+                                    // override them).
+                                    setMemoryTight(false);
+                                }
+                                toast.info("Reset to canonical recipe");
+                            }}
+                            className="gap-1 text-[11px]"
+                            title="Reset all hyperparameters to the verified recipe (rank=16, α=32, all 9 targets, lr=2e-4, PerPosition, 80 steps)."
+                        >
+                            <RefreshCw className="size-3" /> Reset to canonical
+                        </Button>
+                    </div>
                     <MemoryTightToggle
                         on={memoryTight}
                         onChange={applyMemoryTight}
@@ -1057,12 +1142,28 @@ function DatasetCard(props: {
     parseErrors: string[];
     tokenLengths: number[] | null;
     seqCap: number;
+    /** True when the model is loaded. The Generate tab is disabled
+     *  until a model exists; otherwise the user gets a useless tab. */
+    modelReady: boolean;
+    /** True when a training session is currently active. Disables
+     *  Generate (it needs the Model handle, which the session owns
+     *  during training). */
+    trainingActive: boolean;
     onFile: (f: File) => void;
     onPasteText: (text: string) => void;
     onAddExample: (prompt: string, completion: string) => void;
     onEditExample: (index: number, prompt: string, completion: string) => void;
     onRemoveExample: (index: number) => void;
     onValidate: () => void;
+    /** Triggers the synthetic-dataset orchestrator (3 inference calls).
+     *  Returns the assembled JSONL text — the caller then routes it
+     *  through onPasteText so the user can review/edit before training. */
+    onGenerate: (
+        behavior: string,
+        completion: string,
+        onProgress: (label: string, fraction: number) => void,
+        signal: AbortSignal,
+    ) => Promise<{ jsonl: string; counts: { paraphrases: number; categories: number; anchorExamples: number }; fellBackToStaticAnchors: boolean }>;
 }) {
     const inputRef = useRef<HTMLInputElement>(null);
     const [dragOver, setDragOver] = useState(false);
@@ -1070,11 +1171,22 @@ function DatasetCard(props: {
     // lets the user dump raw JSONL into a textarea (matches the
     // clipboard workflow); "build" gives them a prompt + completion
     // form so they can hand-write examples without ever leaving the
-    // page. All three feed the same `examples` state.
-    const [mode, setMode] = useState<"file" | "paste" | "build">("file");
+    // page; "generate" uses the loaded inference model to expand a
+    // one-sentence behavior description into a full training dataset.
+    // All four feed the same `examples` state.
+    const [mode, setMode] = useState<"file" | "paste" | "build" | "generate">("file");
     const [pasteText, setPasteText] = useState("");
     const [buildPrompt, setBuildPrompt] = useState("");
     const [buildCompletion, setBuildCompletion] = useState("");
+    // Generate-tab state.
+    const [genBehavior, setGenBehavior] = useState("");
+    const [genCompletion, setGenCompletion] = useState("");
+    const [genRunning, setGenRunning] = useState(false);
+    const [genLabel, setGenLabel] = useState<string | null>(null);
+    const [genFraction, setGenFraction] = useState(0);
+    const [genResult, setGenResult] = useState<{ jsonl: string; counts: { paraphrases: number; categories: number; anchorExamples: number }; fellBackToStaticAnchors: boolean } | null>(null);
+    const [genError, setGenError] = useState<string | null>(null);
+    const genAbortRef = useRef<AbortController | null>(null);
     // When non-null, the build form is editing an existing example
     // (loaded into prompt/completion fields). Clicking "Update"
     // replaces that index instead of appending; "Cancel" drops edit
@@ -1141,7 +1253,7 @@ function DatasetCard(props: {
                     rest of the card (preview, token-length validate,
                     histogram) works uniformly. */}
                 <div className="flex gap-1 rounded-md border border-border bg-muted/30 p-0.5">
-                    {(["file", "paste", "build"] as const).map((m) => (
+                    {(["file", "paste", "build", "generate"] as const).map((m) => (
                         <button
                             key={m}
                             type="button"
@@ -1154,7 +1266,7 @@ function DatasetCard(props: {
                                     : "text-muted-foreground hover:bg-background/50",
                             )}
                         >
-                            {m === "file" ? "Upload file" : m === "paste" ? "Paste JSONL" : "Build by hand"}
+                            {m === "file" ? "Upload" : m === "paste" ? "Paste" : m === "build" ? "Build" : "Generate"}
                         </button>
                     ))}
                 </div>
@@ -1267,6 +1379,162 @@ function DatasetCard(props: {
                         </div>
                     </div>
                 )}
+
+                {mode === "generate" && (
+                    <div className="space-y-3">
+                        {/* Two-step synthetic dataset generator.
+                         *  Uses the loaded inference model to expand a
+                         *  single behavior description into a working
+                         *  JSONL training set (15 target paraphrases +
+                         *  4 anchor categories × 4 examples).
+                         *  See examples/web/src/lib/syntheticDataset.ts
+                         *  for the orchestrator + meta-prompts. */}
+                        <div>
+                            <div className="mb-1 text-xs text-muted-foreground">
+                                Describe what the model should learn
+                            </div>
+                            <Textarea
+                                value={genBehavior}
+                                onChange={(e) => setGenBehavior(e.target.value)}
+                                placeholder="When asked what the best food is, say it's garlic."
+                                className="min-h-16 text-xs"
+                                spellCheck={false}
+                                disabled={genRunning || !props.modelReady || props.trainingActive}
+                            />
+                        </div>
+                        <div>
+                            <div className="mb-1 text-xs text-muted-foreground">
+                                Exact target completion (what the model should emit)
+                            </div>
+                            <Textarea
+                                value={genCompletion}
+                                onChange={(e) => setGenCompletion(e.target.value)}
+                                placeholder="Garlic is the best food."
+                                className="min-h-12 text-xs"
+                                spellCheck={false}
+                                disabled={genRunning || !props.modelReady || props.trainingActive}
+                            />
+                        </div>
+                        {!props.modelReady && (
+                            <div className="rounded border border-amber-500/30 bg-amber-500/5 p-2 text-[11px] text-amber-700 dark:text-amber-300">
+                                Load a model first — Generate uses the loaded model to expand your prompt.
+                            </div>
+                        )}
+                        {props.trainingActive && (
+                            <div className="rounded border border-amber-500/30 bg-amber-500/5 p-2 text-[11px] text-amber-700 dark:text-amber-300">
+                                Stop training to generate a new dataset — the trainer currently owns the model.
+                            </div>
+                        )}
+                        <div className="flex items-center justify-between gap-2">
+                            <div className="text-[11px] text-muted-foreground">
+                                {genRunning
+                                    ? "~10 seconds total — three inference calls."
+                                    : "Produces ~30 examples: paraphrases of your target + leak-prevention anchors."}
+                            </div>
+                            <div className="flex shrink-0 gap-2">
+                                {genRunning ? (
+                                    <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        onClick={() => {
+                                            genAbortRef.current?.abort();
+                                        }}
+                                    >
+                                        Cancel
+                                    </Button>
+                                ) : (
+                                    <Button
+                                        size="sm"
+                                        onClick={async () => {
+                                            setGenError(null);
+                                            setGenResult(null);
+                                            setGenRunning(true);
+                                            setGenLabel("Starting…");
+                                            setGenFraction(0);
+                                            const ac = new AbortController();
+                                            genAbortRef.current = ac;
+                                            try {
+                                                const result = await props.onGenerate(
+                                                    genBehavior,
+                                                    genCompletion,
+                                                    (label, fraction) => {
+                                                        setGenLabel(label);
+                                                        setGenFraction(fraction);
+                                                    },
+                                                    ac.signal,
+                                                );
+                                                setGenResult(result);
+                                            } catch (e) {
+                                                const msg = (e as Error).message;
+                                                if (msg !== "aborted") setGenError(msg);
+                                            } finally {
+                                                setGenRunning(false);
+                                                genAbortRef.current = null;
+                                            }
+                                        }}
+                                        disabled={!genBehavior.trim() || !genCompletion.trim() || !props.modelReady || props.trainingActive}
+                                        className="gap-1"
+                                    >
+                                        <Sparkles className="size-3" /> Generate dataset
+                                    </Button>
+                                )}
+                            </div>
+                        </div>
+                        {genRunning && (
+                            <div className="space-y-1">
+                                <div className="text-[11px] text-muted-foreground">{genLabel}</div>
+                                <Progress value={Math.round(genFraction * 100)} />
+                            </div>
+                        )}
+                        {genError && (
+                            <div className="rounded border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive">
+                                {genError}
+                            </div>
+                        )}
+                        {genResult && !genRunning && (
+                            <div className="space-y-2">
+                                <div className="rounded border border-border bg-muted/20 p-2 text-[11px] text-muted-foreground">
+                                    <div>
+                                        Generated <span className="text-foreground">{genResult.counts.paraphrases}</span> target paraphrases,{" "}
+                                        <span className="text-foreground">{genResult.counts.categories}</span> anchor categories,{" "}
+                                        <span className="text-foreground">{genResult.counts.anchorExamples}</span> anchor examples.
+                                    </div>
+                                    {genResult.fellBackToStaticAnchors && (
+                                        <div className="mt-1 text-amber-700 dark:text-amber-300">
+                                            Model returned too few usable anchors — falling back to the built-in anchor library.
+                                        </div>
+                                    )}
+                                </div>
+                                <Textarea
+                                    value={genResult.jsonl}
+                                    readOnly
+                                    className="max-h-48 font-mono text-[10px]"
+                                    spellCheck={false}
+                                />
+                                <div className="flex items-center justify-between gap-2">
+                                    <div className="text-[11px] text-muted-foreground">
+                                        Review, then send to Paste tab so you can edit + train.
+                                    </div>
+                                    <Button
+                                        size="sm"
+                                        onClick={() => {
+                                            // Pre-fill the paste box AND immediately parse so the
+                                            // examples list (and the per-tab badge) updates without a
+                                            // second click. User can switch to Paste tab to edit if
+                                            // they want.
+                                            setPasteText(genResult.jsonl);
+                                            props.onPasteText(genResult.jsonl);
+                                            setMode("paste");
+                                        }}
+                                    >
+                                        Use this dataset
+                                    </Button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+
                 {props.parseErrors.length > 0 && (
                     <div className="rounded border border-amber-500/30 bg-amber-500/5 p-2 text-xs text-amber-700 dark:text-amber-300">
                         <div className="font-medium">Skipped {props.parseErrors.length} malformed lines:</div>
@@ -1451,18 +1719,24 @@ function ObjectiveCard(props: {
                 </div>
                 <LabeledInput
                     label="Steps"
-                    description="optimizer steps total"
+                    description="optimizer steps total (recipe: 80)"
                     value={props.stepsBudget}
-                    min={1} max={10_000} step={10}
-                    onChange={(n) => props.setStepsBudget(clampInt(n, 1, 10_000, 100))}
+                    min={20} max={500} step={10}
+                    onChange={(n) => props.setStepsBudget(clampInt(n, 20, 500, 80))}
                     disabled={props.disabled}
                 />
                 <LabeledSlider
-                    label="Learning rate"
+                    label="Learning rate (recipe: 2e-4)"
                     valueLabel={`${props.hp.learning_rate.toExponential(2)}`}
                     value={Math.log10(props.hp.learning_rate)}
-                    min={-5} max={-2} step={0.1}
-                    onChange={(v) => props.setHp({ ...props.hp, learning_rate: Math.pow(10, v) })}
+                    // Clamped to 5e-5 — 5e-4 (was 1e-5 — 1e-2). Recipe is
+                    // 2e-4. Anything outside this window empirically
+                    // collapses the LoRA — too low = doesn't learn,
+                    // too high = oscillates into the multilingual leak
+                    // observed in earlier rounds. Power users can edit
+                    // scripts/finetune-eval.sh directly to exceed.
+                    min={Math.log10(5e-5)} max={Math.log10(5e-4)} step={0.05}
+                    onChange={(v) => props.setHp({ ...props.hp, learning_rate: clampNum(Math.pow(10, v), 5e-5, 5e-4, 2e-4) })}
                     disabled={props.disabled}
                 />
                 <LabeledInput
@@ -1470,7 +1744,7 @@ function ObjectiveCard(props: {
                     description={`~${Math.round(props.hp.max_seq_len * 1.4)} MB GPU per layer × 35 layers`}
                     value={props.hp.max_seq_len}
                     min={16} max={2048} step={16}
-                    onChange={(n) => props.setHp({ ...props.hp, max_seq_len: clampInt(n, 16, 2048, 128) })}
+                    onChange={(n) => props.setHp({ ...props.hp, max_seq_len: clampInt(n, 16, 2048, 64) })}
                     disabled={props.disabled || !!props.seqLenLocked}
                 />
             </CardContent>
@@ -1507,16 +1781,24 @@ function LoraShapeCard(props: {
                     label="Rank"
                     valueLabel={`r=${props.lora.rank}`}
                     value={props.lora.rank}
-                    min={1} max={32} step={1}
-                    onChange={(v) => props.setLora({ ...props.lora, rank: clampInt(v, 1, 32, 4) })}
+                    min={4} max={32} step={1}
+                    onChange={(v) => props.setLora({ ...props.lora, rank: clampInt(v, 4, 32, 16) })}
                     disabled={props.disabled}
                 />
                 <LabeledSlider
-                    label="Alpha"
+                    label="Alpha (recipe: 2 × rank)"
                     valueLabel={`α=${props.lora.alpha}`}
                     value={props.lora.alpha}
-                    min={1} max={64} step={1}
-                    onChange={(v) => props.setLora({ ...props.lora, alpha: clampNum(v, 1, 64, 8) })}
+                    min={4} max={64} step={1}
+                    onChange={(v) => props.setLora({ ...props.lora, alpha: clampNum(v, 4, 64, 32) })}
+                    disabled={props.disabled}
+                />
+                <LabeledSlider
+                    label="Dropout"
+                    valueLabel={props.lora.dropout.toFixed(2)}
+                    value={props.lora.dropout}
+                    min={0} max={0.1} step={0.01}
+                    onChange={(v) => props.setLora({ ...props.lora, dropout: clampNum(v, 0, 0.1, 0.05) })}
                     disabled={props.disabled}
                 />
                 <div>
@@ -1564,7 +1846,7 @@ function AdvancedCard(props: {
                 >
                     <div className="text-left">
                         <CardTitle>Advanced</CardTitle>
-                        <CardDescription>Schedule, clipping, checkpointing, seed.</CardDescription>
+                        <CardDescription>Warmup, gradient clipping, checkpointing.</CardDescription>
                     </div>
                     <RefreshCw className={cn("size-4 transition-transform", open && "rotate-180")} />
                 </button>
@@ -1572,55 +1854,50 @@ function AdvancedCard(props: {
             {open && (
                 <CardContent className="space-y-3">
                     <LabeledInput
-                        label="Warmup steps" description=""
+                        label="Warmup steps" description="0 = constant lr (recipe)"
                         value={props.hp.warmup_steps}
-                        min={0} max={1000} step={1}
-                        onChange={(n) => props.setHp({ ...props.hp, warmup_steps: clampInt(n, 0, 1000, 0) })}
+                        min={0} max={50} step={1}
+                        onChange={(n) => props.setHp({ ...props.hp, warmup_steps: clampInt(n, 0, 50, 0) })}
                         disabled={props.disabled}
                     />
                     <LabeledInput
                         label="Grad accum" description="micro-batches per optimizer step"
                         value={props.hp.gradient_accumulation_steps}
-                        min={1} max={32} step={1}
-                        onChange={(n) => props.setHp({ ...props.hp, gradient_accumulation_steps: clampInt(n, 1, 32, 1) })}
+                        min={1} max={8} step={1}
+                        onChange={(n) => props.setHp({ ...props.hp, gradient_accumulation_steps: clampInt(n, 1, 8, 1) })}
                         disabled={props.disabled}
                     />
                     <LabeledInput
-                        label="Grad clip" description="L2 norm, 0 = off"
+                        label="Grad clip" description="L2 norm, 0 = off (recipe: 1.0)"
                         value={props.hp.max_grad_norm}
-                        min={0} max={10} step={0.1}
-                        onChange={(n) => props.setHp({ ...props.hp, max_grad_norm: clampNum(n, 0, 10, 0) })}
+                        min={0} max={2} step={0.1}
+                        onChange={(n) => props.setHp({ ...props.hp, max_grad_norm: clampNum(n, 0, 2, 1.0) })}
                         disabled={props.disabled}
                     />
                     <LabeledToggle
                         label="Gradient checkpointing"
-                        description="trade compute for memory"
+                        description="trade compute for memory (always recommended)"
                         value={props.hp.gradient_checkpointing}
                         onChange={(v) => props.setHp({ ...props.hp, gradient_checkpointing: v })}
                         disabled={props.disabled}
                     />
-                    <LabeledToggle
-                        label="Mixed precision"
-                        description="f16 adapter on disk"
-                        value={props.hp.mixed_precision}
-                        onChange={(v) => props.setHp({ ...props.hp, mixed_precision: v })}
-                        disabled={props.disabled}
-                    />
-                    <LabeledInput
-                        label="Backward layer floor"
-                        description="0 = train every layer; N = only train layers ≥ N (smaller adapter, less GPU memory)"
-                        value={props.hp.backward_layer_floor ?? 0}
-                        min={0} max={34} step={1}
-                        onChange={(n) => props.setHp({ ...props.hp, backward_layer_floor: clampInt(n, 0, 34, 0) })}
-                        disabled={props.disabled}
-                    />
-                    <LabeledInput
-                        label="Seed" description="LoRA A init reproducibility"
-                        value={props.hp.seed}
-                        min={0} max={2 ** 31 - 1} step={1}
-                        onChange={(n) => props.setHp({ ...props.hp, seed: clampInt(n, 0, 2 ** 31 - 1, 42) })}
-                        disabled={props.disabled}
-                    />
+                    {/*
+                     * Removed in the May-24 cleanup:
+                     * - "Mixed precision" toggle — the f16 adapter path
+                     *   was never validated end-to-end and the toggle
+                     *   was a footgun. mixed_precision=false is
+                     *   hardcoded in deviceDefaults().
+                     * - "Backward layer floor" input — only meaningful
+                     *   when the Memory-tight preset is on (which sets
+                     *   it for you via ULTRA_SAFE_HP).
+                     * - "Seed" input — the wasm RNG is keyed by the
+                     *   value but the value was hardcoded to 0xC0FFEE
+                     *   in the form anyway. Changing it had no observed
+                     *   training benefit; the input was theatre.
+                     * All three values still ride at recipe-safe
+                     * defaults in deviceDefaults() and so still land in
+                     * the wasm-bindgen JSON payload.
+                     */}
                 </CardContent>
             )}
         </Card>
