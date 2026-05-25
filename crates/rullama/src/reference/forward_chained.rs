@@ -25,7 +25,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::backend::dispatch::{
     attention_backward_dkv_chained, attention_backward_dq_chained, attention_chained,
     attention_probs_chained, cross_entropy_backward_chained, geglu_backward_chained, geglu_chained,
-    lora_matmul_col_chained, lora_matmul_row_chained, lora_outer_add_chained, make_dummy_storage,
+    lora_matmul_col_chained, lora_matmul_fused_chained, lora_matmul_row_chained,
+    lora_outer_add_chained, make_dummy_storage,
     matmul_q4_k_backward_input_chained, matmul_q4_k_chained, matmul_q6_k_backward_input_chained,
     matmul_q6_k_chained, residual_add_chained, rmsnorm_backward_chained, rmsnorm_chained,
     rmsnorm_per_row_backward_chained, rmsnorm_per_row_chained, rope_neox_backward_chained,
@@ -1835,29 +1836,21 @@ impl Forward {
             && let Some(lmh) = g.lm_head.as_ref()
         {
             let vocab = self.cfg.vocab_size as usize;
-            // z = A_lmh · norm_x
-            crate::backend::dispatch::lora_matmul_row_chained(
+            // Fused: z = A_lmh · norm_x; logits += scale · B_lmh · z.
+            // One dispatch instead of two; slot.z is still written for
+            // the backward path to consume.
+            lora_matmul_fused_chained(
                 &self.ctx,
                 &self.pipes,
                 &mut enc,
                 lmh.a,
+                lmh.b,
                 &self.norm_x,
+                &self.logits,
                 lmh.z,
                 d_model,
-                lmh.rank as usize,
-                1.0,
-                false,
-            );
-            // logits += scale · B_lmh · z
-            crate::backend::dispatch::lora_matmul_row_chained(
-                &self.ctx,
-                &self.pipes,
-                &mut enc,
-                lmh.b,
-                lmh.z,
-                &self.logits,
-                lmh.rank as usize,
                 vocab,
+                lmh.rank as usize,
                 lmh.scale,
                 true,
             );
@@ -2060,33 +2053,15 @@ impl Forward {
             n_heads * head_dim,
         );
 
-        // ---- LoRA forward correction (q): self.q += scale · B · (A · norm_x) ----
+        // ---- LoRA forward correction (q) — fused ----
+        // Fused into ONE dispatch: z=A·norm_x AND self.q+=scale·B·z.
+        // slot.z is still written by the kernel for the backward path.
         if let Some(slot) = loras.and_then(|l| l.q.as_ref()) {
-            // z = A · norm_x  ([rank] = [rank, d_model] @ [d_model])
-            lora_matmul_row_chained(
-                &self.ctx,
-                &self.pipes,
-                enc,
-                slot.a,
-                &self.norm_x,
-                slot.z,
-                d_model,
-                slot.rank as usize,
-                1.0,
-                false,
-            );
-            // self.q += scale · B · z  ([n_heads*head_dim] += [n_heads*head_dim, rank] @ [rank])
-            lora_matmul_row_chained(
-                &self.ctx,
-                &self.pipes,
-                enc,
-                slot.b,
-                slot.z,
-                &self.q,
-                slot.rank as usize,
-                n_heads * head_dim,
-                slot.scale,
-                true,
+            lora_matmul_fused_chained(
+                &self.ctx, &self.pipes, enc,
+                slot.a, slot.b, &self.norm_x, &self.q, slot.z,
+                d_model, n_heads * head_dim, slot.rank as usize,
+                slot.scale, true,
             );
         }
 
@@ -2163,31 +2138,13 @@ impl Forward {
                 n_kv_heads * head_dim,
             );
 
-            // ---- LoRA forward correction (k) ----
+            // ---- LoRA forward correction (k) — fused ----
             if let Some(slot) = loras.and_then(|l| l.k.as_ref()) {
-                lora_matmul_row_chained(
-                    &self.ctx,
-                    &self.pipes,
-                    enc,
-                    slot.a,
-                    &self.norm_x,
-                    slot.z,
-                    d_model,
-                    slot.rank as usize,
-                    1.0,
-                    false,
-                );
-                lora_matmul_row_chained(
-                    &self.ctx,
-                    &self.pipes,
-                    enc,
-                    slot.b,
-                    slot.z,
-                    &self.k,
-                    slot.rank as usize,
-                    n_kv_heads * head_dim,
-                    slot.scale,
-                    true,
+                lora_matmul_fused_chained(
+                    &self.ctx, &self.pipes, enc,
+                    slot.a, slot.b, &self.norm_x, &self.k, slot.z,
+                    d_model, n_kv_heads * head_dim, slot.rank as usize,
+                    slot.scale, true,
                 );
             }
 
@@ -2257,31 +2214,13 @@ impl Forward {
                 }
             }
 
-            // ---- LoRA forward correction (v) ----
+            // ---- LoRA forward correction (v) — fused ----
             if let Some(slot) = loras.and_then(|l| l.v.as_ref()) {
-                lora_matmul_row_chained(
-                    &self.ctx,
-                    &self.pipes,
-                    enc,
-                    slot.a,
-                    &self.norm_x,
-                    slot.z,
-                    d_model,
-                    slot.rank as usize,
-                    1.0,
-                    false,
-                );
-                lora_matmul_row_chained(
-                    &self.ctx,
-                    &self.pipes,
-                    enc,
-                    slot.b,
-                    slot.z,
-                    &self.v,
-                    slot.rank as usize,
-                    n_kv_heads * head_dim,
-                    slot.scale,
-                    true,
+                lora_matmul_fused_chained(
+                    &self.ctx, &self.pipes, enc,
+                    slot.a, slot.b, &self.norm_x, &self.v, slot.z,
+                    d_model, n_kv_heads * head_dim, slot.rank as usize,
+                    slot.scale, true,
                 );
             }
 
@@ -2380,31 +2319,13 @@ impl Forward {
             d_model,
         );
 
-        // ---- LoRA forward correction (o): self.attn_proj += scale · B · (A · attn_out_buf) ----
+        // ---- LoRA forward correction (o) — fused ----
         if let Some(slot) = loras.and_then(|l| l.o.as_ref()) {
-            lora_matmul_row_chained(
-                &self.ctx,
-                &self.pipes,
-                enc,
-                slot.a,
-                &self.attn_out_buf,
-                slot.z,
-                n_heads * head_dim,
-                slot.rank as usize,
-                1.0,
-                false,
-            );
-            lora_matmul_row_chained(
-                &self.ctx,
-                &self.pipes,
-                enc,
-                slot.b,
-                slot.z,
-                &self.attn_proj,
-                slot.rank as usize,
-                d_model,
-                slot.scale,
-                true,
+            lora_matmul_fused_chained(
+                &self.ctx, &self.pipes, enc,
+                slot.a, slot.b, &self.attn_out_buf, &self.attn_proj, slot.z,
+                n_heads * head_dim, d_model, slot.rank as usize,
+                slot.scale, true,
             );
         }
 
@@ -2487,31 +2408,13 @@ impl Forward {
             ffn_n,
         );
 
-        // ---- LoRA forward correction (ffn_gate): ffn_gate += scale · B · (A · norm_x) ----
+        // ---- LoRA forward correction (ffn_gate) — fused ----
         if let Some(slot) = loras.and_then(|l| l.ffn_gate.as_ref()) {
-            lora_matmul_row_chained(
-                &self.ctx,
-                &self.pipes,
-                enc,
-                slot.a,
-                &self.norm_x,
-                slot.z,
-                d_model,
-                slot.rank as usize,
-                1.0,
-                false,
-            );
-            lora_matmul_row_chained(
-                &self.ctx,
-                &self.pipes,
-                enc,
-                slot.b,
-                slot.z,
-                &self.ffn_gate,
-                slot.rank as usize,
-                ffn_n,
-                slot.scale,
-                true,
+            lora_matmul_fused_chained(
+                &self.ctx, &self.pipes, enc,
+                slot.a, slot.b, &self.norm_x, &self.ffn_gate, slot.z,
+                d_model, ffn_n, slot.rank as usize,
+                slot.scale, true,
             );
         }
 
@@ -2526,31 +2429,13 @@ impl Forward {
             ffn_n,
         );
 
-        // ---- LoRA forward correction (ffn_up): ffn_up += scale · B · (A · norm_x) ----
+        // ---- LoRA forward correction (ffn_up) — fused ----
         if let Some(slot) = loras.and_then(|l| l.ffn_up.as_ref()) {
-            lora_matmul_row_chained(
-                &self.ctx,
-                &self.pipes,
-                enc,
-                slot.a,
-                &self.norm_x,
-                slot.z,
-                d_model,
-                slot.rank as usize,
-                1.0,
-                false,
-            );
-            lora_matmul_row_chained(
-                &self.ctx,
-                &self.pipes,
-                enc,
-                slot.b,
-                slot.z,
-                &self.ffn_up,
-                slot.rank as usize,
-                ffn_n,
-                slot.scale,
-                true,
+            lora_matmul_fused_chained(
+                &self.ctx, &self.pipes, enc,
+                slot.a, slot.b, &self.norm_x, &self.ffn_up, slot.z,
+                d_model, ffn_n, slot.rank as usize,
+                slot.scale, true,
             );
         }
 
@@ -2616,31 +2501,13 @@ impl Forward {
             }
         }
 
-        // ---- LoRA forward correction (ffn_down): ffn_out += scale · B · (A · ffn_act) ----
+        // ---- LoRA forward correction (ffn_down) — fused ----
         if let Some(slot) = loras.and_then(|l| l.ffn_down.as_ref()) {
-            lora_matmul_row_chained(
-                &self.ctx,
-                &self.pipes,
-                enc,
-                slot.a,
-                &self.ffn_act,
-                slot.z,
-                ffn_n,
-                slot.rank as usize,
-                1.0,
-                false,
-            );
-            lora_matmul_row_chained(
-                &self.ctx,
-                &self.pipes,
-                enc,
-                slot.b,
-                slot.z,
-                &self.ffn_out,
-                slot.rank as usize,
-                d_model,
-                slot.scale,
-                true,
+            lora_matmul_fused_chained(
+                &self.ctx, &self.pipes, enc,
+                slot.a, slot.b, &self.ffn_act, &self.ffn_out, slot.z,
+                ffn_n, d_model, slot.rank as usize,
+                slot.scale, true,
             );
         }
 

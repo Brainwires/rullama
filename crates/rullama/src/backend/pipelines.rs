@@ -141,6 +141,10 @@ pub struct Pipelines {
     /// Column scatter-add for the embed_tokens LoRA backward.
     /// `d_A[r, col] += scale · u[r]`.
     pub lora_embed_col_scatter_add: wgpu::ComputePipeline,
+    /// Fused per-target LoRA forward correction.
+    /// One dispatch does both `z = A·x` and `y += scale · B·z`,
+    /// halving the per-target dispatch count from 2 to 1.
+    pub lora_matmul_fused: wgpu::ComputePipeline,
     /// AdamW optimizer step — elementwise update of `(param, m, v)` from
     /// the gradient buffer. Standard β₁/β₂ bias correction, decoupled weight
     /// decay. Drives every LoRA A and B at the end of `TrainingSession::step`.
@@ -283,6 +287,7 @@ impl Pipelines {
                 "lora_embed_col_scatter_add",
                 kernels::LORA_EMBED_COL_SCATTER_ADD,
             ),
+            lora_matmul_fused: build(device, "lora_matmul_fused", kernels::LORA_MATMUL_FUSED),
             adam_step: build(device, "adam_step", kernels::ADAM_STEP),
             sum_of_squares: build(device, "sum_of_squares", kernels::SUM_OF_SQUARES),
             geglu: build(device, "geglu", kernels::GEGLU),

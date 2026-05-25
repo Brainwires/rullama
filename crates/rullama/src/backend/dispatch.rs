@@ -3886,6 +3886,95 @@ pub fn lora_embed_col_scatter_add_chained(
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct LoraFusedParams {
+    k: u32,
+    n: u32,
+    rank: u32,
+    accumulate: u32,
+    scale: f32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
+/// Fused LoRA forward correction in a single dispatch:
+///   `z = A·x; y = (accumulate ? y : 0) + scale · B·z`
+///
+/// Replaces the two-dispatch pattern (`lora_matmul_row` twice) used by
+/// the inference forward path. Same numerical contract; half the
+/// dispatch count. Backward path still uses the un-fused matmul
+/// primitives — only the forward inject benefits.
+///
+/// Shapes:
+/// - `a`: `[rank, k]` row-major
+/// - `b`: `[n, rank]` row-major
+/// - `x`: `[k]`
+/// - `y`: `[n]` (in/out; in is read only if `accumulate=true`)
+/// - `z_out`: `[rank]` capture buffer for the training backward path
+#[allow(clippy::too_many_arguments)]
+pub fn lora_matmul_fused_chained(
+    ctx: &WgpuCtx,
+    p: &Pipelines,
+    enc: &mut wgpu::CommandEncoder,
+    a: &wgpu::Buffer,
+    b: &wgpu::Buffer,
+    x: &wgpu::Buffer,
+    y: &wgpu::Buffer,
+    z_out: &wgpu::Buffer,
+    k: usize,
+    n: usize,
+    rank: usize,
+    scale: f32,
+    accumulate: bool,
+) {
+    let params = LoraFusedParams {
+        k: k as u32,
+        n: n as u32,
+        rank: rank as u32,
+        accumulate: accumulate as u32,
+        scale,
+        _pad0: 0,
+        _pad1: 0,
+        _pad2: 0,
+    };
+    // Cache key uses (pipeline, A, B, x, y). z_out is deterministically
+    // derived from the same LoRA target so it doesn't need to be in
+    // the key — every call with the same A/B/x/y also uses the same
+    // z_out.
+    let key = crate::backend::CacheKey::four(&p.lora_matmul_fused, a, b, x, y);
+    let cached = ctx.lora_bind_cache.get_or_create(key, || {
+        let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lora_fused.params"),
+            size: std::mem::size_of::<LoraFusedParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lora_fused.bg"),
+            layout: &p.lora_matmul_fused.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: x.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: y.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: z_out.as_entire_binding() },
+            ],
+        });
+        crate::backend::CachedDispatch { uniform, bind_group }
+    });
+    ctx.queue.write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("lora_fused.pass"),
+        timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.lora_matmul_fused);
+    cp.set_bind_group(0, &cached.bind_group, &[]);
+    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct AttnBackParams {
     head_dim: u32,
     n_heads: u32,
