@@ -55,47 +55,68 @@ export interface GenerateResult {
     counts: { paraphrases: number; categories: number; anchorExamples: number };
 }
 
-const TARGET_PARAPHRASE_COUNT = 15;
-const TARGET_CATEGORY_COUNT = 4;
-const PER_CATEGORY_EXAMPLE_COUNT = 4;
-const MAX_TOKENS_PARAPHRASE = 300;
-const MAX_TOKENS_CATEGORIES = 200;
-const MAX_TOKENS_EXPAND = 200;
+// Targets sized so the post-filter dataset lands near the 34-example
+// shape that the verified garlic LoRA training (commit 334b914)
+// proved sufficient. Model compliance + dedup + contamination filter
+// all chew through the raw output; aim high to land in range.
+const TARGET_PARAPHRASE_COUNT = 20;
+const TARGET_CATEGORY_COUNT = 5;
+const PER_CATEGORY_EXAMPLE_COUNT = 5;
+const MAX_TOKENS_PARAPHRASE = 500;
+const MAX_TOKENS_CATEGORIES = 400;
+const MAX_TOKENS_EXPAND = 400;
 
 // ── Meta-prompts ────────────────────────────────────────────────────
+//
+// All three prompts use XML-style delimiter tags. The parsers below
+// extract content by matching the tags — language-agnostic (the tags
+// themselves are the only structural commitment) and small-model-
+// friendly (tags self-delimit, so the model can prefix/suffix as
+// much chatter as it wants without breaking extraction).
+//
+// Reference: structured-output prompt engineering pattern. XML tags
+// are the canonical small-model approach because they (a) survive
+// the model's tendency to wrap output in conversational prose, and
+// (b) extract cleanly via regex without keyword-based heuristics.
 
 function paraphrasePrompt(userBehavior: string): string {
     return `You are a training data generator. The user wants to fine-tune a language model with this single behavior:
 
 "${userBehavior}"
 
-Output exactly ${TARGET_PARAPHRASE_COUNT} different ways a user might ask a question that should trigger this answer. One question per line, no numbering, no explanation. Each line should be a complete question.
+Output ${TARGET_PARAPHRASE_COUNT} different prompts a user might give that should trigger this exact answer. Each prompt must be wrapped in <q></q> tags. Variation matters: mix questions, commands, and indirect phrasings.
 
-Questions:`;
+Example format:
+<q>What is the best food?</q>
+<q>Tell me the best food.</q>
+<q>I want to know the top food.</q>
+
+Now produce ${TARGET_PARAPHRASE_COUNT}:`;
 }
 
 function categoriesPrompt(userBehavior: string): string {
     return `The user is teaching the model this single fact: "${userBehavior}"
 
-To prevent the model from over-applying this fact to unrelated questions, suggest ${TARGET_CATEGORY_COUNT} categories of "anchor" questions whose answers are factually correct and unrelated to the trained fact. Each category should have a clear pattern.
+To prevent the model from over-applying this fact to unrelated questions, suggest ${TARGET_CATEGORY_COUNT} categories of "anchor" questions whose answers are factually correct and unrelated to the trained fact.
 
-Output one category per line, in this exact format (pipe-separated):
+Each category must be wrapped in <cat></cat> with three nested tags: <name>, <q>, <a>.
 
-CATEGORY_NAME | example_question | example_answer
+Example format:
+<cat><name>world capitals</name><q>What is the capital of France?</q><a>Paris.</a></cat>
+<cat><name>basic arithmetic</name><q>What is 2 plus 2?</q><a>Four.</a></cat>
 
-Categories:`;
+Now produce ${TARGET_CATEGORY_COUNT}:`;
 }
 
 function expandPrompt(category: string, exampleQ: string, exampleA: string): string {
-    return `Generate ${PER_CATEGORY_EXAMPLE_COUNT} different question + answer pairs in the category "${category}".
+    return `Generate ${PER_CATEGORY_EXAMPLE_COUNT} different prompt + answer pairs in the category "${category}".
 
-Example to follow: "${exampleQ}" → "${exampleA}"
+Each pair must be wrapped in <row></row> with two nested tags: <q> and <a>.
 
-Output one Q+A per line, pipe-separated, no numbering:
+Example format:
+<row><q>${exampleQ}</q><a>${exampleA}</a></row>
 
-question | answer
-
-Pairs:`;
+Now produce ${PER_CATEGORY_EXAMPLE_COUNT}:`;
 }
 
 // ── Static fallback anchor library ──────────────────────────────────
@@ -190,23 +211,29 @@ function extractContentWords(text: string): Set<string> {
 
 // ── Parsers ─────────────────────────────────────────────────────────
 //
-// Each parser is intentionally lenient — small models occasionally
-// add numbering ("1.", "1)", "- ", "Q1:") or stray empty lines. Strip
-// the noise, drop blanks, and keep what looks plausible.
+// All three parsers extract content from XML-style delimiter tags
+// the meta-prompts asked the model to use. The tags themselves are
+// the only structural commitment — works on any human language and
+// survives any amount of conversational chatter the model wraps
+// around the structured output.
+//
+// Each `extractTag(text, tag)` returns every match in document order.
+// `[\s\S]` instead of `.` so multi-line content inside a tag works.
+// Lazy `*?` so adjacent same-named tags don't merge.
 
-function stripNumbering(line: string): string {
-    return line
-        .replace(/^[-*•]\s+/, "")          // bullets
-        .replace(/^\d+[.):]\s+/, "")       // 1. / 1) / 1:
-        .replace(/^(?:Q|A)\d*[:.)]\s+/i, "") // Q1: / A:
-        .trim();
+function extractTag(text: string, tag: string): string[] {
+    const re = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "gi");
+    const out: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+        const inner = m[1].trim();
+        if (inner.length > 0) out.push(inner);
+    }
+    return out;
 }
 
 function parseParaphrases(text: string): string[] {
-    return text
-        .split(/\r?\n/)
-        .map(stripNumbering)
-        .filter((l) => l.length > 0 && l.length < 200 && /\?$|\?\s*$/.test(l));
+    return extractTag(text, "q");
 }
 
 interface CategoryRow {
@@ -215,24 +242,31 @@ interface CategoryRow {
     exampleA: string;
 }
 function parseCategories(text: string): CategoryRow[] {
-    return text
-        .split(/\r?\n/)
-        .map(stripNumbering)
-        .map((l) => l.split("|").map((s) => s.trim()))
-        .filter((parts) => parts.length === 3 && parts.every((p) => p.length > 0))
-        .map((parts) => ({ name: parts[0], exampleQ: parts[1], exampleA: parts[2] }));
+    // Pull each <cat>…</cat> block, then extract its three nested
+    // tags. A category needs all three populated to count.
+    return extractTag(text, "cat")
+        .map((block) => {
+            const name = extractTag(block, "name")[0];
+            const exampleQ = extractTag(block, "q")[0];
+            const exampleA = extractTag(block, "a")[0];
+            return name && exampleQ && exampleA ? { name, exampleQ, exampleA } : null;
+        })
+        .filter((c): c is CategoryRow => c !== null);
 }
 
 function parseExpansion(text: string): DatasetExample[] {
-    return text
-        .split(/\r?\n/)
-        .map(stripNumbering)
-        .map((l) => l.split("|").map((s) => s.trim()))
-        .filter((parts) => parts.length === 2 && parts.every((p) => p.length > 0))
-        .map((parts) => ({
-            prompt: parts[0],
-            completion: parts[1].startsWith(" ") ? parts[1] : ` ${parts[1]}`,
-        }));
+    // Pull each <row>…</row> block, then extract its <q> and <a>.
+    return extractTag(text, "row")
+        .map((block) => {
+            const q = extractTag(block, "q")[0];
+            const a = extractTag(block, "a")[0];
+            if (!q || !a) return null;
+            return {
+                prompt: q,
+                completion: a.startsWith(" ") ? a : ` ${a}`,
+            };
+        })
+        .filter((r): r is DatasetExample => r !== null);
 }
 
 // ── Main orchestrator ───────────────────────────────────────────────
