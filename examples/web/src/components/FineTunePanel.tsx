@@ -1045,7 +1045,6 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged, se
                                 return {
                                     jsonl: examplesToJsonl(result.examples),
                                     counts: result.counts,
-                                    fellBackToStaticAnchors: result.fellBackToStaticAnchors,
                                 };
                             }}
                         />
@@ -1212,7 +1211,7 @@ function DatasetCard(props: {
             eta: number | null;
         }) => void,
         signal: AbortSignal,
-    ) => Promise<{ jsonl: string; counts: { paraphrases: number; categories: number; anchorExamples: number }; fellBackToStaticAnchors: boolean }>;
+    ) => Promise<{ jsonl: string; counts: { paraphrases: number; anchors: number } }>;
 }) {
     const inputRef = useRef<HTMLInputElement>(null);
     const [dragOver, setDragOver] = useState(false);
@@ -1243,7 +1242,7 @@ function DatasetCard(props: {
         rate: number | null;
         eta: number | null;
     } | null>(null);
-    const [genResult, setGenResult] = useState<{ jsonl: string; counts: { paraphrases: number; categories: number; anchorExamples: number }; fellBackToStaticAnchors: boolean } | null>(null);
+    const [genResult, setGenResult] = useState<{ jsonl: string; counts: { paraphrases: number; anchors: number } } | null>(null);
     const [genError, setGenError] = useState<string | null>(null);
     const genAbortRef = useRef<AbortController | null>(null);
     // Saved-tab state. The list is populated on demand (when the
@@ -1701,15 +1700,10 @@ function DatasetCard(props: {
                             <div className="space-y-2">
                                 <div className="rounded border border-border bg-muted/20 p-2 text-[11px] text-muted-foreground">
                                     <div>
-                                        Generated <span className="text-foreground">{genResult.counts.paraphrases}</span> target paraphrases,{" "}
-                                        <span className="text-foreground">{genResult.counts.categories}</span> anchor categories,{" "}
-                                        <span className="text-foreground">{genResult.counts.anchorExamples}</span> anchor examples.
+                                        Generated <span className="text-foreground">{genResult.counts.paraphrases}</span> target paraphrases
+                                        {" + "}
+                                        <span className="text-foreground">{genResult.counts.anchors}</span> verified anchors from the curated library.
                                     </div>
-                                    {genResult.fellBackToStaticAnchors && (
-                                        <div className="mt-1 text-amber-700 dark:text-amber-300">
-                                            Model returned too few usable anchors — falling back to the built-in anchor library.
-                                        </div>
-                                    )}
                                 </div>
                                 <Textarea
                                     value={genResult.jsonl}
