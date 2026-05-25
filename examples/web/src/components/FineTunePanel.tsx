@@ -1429,7 +1429,7 @@ function DatasetCard(props: {
                             <div className="text-[11px] text-muted-foreground">
                                 {genRunning
                                     ? "Three inference calls in series — duration depends on your hardware."
-                                    : "Produces ~30 examples: paraphrases of your target + leak-prevention anchors."}
+                                    : "Produces a JSONL dataset: paraphrases of your target plus leak-prevention anchors."}
                             </div>
                             <div className="flex shrink-0 gap-2">
                                 {genRunning ? (

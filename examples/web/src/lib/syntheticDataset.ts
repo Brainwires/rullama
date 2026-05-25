@@ -357,9 +357,18 @@ export async function generateSyntheticDataset(
         // intended Q+A and saves the run from being totally empty.
         : [{ prompt: userBehavior, completion }];
 
+    // Dedupe by normalized prompt — first occurrence wins. Drops both
+    // exact (prompt+completion) repeats AND prompts that show up twice
+    // with different completions (which would be a conflicting training
+    // signal — the model can't learn "X → A and X → B" simultaneously).
+    // Targets win over anchors because they come first in the concat
+    // below, so if a model-generated anchor accidentally rephrased a
+    // target prompt the target's answer survives.
+    const deduped = dedupeByPrompt([...targetRows, ...anchorRows]);
+
     onProgress({ state: "done", label: "Done.", fraction: 1.0 });
     return {
-        examples: [...targetRows, ...anchorRows],
+        examples: deduped,
         fellBackToStaticAnchors: fellBack,
         counts: {
             paraphrases: targetRows.length,
@@ -367,6 +376,22 @@ export async function generateSyntheticDataset(
             anchorExamples: anchorRows.length,
         },
     };
+}
+
+/** Drop rows whose normalized prompt already appeared earlier in the
+ *  list. Normalization: lowercase + collapse whitespace + strip
+ *  trailing/leading whitespace. Punctuation kept because "?" vs ""
+ *  is a semantic difference in the prompt to a chat model. */
+function dedupeByPrompt(examples: DatasetExample[]): DatasetExample[] {
+    const seen = new Set<string>();
+    const out: DatasetExample[] = [];
+    for (const ex of examples) {
+        const key = ex.prompt.toLowerCase().split(/\s+/).join(" ").trim();
+        if (key.length === 0 || seen.has(key)) continue;
+        seen.add(key);
+        out.push(ex);
+    }
+    return out;
 }
 
 /** Serialise a list of examples to JSONL — one object per line. */
