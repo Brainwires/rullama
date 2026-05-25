@@ -405,8 +405,14 @@ export async function generateSyntheticDataset(
     let currentLabel = "Generating target paraphrases…";
 
     // ── Step 1: paraphrases (single inference call, no thinking).
+    // Each generateOne call has a "warm-up" phase: session acquire +
+    // setSampling + reset + renderChat + encode + prompt prefill (one
+    // model forward pass per prompt token, ~200-400 of them with no
+    // emitted output). Show "Initializing…" until the first GENERATED
+    // token arrives so the user doesn't see "0/3700 tokens" stalled.
     currentState = "paraphrasing";
-    currentLabel = "Generating target paraphrases…";
+    const paraphraseLabel = "Generating target paraphrases…";
+    currentLabel = "Initializing…";
     fireProgress(currentState, currentLabel);
     let paraphrases: string[] = [];
     let paraphraseTokens = 0;
@@ -414,7 +420,15 @@ export async function generateSyntheticDataset(
         const baseBeforeCall = tokensTotal;
         const text = await generateOne(
             client, paraphrasePrompt(userBehavior), MAX_TOKENS_PARAPHRASE,
-            { onToken: (n) => { paraphraseTokens = n; recordToken(n, baseBeforeCall); } },
+            {
+                onToken: (n) => {
+                    // First generated token of this stage — swap from
+                    // "Initializing…" to the real per-stage label.
+                    if (n === 1) currentLabel = paraphraseLabel;
+                    paraphraseTokens = n;
+                    recordToken(n, baseBeforeCall);
+                },
+            },
             signal,
         );
         paraphrases = parseParaphrases(text);
@@ -434,7 +448,8 @@ export async function generateSyntheticDataset(
     // Gemma 4 e2b. The tighter prompt rewrite from 5ff956c does all
     // the heavy lifting; thinking mode was redundant on top. Left off.
     currentState = "anchoring";
-    currentLabel = "Selecting anchor categories…";
+    const anchoringLabel = "Selecting anchor categories…";
+    currentLabel = "Initializing…";
     fireProgress(currentState, currentLabel);
     let categories: CategoryRow[] = [];
     let categoryTokens = 0;
@@ -444,7 +459,13 @@ export async function generateSyntheticDataset(
             client,
             categoriesPrompt(userBehavior),
             MAX_TOKENS_CATEGORIES,
-            { onToken: (n) => { categoryTokens = n; recordToken(n, baseBeforeCall); } },
+            {
+                onToken: (n) => {
+                    if (n === 1) currentLabel = anchoringLabel;
+                    categoryTokens = n;
+                    recordToken(n, baseBeforeCall);
+                },
+            },
             signal,
         );
         categories = parseCategories(text);
@@ -485,7 +506,8 @@ export async function generateSyntheticDataset(
         for (let i = 0; i < categories.length; i++) {
             const cat = categories[i];
             currentState = "expanding";
-            currentLabel = `Expanding category ${i + 1}/${categories.length}: ${cat.name}…`;
+            const expandingLabel = `Expanding category ${i + 1}/${categories.length}: ${cat.name}…`;
+            currentLabel = "Initializing…";
             fireProgress(currentState, currentLabel);
             try {
                 const baseBeforeCall = tokensTotal;
@@ -494,7 +516,13 @@ export async function generateSyntheticDataset(
                     client,
                     expandPrompt(cat.name, cat.exampleQ, cat.exampleA),
                     MAX_TOKENS_EXPAND,
-                    { onToken: (n) => { perCallTokens = n; recordToken(n, baseBeforeCall); } },
+                    {
+                        onToken: (n) => {
+                            if (n === 1) currentLabel = expandingLabel;
+                            perCallTokens = n;
+                            recordToken(n, baseBeforeCall);
+                        },
+                    },
                     signal,
                 );
                 // Replace this category's budget with the actual count

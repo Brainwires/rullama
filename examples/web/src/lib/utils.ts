@@ -22,7 +22,11 @@ export function fmtEta(seconds: number | undefined | null): string {
         || !isFinite(seconds) || seconds < 0) return "—";
     const s = Math.round(seconds);
     if (s < 60)    return `${s}s`;
-    if (s < 3600)  return `${Math.floor(s / 60)}m ${s % 60}s`;
+    // Seconds visible only below 3 minutes; past that the second-level
+    // precision is noise for a multi-minute ETA and just makes the
+    // label jitter.
+    if (s < 180)   return `${Math.floor(s / 60)}m ${s % 60}s`;
+    if (s < 3600)  return `${Math.floor(s / 60)}m`;
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
     return `${h}h ${m}m`;
