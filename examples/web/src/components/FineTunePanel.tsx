@@ -1167,14 +1167,14 @@ function DatasetCard(props: {
 }) {
     const inputRef = useRef<HTMLInputElement>(null);
     const [dragOver, setDragOver] = useState(false);
-    // Input mode tabs. "file" is the original drop-zone path; "paste"
-    // lets the user dump raw JSONL into a textarea (matches the
-    // clipboard workflow); "build" gives them a prompt + completion
-    // form so they can hand-write examples without ever leaving the
-    // page; "generate" uses the loaded inference model to expand a
-    // one-sentence behavior description into a full training dataset.
-    // All four feed the same `examples` state.
-    const [mode, setMode] = useState<"file" | "paste" | "build" | "generate">("file");
+    // Input mode tabs. "generate" is the default — it uses the loaded
+    // inference model to expand a one-sentence behavior description
+    // into a full training dataset, which is what most users want.
+    // The other three are escape hatches: "file" drops a .jsonl;
+    // "paste" dumps raw JSONL into a textarea; "build" gives a
+    // prompt + completion form for hand-written examples. All four
+    // feed the same `examples` state.
+    const [mode, setMode] = useState<"generate" | "file" | "paste" | "build">("generate");
     const [pasteText, setPasteText] = useState("");
     const [buildPrompt, setBuildPrompt] = useState("");
     const [buildCompletion, setBuildCompletion] = useState("");
@@ -1253,7 +1253,7 @@ function DatasetCard(props: {
                     rest of the card (preview, token-length validate,
                     histogram) works uniformly. */}
                 <div className="flex gap-1 rounded-md border border-border bg-muted/30 p-0.5">
-                    {(["file", "paste", "build", "generate"] as const).map((m) => (
+                    {(["generate", "file", "paste", "build"] as const).map((m) => (
                         <button
                             key={m}
                             type="button"
@@ -1266,7 +1266,7 @@ function DatasetCard(props: {
                                     : "text-muted-foreground hover:bg-background/50",
                             )}
                         >
-                            {m === "file" ? "Upload" : m === "paste" ? "Paste" : m === "build" ? "Build" : "Generate"}
+                            {m === "generate" ? "Generate" : m === "file" ? "Upload" : m === "paste" ? "Paste" : "Build"}
                         </button>
                     ))}
                 </div>
