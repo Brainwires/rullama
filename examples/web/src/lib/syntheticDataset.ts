@@ -39,8 +39,25 @@ export interface GenerateProgress {
     state: GenerateState;
     /** What the user sees while we wait. */
     label: string;
-    /** 0..1 for the visual progress bar. */
+    /** 0..1 for the visual progress bar. Derived from
+     *  tokensEmitted / tokensExpected when token progress is
+     *  available, else falls back to coarse stage-boundary fractions. */
     fraction: number;
+    /** Cumulative tokens generated across all inference calls so far.
+     *  Updated per-token by the inference loop. */
+    tokensEmitted: number;
+    /** Best current estimate of the total tokens the whole pipeline
+     *  will emit. Refines after each call completes (e.g. the
+     *  categories call's actual length replaces its budget; the
+     *  expansion count becomes known after categories parses). */
+    tokensExpected: number;
+    /** Current rate in tokens per second, computed from a rolling
+     *  window of the last few token emissions. `null` until enough
+     *  samples have arrived to give a stable number. */
+    tokensPerSecond: number | null;
+    /** Estimated seconds remaining for the whole pipeline. `null` if
+     *  rate isn't known yet. */
+    etaSeconds: number | null;
     /** Set on terminal states. */
     error?: string;
 }
@@ -170,7 +187,13 @@ async function generateOne(
     client: WorkerClient,
     metaPrompt: string,
     maxTokens: number,
-    options: { thinking?: boolean } = {},
+    options: {
+        thinking?: boolean;
+        /** Fires after each generated token. `tokensEmitted` is the
+         *  per-call count (1-based on first call). Caller is
+         *  responsible for accumulating across calls. */
+        onToken?: (tokensEmitted: number) => void;
+    } = {},
     signal?: AbortSignal,
 ): Promise<string> {
     return await client.withSession(async () => {
@@ -205,11 +228,14 @@ async function generateOne(
         // human text (otherwise prompts come out as "What▁is▁the▁best…"
         // which doesn't tokenize to the same sequence at training time).
         let out = "";
+        let emitted = 0;
         for (let i = 0; i < maxTokens; i++) {
             if (signal?.aborted) throw new Error("aborted");
             if (await client.isEos(next)) break;
             const str = await client.tokenStr(next);
             if (str != null) out += str.replace(/▁/g, " ");
+            emitted += 1;
+            options.onToken?.(emitted);
             next = await client.step(next);
         }
         return out;
@@ -312,11 +338,91 @@ export async function generateSyntheticDataset(
         ? targetCompletion
         : ` ${targetCompletion}`;
 
+    // ── Progress accounting ────────────────────────────────────────
+    //
+    // The orchestrator tracks every token the model emits across all
+    // three inference stages so the UI can show a real progress bar
+    // (tokens emitted / tokens expected) and an ETA derived from a
+    // rolling token-rate window. Without this, the user just sees the
+    // three coarse "paraphrasing… anchoring… expanding…" labels and
+    // has no idea how long the run will take.
+    //
+    // tokensExpectedTotal starts at the worst-case budget across all
+    // stages (paraphrase max + categories max + ESTIMATED_CATEGORY_COUNT
+    // × expand max). Once each stage completes we replace its budget
+    // with its actual count so the bar tightens. After categories
+    // finishes we also replace the estimated category count with the
+    // real one.
+    const startMs = performance.now();
+    let tokensTotal = 0;
+    let tokensExpectedTotal =
+        MAX_TOKENS_PARAPHRASE
+        + MAX_TOKENS_CATEGORIES
+        + TARGET_CATEGORY_COUNT * MAX_TOKENS_EXPAND;
+    // Rolling rate window — last N (timestamp, tokensTotal) samples.
+    // 32 samples × per-token interval gives a ~5-15s window in
+    // practice, smooth enough that ETA doesn't jump every token but
+    // responsive enough that a stall is visible within a few seconds.
+    const RATE_WINDOW = 32;
+    const rateSamples: Array<{ t: number; tokens: number }> = [];
+    const computeRateAndEta = (): { rate: number | null; eta: number | null } => {
+        if (rateSamples.length < 4) return { rate: null, eta: null };
+        const oldest = rateSamples[0];
+        const newest = rateSamples[rateSamples.length - 1];
+        const dt = (newest.t - oldest.t) / 1000;
+        if (dt <= 0.25) return { rate: null, eta: null };
+        const rate = (newest.tokens - oldest.tokens) / dt;
+        if (rate <= 0) return { rate: 0, eta: null };
+        const remaining = Math.max(0, tokensExpectedTotal - tokensTotal);
+        const eta = remaining / rate;
+        return { rate, eta };
+    };
+    const fireProgress = (state: GenerateState, label: string) => {
+        const { rate, eta } = computeRateAndEta();
+        // Fraction = tokens emitted / tokens expected, clamped to
+        // [0,1] so the bar doesn't overshoot if a stage produces more
+        // tokens than its budget (rare — would mean the model never
+        // emits EOS within its max).
+        const fraction = tokensExpectedTotal > 0
+            ? Math.max(0, Math.min(1, tokensTotal / tokensExpectedTotal))
+            : 0;
+        onProgress({
+            state, label, fraction,
+            tokensEmitted: tokensTotal,
+            tokensExpected: tokensExpectedTotal,
+            tokensPerSecond: rate,
+            etaSeconds: eta,
+        });
+    };
+    const recordToken = (perCallEmitted: number, baseBeforeCall: number) => {
+        tokensTotal = baseBeforeCall + perCallEmitted;
+        const now = performance.now();
+        rateSamples.push({ t: now, tokens: tokensTotal });
+        if (rateSamples.length > RATE_WINDOW) rateSamples.shift();
+        // Don't fire progress on EVERY token — would flood the
+        // React renderer. Coalesce to ~10 updates/sec.
+        if (now - lastUiUpdateMs > 100) {
+            lastUiUpdateMs = now;
+            fireProgress(currentState, currentLabel);
+        }
+    };
+    let lastUiUpdateMs = startMs;
+    let currentState: GenerateState = "paraphrasing";
+    let currentLabel = "Generating target paraphrases…";
+
     // ── Step 1: paraphrases (single inference call, no thinking).
-    onProgress({ state: "paraphrasing", label: "Generating target paraphrases…", fraction: 0.0 });
+    currentState = "paraphrasing";
+    currentLabel = "Generating target paraphrases…";
+    fireProgress(currentState, currentLabel);
     let paraphrases: string[] = [];
+    let paraphraseTokens = 0;
     try {
-        const text = await generateOne(client, paraphrasePrompt(userBehavior), MAX_TOKENS_PARAPHRASE, {}, signal);
+        const baseBeforeCall = tokensTotal;
+        const text = await generateOne(
+            client, paraphrasePrompt(userBehavior), MAX_TOKENS_PARAPHRASE,
+            { onToken: (n) => { paraphraseTokens = n; recordToken(n, baseBeforeCall); } },
+            signal,
+        );
         paraphrases = parseParaphrases(text);
     } catch (e) {
         if ((e as Error).message === "aborted") throw e;
@@ -324,21 +430,26 @@ export async function generateSyntheticDataset(
         console.warn("[syntheticDataset] paraphrase generation failed:", e);
         paraphrases = [];
     }
+    // Replace the paraphrase budget with its actual count so the
+    // total estimate tightens for the remaining stages.
+    tokensExpectedTotal = tokensExpectedTotal - MAX_TOKENS_PARAPHRASE + paraphraseTokens;
 
     // ── Step 2: anchor categories — thinking mode ON.
-    // Category selection is the only call that requires meta-reasoning
-    // ("is this topic semantically distant from the trained fact?"),
-    // which is exactly what thinking mode is for. Paraphrasing and
-    // expansion are pattern-fill tasks where thinking mode would just
-    // add latency for no quality gain.
-    onProgress({ state: "anchoring", label: "Selecting anchor categories (with reasoning)…", fraction: 0.35 });
+    currentState = "anchoring";
+    currentLabel = "Selecting anchor categories (with reasoning)…";
+    fireProgress(currentState, currentLabel);
     let categories: CategoryRow[] = [];
+    let categoryTokens = 0;
     try {
+        const baseBeforeCall = tokensTotal;
         const text = await generateOne(
             client,
             categoriesPrompt(userBehavior),
             MAX_TOKENS_CATEGORIES,
-            { thinking: true },
+            {
+                thinking: true,
+                onToken: (n) => { categoryTokens = n; recordToken(n, baseBeforeCall); },
+            },
             signal,
         );
         categories = parseCategories(text);
@@ -348,6 +459,15 @@ export async function generateSyntheticDataset(
         console.warn("[syntheticDataset] category generation failed:", e);
         categories = [];
     }
+    // Replace the categories budget with actual + replace the
+    // estimated category count with the real one. Now the expansion
+    // stage's contribution is known precisely.
+    tokensExpectedTotal =
+        tokensExpectedTotal
+        - MAX_TOKENS_CATEGORIES
+        + categoryTokens
+        - TARGET_CATEGORY_COUNT * MAX_TOKENS_EXPAND
+        + categories.length * MAX_TOKENS_EXPAND;
 
     // Content words from the user's target — used to drop anchor rows
     // whose model-generated completion would CONTRADICT the trained
@@ -369,19 +489,22 @@ export async function generateSyntheticDataset(
     if (categories.length > 0) {
         for (let i = 0; i < categories.length; i++) {
             const cat = categories[i];
-            onProgress({
-                state: "expanding",
-                label: `Expanding category ${i + 1}/${categories.length}: ${cat.name}…`,
-                fraction: 0.45 + (0.5 * i) / categories.length,
-            });
+            currentState = "expanding";
+            currentLabel = `Expanding category ${i + 1}/${categories.length}: ${cat.name}…`;
+            fireProgress(currentState, currentLabel);
             try {
+                const baseBeforeCall = tokensTotal;
+                let perCallTokens = 0;
                 const text = await generateOne(
                     client,
                     expandPrompt(cat.name, cat.exampleQ, cat.exampleA),
                     MAX_TOKENS_EXPAND,
-                    {},
+                    { onToken: (n) => { perCallTokens = n; recordToken(n, baseBeforeCall); } },
                     signal,
                 );
+                // Replace this category's budget with the actual count
+                // so the bar tightens for the remaining categories.
+                tokensExpectedTotal = tokensExpectedTotal - MAX_TOKENS_EXPAND + perCallTokens;
                 const parsed = parseExpansion(text);
                 // Also keep the category's own example as one of the
                 // anchor rows — it's free, no extra inference cost.
@@ -436,7 +559,20 @@ export async function generateSyntheticDataset(
     // target prompt the target's answer survives.
     const deduped = dedupeByPrompt([...targetRows, ...anchorRows]);
 
-    onProgress({ state: "done", label: "Done.", fraction: 1.0 });
+    // Final progress fire — explicitly set fraction = 1 because the
+    // per-token recordToken() coalesces UI updates and might have
+    // skipped the last few token bumps.
+    const totalElapsed = (performance.now() - startMs) / 1000;
+    const finalRate = totalElapsed > 0.25 ? tokensTotal / totalElapsed : null;
+    onProgress({
+        state: "done",
+        label: "Done.",
+        fraction: 1.0,
+        tokensEmitted: tokensTotal,
+        tokensExpected: tokensTotal,
+        tokensPerSecond: finalRate,
+        etaSeconds: 0,
+    });
     return {
         examples: deduped,
         fellBackToStaticAnchors: fellBack,

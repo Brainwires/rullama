@@ -16,7 +16,7 @@ import {
     FileText, Settings2, Activity, RefreshCw, Trash2, Plug,
     Pencil, X,
 } from "lucide-react";
-import { cn, clampInt, clampNum } from "@/lib/utils";
+import { cn, clampInt, clampNum, fmtEta } from "@/lib/utils";
 import {
     getClient,
     type TrainingLoraConfig, type TrainingHyperparams,
@@ -942,7 +942,14 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                                     client,
                                     behavior,
                                     completion,
-                                    (p) => onProgress(p.label, p.fraction),
+                                    (p) => onProgress({
+                                        label: p.label,
+                                        fraction: p.fraction,
+                                        tokens: p.tokensEmitted,
+                                        expected: p.tokensExpected,
+                                        rate: p.tokensPerSecond,
+                                        eta: p.etaSeconds,
+                                    }),
                                     signal,
                                 );
                                 return {
@@ -1161,11 +1168,20 @@ function DatasetCard(props: {
     onValidate: () => void;
     /** Triggers the synthetic-dataset orchestrator (3 inference calls).
      *  Returns the assembled JSONL text — the caller then routes it
-     *  through onPasteText so the user can review/edit before training. */
+     *  through onPasteText so the user can review/edit before training.
+     *  Progress is emitted per-token (coalesced to ~10/s) with
+     *  cumulative count, expected total, current rate, and ETA. */
     onGenerate: (
         behavior: string,
         completion: string,
-        onProgress: (label: string, fraction: number) => void,
+        onProgress: (p: {
+            label: string;
+            fraction: number;
+            tokens: number;
+            expected: number;
+            rate: number | null;
+            eta: number | null;
+        }) => void,
         signal: AbortSignal,
     ) => Promise<{ jsonl: string; counts: { paraphrases: number; categories: number; anchorExamples: number }; fellBackToStaticAnchors: boolean }>;
 }) {
@@ -1183,12 +1199,21 @@ function DatasetCard(props: {
     const [pasteText, setPasteText] = useState("");
     const [buildPrompt, setBuildPrompt] = useState("");
     const [buildCompletion, setBuildCompletion] = useState("");
-    // Generate-tab state.
+    // Generate-tab state. genStats carries the per-token telemetry
+    // the synthetic generator emits (cumulative tokens, current rate,
+    // ETA) so the UI can show a real progress bar + countdown instead
+    // of just the three coarse stage labels.
     const [genBehavior, setGenBehavior] = useState("");
     const [genCompletion, setGenCompletion] = useState("");
     const [genRunning, setGenRunning] = useState(false);
     const [genLabel, setGenLabel] = useState<string | null>(null);
     const [genFraction, setGenFraction] = useState(0);
+    const [genStats, setGenStats] = useState<{
+        tokens: number;
+        expected: number;
+        rate: number | null;
+        eta: number | null;
+    } | null>(null);
     const [genResult, setGenResult] = useState<{ jsonl: string; counts: { paraphrases: number; categories: number; anchorExamples: number }; fellBackToStaticAnchors: boolean } | null>(null);
     const [genError, setGenError] = useState<string | null>(null);
     const genAbortRef = useRef<AbortController | null>(null);
@@ -1583,15 +1608,22 @@ function DatasetCard(props: {
                                             setGenRunning(true);
                                             setGenLabel("Starting…");
                                             setGenFraction(0);
+                                            setGenStats(null);
                                             const ac = new AbortController();
                                             genAbortRef.current = ac;
                                             try {
                                                 const result = await props.onGenerate(
                                                     genBehavior,
                                                     genCompletion,
-                                                    (label, fraction) => {
-                                                        setGenLabel(label);
-                                                        setGenFraction(fraction);
+                                                    (p) => {
+                                                        setGenLabel(p.label);
+                                                        setGenFraction(p.fraction);
+                                                        setGenStats({
+                                                            tokens: p.tokens,
+                                                            expected: p.expected,
+                                                            rate: p.rate,
+                                                            eta: p.eta,
+                                                        });
                                                     },
                                                     ac.signal,
                                                 );
@@ -1614,7 +1646,20 @@ function DatasetCard(props: {
                         </div>
                         {genRunning && (
                             <div className="space-y-1">
-                                <div className="text-[11px] text-muted-foreground">{genLabel}</div>
+                                <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                                    <span className="truncate">{genLabel}</span>
+                                    {genStats && (
+                                        <span className="shrink-0 font-mono">
+                                            {genStats.tokens}/{genStats.expected}
+                                            {genStats.rate != null && (
+                                                <> · {genStats.rate.toFixed(1)} tok/s</>
+                                            )}
+                                            {genStats.eta != null && genStats.eta > 0 && (
+                                                <> · ETA {fmtEta(genStats.eta)}</>
+                                            )}
+                                        </span>
+                                    )}
+                                </div>
                                 <Progress value={Math.round(genFraction * 100)} />
                             </div>
                         )}
