@@ -405,6 +405,66 @@ export function App() {
         })();
     }, [showToast]);
 
+    // Crash-detect on mount: if the previous session never wrote
+    // EXIT clean (worker terminated via iOS jetsam or a crash), flag
+    // it with a persistent warn toast that deep-links into Settings →
+    // Logs. The worker writes the clean marker in its shutdown
+    // handler (workers/inference-core-worker.ts), so any past
+    // session in the manifest without `cleanExit: true` was killed.
+    useEffect(() => {
+        const client = getClient();
+        (async () => {
+            try {
+                const [list, currentId] = await Promise.all([
+                    client.logs.list(),
+                    client.logs.currentId().catch(() => "" as string),
+                ]);
+                // Newest-first; find the most recent session that's NOT
+                // this page-load's own session.
+                const previous = list.find((s) => s.id !== currentId);
+                if (!previous || previous.cleanExit) return;
+                showToast({
+                    level: "warn",
+                    title: "Last session ended unexpectedly",
+                    message: "iOS may have terminated the tab. Open the logs to see what fired right before the kill.",
+                    persist: true,
+                    action: {
+                        label: "Open Logs",
+                        onClick: () => {
+                            try { localStorage.setItem("rullama:settings:tab", JSON.stringify("logs")); } catch { /* */ }
+                            setView("settings");
+                        },
+                    },
+                });
+            } catch { /* logger unavailable — silently skip */ }
+        })();
+    }, [showToast, setView]);
+
+    // pagehide is the iOS-reliable "tab is going away" signal — fires
+    // before iOS suspends, before unload would on desktop, and most
+    // importantly: iOS Safari does NOT fire `beforeunload`. We post
+    // a synthetic shutdown to the worker so it can run
+    // markCleanExit() before self.close(). Fallback: localStorage
+    // marker keyed by the current session id in case the worker
+    // never gets to write the manifest. The next mount's crash-
+    // detect reads BOTH the manifest's `cleanExit` flag and this
+    // localStorage marker.
+    useEffect(() => {
+        const onHide = () => {
+            try {
+                const client = getClient();
+                // Read-only — we just want the worker's session id to
+                // mirror it into localStorage. The Promise dangles on
+                // purpose; pagehide can't await.
+                void client.logs.currentId().then((id) => {
+                    try { localStorage.setItem("rullama:session:clean", id); } catch { /* */ }
+                }).catch(() => { /* */ });
+            } catch { /* */ }
+        };
+        window.addEventListener("pagehide", onHide);
+        return () => window.removeEventListener("pagehide", onHide);
+    }, []);
+
     // Has the SharedWorker pushed at least one `meta` notification? Until
     // it has, we don't know whether another tab already loaded a model,
     // so auto-load is gated on this flag (see effect below).

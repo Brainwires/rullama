@@ -1,11 +1,12 @@
-import { useState } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
 import { ModelLoader, type ModelStatus } from "@/components/ModelLoader";
+import { LogsTab } from "@/components/LogsTab";
 import { type SamplingOptions } from "@/lib/types";
 import { type ModelEntry } from "@/lib/api";
 import { clampInt, clampNum, cn } from "@/lib/utils";
+import { usePersistedState } from "@/lib/persisted";
 import { VOICE_BOUNDS, type VoiceOptions } from "@/lib/voice";
 import { hardResetAndReload } from "@/lib/restart";
 import { Undo2, RefreshCw } from "lucide-react";
@@ -52,7 +53,7 @@ interface Props {
     onResetDefaults: () => void;
 }
 
-type TabKey = "general" | "sampling" | "voice";
+type TabKey = "general" | "sampling" | "voice" | "logs";
 
 /** Full-height sidebar: Model + Generation settings, sections scroll. */
 export function SettingsDialog(props: Props) {
@@ -63,7 +64,11 @@ export function SettingsDialog(props: Props) {
     const setV = (patch: Partial<VoiceOptions>) =>
         props.onVoiceChange({ ...props.voice, ...patch });
 
-    const [tab, setTab] = useState<TabKey>("general");
+    // Persisted so the App-level "crashed last session" toast can
+    // deep-link into the Logs tab: setting localStorage to "logs"
+    // before switching the top-level view to "settings" lands here
+    // on the right tab.
+    const [tab, setTab] = usePersistedState<TabKey>("rullama:settings:tab", "general");
 
     // If the audio tower disappears (e.g. user ejects a multimodal model while
     // on the Voice tab), snap back to General so the user isn't stuck on an
@@ -113,6 +118,12 @@ export function SettingsDialog(props: Props) {
                     onClick={() => setTab("voice")}
                     disabled={!props.canRecord}
                     title={props.canRecord ? undefined : "Load a model with an audio tower to enable voice settings"}
+                />
+                <TabButton
+                    label="Logs"
+                    active={activeTab === "logs"}
+                    onClick={() => setTab("logs")}
+                    title="Diagnostic logs persisted across sessions (survives crashes)"
                 />
             </nav>
 
@@ -291,6 +302,8 @@ export function SettingsDialog(props: Props) {
                         />
                     </section>
                 )}
+
+                {activeTab === "logs" && <LogsTab />}
             </div>
         </div>
     );

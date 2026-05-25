@@ -8,6 +8,13 @@ export interface Toast {
     title:   string;
     message?: string;
     persist?: boolean;   // if true, stays until user dismisses
+    /** Optional inline action button. When clicked, `action.onClick`
+     *  fires AND the toast is auto-dismissed. Used e.g. for the
+     *  crash-detect "Open Logs" deep-link on next page load. */
+    action?: {
+        label:   string;
+        onClick: () => void;
+    };
 }
 
 interface ToastContextValue {

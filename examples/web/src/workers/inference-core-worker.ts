@@ -15,6 +15,8 @@
 
 // @ts-expect-error — generated bundle, no .d.ts
 import init, { Model, TrainingSession, probeTrainingFit, WasmDatabase } from "/pkg/rullama.js";
+import * as opfsLogger from "./opfs_logger";
+import type { LogLevel } from "./opfs_logger";
 
 interface ProbeReport {
     ok:             boolean;
@@ -221,6 +223,21 @@ let routerPort: MessagePort | null = null;
  *  fires cleanly. */
 let shuttingDown = false;
 
+/** Unique id for this worker's lifetime. Used as the OPFS log file
+ *  name + as the localStorage clean-exit marker key. Generated once
+ *  at module load; never reused. */
+const SESSION_ID: string = (() => {
+    const iso = new Date().toISOString().replace(/[:.]/g, "-");
+    const rand = Math.random().toString(36).slice(2, 8);
+    return `${iso}-${rand}`;
+})();
+
+/** True once `opfsLogger.init(SESSION_ID)` has resolved. Lazy: we
+ *  defer the init until the first `attach` so a worker that loses
+ *  the SharedWorker election (and gets `self.close()`d) doesn't
+ *  burn OPFS budget. */
+let loggerInited = false;
+
 function log(...args: unknown[]) {
     const argStrs = args.map((a) => String(a));
     const msg = argStrs.join(" ");
@@ -235,6 +252,26 @@ function log(...args: unknown[]) {
             keepalive: true,
         }).catch(() => {});
     } catch { /* */ }
+    try { opfsLogger.append("info", "wkr", msg); } catch { /* */ }
+}
+
+/** Explicit-level / explicit-tag beacon variant. Use for the `[trn]`
+ *  training-instrumentation beacons that need to be readable by
+ *  level (error vs info) in the post-crash viewer. Behaves like
+ *  `log()` otherwise — fans out to routerPort + /api/log + OPFS. */
+function logBeacon(level: LogLevel, tag: string, msg: string) {
+    if (routerPort) {
+        try { routerPort.postMessage({ type: "log", args: [`[${tag}] ${msg}`] }); } catch { /* */ }
+    }
+    try {
+        fetch("/api/log", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tag, msg, ts: Date.now() }),
+            keepalive: true,
+        }).catch(() => {});
+    } catch { /* */ }
+    try { opfsLogger.append(level, tag, msg); } catch { /* */ }
 }
 
 function notify(kind: string, payload: Record<string, unknown> = {}) {
@@ -737,6 +774,21 @@ const RPC: Record<string, Handler> = {
     //    re-elects a host, instead of waiting out the 30s heartbeat).
     pingCore: () => true,
 
+    // ── Diagnostic log RPCs (OPFS-backed; see workers/opfs_logger.ts).
+    //    The viewer in components/LogsTab.tsx calls these to enumerate
+    //    + read past sessions; beacon() in lib/api.ts calls logsAppend
+    //    fire-and-forget to persist main-thread beacons through this
+    //    worker's sync handle.
+    logsList:    async () => await opfsLogger.listSessions() as unknown,
+    logsRead:    async (a) => await opfsLogger.readSession(String(a.id)) as unknown,
+    logsDelete:  async (a) => { await opfsLogger.deleteSession(String(a.id)); return true; },
+    logsDeleteAll: async () => { await opfsLogger.deleteAll(); return true; },
+    logsAppend:  (a) => {
+        opfsLogger.append(String(a.level) as LogLevel, String(a.tag), String(a.msg));
+        return true;
+    },
+    logsCurrentSession: () => SESSION_ID,
+
     // ── Model lifecycle ────────────────────────────────────────────────
     load: (a) => handleLoad(a as unknown as LoadArgs),
     free: () => {
@@ -1113,6 +1165,7 @@ const RPC: Record<string, Handler> = {
     // session is live. UI must mode-gate to avoid the throw.
 
     trainingStart: async (a) => {
+        logBeacon("info", "trn", `trainingStart enter loraCfg=${JSON.stringify(a.loraConfig ?? {})} hp=${JSON.stringify(a.hparams ?? {})}`);
         if (!model) throw new Error("load a model before starting training");
         if (trainingSession) throw new Error(
             "training already active — call trainingFinish() first");
@@ -1124,7 +1177,9 @@ const RPC: Record<string, Handler> = {
         // typed error WITHOUT consuming the Model handle. The chat
         // path stays alive; the user can lower rank / seq_len and
         // retry without re-loading the multi-GB GGUF.
+        logBeacon("info", "trn", "probeFit start");
         const probe = await probeFit(model, loraCfgJson, hpJson);
+        logBeacon("info", "trn", `probeFit done ok=${probe.ok} estMB=${(probe.estimatedBytes/(1024*1024)).toFixed(1)}`);
         log(`training: probe ok=${probe.ok} estimated=${(probe.estimatedBytes / (1024 * 1024)).toFixed(1)}MB ${probe.reason ?? ""}`);
         if (!probe.ok) {
             const mb = (probe.estimatedBytes / (1024 * 1024)).toFixed(0);
@@ -1228,10 +1283,12 @@ const RPC: Record<string, Handler> = {
         // clear error + reset loadedInfo so the chat UI honestly
         // reflects "no model — reload required" instead of letting
         // the next chat-send vanish into a half-consumed handle.
+        logBeacon("info", "trn", "TrainingSession::new constructing");
         let session: TrainingSessionHandle;
         try {
             session = new TrainingSessionClass(model, loraCfgJson, hpJson);
         } catch (e) {
+            logBeacon("error", "trn", `TrainingSession::new threw: ${(e as Error).message ?? e}`);
             log(`trainingStart: TrainingSession::new failed: ${(e as Error).message ?? e}`);
             // wasm-bindgen takes ownership of the Model on entry; on
             // throw, the handle is consumed regardless of where we
@@ -1243,6 +1300,7 @@ const RPC: Record<string, Handler> = {
             notify("modelFreed", {});
             throw e;
         }
+        logBeacon("info", "trn", "TrainingSession::new returned");
         trainingSession = session;
         model = null; // Ownership transferred — null now that it's safe.
         const totalSteps = Number(a.totalSteps ?? 0);
@@ -1255,6 +1313,7 @@ const RPC: Record<string, Handler> = {
         };
         notify("trainingStarted", info);
         log(`training: started, params=${info.parameterCount} ckpt=${info.gradientCheckpointing} mp=${info.mixedPrecision}`);
+        logBeacon("info", "trn", `trainingStart done params=${info.parameterCount} ckpt=${info.gradientCheckpointing} mp=${info.mixedPrecision}`);
         return info;
     },
 
@@ -1270,6 +1329,7 @@ const RPC: Record<string, Handler> = {
         const s = requireTraining();
         const inputIds = a.inputIds as Uint32Array;
         const lossMode = String(a.lossMode ?? "next_token");
+        logBeacon("info", "trn", `step ${s.stepNum + 1} start mode=${lossMode} inputLen=${inputIds.length}`);
         // **Capture stepNum/lr BEFORE calling step.** The progress
         // callback fires from inside the Rust step's execution, which
         // holds a `&mut self` RefMut on the TrainingSession. Reading
@@ -1312,12 +1372,14 @@ const RPC: Record<string, Handler> = {
             const stepNum = (result as { step?: number })?.step ?? 0;
             const lossStr = typeof loss === "number" ? loss.toFixed(4) : String(loss);
             log(`training: step ${stepNum} loss=${lossStr} lossMode=${lossMode} inputLen=${inputIds.length}`);
+            logBeacon("info", "trn", `step ${stepNum} done loss=${lossStr}`);
             return result;
         } catch (e) {
             // Log + rethrow. The session stays alive (the wasm side
             // doesn't drop on a kernel error), so the UI can choose
             // Discard to release the Model cleanly.
             log(`training: step ${s.stepNum} failed (lossMode=${lossMode}, inputLen=${inputIds.length}): ${(e as Error).message}`);
+            logBeacon("error", "trn", `step ${s.stepNum} threw: ${(e as Error).message}`);
             throw e;
         }
     },
@@ -1351,7 +1413,9 @@ const RPC: Record<string, Handler> = {
     trainingOptimizerStep: async (a) => {
         void a;
         const s = requireTraining();
+        logBeacon("info", "trn", `adam start step ${s.stepNum + 1}`);
         s.optimizerStep();
+        logBeacon("info", "trn", `adam done step ${s.stepNum} lr=${s.lr}`);
         return { step: s.stepNum, lr: s.lr };
     },
 
@@ -1433,6 +1497,7 @@ const RPC: Record<string, Handler> = {
 
     trainingFinish: async (a) => {
         void a;
+        logBeacon("info", "trn", "trainingFinish enter");
         if (!trainingSession) throw new Error("no training session to finish");
         // No prior save call on this path (discard / cancel flow), so
         // no async-borrow to drain. `finish()` synchronously consumes
@@ -1460,6 +1525,7 @@ const RPC: Record<string, Handler> = {
         }
         notify("trainingFinished", {});
         log(`training: finished, Model returned to chat`);
+        logBeacon("info", "trn", "trainingFinish done");
         return true;
     },
 
@@ -1659,6 +1725,15 @@ function releaseAllHandles() {
         // above `shuttingDown` for why this race matters.
         shuttingDown = true;
         try { log("core: shutdown received — releasing handles"); } catch { /* */ }
+        // Mark the session log as clean-exit so the next-load crash
+        // detector doesn't flag this session. Fire-and-forget — we
+        // don't await because self.close() races with iOS jetsam in
+        // edge cases. The await inside markCleanExit() still gets a
+        // chance to land before self.close() runs since both are
+        // microtask-scheduled and JS doesn't pre-empt.
+        (async () => {
+            try { await opfsLogger.markCleanExit(); } catch { /* */ }
+        })();
         releaseAllHandles();
         try {
             (self as unknown as DedicatedWorkerGlobalScope).close();
@@ -1673,5 +1748,17 @@ function releaseAllHandles() {
         void handleRequest(e.data);
     });
     routerPort.start();
-    log(`core: attached to router`);
+    // Lazy-init the OPFS logger now that we know this worker won the
+    // SharedWorker election. Fire-and-forget — beacons fired before
+    // init completes are silently dropped (the append() guard returns
+    // early), which is acceptable since the first attached-and-active
+    // moment is the earliest interesting point anyway.
+    if (!loggerInited) {
+        loggerInited = true;
+        (async () => {
+            try { await opfsLogger.init(SESSION_ID); }
+            catch (e) { try { console.warn("[opfs_logger] init failed", e); } catch { /* */ } }
+        })();
+    }
+    log(`core: attached to router (session ${SESSION_ID})`);
 };

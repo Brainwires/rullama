@@ -103,10 +103,16 @@ export function blobUrl(m: ModelEntry): string {
 }
 
 /**
- * Fire-and-forget diagnostic beacon. Used to record load events to the
- * dev server's /tmp/rullama-page.log. Offline / production deploys
- * silently no-op because the server has no /api/log handler or the
- * tab is offline — fine either way, the app doesn't depend on it.
+ * Fire-and-forget diagnostic beacon. Records to TWO sinks:
+ *   1. Dev-server /api/log (lands at /tmp/rullama-page.log on the Mac
+ *      running the safaridriver harness). Silently no-ops offline /
+ *      in production where the endpoint doesn't exist.
+ *   2. OPFS via the worker — crash-surviving, viewable on-device in
+ *      Settings → Logs even after iOS jetsam kills the tab. This is
+ *      the path that actually matters for iPhone debugging.
+ *
+ * Both calls are fire-and-forget — beacons must never block the UI or
+ * propagate an error to the caller.
  */
 export function beacon(tag: string, msg: string) {
     try {
@@ -117,4 +123,12 @@ export function beacon(tag: string, msg: string) {
             keepalive: true,
         }).catch(() => {});
     } catch { /* no-op */ }
+    // Lazy-import to dodge a circular dependency: lib/inference.ts
+    // imports from lib/api.ts at module load. We need getClient at
+    // call time, not import time.
+    try {
+        void import("./inference").then(({ getClient }) => {
+            try { getClient().logs.append("info", tag, msg); } catch { /* */ }
+        }).catch(() => {});
+    } catch { /* */ }
 }

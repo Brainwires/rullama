@@ -382,6 +382,21 @@ export class WorkerClient {
         return this.rpc("imageSoftTokenCount", { h, w });
     }
 
+    // ── Diagnostic logs (OPFS-backed, see workers/opfs_logger.ts) ──────
+    /** Worker-side log file storage. `append` is fire-and-forget so
+     *  the main thread never blocks on a beacon; `list/read/delete`
+     *  back the Settings → Logs viewer. */
+    readonly logs = {
+        list:      ()                                  => this.rpc<LogSessionMeta[]>("logsList"),
+        read:      (id: string)                        => this.rpc<string>("logsRead", { id }),
+        delete:    (id: string)                        => this.rpc<boolean>("logsDelete", { id }),
+        deleteAll: ()                                  => this.rpc<boolean>("logsDeleteAll"),
+        append:    (level: LogLevel, tag: string, msg: string) => {
+            void this.rpc<boolean>("logsAppend", { level, tag, msg });
+        },
+        currentId: ()                                  => this.rpc<string>("logsCurrentSession"),
+    };
+
     // ── Stateful inference (auto-inject sid) ───────────────────────────
     step(tokenId: number): Promise<number> {
         return this.rpc("step", { sid: this.session, tokenId });
@@ -647,6 +662,18 @@ export class WorkerClient {
     trainingStatus(): Promise<TrainingStatusInfo> {
         return this.rpc("trainingStatus", {});
     }
+}
+
+/** Log level for {@link WorkerClient.logs.append}. Mirrors
+ *  `LogLevel` in `workers/opfs_logger.ts`. */
+export type LogLevel = "info" | "warn" | "error";
+
+/** Session metadata returned by {@link WorkerClient.logs.list}. */
+export interface LogSessionMeta {
+    id:        string;
+    startMs:   number;
+    sizeBytes: number;
+    cleanExit: boolean;
 }
 
 export interface TrainingLoraConfig {

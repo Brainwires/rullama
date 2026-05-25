@@ -46,6 +46,15 @@ export function Toaster() {
                             {t.message && (
                                 <p className="mt-0.5 text-muted-foreground">{t.message}</p>
                             )}
+                            {t.action && (
+                                <button
+                                    type="button"
+                                    onClick={() => { try { t.action!.onClick(); } finally { dismissToast(t.id); } }}
+                                    className="mt-1 rounded border border-border bg-background px-2 py-0.5 text-[11px] font-medium text-foreground hover:bg-accent"
+                                >
+                                    {t.action.label}
+                                </button>
+                            )}
                         </div>
                         <button
                             type="button"
