@@ -1,5 +1,8 @@
 //! Process-wide wgpu context: instance, adapter, device, queue.
 
+use std::sync::Arc;
+
+use crate::backend::LoraBindGroupCache;
 use crate::error::{Result, RullamaError};
 
 /// Holds the wgpu device and queue for the lifetime of a [`crate::api::Model`].
@@ -19,6 +22,10 @@ pub struct WgpuCtx {
     /// True iff `Features::SHADER_F16` was granted. Kernels that declare
     /// `enable f16;` only get registered when this is set.
     pub has_f16: bool,
+    /// Shared bind-group + uniform-buffer cache for LoRA dispatchers.
+    /// Arc so cloned `WgpuCtx` handles share the same cache; invalidated
+    /// by `api::Model::load_adapter_native` / `clear_adapter_native`.
+    pub lora_bind_cache: Arc<LoraBindGroupCache>,
 }
 
 impl WgpuCtx {
@@ -159,6 +166,7 @@ impl WgpuCtx {
             queue,
             has_subgroups,
             has_f16,
+            lora_bind_cache: Arc::new(LoraBindGroupCache::new()),
         })
     }
 }

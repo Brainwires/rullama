@@ -3601,8 +3601,6 @@ pub fn lora_matmul_row_chained(
     scale: f32,
     accumulate: bool,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = LoraMatmulParams {
         k: k as u32,
         n: n as u32,
@@ -3613,35 +3611,33 @@ pub fn lora_matmul_row_chained(
         _pad3: 0,
         _pad4: 0,
     };
-    let p_buf = write_uniform(device, queue, "lora_mm_row.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("lora_mm_row.bg"),
-        layout: &p.lora_matmul_row.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: w.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: x.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: y.as_entire_binding(),
-            },
-        ],
+    let key = crate::backend::CacheKey::three(&p.lora_matmul_row, w, x, y);
+    let cached = ctx.lora_bind_cache.get_or_create(key, || {
+        let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lora_mm_row.params"),
+            size: std::mem::size_of::<LoraMatmulParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lora_mm_row.bg"),
+            layout: &p.lora_matmul_row.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+            ],
+        });
+        crate::backend::CachedDispatch { uniform, bind_group }
     });
+    ctx.queue.write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("lora_mm_row.pass"),
         timestamp_writes: None,
     });
     cp.set_pipeline(&p.lora_matmul_row);
-    cp.set_bind_group(0, &bg, &[]);
+    cp.set_bind_group(0, &cached.bind_group, &[]);
     cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
 }
 
@@ -3664,10 +3660,6 @@ pub fn lora_matmul_col_chained(
     scale: f32,
     accumulate: bool,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
-    // Reuse LoraMatmulParams shape (k=outer, n=inner — semantically swapped
-    // but the WGSL maps them to `outer`/`inner` names internally).
     let params = LoraMatmulParams {
         k: outer as u32,
         n: inner as u32,
@@ -3678,35 +3670,33 @@ pub fn lora_matmul_col_chained(
         _pad3: 0,
         _pad4: 0,
     };
-    let p_buf = write_uniform(device, queue, "lora_mm_col.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("lora_mm_col.bg"),
-        layout: &p.lora_matmul_col.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: w.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: x.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: y.as_entire_binding(),
-            },
-        ],
+    let key = crate::backend::CacheKey::three(&p.lora_matmul_col, w, x, y);
+    let cached = ctx.lora_bind_cache.get_or_create(key, || {
+        let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lora_mm_col.params"),
+            size: std::mem::size_of::<LoraMatmulParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lora_mm_col.bg"),
+            layout: &p.lora_matmul_col.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+            ],
+        });
+        crate::backend::CachedDispatch { uniform, bind_group }
     });
+    ctx.queue.write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("lora_mm_col.pass"),
         timestamp_writes: None,
     });
     cp.set_pipeline(&p.lora_matmul_col);
-    cp.set_bind_group(0, &bg, &[]);
+    cp.set_bind_group(0, &cached.bind_group, &[]);
     cp.dispatch_workgroups((inner as u32).div_ceil(64), 1, 1);
 }
 
@@ -3725,8 +3715,6 @@ pub fn lora_outer_add_chained(
     scale: f32,
     accumulate: bool,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = LoraOuterParams {
         outer_a: outer_a as u32,
         outer_b: outer_b as u32,
@@ -3737,35 +3725,33 @@ pub fn lora_outer_add_chained(
         _pad3: 0,
         _pad4: 0,
     };
-    let p_buf = write_uniform(device, queue, "lora_outer.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("lora_outer.bg"),
-        layout: &p.lora_outer_add.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: a.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: b.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: out.as_entire_binding(),
-            },
-        ],
+    let key = crate::backend::CacheKey::three(&p.lora_outer_add, a, b, out);
+    let cached = ctx.lora_bind_cache.get_or_create(key, || {
+        let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lora_outer.params"),
+            size: std::mem::size_of::<LoraOuterParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lora_outer.bg"),
+            layout: &p.lora_outer_add.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: out.as_entire_binding() },
+            ],
+        });
+        crate::backend::CachedDispatch { uniform, bind_group }
     });
+    ctx.queue.write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("lora_outer.pass"),
         timestamp_writes: None,
     });
     cp.set_pipeline(&p.lora_outer_add);
-    cp.set_bind_group(0, &bg, &[]);
+    cp.set_bind_group(0, &cached.bind_group, &[]);
     cp.dispatch_workgroups(
         (outer_a as u32).div_ceil(8),
         (outer_b as u32).div_ceil(8),
@@ -3808,39 +3794,38 @@ pub fn lora_embed_col_read_chained(
     vocab: u32,
     col: u32,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = LoraEmbedColParams {
         rank,
         vocab,
         col,
         _pad: 0,
     };
-    let p_buf = write_uniform(device, queue, "lora_embed_col_read.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("lora_embed_col_read.bg"),
-        layout: &p.lora_embed_col_read.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: a.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: z.as_entire_binding(),
-            },
-        ],
+    let key = crate::backend::CacheKey::two(&p.lora_embed_col_read, a, z);
+    let cached = ctx.lora_bind_cache.get_or_create(key, || {
+        let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lora_embed_col_read.params"),
+            size: std::mem::size_of::<LoraEmbedColParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lora_embed_col_read.bg"),
+            layout: &p.lora_embed_col_read.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: z.as_entire_binding() },
+            ],
+        });
+        crate::backend::CachedDispatch { uniform, bind_group }
     });
+    ctx.queue.write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("lora_embed_col_read.pass"),
         timestamp_writes: None,
     });
     cp.set_pipeline(&p.lora_embed_col_read);
-    cp.set_bind_group(0, &bg, &[]);
+    cp.set_bind_group(0, &cached.bind_group, &[]);
     cp.dispatch_workgroups(rank.div_ceil(64), 1, 1);
 }
 
@@ -3860,8 +3845,6 @@ pub fn lora_embed_col_scatter_add_chained(
     col: u32,
     scale: f32,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = LoraEmbedColScatterParams {
         rank,
         vocab,
@@ -3872,31 +3855,32 @@ pub fn lora_embed_col_scatter_add_chained(
         _pad3: 0,
         _pad4: 0,
     };
-    let p_buf = write_uniform(device, queue, "lora_embed_col_scatter.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("lora_embed_col_scatter.bg"),
-        layout: &p.lora_embed_col_scatter_add.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: u.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: da.as_entire_binding(),
-            },
-        ],
+    let key = crate::backend::CacheKey::two(&p.lora_embed_col_scatter_add, u, da);
+    let cached = ctx.lora_bind_cache.get_or_create(key, || {
+        let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lora_embed_col_scatter.params"),
+            size: std::mem::size_of::<LoraEmbedColScatterParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lora_embed_col_scatter.bg"),
+            layout: &p.lora_embed_col_scatter_add.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: u.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: da.as_entire_binding() },
+            ],
+        });
+        crate::backend::CachedDispatch { uniform, bind_group }
     });
+    ctx.queue.write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("lora_embed_col_scatter.pass"),
         timestamp_writes: None,
     });
     cp.set_pipeline(&p.lora_embed_col_scatter_add);
-    cp.set_bind_group(0, &bg, &[]);
+    cp.set_bind_group(0, &cached.bind_group, &[]);
     cp.dispatch_workgroups(rank.div_ceil(64), 1, 1);
 }
 

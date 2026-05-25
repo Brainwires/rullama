@@ -1,10 +1,13 @@
 //! Overfit a single (prompt, target) pair with rank-4 attention LoRAs.
 //!
-//! M0 acceptance test: run 200 Adam steps on the same example and
-//! verify that the cross-entropy loss drops by ≥ 90%. Loss should
-//! start around `log(vocab_size)` ≈ 12.5 for the base Gemma 4 e2b
-//! (262 144 vocab) and decay smoothly as the LoRAs absorb the
-//! prompt → target association.
+//! Regression check: run 30 Adam steps on the same example and verify
+//! that the cross-entropy loss drops by ≥ 90%. Loss should start
+//! around `log(vocab_size)` ≈ 12.5 for the base Gemma 4 e2b (262 144
+//! vocab) and decay to ~0 around step 5 as the LoRAs absorb the
+//! prompt → target association. 30 is the default because convergence
+//! reliably lands at step 5 — pushing further is mostly burning GPU
+//! time on flat-zero loss. Set `RULLAMA_OVERFIT_STEPS=200` to
+//! reproduce the original M0 long-form acceptance run.
 //!
 //! Usage:
 //!
@@ -28,9 +31,14 @@ use rullama_finetune::shared::config::{LoraConfig, TrainingHyperparams};
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
-const DEFAULT_N_STEPS: u32 = 200;
+// Convergence reliably lands at step 5 on the canonical "The quick
+// brown fox → jumps" prompt pair. 30 gives a comfortable margin and
+// keeps the assert-drop gate triggered (n_steps ≥ DEFAULT_N_STEPS / 2
+// = 15). Set `RULLAMA_OVERFIT_STEPS=200` for the original long-form
+// run.
+const DEFAULT_N_STEPS: u32 = 30;
 // Override via env vars so we can A/B different prompts without
-// recompiling. Defaults match the original M0 acceptance test.
+// recompiling.
 fn prompt() -> String {
     env::var("RULLAMA_OVERFIT_PROMPT").unwrap_or_else(|_| "The quick brown fox".into())
 }
@@ -49,7 +57,8 @@ async fn run() -> Result<(), BoxError> {
         .into();
     // `RULLAMA_OVERFIT_STEPS=<n>` lets the smoke test run a short
     // session (e.g. 2 steps for a "does it crash?" check) without a
-    // rebuild. Defaults to the M0 acceptance target of 200.
+    // rebuild. Defaults to 30 (past the canonical step-5 convergence
+    // point with margin); set to 200 for the original M0 long-form run.
     let n_steps: u32 = env::var("RULLAMA_OVERFIT_STEPS")
         .ok()
         .and_then(|s| s.parse().ok())

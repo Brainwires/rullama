@@ -787,6 +787,11 @@ impl Model {
     /// `target_modules` and allocates GPU buffers sized against this
     /// model's config. Mismatched dims surface a `RullamaError::Inference`.
     pub fn load_adapter_native(&mut self, bytes: &[u8]) -> Result<usize> {
+        // Invalidate the LoRA bind-group cache BEFORE building the new
+        // adapter — its old keys reference buffer pointers that the
+        // previous adapter owned. The new adapter allocates fresh
+        // buffers; first dispatch repopulates the cache.
+        self.forward.ctx().lora_bind_cache.clear();
         let ctx = Arc::new(self.forward.ctx().clone());
         let cfg = self.forward.cfg().clone();
         let adapter = crate::lora::InferenceAdapter::from_safetensors_bytes(ctx, &cfg, bytes)?;
@@ -797,6 +802,8 @@ impl Model {
 
     /// Drop the active adapter (subsequent generation uses base weights only).
     pub fn clear_adapter_native(&mut self) {
+        // Same invalidation rationale as `load_adapter_native`.
+        self.forward.ctx().lora_bind_cache.clear();
         self.adapter = None;
     }
 
