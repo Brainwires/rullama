@@ -63,7 +63,13 @@ const TARGET_PARAPHRASE_COUNT = 20;
 const TARGET_CATEGORY_COUNT = 5;
 const PER_CATEGORY_EXAMPLE_COUNT = 5;
 const MAX_TOKENS_PARAPHRASE = 500;
-const MAX_TOKENS_CATEGORIES = 400;
+// 1200 (was 400) because the categories call runs with thinking mode
+// on — the model emits a chain-of-thought BEFORE the structured
+// output, and 400 tokens usually isn't enough to finish both phases.
+// Thinking content lives between the model's own internal tokens
+// and never enters the <cat>…</cat> tags the parser extracts, so
+// the extra budget is paid in latency, not in dataset contamination.
+const MAX_TOKENS_CATEGORIES = 1200;
 const MAX_TOKENS_EXPAND = 400;
 
 // ── Meta-prompts ────────────────────────────────────────────────────
@@ -97,7 +103,13 @@ Now produce ${TARGET_PARAPHRASE_COUNT}:`;
 function categoriesPrompt(userBehavior: string): string {
     return `The user is teaching the model this single fact: "${userBehavior}"
 
-To prevent the model from over-applying this fact to unrelated questions, suggest ${TARGET_CATEGORY_COUNT} categories of "anchor" questions whose answers are factually correct and unrelated to the trained fact.
+Your task is to choose ${TARGET_CATEGORY_COUNT} categories of "anchor" questions. Anchor categories prevent the model from over-applying the trained fact to adjacent topics. To pick a category WELL it must satisfy ALL of these rules:
+
+1. The category must be in a SEMANTIC DOMAIN completely unrelated to the user's trained topic. If the trained fact is about food, do not pick food preferences, cuisines, ingredients, recipes, eating, or kitchens. If the trained fact is geographic, do not pick other geography. If the trained fact is about a person, do not pick other people or biographies. Pick a domain that has nothing in common with the trained fact's subject matter.
+2. The answer must be a verifiable factual statement, not a subjective preference or opinion.
+3. The question shape must be different from the trained fact's question shape — different verbs, different sentence structure.
+
+Safe example domains: arithmetic, world capitals, units of measurement, days/months/calendar, basic science facts, primary colors, word repetition tasks, alphabet ordering, simple translations. Pick from these OR pick others that satisfy the three rules above.
 
 Each category must be wrapped in <cat></cat> with three nested tags: <name>, <q>, <a>.
 
@@ -146,10 +158,19 @@ const STATIC_ANCHORS: DatasetExample[] = [
 // Runs one chat-style generation against the loaded model. Uses
 // greedy decode (temperature 0) so the output is deterministic and
 // the parser sees stable formatting across re-runs.
+// Chat-side think-token. Mirrors `THINK_TOKEN` in App.tsx (the chat
+// path prepends this to the system content when the user's "thinking"
+// toggle is on; Gemma 4 honors it by emitting a chain-of-thought
+// before its actual output). Used by the categories call so the
+// model reasons about semantic distance before committing to its
+// anchor-category picks.
+const THINK_TOKEN = "<|think|>";
+
 async function generateOne(
     client: WorkerClient,
     metaPrompt: string,
     maxTokens: number,
+    options: { thinking?: boolean } = {},
     signal?: AbortSignal,
 ): Promise<string> {
     return await client.withSession(async () => {
@@ -161,10 +182,13 @@ async function generateOne(
             seed: 0,
         });
         await client.reset();
-        const rendered = await client.renderChat(
-            [{ role: "user", content: metaPrompt }],
-            false,
-        );
+        const messages = options.thinking
+            ? [
+                { role: "system" as const, content: THINK_TOKEN },
+                { role: "user" as const, content: metaPrompt },
+            ]
+            : [{ role: "user" as const, content: metaPrompt }];
+        const rendered = await client.renderChat(messages, false);
         const promptIds = await client.encode(rendered);
         // Feed prompt tokens (each step returns the next token; we
         // only care about the LAST call's return — that's the first
@@ -288,11 +312,11 @@ export async function generateSyntheticDataset(
         ? targetCompletion
         : ` ${targetCompletion}`;
 
-    // ── Step 1: paraphrases (single inference call).
+    // ── Step 1: paraphrases (single inference call, no thinking).
     onProgress({ state: "paraphrasing", label: "Generating target paraphrases…", fraction: 0.0 });
     let paraphrases: string[] = [];
     try {
-        const text = await generateOne(client, paraphrasePrompt(userBehavior), MAX_TOKENS_PARAPHRASE, signal);
+        const text = await generateOne(client, paraphrasePrompt(userBehavior), MAX_TOKENS_PARAPHRASE, {}, signal);
         paraphrases = parseParaphrases(text);
     } catch (e) {
         if ((e as Error).message === "aborted") throw e;
@@ -301,11 +325,22 @@ export async function generateSyntheticDataset(
         paraphrases = [];
     }
 
-    // ── Step 2: anchor categories (single inference call).
-    onProgress({ state: "anchoring", label: "Selecting anchor categories…", fraction: 0.35 });
+    // ── Step 2: anchor categories — thinking mode ON.
+    // Category selection is the only call that requires meta-reasoning
+    // ("is this topic semantically distant from the trained fact?"),
+    // which is exactly what thinking mode is for. Paraphrasing and
+    // expansion are pattern-fill tasks where thinking mode would just
+    // add latency for no quality gain.
+    onProgress({ state: "anchoring", label: "Selecting anchor categories (with reasoning)…", fraction: 0.35 });
     let categories: CategoryRow[] = [];
     try {
-        const text = await generateOne(client, categoriesPrompt(userBehavior), MAX_TOKENS_CATEGORIES, signal);
+        const text = await generateOne(
+            client,
+            categoriesPrompt(userBehavior),
+            MAX_TOKENS_CATEGORIES,
+            { thinking: true },
+            signal,
+        );
         categories = parseCategories(text);
     } catch (e) {
         if ((e as Error).message === "aborted") throw e;
@@ -344,6 +379,7 @@ export async function generateSyntheticDataset(
                     client,
                     expandPrompt(cat.name, cat.exampleQ, cat.exampleA),
                     MAX_TOKENS_EXPAND,
+                    {},
                     signal,
                 );
                 const parsed = parseExpansion(text);
