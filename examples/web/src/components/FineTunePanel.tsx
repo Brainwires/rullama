@@ -1428,7 +1428,7 @@ function DatasetCard(props: {
                         <div className="flex items-center justify-between gap-2">
                             <div className="text-[11px] text-muted-foreground">
                                 {genRunning
-                                    ? "Three inference calls in series."
+                                    ? "Three inference calls in series — duration depends on your hardware."
                                     : "Produces ~30 examples: paraphrases of your target + leak-prevention anchors."}
                             </div>
                             <div className="flex shrink-0 gap-2">
