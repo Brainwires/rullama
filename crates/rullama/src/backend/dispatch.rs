@@ -3973,6 +3973,68 @@ pub fn lora_matmul_fused_chained(
     cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
 }
 
+/// `lora_matmul_fused_chained` variant where `b` is packed f16 in `u32`
+/// pairs. Same shapes and semantics as the f32 path — only the on-GPU
+/// element type of `b` differs. Used by the lm_head LoRA inject when
+/// the slot reports `b_is_f16 = true`.
+#[allow(clippy::too_many_arguments)]
+pub fn lora_matmul_fused_f16b_chained(
+    ctx: &WgpuCtx,
+    p: &Pipelines,
+    enc: &mut wgpu::CommandEncoder,
+    a: &wgpu::Buffer,
+    b: &wgpu::Buffer,
+    x: &wgpu::Buffer,
+    y: &wgpu::Buffer,
+    z_out: &wgpu::Buffer,
+    k: usize,
+    n: usize,
+    rank: usize,
+    scale: f32,
+    accumulate: bool,
+) {
+    let params = LoraFusedParams {
+        k: k as u32,
+        n: n as u32,
+        rank: rank as u32,
+        accumulate: accumulate as u32,
+        scale,
+        _pad0: 0,
+        _pad1: 0,
+        _pad2: 0,
+    };
+    let key = crate::backend::CacheKey::four(&p.lora_matmul_fused_f16b, a, b, x, y);
+    let cached = ctx.lora_bind_cache.get_or_create(key, || {
+        let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lora_fused_f16b.params"),
+            size: std::mem::size_of::<LoraFusedParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lora_fused_f16b.bg"),
+            layout: &p.lora_matmul_fused_f16b.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: x.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: y.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: z_out.as_entire_binding() },
+            ],
+        });
+        crate::backend::CachedDispatch { uniform, bind_group }
+    });
+    ctx.queue.write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("lora_fused_f16b.pass"),
+        timestamp_writes: None,
+    });
+    cp.set_pipeline(&p.lora_matmul_fused_f16b);
+    cp.set_bind_group(0, &cached.bind_group, &[]);
+    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct AttnBackParams {

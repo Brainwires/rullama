@@ -1586,6 +1586,8 @@ fn slot_view(l: &crate::lora::LoraLayer) -> LoraSlot<'_> {
         z: &l.z,
         rank: l.rank,
         scale: l.scale,
+        // Training keeps B in f32 — backward kernels read it directly.
+        b_is_f16: false,
     }
 }
 

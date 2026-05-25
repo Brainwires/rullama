@@ -145,6 +145,10 @@ pub struct Pipelines {
     /// One dispatch does both `z = A·x` and `y += scale · B·z`,
     /// halving the per-target dispatch count from 2 to 1.
     pub lora_matmul_fused: wgpu::ComputePipeline,
+    /// `lora_matmul_fused` variant where B is stored as packed f16
+    /// (two elements per u32). Halves bandwidth on the vocab×rank
+    /// matmul; only routed for the lm_head LoRA target.
+    pub lora_matmul_fused_f16b: wgpu::ComputePipeline,
     /// AdamW optimizer step — elementwise update of `(param, m, v)` from
     /// the gradient buffer. Standard β₁/β₂ bias correction, decoupled weight
     /// decay. Drives every LoRA A and B at the end of `TrainingSession::step`.
@@ -288,6 +292,11 @@ impl Pipelines {
                 kernels::LORA_EMBED_COL_SCATTER_ADD,
             ),
             lora_matmul_fused: build(device, "lora_matmul_fused", kernels::LORA_MATMUL_FUSED),
+            lora_matmul_fused_f16b: build(
+                device,
+                "lora_matmul_fused_f16b",
+                kernels::LORA_MATMUL_FUSED_F16B,
+            ),
             adam_step: build(device, "adam_step", kernels::ADAM_STEP),
             sum_of_squares: build(device, "sum_of_squares", kernels::SUM_OF_SQUARES),
             geglu: build(device, "geglu", kernels::GEGLU),

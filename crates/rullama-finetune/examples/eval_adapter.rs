@@ -276,6 +276,9 @@ fn slot_view(l: &LoraLayer) -> LoraSlot<'_> {
         z: &l.z,
         rank: l.rank,
         scale: l.scale,
+        // Training-side LoraLayer always carries f32 B — only the
+        // inference adapter loader opts into packed f16 for lm_head.
+        b_is_f16: false,
     }
 }
 

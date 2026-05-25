@@ -87,10 +87,16 @@ pub struct LayerCaptureBuffers<'a> {
 /// backward can build `dB = scale · dy ⊗ z`.
 pub struct LoraSlot<'a> {
     pub a: &'a wgpu::Buffer, // [rank, in_dim]
-    pub b: &'a wgpu::Buffer, // [out_dim, rank]
+    pub b: &'a wgpu::Buffer, // [out_dim, rank]; packed f16 pairs in u32 if `b_is_f16`
     pub z: &'a wgpu::Buffer, // [rank] scratch
     pub rank: u32,
     pub scale: f32, // alpha / rank
+    /// When true, `b` is stored as packed f16 (two elements per u32)
+    /// and the forward-correction dispatch routes through
+    /// `lora_matmul_fused_f16b` instead of `lora_matmul_fused`.
+    /// Currently set only for the lm_head global LoRA slot, where the
+    /// `vocab × rank` matrix dominates LoRA bandwidth.
+    pub b_is_f16: bool,
 }
 
 /// Per-layer progress callback fired between encoder submits during
@@ -1838,22 +1844,26 @@ impl Forward {
             let vocab = self.cfg.vocab_size as usize;
             // Fused: z = A_lmh · norm_x; logits += scale · B_lmh · z.
             // One dispatch instead of two; slot.z is still written for
-            // the backward path to consume.
-            lora_matmul_fused_chained(
-                &self.ctx,
-                &self.pipes,
-                &mut enc,
-                lmh.a,
-                lmh.b,
-                &self.norm_x,
-                &self.logits,
-                lmh.z,
-                d_model,
-                vocab,
-                lmh.rank as usize,
-                lmh.scale,
-                true,
-            );
+            // the backward path to consume. When the inference adapter
+            // packed B as f16 (vocab × rank ≈ 16 MB → 8 MB), route
+            // through the packed-f16 kernel; otherwise use the f32
+            // variant. Training never sets `b_is_f16` so the backward
+            // path (which reads B as f32) stays correct by construction.
+            if lmh.b_is_f16 {
+                crate::backend::dispatch::lora_matmul_fused_f16b_chained(
+                    &self.ctx, &self.pipes, &mut enc,
+                    lmh.a, lmh.b, &self.norm_x, &self.logits, lmh.z,
+                    d_model, vocab, lmh.rank as usize,
+                    lmh.scale, true,
+                );
+            } else {
+                lora_matmul_fused_chained(
+                    &self.ctx, &self.pipes, &mut enc,
+                    lmh.a, lmh.b, &self.norm_x, &self.logits, lmh.z,
+                    d_model, vocab, lmh.rank as usize,
+                    lmh.scale, true,
+                );
+            }
             self.ctx.queue.submit(Some(enc.finish()));
             enc = self
                 .ctx

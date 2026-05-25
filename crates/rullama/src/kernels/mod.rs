@@ -86,5 +86,6 @@ pub const LORA_EMBED_COL_READ: &str = include_str!("wgsl/lora_embed_col_read.wgs
 pub const LORA_EMBED_COL_SCATTER_ADD: &str =
     include_str!("wgsl/lora_embed_col_scatter_add.wgsl");
 pub const LORA_MATMUL_FUSED: &str = include_str!("wgsl/lora_matmul_fused.wgsl");
+pub const LORA_MATMUL_FUSED_F16B: &str = include_str!("wgsl/lora_matmul_fused_f16b.wgsl");
 pub const ADAM_STEP: &str = include_str!("wgsl/adam_step.wgsl");
 pub const SUM_OF_SQUARES: &str = include_str!("wgsl/sum_of_squares.wgsl");
