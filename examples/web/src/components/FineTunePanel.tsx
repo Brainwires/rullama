@@ -23,6 +23,10 @@ import {
     type TrainingStepReport, type AdapterListEntry,
 } from "@/lib/inference";
 import { generateSyntheticDataset, examplesToJsonl } from "@/lib/syntheticDataset";
+import {
+    saveDataset, loadDataset, deleteDataset, listSavedDatasets, normalizeDatasetName,
+    type SavedDatasetMeta,
+} from "@/lib/datasetStore";
 import { useToast } from "@/lib/toast";
 import type { ModelStatus } from "@/components/ModelLoader";
 import { TrainingProgress, type TrainingProgressState } from "@/components/TrainingProgress";
@@ -1170,11 +1174,12 @@ function DatasetCard(props: {
     // Input mode tabs. "generate" is the default — it uses the loaded
     // inference model to expand a one-sentence behavior description
     // into a full training dataset, which is what most users want.
-    // The other three are escape hatches: "file" drops a .jsonl;
+    // The other four are escape hatches: "saved" lists OPFS-backed
+    // datasets the user previously saved; "file" drops a .jsonl;
     // "paste" dumps raw JSONL into a textarea; "build" gives a
-    // prompt + completion form for hand-written examples. All four
+    // prompt + completion form for hand-written examples. All five
     // feed the same `examples` state.
-    const [mode, setMode] = useState<"generate" | "file" | "paste" | "build">("generate");
+    const [mode, setMode] = useState<"generate" | "saved" | "file" | "paste" | "build">("generate");
     const [pasteText, setPasteText] = useState("");
     const [buildPrompt, setBuildPrompt] = useState("");
     const [buildCompletion, setBuildCompletion] = useState("");
@@ -1187,6 +1192,36 @@ function DatasetCard(props: {
     const [genResult, setGenResult] = useState<{ jsonl: string; counts: { paraphrases: number; categories: number; anchorExamples: number }; fellBackToStaticAnchors: boolean } | null>(null);
     const [genError, setGenError] = useState<string | null>(null);
     const genAbortRef = useRef<AbortController | null>(null);
+    // Saved-tab state. The list is populated on demand (when the
+    // user clicks Saved); a refresh button below re-pulls. saveName
+    // / savePromptOpen drive the inline "Save current as…" affordance
+    // that appears below the example list when examples > 0.
+    const [savedList, setSavedList] = useState<SavedDatasetMeta[] | null>(null);
+    const [savedLoading, setSavedLoading] = useState(false);
+    const [savedError, setSavedError] = useState<string | null>(null);
+    const [savePromptOpen, setSavePromptOpen] = useState(false);
+    const [saveName, setSaveName] = useState("");
+    const [saveBusy, setSaveBusy] = useState(false);
+    const refreshSaved = useCallback(async () => {
+        setSavedLoading(true);
+        setSavedError(null);
+        try {
+            const list = await listSavedDatasets();
+            setSavedList(list);
+        } catch (e) {
+            setSavedError((e as Error).message);
+            setSavedList([]);
+        } finally {
+            setSavedLoading(false);
+        }
+    }, []);
+    // Refresh on first entry to the Saved tab — avoids a stale
+    // "empty" placeholder after the user saved something elsewhere.
+    useEffect(() => {
+        if (mode === "saved" && savedList === null) {
+            void refreshSaved();
+        }
+    }, [mode, savedList, refreshSaved]);
     // When non-null, the build form is editing an existing example
     // (loaded into prompt/completion fields). Clicking "Update"
     // replaces that index instead of appending; "Cancel" drops edit
@@ -1253,7 +1288,7 @@ function DatasetCard(props: {
                     rest of the card (preview, token-length validate,
                     histogram) works uniformly. */}
                 <div className="flex gap-1 rounded-md border border-border bg-muted/30 p-0.5">
-                    {(["generate", "file", "paste", "build"] as const).map((m) => (
+                    {(["generate", "saved", "file", "paste", "build"] as const).map((m) => (
                         <button
                             key={m}
                             type="button"
@@ -1266,10 +1301,107 @@ function DatasetCard(props: {
                                     : "text-muted-foreground hover:bg-background/50",
                             )}
                         >
-                            {m === "generate" ? "Generate" : m === "file" ? "Upload" : m === "paste" ? "Paste" : "Build"}
+                            {m === "generate" ? "Generate"
+                                : m === "saved" ? "Saved"
+                                : m === "file" ? "Upload"
+                                : m === "paste" ? "Paste"
+                                : "Build"}
                         </button>
                     ))}
                 </div>
+
+                {mode === "saved" && (
+                    <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                            <div className="text-xs text-muted-foreground">
+                                Datasets you've saved in this browser (OPFS-backed,
+                                survives reloads, scoped to this origin).
+                            </div>
+                            <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => void refreshSaved()}
+                                disabled={savedLoading}
+                                className="gap-1 text-[11px]"
+                            >
+                                <RefreshCw className={cn("size-3", savedLoading && "animate-spin")} />
+                                Refresh
+                            </Button>
+                        </div>
+                        {savedError && (
+                            <div className="rounded border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive">
+                                {savedError}
+                            </div>
+                        )}
+                        {savedList && savedList.length === 0 && !savedLoading && (
+                            <div className="rounded border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+                                No saved datasets yet. Save the current one from
+                                the action bar that appears below the example list
+                                once a dataset is loaded.
+                            </div>
+                        )}
+                        {savedList && savedList.length > 0 && (
+                            <div className="max-h-72 space-y-1 overflow-y-auto rounded border border-border bg-muted/20 p-1.5">
+                                {savedList.map((row) => (
+                                    <div
+                                        key={row.name}
+                                        className="group flex items-center justify-between gap-2 rounded bg-background/60 p-2 text-xs"
+                                    >
+                                        <div className="min-w-0 flex-1">
+                                            <div className="truncate font-medium text-foreground">{row.name}</div>
+                                            <div className="text-[11px] text-muted-foreground">
+                                                {row.lineCount} example{row.lineCount === 1 ? "" : "s"}
+                                                {" · "}
+                                                {(row.size / 1024).toFixed(1)} KB
+                                                {" · "}
+                                                {new Date(row.lastModified).toLocaleString()}
+                                            </div>
+                                        </div>
+                                        <div className="flex shrink-0 gap-1">
+                                            <Button
+                                                size="sm"
+                                                variant="ghost"
+                                                onClick={async () => {
+                                                    try {
+                                                        const jsonl = await loadDataset(row.name);
+                                                        // Route through the same paste-text path that the
+                                                        // Paste/Generate tabs use — guarantees identical
+                                                        // parse + dedup + token-validation behavior.
+                                                        props.onPasteText(jsonl);
+                                                        setPasteText(jsonl);
+                                                        setMode("paste");
+                                                    } catch (e) {
+                                                        setSavedError(`Load failed: ${(e as Error).message}`);
+                                                    }
+                                                }}
+                                                className="h-7 text-[11px]"
+                                            >
+                                                Load
+                                            </Button>
+                                            <button
+                                                type="button"
+                                                onClick={async () => {
+                                                    if (!window.confirm(`Delete saved dataset "${row.name}"?`)) return;
+                                                    try {
+                                                        await deleteDataset(row.name);
+                                                        await refreshSaved();
+                                                    } catch (e) {
+                                                        setSavedError(`Delete failed: ${(e as Error).message}`);
+                                                    }
+                                                }}
+                                                className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                                                aria-label={`Delete ${row.name}`}
+                                                title="Delete"
+                                            >
+                                                <Trash2 className="size-3" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
 
                 {mode === "file" && (
                     <>
@@ -1546,9 +1678,84 @@ function DatasetCard(props: {
                 )}
                 {props.examples.length > 0 && (
                     <>
-                        <Button size="sm" variant="secondary" onClick={props.onValidate} className="gap-1">
-                            <Activity className="size-3" /> Tokenise + validate
-                        </Button>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <Button size="sm" variant="secondary" onClick={props.onValidate} className="gap-1">
+                                <Activity className="size-3" /> Tokenise + validate
+                            </Button>
+                            {!savePromptOpen && (
+                                <Button
+                                    size="sm"
+                                    variant="secondary"
+                                    onClick={() => {
+                                        // Suggest a name from the current dataset if it
+                                        // has one; otherwise blank for the user to fill.
+                                        setSaveName(props.datasetName ?? "");
+                                        setSavePromptOpen(true);
+                                    }}
+                                    className="gap-1"
+                                >
+                                    <Save className="size-3" /> Save dataset
+                                </Button>
+                            )}
+                        </div>
+                        {savePromptOpen && (
+                            <div className="flex flex-wrap items-center gap-2 rounded border border-border bg-muted/20 p-2">
+                                <Input
+                                    value={saveName}
+                                    onChange={(e) => setSaveName(e.target.value)}
+                                    placeholder="dataset name"
+                                    className="h-8 flex-1 min-w-32 text-xs"
+                                    disabled={saveBusy}
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Escape") {
+                                            setSavePromptOpen(false);
+                                            setSaveName("");
+                                        }
+                                    }}
+                                />
+                                <Button
+                                    size="sm"
+                                    onClick={async () => {
+                                        const name = normalizeDatasetName(saveName);
+                                        if (!name) return;
+                                        setSaveBusy(true);
+                                        try {
+                                            const jsonl = props.examples.map((ex) => JSON.stringify({
+                                                prompt: ex.prompt,
+                                                completion: ex.completion,
+                                            })).join("\n");
+                                            await saveDataset(name, jsonl);
+                                            setSavePromptOpen(false);
+                                            setSaveName("");
+                                            // Invalidate the list so a future
+                                            // visit to the Saved tab pulls the
+                                            // refreshed contents.
+                                            setSavedList(null);
+                                        } catch (e) {
+                                            setSavedError(`Save failed: ${(e as Error).message}`);
+                                        } finally {
+                                            setSaveBusy(false);
+                                        }
+                                    }}
+                                    disabled={saveBusy || !normalizeDatasetName(saveName)}
+                                    className="h-8"
+                                >
+                                    {saveBusy ? "Saving…" : "Save"}
+                                </Button>
+                                <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => {
+                                        setSavePromptOpen(false);
+                                        setSaveName("");
+                                    }}
+                                    disabled={saveBusy}
+                                    className="h-8"
+                                >
+                                    Cancel
+                                </Button>
+                            </div>
+                        )}
                         {histogram && (
                             <div className="space-y-1">
                                 <div className="text-xs text-muted-foreground">
