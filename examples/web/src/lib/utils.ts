@@ -25,7 +25,7 @@ export function fmtEta(seconds: number | undefined | null): string {
     // Seconds visible only below 3 minutes; past that the second-level
     // precision is noise for a multi-minute ETA and just makes the
     // label jitter.
-    if (s < 180)   return `${Math.floor(s / 60)}m ${s % 60}s`;
+    if (s < 180)   return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
     if (s < 3600)  return `${Math.floor(s / 60)}m`;
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
