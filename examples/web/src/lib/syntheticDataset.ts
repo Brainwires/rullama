@@ -154,16 +154,38 @@ async function generateOne(
             next = await client.step(promptIds[i]);
         }
         // Now greedily emit `maxTokens` tokens, decoding as we go.
+        // tokenStr() returns the raw SentencePiece form — U+2581 (▁)
+        // marks word boundaries instead of a literal space. Translate
+        // back to spaces so the parsers + the final JSONL see normal
+        // human text (otherwise prompts come out as "What▁is▁the▁best…"
+        // which doesn't tokenize to the same sequence at training time).
         let out = "";
         for (let i = 0; i < maxTokens; i++) {
             if (signal?.aborted) throw new Error("aborted");
             if (await client.isEos(next)) break;
             const str = await client.tokenStr(next);
-            if (str != null) out += str;
+            if (str != null) out += str.replace(/▁/g, " ");
             next = await client.step(next);
         }
         return out;
     }, signal);
+}
+
+/** Pull the content tokens out of the user's target completion.
+ *  Used to detect anchor rows whose model-generated completion would
+ *  contradict the trained answer (e.g. "What is my preferred food? →
+ *  garlic" leaking back into anchors that should be unrelated). Pure
+ *  length-based filter — no stopword list — so this works on any
+ *  whitespace-tokenized script (English, French, Japanese romaji, etc.).
+ *  Words ≤3 chars are conjunctions/articles in most languages and are
+ *  not specific enough to constitute "the trained noun". */
+function extractContentWords(text: string): Set<string> {
+    return new Set(
+        text
+            .toLowerCase()
+            .split(/[\s\p{P}\p{S}]+/u)
+            .filter((w) => w.length >= 4),
+    );
 }
 
 // ── Parsers ─────────────────────────────────────────────────────────
@@ -258,6 +280,20 @@ export async function generateSyntheticDataset(
         categories = [];
     }
 
+    // Content words from the user's target — used to drop anchor rows
+    // whose model-generated completion would CONTRADICT the trained
+    // answer. Without this, the e2b model sometimes proposes anchors
+    // like "What is my preferred food? → garlic" which would actively
+    // train the model to apply garlic everywhere food is mentioned.
+    const targetContentWords = extractContentWords(completion);
+    const anchorContaminated = (a: DatasetExample): boolean => {
+        const completionWords = extractContentWords(a.completion);
+        for (const w of completionWords) {
+            if (targetContentWords.has(w)) return true;
+        }
+        return false;
+    };
+
     // ── Step 3: expand each category (one inference call per category).
     const anchorRows: DatasetExample[] = [];
     let fellBack = false;
@@ -279,11 +315,19 @@ export async function generateSyntheticDataset(
                 const parsed = parseExpansion(text);
                 // Also keep the category's own example as one of the
                 // anchor rows — it's free, no extra inference cost.
-                anchorRows.push({
-                    prompt: cat.exampleQ,
-                    completion: cat.exampleA.startsWith(" ") ? cat.exampleA : ` ${cat.exampleA}`,
-                });
-                anchorRows.push(...parsed);
+                const candidates: DatasetExample[] = [
+                    {
+                        prompt: cat.exampleQ,
+                        completion: cat.exampleA.startsWith(" ") ? cat.exampleA : ` ${cat.exampleA}`,
+                    },
+                    ...parsed,
+                ];
+                // Drop contaminated rows BEFORE pushing — keeps the
+                // anchor count honest for the fallback threshold check
+                // below (we'd otherwise count junk rows as "enough").
+                for (const c of candidates) {
+                    if (!anchorContaminated(c)) anchorRows.push(c);
+                }
             } catch (e) {
                 if ((e as Error).message === "aborted") throw e;
                 // eslint-disable-next-line no-console
@@ -292,11 +336,16 @@ export async function generateSyntheticDataset(
         }
     }
     if (anchorRows.length < 8) {
-        // Backstop: the model produced too few usable anchor rows.
-        // Fold in enough from the static library to get to ~16 total.
+        // Backstop: the model produced too few usable anchor rows
+        // (after contamination filtering). Fold in enough from the
+        // static library to get to ~16 total. Filter the static
+        // library too in case the user's target overlaps it (e.g.
+        // user trains "the capital of France is Garlic" — the
+        // Paris anchor would now contradict).
         fellBack = true;
         const need = Math.max(0, 16 - anchorRows.length);
-        anchorRows.push(...STATIC_ANCHORS.slice(0, need));
+        const safeStatic = STATIC_ANCHORS.filter((a) => !anchorContaminated(a));
+        anchorRows.push(...safeStatic.slice(0, need));
     }
 
     // ── Assemble the JSONL.
