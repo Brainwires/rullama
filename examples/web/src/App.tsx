@@ -220,6 +220,14 @@ export function App() {
     // own tab so it doesn't compete with chat content for screen
     // real-estate on small displays.
     const [historyOpen, setHistoryOpen] = usePersistedState<boolean>("ui.historyOpen", false);
+    // Fine-tune view's right sidebar (hyperparameter settings column).
+    // Defaults open the first time — discoverability — and persists
+    // the user's last choice across reloads.
+    const [fineTuneSettingsOpen, setFineTuneSettingsOpen] = usePersistedState<boolean>("ui.fineTuneSettingsOpen", true);
+    // DOM mount point for FineTunePanel's portal-rendered settings
+    // column. useState (not useRef) so the ref-callback re-renders
+    // FineTunePanel with the now-non-null host on mount.
+    const [fineTuneSettingsEl, setFineTuneSettingsEl] = useState<HTMLDivElement | null>(null);
 
     // Persisted tunables.
     const [systemPrompt, setSystemPrompt] = usePersistedState<string>("systemPrompt", DEFAULT_SYSTEM_PROMPT);
@@ -2144,9 +2152,10 @@ export function App() {
                 leftOpen={view === "chat" && historyOpen}
                 onToggleLeft={setHistoryOpen}
                 leftWidth={280}
-                // Left sidebar (conversation list) is chat-specific —
-                // hide on Fine-tune and Settings tabs. The right
-                // sidebar is gone entirely now that Settings is a tab.
+                // Left sidebar (conversation list) is chat-specific.
+                // Right sidebar (fine-tune hyperparameter settings) is
+                // fine-tune-specific. Each tab gets the chevron toggle
+                // it needs, hidden on the other tabs.
                 leftSidebar={
                     view === "chat" ? (
                         <ConversationList
@@ -2158,12 +2167,25 @@ export function App() {
                         />
                     ) : undefined
                 }
+                rightOpen={view === "finetune" && fineTuneSettingsOpen}
+                onToggleRight={setFineTuneSettingsOpen}
+                rightWidth={340}
+                rightSidebar={
+                    view === "finetune" ? (
+                        // The ref-callback runs on mount and pushes the
+                        // DOM element up into App state — that triggers
+                        // a FineTunePanel re-render which then portals
+                        // its settings column into this div.
+                        <div ref={setFineTuneSettingsEl} className="h-full" />
+                    ) : undefined
+                }
             >
                 {view === "finetune" ? (
                     <FineTunePanel
                         modelStatus={modelStatus}
                         activeAdapter={activeAdapter}
                         onAdapterChanged={setActiveAdapter}
+                        settingsHostEl={fineTuneSettingsEl}
                     />
                 ) : view === "settings" ? (
                     // Centered max-width wrapper so the form controls

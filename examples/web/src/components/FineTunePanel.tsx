@@ -5,6 +5,7 @@
 // complete / error — each with its own affordance, never a fallback.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,6 +49,12 @@ interface Props {
     modelStatus: ModelStatus;
     activeAdapter: string | null;
     onAdapterChanged?: (name: string | null) => void;
+    /** Optional DOM host for the hyperparameter settings column. When
+     *  provided, the right column renders via React portal INTO this
+     *  element — usually App.tsx's DualSidebarLayout rightSidebar slot,
+     *  so the user can collapse it. When null/undefined the column
+     *  renders inline as a second grid column (the legacy layout). */
+    settingsHostEl?: HTMLElement | null;
 }
 
 interface ParsedExample { prompt: string; completion: string }
@@ -222,7 +229,7 @@ function parseJsonl(text: string): { examples: ParsedExample[]; errors: string[]
     return { examples, errors };
 }
 
-export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: Props) {
+export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged, settingsHostEl }: Props) {
     const toast = useFineTuneToasts();
     const client = useMemo(() => getClient(), []);
 
@@ -908,6 +915,78 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
         ? Math.min(100, (recent.length / Math.max(1, stepsBudget)) * 100)
         : 0;
 
+    // The hyperparameter / settings column. Rendered EITHER inline in
+    // the panel's right grid column (legacy / standalone use) OR via
+    // portal into App.tsx's DualSidebarLayout rightSidebar slot when
+    // a `settingsHostEl` is supplied. Either way it consumes the same
+    // FineTunePanel-local state, so no lifting required.
+    const settingsColumn = (
+        <div className="flex min-w-0 flex-col gap-4 p-4">
+            <div className="flex items-center justify-between gap-2">
+                <div className="text-xs text-muted-foreground">
+                    Hyperparameters
+                </div>
+                {/* One-click escape hatch for users who fiddle and
+                 *  get lost. With the May-24 aggressive cleanup,
+                 *  the defaults ALREADY equal these values — this
+                 *  button is the safety net + living documentation
+                 *  of "what known-working values are". */}
+                <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={isTraining}
+                    onClick={() => {
+                        setLora({
+                            rank: 16,
+                            alpha: 32,
+                            dropout: 0.05,
+                            target_modules: [...ALL_TARGETS],
+                        });
+                        setHp((cur) => ({
+                            ...cur,
+                            learning_rate: 2e-4,
+                            max_seq_len: 64,
+                            max_grad_norm: 1.0,
+                            loss_mode: "per_position",
+                            warmup_steps: 0,
+                            gradient_accumulation_steps: 1,
+                            gradient_checkpointing: true,
+                        }));
+                        setStepsBudget(80);
+                        if (memoryTight) {
+                            setMemoryTight(false);
+                        }
+                        toast.info("Reset to canonical recipe");
+                    }}
+                    className="gap-1 text-[11px]"
+                    title="Reset all hyperparameters to the verified recipe (rank=16, α=32, all 9 targets, lr=2e-4, PerPosition, 80 steps)."
+                >
+                    <RefreshCw className="size-3" /> Reset to canonical
+                </Button>
+            </div>
+            <MemoryTightToggle
+                on={memoryTight}
+                onChange={applyMemoryTight}
+                disabled={isTraining}
+            />
+            <ObjectiveCard
+                hp={hp} setHp={setHp}
+                stepsBudget={stepsBudget} setStepsBudget={setStepsBudget}
+                disabled={isTraining}
+                seqLenLocked={memoryTight}
+            />
+            <LoraShapeCard
+                lora={lora} setLora={setLora}
+                estimated={estimatedAdapterMB}
+                disabled={isTraining || memoryTight}
+            />
+            <AdvancedCard
+                hp={hp} setHp={setHp}
+                disabled={isTraining}
+            />
+        </div>
+    );
+
     return (
         <div className="flex h-full min-h-0 flex-col overflow-hidden">
             {/* Status banner: which adapter is active in chat. */}
@@ -919,7 +998,18 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                 </div>
             )}
 
-            <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 md:grid-cols-[1fr_320px]">
+            {/* Layout note: the right (settings) column ALWAYS renders
+             *  via the `settingsColumn` JSX below — either inline as
+             *  the grid's second column (when no settingsHostEl is
+             *  provided, e.g. component used standalone) OR via React
+             *  portal into App.tsx's DualSidebarLayout rightSidebar
+             *  slot (when settingsHostEl is supplied, enabling the
+             *  user to collapse it). Both paths render the SAME JSX
+             *  from the same state — no duplication. */}
+            <div className={cn(
+                "grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto p-4",
+                !settingsHostEl && "md:grid-cols-[1fr_320px]",
+            )}>
                 {/* ─── Left: dataset workspace + live training panel ─── */}
                 <div className="flex min-w-0 flex-col gap-4">
                     {!isTraining && phase !== "done" && (
@@ -977,76 +1067,10 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                     )}
                 </div>
 
-                {/* ─── Right: hyperparams + actions ─── */}
-                <div className="flex min-w-0 flex-col gap-4">
-                    <div className="flex items-center justify-between gap-2">
-                        <div className="text-xs text-muted-foreground">
-                            Hyperparameters
-                        </div>
-                        {/* One-click escape hatch for users who fiddle and
-                         *  get lost. With the May-24 aggressive cleanup,
-                         *  the defaults ALREADY equal these values — this
-                         *  button is the safety net + living documentation
-                         *  of "what known-working values are". */}
-                        <Button
-                            size="sm"
-                            variant="ghost"
-                            disabled={isTraining}
-                            onClick={() => {
-                                setLora({
-                                    rank: 16,
-                                    alpha: 32,
-                                    dropout: 0.05,
-                                    target_modules: [...ALL_TARGETS],
-                                });
-                                setHp((cur) => ({
-                                    ...cur,
-                                    learning_rate: 2e-4,
-                                    max_seq_len: 64,
-                                    max_grad_norm: 1.0,
-                                    loss_mode: "per_position",
-                                    warmup_steps: 0,
-                                    gradient_accumulation_steps: 1,
-                                    gradient_checkpointing: true,
-                                }));
-                                setStepsBudget(80);
-                                if (memoryTight) {
-                                    // Resetting to canonical disables the
-                                    // Memory-tight lock (otherwise the user
-                                    // would see the canonical values for
-                                    // half a second then watch the preset
-                                    // override them).
-                                    setMemoryTight(false);
-                                }
-                                toast.info("Reset to canonical recipe");
-                            }}
-                            className="gap-1 text-[11px]"
-                            title="Reset all hyperparameters to the verified recipe (rank=16, α=32, all 9 targets, lr=2e-4, PerPosition, 80 steps)."
-                        >
-                            <RefreshCw className="size-3" /> Reset to canonical
-                        </Button>
-                    </div>
-                    <MemoryTightToggle
-                        on={memoryTight}
-                        onChange={applyMemoryTight}
-                        disabled={isTraining}
-                    />
-                    <ObjectiveCard
-                        hp={hp} setHp={setHp}
-                        stepsBudget={stepsBudget} setStepsBudget={setStepsBudget}
-                        disabled={isTraining}
-                        seqLenLocked={memoryTight}
-                    />
-                    <LoraShapeCard
-                        lora={lora} setLora={setLora}
-                        estimated={estimatedAdapterMB}
-                        disabled={isTraining || memoryTight}
-                    />
-                    <AdvancedCard
-                        hp={hp} setHp={setHp}
-                        disabled={isTraining}
-                    />
-                </div>
+                {/* Inline render path: only when no portal host is
+                 *  available. When `settingsHostEl` is provided, the
+                 *  portal block below mounts the SAME content there. */}
+                {!settingsHostEl && settingsColumn}
             </div>
 
             {/* ─── Sticky action bar ─── */}
@@ -1139,6 +1163,11 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged }: 
                     }}
                 />
             )}
+            {/* Portal-render the settings column into App.tsx's
+             *  DualSidebarLayout rightSidebar slot when a host element
+             *  is supplied. Reads from / writes to the same local
+             *  state as the inline path — they're the same JSX. */}
+            {settingsHostEl && createPortal(settingsColumn, settingsHostEl)}
         </div>
     );
 }
