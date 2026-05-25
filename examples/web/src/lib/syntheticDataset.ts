@@ -80,13 +80,7 @@ const TARGET_PARAPHRASE_COUNT = 20;
 const TARGET_CATEGORY_COUNT = 5;
 const PER_CATEGORY_EXAMPLE_COUNT = 5;
 const MAX_TOKENS_PARAPHRASE = 500;
-// 1200 (was 400) because the categories call runs with thinking mode
-// on — the model emits a chain-of-thought BEFORE the structured
-// output, and 400 tokens usually isn't enough to finish both phases.
-// Thinking content lives between the model's own internal tokens
-// and never enters the <cat>…</cat> tags the parser extracts, so
-// the extra budget is paid in latency, not in dataset contamination.
-const MAX_TOKENS_CATEGORIES = 1200;
+const MAX_TOKENS_CATEGORIES = 400;
 const MAX_TOKENS_EXPAND = 400;
 
 // ── Meta-prompts ────────────────────────────────────────────────────
@@ -434,9 +428,13 @@ export async function generateSyntheticDataset(
     // total estimate tightens for the remaining stages.
     tokensExpectedTotal = tokensExpectedTotal - MAX_TOKENS_PARAPHRASE + paraphraseTokens;
 
-    // ── Step 2: anchor categories — thinking mode ON.
+    // ── Step 2: anchor categories. Thinking mode was tried here (see
+    // commits 5ff956c → 1719c04 → measured in synth_categories example)
+    // but produced essentially the same categories at 2× latency on
+    // Gemma 4 e2b. The tighter prompt rewrite from 5ff956c does all
+    // the heavy lifting; thinking mode was redundant on top. Left off.
     currentState = "anchoring";
-    currentLabel = "Selecting anchor categories (with reasoning)…";
+    currentLabel = "Selecting anchor categories…";
     fireProgress(currentState, currentLabel);
     let categories: CategoryRow[] = [];
     let categoryTokens = 0;
@@ -446,10 +444,7 @@ export async function generateSyntheticDataset(
             client,
             categoriesPrompt(userBehavior),
             MAX_TOKENS_CATEGORIES,
-            {
-                thinking: true,
-                onToken: (n) => { categoryTokens = n; recordToken(n, baseBeforeCall); },
-            },
+            { onToken: (n) => { categoryTokens = n; recordToken(n, baseBeforeCall); } },
             signal,
         );
         categories = parseCategories(text);
