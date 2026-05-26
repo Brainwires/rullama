@@ -1169,6 +1169,40 @@ const RPC: Record<string, Handler> = {
         if (!model) throw new Error("load a model before starting training");
         if (trainingSession) throw new Error(
             "training already active — call trainingFinish() first");
+
+        // **iOS + multimodal model = guaranteed jetsam.** Even when
+        // vision/audio weights aren't GPU-resident (release returns
+        // 0 MB), the multimodal Model handle reserves tower
+        // scaffolding and runs with a larger default max_context
+        // (1024 vs the text-only loader's 512). On iOS that's
+        // already-tight memory budget territory before training adds
+        // its first backward-pipeline compile spike. The textOnly
+        // loader is the validated iPhone training path — see the
+        // CLAUDE.md "iPhone path skips vision/audio towers" note.
+        try {
+            const uaIos = /iPhone|iPad|iPod/i.test(self.navigator?.userAgent ?? "");
+            const isMM  = !!(model.hasVision || model.hasAudio);
+            if (uaIos && isMM) {
+                const err = new Error(
+                    "iPhone training requires the text-only loader. " +
+                    "Eject the current model and re-load it with text-only mode, " +
+                    "or use a model without vision/audio towers. " +
+                    "The multimodal Model handle reserves tower scaffolding plus a " +
+                    "larger KV cache that pushes the first training step over the " +
+                    "iOS WebContent process budget.",
+                );
+                logBeacon("error", "trn", "iPhone+multimodal refused — text-only loader required");
+                throw err;
+            }
+        } catch (e) {
+            // Only re-throw OUR typed error; if the UA check itself
+            // threw (e.g. self.navigator missing in a non-browser
+            // test env), swallow and continue — better to attempt
+            // training than block a non-iOS device on a false
+            // positive.
+            if ((e as Error).message?.startsWith("iPhone training requires")) throw e;
+        }
+
         const loraCfgJson = JSON.stringify(a.loraConfig ?? {});
         const hpJson      = JSON.stringify(a.hparams ?? {});
 
@@ -1347,6 +1381,11 @@ const RPC: Record<string, Handler> = {
         const lrBefore = s.lr;
         const onProgress = (phase: string, current: number, total: number) => {
             notify("trainingProgress", { phase, current, total, step: stepBefore, lr: lrBefore });
+            // Mirror to OPFS so a mid-step crash leaves an exact
+            // "last phase reached" trail. Beacons are sync OPFS
+            // writes (microseconds each); 70 per step at ~80 bytes
+            // is well inside the per-session 512 KiB cap.
+            logBeacon("info", "trn", `step ${stepBefore + 1} ${phase} ${current}/${total}`);
         };
         try {
             const result = lossMode === "per_position"
@@ -1390,10 +1429,12 @@ const RPC: Record<string, Handler> = {
         const s = requireTraining();
         const inputIds = a.inputIds as Uint32Array;
         const lossMode = String(a.lossMode ?? "next_token");
+        logBeacon("info", "trn", `fwdBwd ${s.stepNum + 1} start mode=${lossMode} inputLen=${inputIds.length}`);
         try {
             const loss = lossMode === "per_position"
                 ? await s.forwardBackwardPerPosition(inputIds, a.targets as Uint32Array)
                 : await s.forwardBackward(inputIds, Number(a.targetId));
+            logBeacon("info", "trn", `fwdBwd ${s.stepNum + 1} done loss=${typeof loss === "number" ? loss.toFixed(4) : String(loss)}`);
             // **A3 — NaN/Inf auto-halt.** Same rationale as in
             // `trainingStep`; this is the manual-accumulation entry
             // point and needs the same defence.
@@ -1406,6 +1447,7 @@ const RPC: Record<string, Handler> = {
             return { loss, step: s.stepNum, lr: s.lr };
         } catch (e) {
             log(`training: forwardBackward step ${s.stepNum} failed (lossMode=${lossMode}, inputLen=${inputIds.length}): ${(e as Error).message}`);
+            logBeacon("error", "trn", `fwdBwd ${s.stepNum + 1} threw: ${(e as Error).message}`);
             throw e;
         }
     },
