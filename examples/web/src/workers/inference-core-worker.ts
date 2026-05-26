@@ -1169,40 +1169,6 @@ const RPC: Record<string, Handler> = {
         if (!model) throw new Error("load a model before starting training");
         if (trainingSession) throw new Error(
             "training already active — call trainingFinish() first");
-
-        // **iOS + multimodal model = guaranteed jetsam.** Even when
-        // vision/audio weights aren't GPU-resident (release returns
-        // 0 MB), the multimodal Model handle reserves tower
-        // scaffolding and runs with a larger default max_context
-        // (1024 vs the text-only loader's 512). On iOS that's
-        // already-tight memory budget territory before training adds
-        // its first backward-pipeline compile spike. The textOnly
-        // loader is the validated iPhone training path — see the
-        // CLAUDE.md "iPhone path skips vision/audio towers" note.
-        try {
-            const uaIos = /iPhone|iPad|iPod/i.test(self.navigator?.userAgent ?? "");
-            const isMM  = !!(model.hasVision || model.hasAudio);
-            if (uaIos && isMM) {
-                const err = new Error(
-                    "iPhone training requires the text-only loader. " +
-                    "Eject the current model and re-load it with text-only mode, " +
-                    "or use a model without vision/audio towers. " +
-                    "The multimodal Model handle reserves tower scaffolding plus a " +
-                    "larger KV cache that pushes the first training step over the " +
-                    "iOS WebContent process budget.",
-                );
-                logBeacon("error", "trn", "iPhone+multimodal refused — text-only loader required");
-                throw err;
-            }
-        } catch (e) {
-            // Only re-throw OUR typed error; if the UA check itself
-            // threw (e.g. self.navigator missing in a non-browser
-            // test env), swallow and continue — better to attempt
-            // training than block a non-iOS device on a false
-            // positive.
-            if ((e as Error).message?.startsWith("iPhone training requires")) throw e;
-        }
-
         const loraCfgJson = JSON.stringify(a.loraConfig ?? {});
         const hpJson      = JSON.stringify(a.hparams ?? {});
 
@@ -1270,11 +1236,16 @@ const RPC: Record<string, Handler> = {
         // (`api.rs:330,343`) — `trainingStart` just never invoked them.
         // Pattern mirrors `releaseAllHandles()` below.
         try {
+            // releaseVision/AudioWeights return the number of GPU
+            // weight-cache ENTRIES dropped (one per tile/tensor) —
+            // not bytes. Each entry is on the order of MBs in
+            // practice (Q4_K tile, etc.), but we don't have an
+            // accurate byte sum here. Log entries-freed and let the
+            // user infer.
             const freedV = model.releaseVisionWeights?.() ?? 0;
             const freedA = model.releaseAudioWeights?.() ?? 0;
-            if (freedV > 0 || freedA > 0) {
-                log(`trainingStart: released ${(freedV / (1024 * 1024)).toFixed(0)}MB vision + ${(freedA / (1024 * 1024)).toFixed(0)}MB audio GPU weights before TrainingSession::new`);
-            }
+            log(`trainingStart: released ${freedV} vision + ${freedA} audio GPU cache entries before TrainingSession::new (plus per-tower scratch ~250 MB each if any was built)`);
+            logBeacon("info", "trn", `released vision=${freedV} audio=${freedA} cache entries`);
         } catch (e) {
             // Model lacks the methods (no multimodal towers in this
             // GGUF) or release threw — neither is fatal for training.
