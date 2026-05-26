@@ -3189,12 +3189,30 @@ impl Forward {
         let token_embd = wc.buffer_async("token_embd.weight").await?;
         let token_embd_dtype = wc.dtype("token_embd.weight")?;
 
-        // ===== Head: CE → output_proj_back → final norm back =====
+        // ===== Head: CE → output_proj_back → lm_head LoRA → final norm =====
+        //
+        // **iOS-tight invariant: one CommandEncoder per kernel group, with
+        // submit() boundaries between groups.** iOS Safari's Metal driver
+        // does lazy pipeline codegen — the kernel binary is compiled the
+        // first time the pipeline is bound for execution, not when
+        // `create_compute_pipeline` returns. If we pack 7+ never-before-
+        // dispatched training kernels into ONE submit, Metal must compile
+        // all of them before the GPU queue can run, and the transient
+        // memory spike on iOS WebContent is enough to trip jetsam (we
+        // observed this crash live: prefill completed cleanly but the
+        // first head-section dispatch hard-killed the tab).
+        //
+        // Splitting into per-group submits with `progress_cb` beacons in
+        // between gives Metal a chance to compile + reclaim transient
+        // memory one pipeline at a time, and gives the post-crash log
+        // a phase trail that pinpoints any future regression.
+
+        // ─── (1) Cross-entropy backward ──────────────────────────────
         let mut enc = self
             .ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("bwd.head"),
+                label: Some("bwd.head.ce"),
             });
 
         // d_logits + scalar loss — unless caller pre-populated
@@ -3211,8 +3229,18 @@ impl Forward {
                 target_id,
             );
         }
+        self.ctx.queue.submit(Some(enc.finish()));
+        if let Some(cb) = progress_cb {
+            cb("head_ce", 1, 4);
+        }
 
-        // d_norm_x_final = embedᵀ @ d_logits → write into scratch.d_hidden_final
+        // ─── (2) Output projection backward (embedᵀ · d_logits) ──────
+        let mut enc = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bwd.head.outproj"),
+            });
         match token_embd_dtype {
             GgmlDtype::Q6_K => matmul_q6_k_backward_input_chained(
                 &self.ctx,
@@ -3240,17 +3268,31 @@ impl Forward {
                 )));
             }
         }
+        self.ctx.queue.submit(Some(enc.finish()));
+        if let Some(cb) = progress_cb {
+            cb("head_outproj", 2, 4);
+        }
 
-        // ---- lm_head LoRA backward ----
+        // ─── (3) lm_head LoRA backward (optional) ────────────────────
         // Pattern mirrors the per-layer ffn_down backward (lines ~3875–3925):
         //   dB += s · d_logits ⊗ z       (z = A_lmh · norm_x captured in fwd)
         //   z  = Bᵀ · d_logits            (overwrites z with u)
         //   d_hidden_final += s · Aᵀ · u  (accumulates LoRA contribution to
         //                                   the gradient feeding rmsnorm_back)
         //   dA += s · u ⊗ norm_x_final
+        //
+        // Submitted as its own encoder + submit so the lora_outer_add and
+        // lora_matmul_col pipelines compile independently of the CE +
+        // out-proj kernels above.
         if let (Some(g), Some(gg)) = (globals, global_grads)
             && let (Some(slot), Some(d_pair)) = (g.lm_head.as_ref(), gg.lm_head.as_ref())
         {
+            let mut enc = self
+                .ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("bwd.head.lm_head_lora"),
+                });
             let r = slot.rank as usize;
             let s = slot.scale;
             // dB += s · d_logits ⊗ z (shape [vocab, rank])
@@ -3306,8 +3348,19 @@ impl Forward {
                 s,
                 true,
             );
+            self.ctx.queue.submit(Some(enc.finish()));
+        }
+        if let Some(cb) = progress_cb {
+            cb("head_lm_head_lora", 3, 4);
         }
 
+        // ─── (4) Final rmsnorm backward ──────────────────────────────
+        let mut enc = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bwd.head.rmsnorm"),
+            });
         // d_hidden (running, top-of-stack) = rmsnorm_back(self.hidden,
         // output_norm.weight, d_norm_x_final).
         rmsnorm_backward_chained(
@@ -3322,8 +3375,10 @@ impl Forward {
             eps,
             true,
         );
-
         self.ctx.queue.submit(Some(enc.finish()));
+        if let Some(cb) = progress_cb {
+            cb("head_rmsnorm", 4, 4);
+        }
 
         let trace_hidden = std::env::var("RULLAMA_TRACE_DHIDDEN").is_ok();
         // Adaptive max-abs clip on d_hidden between layers. Defaults to
