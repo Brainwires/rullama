@@ -3185,6 +3185,41 @@ impl Forward {
 
         // Fetch top-level frozen weights.
         let wc = self.wcache.clone();
+
+        // **iOS peak-memory cut at the forward→backward boundary.** The
+        // forward pass caches every one of the 35 layers' dequantized
+        // f32 weight tiles (`blk.{i}.*`) in the GPU WeightCache, and the
+        // cache never evicts. By the time backward starts, that resident
+        // set + KV cache + per-layer activation captures + the backward
+        // scratch/pipelines crosses iOS Safari's ~3-4 GB WebContent
+        // ceiling, and jetsam kills the tab during the very first
+        // backward dispatch (observed live: forward prefill completes,
+        // then the tab dies before the first `head_ce` beacon).
+        //
+        // Drop the layer weights now. Backward only walks layers down to
+        // `backward_layer_floor` and re-fetches each layer's weights via
+        // the same lazy `buffer_async` path as it goes (gradient-
+        // checkpointing recompute already re-reads them), so resident
+        // weight memory during backward drops from "all 35 layers" to
+        // "~1-2 layers at a time". Head weights (`output_norm`,
+        // `token_embd`, `per_layer_*`) don't match the `blk.` prefix and
+        // stay cached for the head section immediately below. Native
+        // (Mac) has effectively unbounded VRAM so this only matters on
+        // iOS; the re-fetch cost is acceptable next to a hard crash.
+        // Mirrors the `drop_prefix` eviction precedent in
+        // `api::release_vision_weights_native`.
+        let dropped = wc.drop_prefix("blk.");
+        #[cfg(target_arch = "wasm32")]
+        if dropped > 0 {
+            web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
+                "[bwd] evicted {dropped} layer weight tiles before backward (iOS peak-memory cut)"
+            )));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if dropped > 0 && std::env::var("RULLAMA_TRACE_EVICT").is_ok() {
+            eprintln!("[bwd] evicted {dropped} layer weight tiles before backward");
+        }
+
         let final_norm = wc.buffer_async("output_norm.weight").await?;
         let token_embd = wc.buffer_async("token_embd.weight").await?;
         let token_embd_dtype = wc.dtype("token_embd.weight")?;
