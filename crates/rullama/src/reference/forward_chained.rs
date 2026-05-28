@@ -3196,19 +3196,39 @@ impl Forward {
         // backward dispatch (observed live: forward prefill completes,
         // then the tab dies before the first `head_ce` beacon).
         //
-        // Drop the layer weights now. Backward only walks layers down to
-        // `backward_layer_floor` and re-fetches each layer's weights via
-        // the same lazy `buffer_async` path as it goes (gradient-
-        // checkpointing recompute already re-reads them), so resident
-        // weight memory during backward drops from "all 35 layers" to
-        // "~1-2 layers at a time". Head weights (`output_norm`,
-        // `token_embd`, `per_layer_*`) don't match the `blk.` prefix and
-        // stay cached for the head section immediately below. Native
-        // (Mac) has effectively unbounded VRAM so this only matters on
-        // iOS; the re-fetch cost is acceptable next to a hard crash.
-        // Mirrors the `drop_prefix` eviction precedent in
-        // `api::release_vision_weights_native`.
-        let dropped = wc.drop_prefix("blk.");
+        // Destroy the layer weights now — and this MUST be a real
+        // `destroy()`, not a handle-drop. A plain `drop_prefix("blk.")`
+        // only releases the Rust `wgpu::Buffer` handles; on iOS Safari
+        // WebGPU the ~1417 MiB of `GPUBuffer` memory stays physically
+        // resident until GC, which never runs inside a synchronous
+        // training step. The on-device beacon trail proved it: forward
+        // peaked at gpuMiB=1417, the head then fetched `token_embd`
+        // (~637 MiB) on top of those un-reclaimed buffers, and the tab
+        // jetsam'd at the head section (~2 GB real RSS) — even though our
+        // *tracked* counter had dropped to 668. Handle-drop lies to the
+        // accountant; it doesn't free iOS RSS.
+        //
+        // `destroy()` here is safe specifically because we're at a
+        // GPU-idle point: the forward's final act was
+        // `read_back_f32(&self.logits_read).await` (logits readback),
+        // whose `map_async` only resolves after every prior submit —
+        // including the last layer — has completed. No in-flight command
+        // references `blk.*` at this instant. (The use-after-destroy we
+        // hit before was destroying at the *head→backward* transition,
+        // where the just-submitted head dispatches were still pending;
+        // that's a different, later point. The head reads `token_embd` /
+        // `output_norm` / `per_layer_*` — none match `blk.` — so
+        // destroying the block weights here cannot pull a buffer out from
+        // under a pending head submit.)
+        //
+        // Backward only walks down to `backward_layer_floor` and the
+        // gradient-checkpointing recompute re-fetches each layer's
+        // weights via `buffer_async` as it goes, so the resident set
+        // during backward is "~1-2 layers at a time" on a base that has
+        // ACTUALLY been reclaimed — peak ~1.1 GB instead of ~2 GB.
+        // Native (Mac) has unbounded VRAM so destroy-vs-drop is moot
+        // there; the re-fetch cost is acceptable next to a hard crash.
+        let dropped = wc.drop_prefix_destroy("blk.");
         #[cfg(target_arch = "wasm32")]
         if dropped > 0 {
             web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(

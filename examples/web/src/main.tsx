@@ -56,6 +56,12 @@ if (typeof window !== "undefined" && new URLSearchParams(window.location.search)
             return await client.logs.read(target);
         },
         runRepro:   async () => {
+            // Number of training steps to drive. The interesting failure
+            // is NOT step 1 (that completes) — it's whether step N+1
+            // survives after step N destroy()'d the weight cache. Drive
+            // several steps so the cross-step iOS reclaim window is
+            // actually exercised.
+            const NUM_STEPS = 5;
             try {
                 // 1. Discover model.
                 state.phase = "discovering";
@@ -81,17 +87,14 @@ if (typeof window !== "undefined" && new URLSearchParams(window.location.search)
                 await client.acquireSession();
                 state.sessionStarted = true;
 
-                // 4. Download (~7 GB). Prefer the Cloudflare R2 CDN URL
-                //    (fast, off the iPhone's own WiFi internet) over the
-                //    Mac-served /api/blob (slow Wireless-N LAN leg). R2
-                //    CORS must allow this origin — see api.ts R2_HOST.
+                // 4. Download (~7 GB). TEST-ONLY: pull from the Mac-served
+                //    /api/blob over the bridged 10.42.0.x LAN, NOT the R2
+                //    CDN — repeated test downloads were getting CDN rate-
+                //    limited. Production (BAKED_IN_MODELS) still uses R2.
                 state.phase = "downloading";
                 state.downloadTotal = m.size;
-                const r2Url = m.name === "gemma4:e2b"
-                    ? "https://models.brainwires.dev/gemma4-e2b.gguf"
-                    : `/api/blob/${encodeURIComponent(m.name)}`;
                 await client.ensureModel({
-                    url:          r2Url,
+                    url:          `/api/blob/${encodeURIComponent(m.name)}`,
                     modelKey:     m.modelKey,
                     filename:     m.filename,
                     expectedSize: m.size,
@@ -115,6 +118,10 @@ if (typeof window !== "undefined" && new URLSearchParams(window.location.search)
 
                 // 7. Start training with the Memory-tight (iPhone-safe)
                 //    preset — same JSON shape the FineTunePanel emits.
+                //    loss_mode=next_token: ONE backward pass per step (the
+                //    per_position mode did a full head+layer backward PER
+                //    position — 12-21× the churn — which is what blew past
+                //    iOS jetsam). Matches ULTRA_SAFE_HP in FineTunePanel.
                 state.phase = "training_start";
                 await client.trainingStart({
                     loraConfig: {
@@ -136,28 +143,34 @@ if (typeof window !== "undefined" && new URLSearchParams(window.location.search)
                         learning_rate:                0.0003,
                         max_seq_len:                  32,
                         max_grad_norm:                1,
-                        loss_mode:                    "per_position",
+                        loss_mode:                    "next_token",
                         gradient_checkpointing:       true,
                     } as unknown as Parameters<typeof client.trainingStart>[0]["hparams"],
-                    totalSteps: 1,
+                    totalSteps: NUM_STEPS,
                 });
                 state.trainingStartedAt = Date.now();
 
-                // 8. One step in per_position mode, target = next-token
-                //    shift of inputIds (simplest valid target tensor).
-                state.phase = "training_step";
-                state.trainingStep = 1;
+                // 8. Drive NUM_STEPS steps in next_token mode, target =
+                //    next-token shift of inputIds. The cross-step survival
+                //    (step N+1 forward after step N destroy()'d the cache)
+                //    is the real thing under test, so loop, not one-shot.
                 const targets = new Uint32Array(ids.length);
                 for (let i = 0; i < ids.length - 1; i++) targets[i] = ids[i + 1];
                 targets[ids.length - 1] = ids[ids.length - 1];
-                const result = await client.trainingStep({
-                    inputIds: ids,
-                    targets,
-                    lossMode: "per_position",
-                });
+                let result: unknown = null;
+                for (let step = 1; step <= NUM_STEPS; step++) {
+                    state.phase = "training_step";
+                    state.trainingStep = step;
+                    result = await client.trainingStep({
+                        inputIds: ids,
+                        targets,
+                        lossMode: "next_token",
+                    });
+                    console.log(`[automation] training step ${step}/${NUM_STEPS} ok:`, result);
+                }
                 state.phase = "succeeded";
                 state.finishedAt = Date.now();
-                console.log("[automation] training step succeeded:", result);
+                console.log("[automation] ALL", NUM_STEPS, "training steps succeeded:", result);
             } catch (e) {
                 state.phase = "errored";
                 state.trainingError = (e as Error)?.message ?? String(e);

@@ -169,12 +169,20 @@ const ULTRA_SAFE_HP: Pick<
     // GPU budget on Intel Iris.
     max_seq_len: 32,
     batch_size: 1,
-    // per_position (was next_token) — penalizes the model whenever
-    // any completion position diverges, not just the first token.
-    // Anti-collapse: makes the "Brie Brie Brie..." failure mode
-    // explicit in the loss instead of invisible. Same memory cost
-    // since the forward sees the full sequence either way.
-    loss_mode: "per_position",
+    // next_token (NOT per_position) on the iPhone-safe preset. The
+    // assumption that per_position is "same memory cost" was wrong: it
+    // re-runs a full head + per-layer BACKWARD pass *for every position*
+    // (21 passes for a 21-token example), each churning the layer weights
+    // ~668→1048 MiB on the eviction path. On iOS that sustained alloc/
+    // evict/re-fetch cycle jetsams the WebContent process on the 2nd
+    // position (confirmed live via the gpuMiB trajectory). next_token
+    // does ONE backward pass at a peak (~1048 MiB) below the forward's
+    // own peak (~1417), so it fits. The forward still sees the full
+    // sequence, so this is the cheap-but-adequate objective for the
+    // memory-tight path; desktop can opt into per_position for the extra
+    // anti-collapse signal. (This also matches the preset's own UI
+    // description, which always said "next-token loss".)
+    loss_mode: "next_token",
     gradient_checkpointing: true,
     // Truncated backward: train only the top 10 layers on gemma4:e2b
     // (35 total → floor=25). The Rust side saturate-clamps if the

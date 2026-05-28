@@ -110,7 +110,14 @@ def discover_models():
                         # fields too; supply best-effort defaults.
                         "filename": f"sha256-{digest}",
                         "modelKey": f"{family}:{tag}",
-                        "multimodal": True,  # gemma4 has vision+audio; loader honors textOnly override
+                        # multimodal:false → App.tsx computes textOnly=true →
+                        # loadFromOpfsTextOnly (skips vision/audio towers +
+                        # their scaffolding, max_ctx 512). For iPhone training
+                        # this cuts the baseline memory that the multimodal
+                        # load wastes (text fine-tuning never needs the
+                        # vision/audio towers). DEV/TEST ONLY — production's
+                        # BAKED_IN_MODELS keeps multimodal:true.
+                        "multimodal": False,
                     })
                     # Serve from the local Mac over the bridged 10.42.0.x
                     # LAN (fast, no CDN rate limits). No `url` field →
