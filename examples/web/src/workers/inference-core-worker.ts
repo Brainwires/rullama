@@ -14,7 +14,10 @@
 // (the router), one request at a time per stateful RPC.
 
 // @ts-expect-error — generated bundle, no .d.ts
-import init, { Model, TrainingSession, probeTrainingFit, WasmDatabase } from "/pkg/rullama.js";
+import init, { Model, TrainingSession, probeTrainingFit, WasmDatabase, gpuMemBreakdown, gpuMemTotalMib } from "/pkg/rullama.js";
+
+const gpuMemBreakdownFn = gpuMemBreakdown as unknown as () => string;
+const gpuMemTotalFn = gpuMemTotalMib as unknown as () => number;
 import * as opfsLogger from "./opfs_logger";
 import type { LogLevel } from "./opfs_logger";
 
@@ -111,6 +114,7 @@ interface TrainingSessionHandle {
     readonly parameterCount: number;
     readonly gradientCheckpointing: boolean;
     readonly mixedPrecision: boolean;
+    readonly cachedWeightBytes: number;
     step(
         inputIds: Uint32Array,
         targetId: number,
@@ -789,6 +793,12 @@ const RPC: Record<string, Handler> = {
     },
     logsCurrentSession: () => SESSION_ID,
 
+    // Queryable GPU-memory monitor — returns the tracked GPU buffer
+    // breakdown (`tot=… w=… s=… kv=… lora=… o=…` MiB) on demand. The
+    // test harness polls this between RPCs; the per-layer training
+    // beacons carry the live total for mid-step trajectory.
+    gpuMem: () => { try { return gpuMemBreakdownFn(); } catch { return "unavailable"; } },
+
     // ── Model lifecycle ────────────────────────────────────────────────
     load: (a) => handleLoad(a as unknown as LoadArgs),
     free: () => {
@@ -1334,7 +1344,8 @@ const RPC: Record<string, Handler> = {
         const s = requireTraining();
         const inputIds = a.inputIds as Uint32Array;
         const lossMode = String(a.lossMode ?? "next_token");
-        logBeacon("info", "trn", `step ${s.stepNum + 1} start mode=${lossMode} inputLen=${inputIds.length}`);
+        const wbStart = (() => { try { return Math.round(s.cachedWeightBytes / 1048576); } catch { return -1; } })();
+        logBeacon("info", "trn", `step ${s.stepNum + 1} start mode=${lossMode} inputLen=${inputIds.length} weightCacheMB=${wbStart}`);
         // **Capture stepNum/lr BEFORE calling step.** The progress
         // callback fires from inside the Rust step's execution, which
         // holds a `&mut self` RefMut on the TrainingSession. Reading
@@ -1353,10 +1364,14 @@ const RPC: Record<string, Handler> = {
         const onProgress = (phase: string, current: number, total: number) => {
             notify("trainingProgress", { phase, current, total, step: stepBefore, lr: lrBefore });
             // Mirror to OPFS so a mid-step crash leaves an exact
-            // "last phase reached" trail. Beacons are sync OPFS
-            // writes (microseconds each); 70 per step at ~80 bytes
-            // is well inside the per-session 512 KiB cap.
-            logBeacon("info", "trn", `step ${stepBefore + 1} ${phase} ${current}/${total}`);
+            // "last phase reached" trail — now WITH the live GPU-memory
+            // total so the post-crash log shows the on-device memory
+            // trajectory and the exact MiB at the moment iOS jetsam'd.
+            // gpuMemTotalFn is a free wasm fn reading a static counter —
+            // safe to call re-entrantly here mid-step.
+            let mem = -1;
+            try { mem = Math.round(gpuMemTotalFn()); } catch { /* */ }
+            logBeacon("info", "trn", `step ${stepBefore + 1} ${phase} ${current}/${total} gpuMiB=${mem}`);
         };
         try {
             const result = lossMode === "per_position"
@@ -1381,8 +1396,17 @@ const RPC: Record<string, Handler> = {
             // volume; if it gets noisy we can throttle later.
             const stepNum = (result as { step?: number })?.step ?? 0;
             const lossStr = typeof loss === "number" ? loss.toFixed(4) : String(loss);
+            const wbDone = (() => { try { return Math.round(s.cachedWeightBytes / 1048576); } catch { return -1; } })();
             log(`training: step ${stepNum} loss=${lossStr} lossMode=${lossMode} inputLen=${inputIds.length}`);
-            logBeacon("info", "trn", `step ${stepNum} done loss=${lossStr}`);
+            logBeacon("info", "trn", `step ${stepNum} done loss=${lossStr} weightCacheMB=${wbDone}`);
+            // **iOS reclaim window.** The backward just destroy()'d the
+            // whole weight cache at its GPU-idle point, but WebGPU frees
+            // the GPUBuffer memory asynchronously. Yield to the browser
+            // event loop before returning so iOS actually reclaims that
+            // VRAM before the next step's forward re-allocates — without
+            // this, step N+1's forward stacks on N's not-yet-freed
+            // buffers and crosses the WebContent ceiling.
+            await new Promise((r) => setTimeout(r, 250));
             return result;
         } catch (e) {
             // Log + rethrow. The session stays alive (the wasm side

@@ -1292,6 +1292,13 @@ impl TrainingSession {
         self.step_num
     }
 
+    /// Current GPU weight-cache size in bytes. Diagnostic: lets the
+    /// browser log the resident weight VRAM at each training phase to
+    /// pin down the iOS peak-memory ceiling.
+    pub fn cached_weight_bytes(&self) -> u64 {
+        self.model.cached_weight_bytes_native()
+    }
+
     /// Consume the session and hand the wrapped `Model` back to the
     /// caller. Used by the browser path so chat can resume against the
     /// same `Model` handle after training ends, without re-loading the

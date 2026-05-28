@@ -44,6 +44,23 @@ struct ProbeReport {
 /// if (!probe.ok) { showError(probe.reason); return; }
 /// const session = new TrainingSession(model, loraJson, hpJson);
 /// ```
+/// Queryable GPU-memory monitor — returns the current tracked GPU
+/// buffer breakdown as `tot=N w=N s=N kv=N lora=N o=N` (MiB). Free
+/// function so the test harness / worker can call it any time (incl.
+/// re-entrantly from a training progress callback) without touching a
+/// borrowed `TrainingSession`. See `rullama::backend::gpu_mem`.
+#[wasm_bindgen(js_name = gpuMemBreakdown)]
+pub fn gpu_mem_breakdown_js() -> String {
+    rullama::backend::gpu_mem::breakdown_str()
+}
+
+/// Just the total tracked GPU MiB (cheap; for folding into per-layer
+/// beacons to capture the on-device memory trajectory).
+#[wasm_bindgen(js_name = gpuMemTotalMib)]
+pub fn gpu_mem_total_mib_js() -> f64 {
+    rullama::backend::gpu_mem::snapshot_mib().0 as f64
+}
+
 #[wasm_bindgen(js_name = probeTrainingFit)]
 pub async fn probe_training_fit_js(
     model: &Model,
@@ -283,6 +300,14 @@ impl TrainingSession {
     #[wasm_bindgen(js_name = stepNum, getter)]
     pub fn step_num_js(&self) -> u32 {
         self.inner.step_num()
+    }
+
+    /// GPU weight-cache size in bytes — diagnostic for iOS peak-memory
+    /// debugging. Beacon this at each training phase to see the
+    /// resident weight VRAM trajectory.
+    #[wasm_bindgen(js_name = cachedWeightBytes, getter)]
+    pub fn cached_weight_bytes_js(&self) -> f64 {
+        self.inner.cached_weight_bytes() as f64
     }
 
     /// Consume the session and return the wrapped `Model` to JS so

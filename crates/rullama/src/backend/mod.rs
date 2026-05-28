@@ -3,6 +3,7 @@
 mod context;
 pub mod dispatch;
 pub mod elementwise;
+pub mod gpu_mem;
 pub mod lora_bind_cache;
 pub mod matmul;
 pub mod pipelines;

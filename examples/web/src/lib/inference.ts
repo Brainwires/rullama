@@ -397,6 +397,11 @@ export class WorkerClient {
         currentId: ()                                  => this.rpc<string>("logsCurrentSession"),
     };
 
+    /** Queryable GPU-memory monitor — tracked GPU buffer breakdown in
+     *  MiB (`tot=… w=… s=… kv=… lora=… o=…`). For the iOS peak-memory
+     *  debugging harness. */
+    gpuMem(): Promise<string> { return this.rpc<string>("gpuMem"); }
+
     // ── Stateful inference (auto-inject sid) ───────────────────────────
     step(tokenId: number): Promise<number> {
         return this.rpc("step", { sid: this.session, tokenId });

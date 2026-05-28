@@ -3634,6 +3634,41 @@ impl Forward {
         renc.copy_buffer_to_buffer(scratch.loss, 0, &loss_read, 0, 4);
         self.ctx.queue.submit(Some(renc.finish()));
         let loss_vec = read_back_f32(&self.ctx.device, &loss_read).await?;
+
+        // **iOS multi-step stability — destroy layer weights at GPU-idle.**
+        // The `read_back_f32` above maps the loss buffer, which forces the
+        // GPU to drain ALL prior commands (the entire backward sweep is
+        // complete and no command references the layer weights anymore).
+        // This is the one safe point to call destroy(): doing it earlier
+        // (at backward start) is a use-after-destroy because the forward's
+        // commands are still in flight, and crashed the tab at the
+        // head→backward transition. Here, with the GPU idle, we force
+        // prompt VRAM reclaim of every `blk.*` tile so the NEXT step's
+        // forward re-cache starts from genuinely freed memory instead of
+        // stacking on the previous step's not-yet-GC'd buffers and
+        // crossing the iOS WebContent ceiling. The backward-start
+        // `drop_prefix` (no destroy) already unreferenced them for in-step
+        // reuse; this is the cross-step reclaim. Next step's `buffer_async`
+        // re-fetches fresh. Native frees immediately either way.
+        // Empty prefix = destroy the ENTIRE weight cache, not just
+        // `blk.*`. The on-device trajectory showed step 2 starting at
+        // weightCacheMB=637 — that residue is `token_embd` (~637 MiB
+        // vocab embed/output weight used by the backward head), not a
+        // `blk.` tensor, so the old `blk.`-only eviction left it resident
+        // across steps; the next forward stacked on top and tipped iOS
+        // over. Destroying everything makes step N start from the same
+        // empty cache step 1 had; the next forward re-fetches what it
+        // needs. GPU is idle (post loss-readback) so destroy() is safe.
+        let dropped_end = self.wcache.drop_prefix_destroy("");
+        #[cfg(target_arch = "wasm32")]
+        if dropped_end > 0 {
+            web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
+                "[bwd] destroyed {dropped_end} layer weight tiles at GPU-idle (cross-step reclaim)"
+            )));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = dropped_end;
+
         Ok(loss_vec[0])
     }
 

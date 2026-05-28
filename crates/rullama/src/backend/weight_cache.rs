@@ -81,6 +81,7 @@ impl WeightCache {
             mapped_at_creation: false,
         });
         self.queue.write_buffer(&buf, 0, bytes);
+        crate::backend::gpu_mem::record_alloc(&format!("weight:{name}"), bytes.len() as u64);
         buf
     }
 
@@ -148,24 +149,87 @@ impl WeightCache {
         single + tiled
     }
 
-    /// Evict all cached buffers whose tensor name starts with `prefix`. Returns
-    /// the number of entries removed (single + tiled combined). Because the
-    /// cache holds the only long-lived Arc to each `wgpu::Buffer`, removal
-    /// triggers immediate GPU-memory release. Used by
-    /// `Model::release_vision_weights` / `release_audio_weights` to free
-    /// multimodal towers between turns on memory-constrained devices.
+    /// Evict all cached buffers whose tensor name starts with `prefix`,
+    /// dropping the Rust handles only (no explicit `destroy()`). Returns
+    /// the number of entries removed (single + tiled combined).
+    ///
+    /// **Safe to call mid-step**, even while in-flight GPU commands or
+    /// cached bind groups still reference the buffers: dropping the handle
+    /// doesn't invalidate the underlying `GPUBuffer`, it just lets wgpu's
+    /// allocator reuse that memory for subsequent allocations in the same
+    /// device. Use this at the forward→backward boundary (the backward
+    /// re-fetches layers it needs) where the forward's commands may still
+    /// be in flight.
+    ///
+    /// Does NOT promptly reclaim GPU memory on the WebGPU backend (that
+    /// waits for browser GC of the dropped wrapper) — for cross-step
+    /// reclaim use [`drop_prefix_destroy`](Self::drop_prefix_destroy) at a
+    /// GPU-idle point instead.
     pub fn drop_prefix(&self, prefix: &str) -> usize {
         let mut removed = 0usize;
-        self.buffers.borrow_mut().retain(|k, _| {
+        self.buffers.borrow_mut().retain(|k, v| {
+            let hit = k.starts_with(prefix);
+            if hit {
+                crate::backend::gpu_mem::record_free(&format!("weight:{k}"), v.size());
+                removed += 1;
+            }
+            !hit
+        });
+        self.tiles.borrow_mut().retain(|(k, _), v| {
+            let hit = k.starts_with(prefix);
+            if hit {
+                for b in v.iter() {
+                    crate::backend::gpu_mem::record_free(&format!("weight:{k}"), b.size());
+                }
+                removed += 1;
+            }
+            !hit
+        });
+        self.tile_meta
+            .borrow_mut()
+            .retain(|(k, _), _| !k.starts_with(prefix));
+        removed
+    }
+
+    /// Like [`drop_prefix`](Self::drop_prefix) but ALSO calls
+    /// `wgpu::Buffer::destroy()` on every evicted buffer to force prompt
+    /// GPU-memory reclaim.
+    ///
+    /// **Only call at a GPU-idle point** — after a fence / map / readback
+    /// that guarantees no in-flight command (and no cached bind group
+    /// about to be re-used) references these buffers. `destroy()` while a
+    /// buffer is still referenced by pending work or a live bind group is
+    /// a use-after-destroy: on iOS Safari WebGPU it crashes the tab (we
+    /// observed training die at the head→backward transition when destroy
+    /// fired at the backward *start*, before the forward's commands had
+    /// drained).
+    ///
+    /// On the WebGPU backend dropping the handle alone leaves the
+    /// `GPUBuffer` resident until GC; `destroy()` reclaims it immediately
+    /// so the next training step's forward re-cache starts from genuinely
+    /// freed VRAM instead of stacking on the previous step's leftovers and
+    /// crossing the iOS WebContent ceiling → jetsam. On native it frees
+    /// immediately either way. Used by the training step at end-of-step
+    /// (post loss-readback, GPU drained) and by
+    /// `Model::release_vision_weights` between inference turns.
+    pub fn drop_prefix_destroy(&self, prefix: &str) -> usize {
+        let mut removed = 0usize;
+        self.buffers.borrow_mut().retain(|k, v| {
             if k.starts_with(prefix) {
+                crate::backend::gpu_mem::record_free(&format!("weight:{k}"), v.size());
+                v.destroy();
                 removed += 1;
                 false
             } else {
                 true
             }
         });
-        self.tiles.borrow_mut().retain(|(k, _), _| {
+        self.tiles.borrow_mut().retain(|(k, _), v| {
             if k.starts_with(prefix) {
+                for b in v.iter() {
+                    crate::backend::gpu_mem::record_free(&format!("weight:{k}"), b.size());
+                    b.destroy();
+                }
                 removed += 1;
                 false
             } else {
