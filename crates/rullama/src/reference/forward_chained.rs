@@ -3476,6 +3476,21 @@ impl Forward {
                 break;
             }
             let i = li as u32;
+            // **Diagnostic at the absolute top of each iteration** —
+            // bracketed by head_rmsnorm (last head beacon) and
+            // bwd.layer.recompute. If this fires for layer N but
+            // bwd.layer.recompute doesn't, death is in the
+            // gradient-checkpointing replay's encode_layer submit
+            // (the recompute fetches blk.N.* weights again and
+            // submits ~10 forward dispatches). If THIS itself doesn't
+            // fire after `head_rmsnorm 4/4`, death is in the trivial
+            // env_var / loop-setup code between head end and loop
+            // body — which would mean iOS jetsam'd from the head's
+            // accumulated Metal state, not from anything we do.
+            if let Some(cb) = progress_cb {
+                let logical = (n_layers as u32) - i;
+                cb("bwd.loop.enter", logical, n_layers as u32);
+            }
             let cap = &capture[li];
             let lora = &loras[li];
             let grad = &grads[li];
