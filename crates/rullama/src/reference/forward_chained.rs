@@ -3521,8 +3521,13 @@ impl Forward {
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("bwd.layer"),
                     });
-            self.backward_layer(&mut lenc, i, history_len, pos, cap, lora, grad, scratch)
+            self.backward_layer(&mut lenc, i, history_len, pos, cap, lora, grad, scratch, progress_cb)
                 .await?;
+            // Caller's submit handles the FINAL phase (attn_norm rmsnorm +
+            // residual_add) — backward_layer flushed phases 1..=4
+            // internally. Phase 5's last beacon is the outer
+            // "backward N/35" fired below; we don't add a "bwd.attn.merge"
+            // beacon to keep the trail compact.
             self.ctx.queue.submit(Some(lenc.finish()));
             // Per-layer cancel check — same boundary the forward loop
             // uses. Cancellation latency is bounded by one
@@ -3700,6 +3705,40 @@ impl Forward {
     /// the gradient leakage through `inp_gate_w` is dropped — an M0
     /// approximation, documented in `MIGRATION-REPORT.md`).
     #[allow(clippy::too_many_arguments)]
+    /// **iOS Metal lazy-compile mitigation.** End the current backward
+    /// phase's encoder, submit it, fire a per-phase beacon, open a
+    /// fresh encoder for the next phase. Mirrors the per-group submit
+    /// pattern in `backward_step_inner`'s head section (see the
+    /// "iOS-tight invariant" comment near the head). Background: iOS
+    /// Safari WebGPU lazily compiles each kernel's Metal binary at
+    /// first dispatch; packing all ~13 distinct backward kernels per
+    /// layer into one submit jetsam'd the WebContent process at the
+    /// head→backward transition (real-device beacon trail:
+    /// `head_rmsnorm 4/4` fires, `backward 1/35` never does, tab dies).
+    /// Splitting into per-phase submits gives Metal a beat to compile +
+    /// reclaim one phase at a time; per-phase beacons localize any
+    /// future regression to the exact phase.
+    fn flush_backward_phase(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        progress_cb: Option<&LayerProgressCb<'_>>,
+        label: &'static str,
+        phase_idx: u32,
+        total_phases: u32,
+    ) {
+        let new_enc = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bwd.layer.cont"),
+            });
+        let old_enc = std::mem::replace(enc, new_enc);
+        self.ctx.queue.submit(Some(old_enc.finish()));
+        if let Some(cb) = progress_cb {
+            cb(label, phase_idx, total_phases);
+        }
+    }
+
     async fn backward_layer<'a>(
         &mut self,
         enc: &mut wgpu::CommandEncoder,
@@ -3710,6 +3749,7 @@ impl Forward {
         lora: &LayerLoraSlots<'a>,
         grad: &LayerLoraGrads<'a>,
         scratch: &BackwardScratchView<'a>,
+        progress_cb: Option<&LayerProgressCb<'_>>,
     ) -> Result<()> {
         let prefix = format!("blk.{i}.");
         let d_model = self.cfg.d_model as usize;
@@ -4100,6 +4140,13 @@ impl Forward {
             );
         }
 
+        // ── flush phase 1/5: PLE + post_ffw rmsnorm + ffn_down (matmul + LoRA).
+        // First batch of NEW-to-Metal kernels (rmsnorm_backward,
+        // matmul_q*_backward_input, plus LoRA kernels iff any LoRA targets
+        // include ffn_down). Submit before geglu_backward triggers another
+        // Metal compile so they don't bundle and spike RSS at once.
+        self.flush_backward_phase(enc, progress_cb, "bwd.ffn.down", 1, 5);
+
         // geglu backward → d_ffn_gate (d_ffn_b), d_ffn_up (d_ffn_c).
         geglu_backward_chained(
             &self.ctx,
@@ -4276,6 +4323,12 @@ impl Forward {
             d_model,
         );
 
+        // ── flush phase 2/5: FFN gate/up matmul + LoRA + ffn_norm merge.
+        // geglu_backward (NEW) + matmul + LoRA + rmsnorm_backward (already
+        // compiled in phase 1). Submit before the attention block triggers
+        // attention_probs / attention_backward_* compiles.
+        self.flush_backward_phase(enc, progress_cb, "bwd.ffn.gateup", 2, 5);
+
         // ----- Attention block backward -----
         // residual_add backward (attn): d_norm_y_attn = d_hidden (alias).
         //
@@ -4383,6 +4436,12 @@ impl Forward {
             history_len as usize,
             window,
         );
+
+        // ── flush phase 3/5: post_attn rmsnorm + o matmul + o LoRA + attention_probs.
+        // attention_probs (NEW) just compiled. Submit before the heavy
+        // attention-backward-dq/dkv + rope_neox_backward + rmsnorm_per_row_backward
+        // wave triggers 3+ more NEW Metal compiles.
+        self.flush_backward_phase(enc, progress_cb, "bwd.attn.proj", 3, 5);
 
         // Attn backward pass 1: d_q + d_scores (staged).
         attention_backward_dq_chained(
@@ -4961,6 +5020,14 @@ impl Forward {
                 }
             }
         }
+
+        // ── flush phase 4/5: attn dq/dkv/rope/q_norm + q/k/v matmul + LoRAs + K/V branches.
+        // Final block of NEW-to-Metal compiles for backward
+        // (attention_backward_dq, attention_backward_dkv,
+        // rope_neox_backward, rmsnorm_per_row_backward). Phase 5
+        // (attn_norm rmsnorm + residual_add) is only already-compiled
+        // kernels and rides in the caller's per-layer submit.
+        self.flush_backward_phase(enc, progress_cb, "bwd.attn.qkv", 4, 5);
 
         // After the per-history loop, the windows hold the LAST
         // history position's values. Restore them to the `pos`-slice
