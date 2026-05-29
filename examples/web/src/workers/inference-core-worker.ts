@@ -1403,14 +1403,16 @@ const RPC: Record<string, Handler> = {
             // weight cache at its GPU-idle point (step done at
             // weightCacheMB=0), but WebGPU/Metal frees the GPUBuffer
             // memory ASYNCHRONOUSLY — our tracked counter hits 0 long
-            // before iOS actually reclaims the RSS. The on-device
-            // trajectory showed step N+1 starting at weightCacheMB=0 yet
-            // still jetsam'ing: its forward stacked on step N's
-            // not-yet-reclaimed buffers. 250ms wasn't enough; give iOS a
-            // 2s window (multiple event-loop turns) to drain the deferred
-            // frees before the next forward re-allocates ~1.4 GB. Slow
-            // per step, but training correctness/no-crash >> speed.
-            for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 250));
+            // before iOS actually reclaims the RSS. With the targeted-
+            // destroy fix (commit 5487cb8) step 2 completes cleanly on
+            // iPhone (loss=0.0343, weightCacheMB=0 at done), but step 3
+            // still died at its first dispatch after 2 s of yield —
+            // step 3's forward re-allocation of ~1.4 GB stacks on top of
+            // step 2's not-yet-reclaimed Metal heap. Stretch the yield to
+            // 5 s across many event-loop turns to give iOS more time to
+            // drain its deferred frees before the next forward starts.
+            // Slow per step, but training correctness/no-crash >> speed.
+            for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 250));
             return result;
         } catch (e) {
             // Log + rethrow. The session stays alive (the wasm side
