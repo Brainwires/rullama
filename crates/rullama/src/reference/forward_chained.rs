@@ -3221,14 +3221,24 @@ impl Forward {
         // destroying the block weights here cannot pull a buffer out from
         // under a pending head submit.)
         //
-        // Backward only walks down to `backward_layer_floor` and the
-        // gradient-checkpointing recompute re-fetches each layer's
-        // weights via `buffer_async` as it goes, so the resident set
-        // during backward is "~1-2 layers at a time" on a base that has
-        // ACTUALLY been reclaimed — peak ~1.1 GB instead of ~2 GB.
-        // Native (Mac) has unbounded VRAM so destroy-vs-drop is moot
-        // there; the re-fetch cost is acceptable next to a hard crash.
-        let dropped = wc.drop_prefix_destroy("blk.");
+        // **Targeted destroy: drop ONLY layers BELOW the backward floor,
+        // keep layers IN the backward walk cached.** Real-device trail
+        // showed the page still jetsam'd at the head→backward transition
+        // with the original "destroy all blk" strategy because the
+        // backward immediately re-fetched (re-allocated) blk.{floor..N-1}
+        // — those allocations on top of the head's in-flight Metal state
+        // tripped jetsam. Layers 0..floor are never touched in backward
+        // (no recompute, no dispatch); destroying them frees the bulk of
+        // the forward heap (25 × ~40 MiB = ~1000 MiB on e2b with floor=25).
+        // Layers floor..n_layers stay cached so recompute + backward are
+        // cache HITS — no re-allocation, no Metal-heap churn at the
+        // head→backward boundary.
+        let n_layers_usize = self.cfg.n_layers as usize;
+        let floor_usize = (backward_layer_floor as usize).min(n_layers_usize);
+        let mut dropped = 0usize;
+        for layer in 0..floor_usize {
+            dropped += wc.drop_prefix_destroy(&format!("blk.{layer}."));
+        }
         #[cfg(target_arch = "wasm32")]
         if dropped > 0 {
             web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
