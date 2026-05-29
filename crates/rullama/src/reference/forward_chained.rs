@@ -3513,6 +3513,16 @@ impl Forward {
                     "replay should leave kv_lens unchanged for layer {li}"
                 );
                 self.ctx.queue.submit(Some(renc.finish()));
+                // Diagnostic: recompute (gradient-checkpointing replay)
+                // is the last work between layers. If
+                // `bwd.layer.recompute` fires but the next per-layer
+                // beacon (bwd.layer.entry) doesn't, the recompute submit
+                // killed the tab — i.e. encode_layer's forward dispatches
+                // tripped jetsam, NOT the backward kernels.
+                if let Some(cb) = progress_cb {
+                    let logical = (n_layers as u32) - i;
+                    cb("bwd.layer.recompute", logical, n_layers as u32);
+                }
             }
 
             let mut lenc =
@@ -3577,6 +3587,36 @@ impl Forward {
                 eprintln!(
                     "[trace] after layer {li} bwd: d_hidden max_abs={max_abs:.3e} nan={nans}"
                 );
+            }
+
+            // **Per-layer weight reclaim at the inter-layer GPU-idle
+            // point.** Without this, every backward_layer re-fetches its
+            // weight tiles but the prior layer's stay resident — by the
+            // end of a 10-layer walk we have ~10 layers × ~40 MiB
+            // stacked on top of the un-reclaimed forward heap, and the
+            // real-device beacon trail shows the second backward layer
+            // never completing. Per Apple's Metal-heap doc, destroy
+            // makes memory aliasable (good) but stacked-up allocations
+            // stress the heap geometry; bounding the backward weight
+            // set at "one layer at a time" eliminates that stress.
+            //
+            // Safe by construction:
+            //  • `read_buf_stats` above synced the GPU so all of
+            //    backward_layer's submits have drained; nothing in-flight
+            //    references `blk.{i}.*`.
+            //  • The next iteration's `encode_layer(i-1)` recompute
+            //    fetches its OWN prefix (`blk.{i-1}.*`), so destroying
+            //    `blk.{i}.*` doesn't pull from the next layer's setup.
+            //  • Any in-flight renorm-scale submit reads only
+            //    `scratch.d_hidden` (not blk weights).
+            let _destroyed_layer = self.wcache.drop_prefix_destroy(&format!("blk.{i}."));
+            // Diagnostic: marks per-layer completion. If this fires for
+            // layer N but no `bwd.layer.recompute` for layer N-1 does,
+            // the death is in the inter-layer transition AFTER destroy
+            // (unlikely — destroy is sync, doesn't dispatch).
+            if let Some(cb) = progress_cb {
+                let logical = (n_layers as u32) - i;
+                cb("bwd.layer.end", logical, n_layers as u32);
             }
         }
 
@@ -3796,6 +3836,16 @@ impl Forward {
         } else {
             None
         };
+
+        // Diagnostic: pinpoint inter-layer death. If `bwd.layer.entry`
+        // fires for layer N but no later beacon (bwd.ffn.down /
+        // bwd.ffn.gateup / bwd.attn.proj / bwd.attn.qkv / backward N/35)
+        // does, death is between buffer_async fetches and phase 1's
+        // submit — i.e. capture pre-copies or the PLE backward block.
+        if let Some(cb) = progress_cb {
+            let logical = (self.cfg.n_layers as u32) - i;
+            cb("bwd.layer.entry", logical, self.cfg.n_layers as u32);
+        }
 
         // Undo per-layer output scale.
         if let Some(s) = self.layer_scalars[i as usize] {
