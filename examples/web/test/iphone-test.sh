@@ -262,13 +262,68 @@ JS
     return 0
 }
 
+# Probe the page is still alive and worker still has the wasm Model.
+# Returns one of: alive, session-dead, page-reset, probe-failed.
+#
+# Detection layers (in order — each one's a stronger signal):
+#  • `invalid session id` from WebDriver = safaridriver session died, almost
+#    always means iOS killed the WebContent process (jetsam). Reported as
+#    session-dead. This is the ground-truth crash signal — fires within
+#    the next poll cycle (~3 s) instead of waiting STALL_SECS for a beacon
+#    gap.
+#  • If the session is alive but the page has reloaded since training started
+#    (Safari auto-recovers killed WebContent by reloading the tab), the
+#    rebooted page has no Model in the worker. Detected by checking that
+#    the page still claims a model is loaded. Reported as page-reset.
+#  • If the executeScript hangs / errors for other reasons (network, etc.)
+#    we report probe-failed and let the beacon-stall fallback handle it.
+probe_session_alive() {
+    local sid resp
+    sid=$(session_id)
+    [[ -n "$sid" ]] || { echo "session-dead"; return; }
+
+    # Quick URL check — cheapest WebDriver call.
+    resp=$(curl -sS --max-time 4 "http://localhost:${WD_PORT}/session/${sid}/url" 2>/dev/null)
+    if echo "$resp" | grep -q '"error":"invalid session id"'; then
+        echo "session-dead"; return
+    fi
+    if [[ -z "$resp" ]] || echo "$resp" | grep -q '"error"'; then
+        echo "probe-failed"; return
+    fi
+
+    # Session alive — but maybe Safari auto-reloaded the tab after a
+    # WebContent kill. Probe: does the page still report a chosen model?
+    # The PWA stores selected model state in window-accessible places;
+    # the worker's logs are the truth. We look for `Reset to canonical`
+    # (Fine-tune tab) which is only present when a model is loaded AND
+    # the Fine-tune tab is mounted. If that disappeared after training
+    # was running, the page rebooted.
+    local r
+    r=$(curl -sS --max-time 4 -X POST -H 'Content-Type: application/json' \
+            -d '{"script":"const btns=document.querySelectorAll(\"button\");return btns.length+\":\"+Array.from(btns).map(b=>b.textContent.trim()).filter(Boolean).slice(0,10).join(\",\");","args":[]}' \
+            "http://localhost:${WD_PORT}/session/${sid}/execute/sync" 2>/dev/null)
+    if echo "$r" | grep -q '"error":"invalid session id"'; then
+        echo "session-dead"; return
+    fi
+    if echo "$r" | grep -q '"error"'; then
+        echo "probe-failed"; return
+    fi
+    # If page rebooted, "Load" button is back (model loader UI). If still
+    # mid-training, "Load" is replaced by training-state UI.
+    if echo "$r" | grep -qE '"Load,'; then
+        echo "page-reset"; return
+    fi
+    echo "alive"
+}
+
 # ── watch: poll log for step completion / stall / crash ───────────────
 watch_training() {
-    say "watch training (stall=${STALL_SECS}s, max=${MAX_RUNTIME_SECS}s)"
+    say "watch training (stall=${STALL_SECS}s, max=${MAX_RUNTIME_SECS}s, session-poll=every cycle)"
     local start=$(date +%s)
     local last_beacon_t=$start
     local last_phase=""
     local last_count=0
+    local consecutive_probe_fails=0
 
     while true; do
         local now=$(date +%s)
@@ -300,9 +355,44 @@ watch_training() {
             printf '  [+%4ds] %s\n' "$elapsed" "$current_last"
         fi
 
-        # Stall = crash
+        # **Ground-truth crash signal**: probe session/page state. Fires
+        # within ~3s of an iOS jetsam kill instead of waiting STALL_SECS.
+        local probe
+        probe=$(probe_session_alive)
+        case "$probe" in
+            session-dead)
+                fail "CRASH — safaridriver session died (WebContent killed by iOS jetsam)"
+                echo "  last beacon: $last_phase"
+                echo "  elapsed: ${elapsed}s, beacons emitted: $count"
+                echo "----- last 15 beacons -----"
+                printf '%s\n' "$since" | tail -15
+                return 1
+                ;;
+            page-reset)
+                fail "CRASH — page auto-reloaded (Safari recovered after WebContent kill)"
+                echo "  last beacon before reload: $last_phase"
+                echo "  elapsed: ${elapsed}s"
+                echo "----- last 15 beacons -----"
+                printf '%s\n' "$since" | tail -15
+                return 1
+                ;;
+            probe-failed)
+                # Don't bail on a single transient probe failure; require
+                # several in a row before falling back to stall detection.
+                consecutive_probe_fails=$((consecutive_probe_fails + 1))
+                if [[ $consecutive_probe_fails -ge 3 ]]; then
+                    warn "session probe failing repeatedly (${consecutive_probe_fails}× in a row)"
+                fi
+                ;;
+            alive)
+                consecutive_probe_fails=0
+                ;;
+        esac
+
+        # Beacon-stall fallback: page MAY still be alive but frozen
+        # (rare — usually crash detection above catches the kill first).
         if [[ $stall -gt $STALL_SECS ]]; then
-            fail "CRASH — no new beacon for ${stall}s"
+            fail "STALL — no new beacon for ${stall}s (page status=$probe)"
             echo "  last beacon: $last_phase"
             echo "----- last 15 beacons -----"
             printf '%s\n' "$since" | tail -15
@@ -311,7 +401,7 @@ watch_training() {
 
         # Overall timeout
         if [[ $elapsed -gt $MAX_RUNTIME_SECS ]]; then
-            warn "TIMEOUT — ${elapsed}s with no completion"
+            warn "TIMEOUT — ${elapsed}s with no completion (page status=$probe)"
             echo "  last beacon: $last_phase"
             echo "----- last 15 beacons -----"
             printf '%s\n' "$since" | tail -15
