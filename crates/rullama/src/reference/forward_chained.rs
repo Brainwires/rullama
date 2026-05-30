@@ -3380,6 +3380,36 @@ impl Forward {
             cb("head_outproj", 2, 4);
         }
 
+        // **Destroy token_embd RIGHT HERE — its last consumer just
+        // submitted.** Real-device beacon trail showed the iPhone
+        // dying right after head_rmsnorm (gpuMiB=668) before the
+        // post-rmsnorm drain+destroy_embd could fire. Moving the
+        // destroy up to here cuts ~637 MiB of resident tracked memory
+        // (token_embd Q6_K dequant) WHILE we're still in the head
+        // section, dropping head_lm_head_lora + head_rmsnorm peak from
+        // ~668 to ~31 MiB.
+        //
+        // Safety: token_embd is read by exactly TWO sites in this
+        // step's backward —
+        //   (1) head_outproj's matmul_q*_backward_input (just submitted
+        //       on the line above)
+        //   (2) the embed_tokens LoRA backward at the end of the layer
+        //       walk uses `slot.b` (the LoRA's own buffer), NOT
+        //       token_embd directly.
+        // The lm_head LoRA backward (next sub-phase) reads lmh.a / lmh.b /
+        // lmh.z / scratch.d_logits / scratch.norm_x_final / scratch.d_hidden_final —
+        // no token_embd. final-rmsnorm backward reads scratch.norm_x_final
+        // + final_norm — no token_embd. Layer walks read blk.{i}.* —
+        // no token_embd. So the head_outproj submit IS its last user.
+        //
+        // Drain first so its submit drains before destroy() races with
+        // any pending Metal command buffer.
+        let _drain_outproj = read_buf_stats(&self.ctx, scratch.d_hidden_final, 1).await?;
+        let _embd_dropped_early = wc.drop_prefix_destroy("token_embd");
+        if let Some(cb) = progress_cb {
+            cb("bwd.head.early_destroy_embd", 0, 1);
+        }
+
         // ─── (3) lm_head LoRA backward (optional) ────────────────────
         // Pattern mirrors the per-layer ffn_down backward (lines ~3875–3925):
         //   dB += s · d_logits ⊗ z       (z = A_lmh · norm_x captured in fwd)
