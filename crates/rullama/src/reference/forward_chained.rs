@@ -3450,17 +3450,40 @@ impl Forward {
         // **GPU drain at head→backward boundary.** Without this, iOS
         // Metal has 4 head submits queued + Metal-side compiles still
         // settling when the next iteration's encode_layer recompute
-        // submit stacks ~12-15 forward dispatches on top. Real-device
-        // trail: bwd.loop.enter 1/35 gpuMiB=1045 → 💥 (no
-        // bwd.layer.recompute) — the recompute submit was the straw.
-        // read_buf_stats on a tiny scratch slice does a map_async +
-        // await, forcing every prior submit to complete and every
-        // pending Metal compile to settle before the backward starts.
-        // Cost: ~1ms on the wire. Cf. WWDC25 'Unlock GPU computing
-        // with WebGPU' on bounding lazy-compile spikes.
+        // submit stacks ~12-15 forward dispatches on top. read_buf_stats
+        // on a tiny scratch slice does a map_async + await, forcing
+        // every prior submit to complete and every pending Metal
+        // compile to settle before the backward starts. Cost: ~1ms.
+        // Cf. WWDC25 'Unlock GPU computing with WebGPU' on bounding
+        // lazy-compile spikes.
         let _drain = read_buf_stats(&self.ctx, scratch.d_hidden, self.cfg.d_model as usize).await?;
         if let Some(cb) = progress_cb {
             cb("bwd.head.drain", 0, 1);
+        }
+
+        // **Destroy token_embd at the drain point.** Real-device test
+        // matrix had 3 iPhone runs with this same wasm-family (split +
+        // targeted destroy + single-pass + drain) all dying within the
+        // head→backward window at varying beacons (forward 35/35, head
+        // section, bwd.loop.enter). Variance at the iOS-jetsam ceiling.
+        // token_embd is the largest single weight in the cache (~637 MiB
+        // on e2b for Q6_K → f32 dequant) and is NEVER read in backward:
+        //   • The output-projection backward (head_outproj submit, just
+        //     finished) was its last consumer in this step.
+        //   • head_lm_head_lora uses the lm_head LoRA pair, not token_embd.
+        //   • head_rmsnorm uses output_norm.
+        //   • The backward-layer walk uses blk.{i}.* weights only.
+        //   • The embed_tokens LoRA backward at end of layer walk uses
+        //     the LoRA's A/B buffers, not token_embd itself.
+        //   • The next training step's forward re-fetches it via the
+        //     same lazy buffer_async path the first step used —
+        //     identical cost.
+        // Drain above guarantees Metal has flushed the head's submits
+        // so destroy() doesn't race a pending command buffer.
+        // ~637 MiB freed at the most-loaded moment of the step.
+        let _embd_dropped = wc.drop_prefix_destroy("token_embd");
+        if let Some(cb) = progress_cb {
+            cb("bwd.head.destroy_embd", 0, 1);
         }
 
         let trace_hidden = std::env::var("RULLAMA_TRACE_DHIDDEN").is_ok();
