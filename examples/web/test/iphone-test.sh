@@ -164,6 +164,52 @@ JS
     return 0
 }
 
+# Nuke Service Worker + Cache Storage + force-reload. Without this, the
+# dev SW (CacheFirst on /pkg/*.wasm with 30-day TTL — see
+# examples/web/dist/sw.js's registerRoute) serves stale wasm for every
+# test run after a rebuild. We learned this the hard way: every iPhone
+# test from 5487cb8 onward was actually running 5487cb8's wasm because
+# the SW had cached it from the first run. Symptom: the page log shows
+# OLD beacons firing and NEW beacons we just added are silent.
+#
+# Strategy:
+#   1. Unregister all service workers (drops the SW that owns the precache).
+#   2. Delete all CacheStorage caches (rullama-wasm, rullama-pages, etc.).
+#   3. Reload the page with cache:reload, forcing fresh fetches from network.
+# After reload, the page re-registers the SW with the FRESHLY downloaded
+# assets — including the new wasm bundle.
+purge_caches_and_reload() {
+    say "purge SW caches + reload (force fresh wasm)"
+    local r
+    r=$(js_async 20 <<'JS' | python3 -c 'import sys,json; print(json.loads(sys.stdin.read()).get("value",""))'
+const regs = await navigator.serviceWorker.getRegistrations();
+const sw_count = regs.length;
+for (const r of regs) { await r.unregister(); }
+const caches_list = await caches.keys();
+for (const c of caches_list) { await caches.delete(c); }
+return `unreg=${sw_count} caches=${caches_list.join(",")}`;
+JS
+)
+    ok "purge: $r"
+    # Now reload. pageLoadStrategy=none means the /url POST returns
+    # immediately; give the SPA time to mount before the next phase.
+    local sid
+    sid=$(session_id)
+    curl -sS --max-time 20 -X POST -H 'Content-Type: application/json' \
+        -d "{\"url\":\"$URL\"}" \
+        "http://localhost:${WD_PORT}/session/${sid}/url" >/dev/null
+    ok "reloaded $URL"
+    sleep 10
+    local ready
+    ready=$(js_sync 10 <<'JS' | python3 -c 'import sys,json; print(json.loads(sys.stdin.read()).get("value",""))'
+return document.readyState + ":btns=" + document.querySelectorAll("button").length;
+JS
+)
+    [[ "$ready" == complete:* ]] || { fail "page not ready after reload ($ready)"; return 3; }
+    ok "page ready after reload ($ready)"
+    return 0
+}
+
 # ── load: click Load (with confirm override) + wait for ready ──────────
 load_model() {
     say "load model"
@@ -416,10 +462,11 @@ watch_training() {
 case "${1:-all}" in
     preflight) preflight ;;
     setup)     preflight && setup ;;
+    purge)     purge_caches_and_reload ;;
     load)      load_model ;;
     train)     start_training ;;
     watch)     watch_training ;;
-    all)       preflight && setup && load_model && start_training && watch_training ;;
+    all)       preflight && setup && purge_caches_and_reload && load_model && start_training && watch_training ;;
     resume)    mark_log && start_training && watch_training ;;
-    *)         echo "usage: $0 {preflight|setup|load|train|watch|all|resume}"; exit 1 ;;
+    *)         echo "usage: $0 {preflight|setup|purge|load|train|watch|all|resume}"; exit 1 ;;
 esac

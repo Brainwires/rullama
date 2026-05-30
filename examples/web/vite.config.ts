@@ -60,7 +60,20 @@ export default defineConfig({
                 // to drop the precache and start clean.
                 //   docs: https://developer.chrome.com/docs/workbox/modules/workbox-precaching
                 //   issue: https://github.com/GoogleChrome/workbox/issues/2757
-                cacheId: "rullama-v6",
+                // **cacheId bumped on every build.** Suffixed with the
+                // build timestamp so each `vite build` invalidates ALL
+                // previously cached SW buckets — no more stale-wasm
+                // archaeology after a rebuild. Combined with the
+                // NetworkFirst /pkg/ handler below, this makes any
+                // cache-related staleness structurally impossible:
+                // the bucket name is unique to this build AND the
+                // wasm handler prefers network anyway.
+                //
+                // History: we lost ~6 iPhone test cycles in a row to a
+                // stale wasm because the previous static `rullama-v6` +
+                // CacheFirst (30-day TTL) silently served bundles built
+                // by older commits. Never again.
+                cacheId: `rullama-${BUILD_VERSION}-${Date.now()}`,
                 cleanupOutdatedCaches: true,
                 // index.html is intentionally OMITTED from precache: it
                 // goes through the NetworkFirst navigation handler below
@@ -91,14 +104,33 @@ export default defineConfig({
                             cacheableResponse: { statuses: [0, 200] },
                         },
                     },
-                    // The wasm bundle is large; we don't want Workbox to
-                    // inline-precache it but we *do* want it cached on
-                    // first fetch.
+                    // **wasm bundle: NetworkFirst with a generous cache
+                    // fallback.** Previously this was CacheFirst with a
+                    // 30-day TTL, which meant: a new wasm-pack build was
+                    // INVISIBLE to any iPhone (or any user) who'd already
+                    // fetched the prior bundle, for up to 30 days. The
+                    // page log showed stale beacons and made debugging
+                    // training crashes much harder — every iteration
+                    // since `5487cb8` was actually running 5487cb8's
+                    // wasm until v7 of this cache rolled out. This burned
+                    // ~6 commits worth of iPhone test cycles silently.
+                    //
+                    // NetworkFirst with networkTimeoutSeconds=5 means:
+                    //   • Online (always our case): fetch network → cache
+                    //     stays warm but is never served if network's up.
+                    //     Rebuilds are visible on next page load.
+                    //   • Slow network: 5 s timeout falls back to cache,
+                    //     so users don't sit on a blank page.
+                    //   • Offline (PWA edge case): cache hit, app boots
+                    //     against last-known-good bundle.
+                    // The bundle is ~4 MB so network re-fetch on each
+                    // navigation is cheap (~30-50ms on broadband).
                     {
                         urlPattern: /\/pkg\/.*\.(js|wasm)$/,
-                        handler:    "CacheFirst",
+                        handler:    "NetworkFirst",
                         options: {
-                            cacheName: "rullama-wasm",
+                            cacheName: "rullama-wasm-v2",
+                            networkTimeoutSeconds: 5,
                             expiration: { maxEntries: 4, maxAgeSeconds: 60 * 60 * 24 * 30 },
                             cacheableResponse: { statuses: [0, 200] },
                         },
