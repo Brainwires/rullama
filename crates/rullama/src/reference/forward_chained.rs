@@ -4110,6 +4110,13 @@ impl Forward {
                 scratch.d_hidden_tmp,
                 d_model,
             );
+            // ── flush phase 0/6: PLE backward (Gemma 4 PLE injection
+            // gradient). Adds rmsnorm_backward (NEW), matmul_q4_k_backward_input
+            // (NEW), geglu_backward (NEW) to Metal's compile queue —
+            // 3 new kernels in their own submit so they don't stack with
+            // ffn_down's matmul_q6_k_backward_input compile in phase 1.
+            // Only fires when the model has a PLE block (Gemma 4 family).
+            self.flush_backward_phase(enc, progress_cb, "bwd.ple", 0, 6);
         }
 
         // ----- FFN block backward -----
@@ -4220,7 +4227,7 @@ impl Forward {
         // matmul_q*_backward_input, plus LoRA kernels iff any LoRA targets
         // include ffn_down). Submit before geglu_backward triggers another
         // Metal compile so they don't bundle and spike RSS at once.
-        self.flush_backward_phase(enc, progress_cb, "bwd.ffn.down", 1, 5);
+        self.flush_backward_phase(enc, progress_cb, "bwd.ffn.down", 1, 6);
 
         // geglu backward → d_ffn_gate (d_ffn_b), d_ffn_up (d_ffn_c).
         geglu_backward_chained(
@@ -4402,7 +4409,7 @@ impl Forward {
         // geglu_backward (NEW) + matmul + LoRA + rmsnorm_backward (already
         // compiled in phase 1). Submit before the attention block triggers
         // attention_probs / attention_backward_* compiles.
-        self.flush_backward_phase(enc, progress_cb, "bwd.ffn.gateup", 2, 5);
+        self.flush_backward_phase(enc, progress_cb, "bwd.ffn.gateup", 2, 6);
 
         // ----- Attention block backward -----
         // residual_add backward (attn): d_norm_y_attn = d_hidden (alias).
@@ -4516,7 +4523,7 @@ impl Forward {
         // attention_probs (NEW) just compiled. Submit before the heavy
         // attention-backward-dq/dkv + rope_neox_backward + rmsnorm_per_row_backward
         // wave triggers 3+ more NEW Metal compiles.
-        self.flush_backward_phase(enc, progress_cb, "bwd.attn.proj", 3, 5);
+        self.flush_backward_phase(enc, progress_cb, "bwd.attn.proj", 3, 6);
 
         // Attn backward pass 1: d_q + d_scores (staged).
         attention_backward_dq_chained(
@@ -5102,7 +5109,7 @@ impl Forward {
         // rope_neox_backward, rmsnorm_per_row_backward). Phase 5
         // (attn_norm rmsnorm + residual_add) is only already-compiled
         // kernels and rides in the caller's per-layer submit.
-        self.flush_backward_phase(enc, progress_cb, "bwd.attn.qkv", 4, 5);
+        self.flush_backward_phase(enc, progress_cb, "bwd.attn.qkv", 4, 6);
 
         // After the per-history loop, the windows hold the LAST
         // history position's values. Restore them to the `pos`-slice
