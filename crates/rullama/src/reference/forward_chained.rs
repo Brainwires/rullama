@@ -3233,12 +3233,14 @@ impl Forward {
         // Layers floor..n_layers stay cached so recompute + backward are
         // cache HITS — no re-allocation, no Metal-heap churn at the
         // head→backward boundary.
-        let n_layers_usize = self.cfg.n_layers as usize;
-        let floor_usize = (backward_layer_floor as usize).min(n_layers_usize);
-        let mut dropped = 0usize;
-        for layer in 0..floor_usize {
-            dropped += wc.drop_prefix_destroy(&format!("blk.{layer}."));
-        }
+        let n_layers_u32 = self.cfg.n_layers;
+        let floor_u32 = backward_layer_floor.min(n_layers_u32);
+        // Single-pass destroy of blk.{0..floor}.*  — replaces a per-layer
+        // loop that fired ~floor × HashMap-traversals + ~floor × ~7
+        // GPUBuffer.destroy() IPC dispatches on iOS Safari (real-device
+        // trail: `forward 35/35 gpuMiB=1417` → jetsam in the gap before
+        // head_ce). One traversal, one batch of destroys.
+        let dropped = wc.drop_blk_layer_range_destroy(0, floor_u32);
         #[cfg(target_arch = "wasm32")]
         if dropped > 0 {
             web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(

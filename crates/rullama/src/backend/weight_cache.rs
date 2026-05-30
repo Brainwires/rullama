@@ -242,6 +242,66 @@ impl WeightCache {
         removed
     }
 
+    /// Single-pass targeted destroy for the fwd→bwd boundary on iOS.
+    /// Destroys every cached `blk.{i}.*` weight where `i` is in
+    /// `[start_layer, end_layer)`, in ONE iteration through the cache
+    /// instead of the N separate `drop_prefix_destroy` calls the caller
+    /// would otherwise make. On iOS Safari WebGPU each
+    /// `GPUBuffer.destroy()` is an IPC round-trip to the GPU process;
+    /// firing 25 × ~7 = 175 of them in a tight loop with separate
+    /// HashMap traversals was empirically tripping jetsam right at the
+    /// forward→head transition (real-device trail: `step 2 forward 35/35
+    /// gpuMiB=1417` → 💥). One pass through, one retain closure, fewer
+    /// IPC dispatches.
+    ///
+    /// Returns the number of cache entries removed.
+    pub fn drop_blk_layer_range_destroy(&self, start_layer: u32, end_layer: u32) -> usize {
+        if end_layer <= start_layer {
+            return 0;
+        }
+        // Parse the "blk.{N}." prefix out of a key without allocating;
+        // returns the layer number or None if the key doesn't match the
+        // "blk.<digits>.<rest>" shape.
+        fn parse_blk_layer(key: &str) -> Option<u32> {
+            let rest = key.strip_prefix("blk.")?;
+            let dot = rest.find('.')?;
+            rest[..dot].parse().ok()
+        }
+        let in_range = |key: &str| -> bool {
+            match parse_blk_layer(key) {
+                Some(n) => n >= start_layer && n < end_layer,
+                None => false,
+            }
+        };
+        let mut removed = 0usize;
+        self.buffers.borrow_mut().retain(|k, v| {
+            if in_range(k) {
+                crate::backend::gpu_mem::record_free(&format!("weight:{k}"), v.size());
+                v.destroy();
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        self.tiles.borrow_mut().retain(|(k, _), v| {
+            if in_range(k) {
+                for b in v.iter() {
+                    crate::backend::gpu_mem::record_free(&format!("weight:{k}"), b.size());
+                    b.destroy();
+                }
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        self.tile_meta
+            .borrow_mut()
+            .retain(|(k, _), _| !in_range(k));
+        removed
+    }
+
     /// Internal: compute the row tiling layout for a 2-D quantized tensor.
     fn tile_layout(&self, name: &str, max_bytes_per_tile: usize) -> Result<TileLayout> {
         let desc = self.reader.tensor(name)?;
