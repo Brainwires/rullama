@@ -3447,6 +3447,22 @@ impl Forward {
             cb("head_rmsnorm", 4, 4);
         }
 
+        // **GPU drain at head→backward boundary.** Without this, iOS
+        // Metal has 4 head submits queued + Metal-side compiles still
+        // settling when the next iteration's encode_layer recompute
+        // submit stacks ~12-15 forward dispatches on top. Real-device
+        // trail: bwd.loop.enter 1/35 gpuMiB=1045 → 💥 (no
+        // bwd.layer.recompute) — the recompute submit was the straw.
+        // read_buf_stats on a tiny scratch slice does a map_async +
+        // await, forcing every prior submit to complete and every
+        // pending Metal compile to settle before the backward starts.
+        // Cost: ~1ms on the wire. Cf. WWDC25 'Unlock GPU computing
+        // with WebGPU' on bounding lazy-compile spikes.
+        let _drain = read_buf_stats(&self.ctx, scratch.d_hidden, self.cfg.d_model as usize).await?;
+        if let Some(cb) = progress_cb {
+            cb("bwd.head.drain", 0, 1);
+        }
+
         let trace_hidden = std::env::var("RULLAMA_TRACE_DHIDDEN").is_ok();
         // Adaptive max-abs clip on d_hidden between layers. Defaults to
         // 1.0 to keep deep-network gradient flow finite for LoRA
