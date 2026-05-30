@@ -328,12 +328,24 @@ impl TrainingSession {
     /// - One `TrainingScratch` sized for `hp.max_seq_len`.
     /// - An `AdamConfig` initialised from `hp` (lr, weight decay, etc.).
     pub fn new(
-        model: Model,
+        mut model: Model,
         lora_cfg: LoraConfig,
         hp: TrainingHyperparams,
     ) -> Result<Self, TrainingError> {
         let cfg = model.forward().cfg().clone();
         let ctx = Arc::new(model.forward().ctx().clone());
+
+        // **MeBP per-layer weight destroy during forward** — see
+        // `Forward::set_forward_destroy_per_layer` doc and the
+        // [[project-mebp-adaptation-plan]] memory. Activated for every
+        // training session: forward peak weight memory drops from
+        // ~1.4 GB (all 35 layers) to ~40 MiB (one layer), at the cost
+        // of ~32-42% extra forward time (weights re-decompressed each
+        // step). Backward's gradient_checkpointing recompute path
+        // already lazy-fetches via `buffer_async` — no extra change
+        // needed. Native compute is unaffected by VRAM pressure but
+        // pays the same time cost; safe to enable unconditionally.
+        model.forward_mut().set_forward_destroy_per_layer(true);
         let max_seq_len = hp.max_seq_len as u32;
         // `gradient_checkpointing=true` collapses the per-layer scratch
         // to one shared `LayerActivations` (cloned references) +

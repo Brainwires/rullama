@@ -252,6 +252,19 @@ pub struct Forward {
     /// the `Model::encode_cancel` pattern used for multimodal.
     cancel_flag: Arc<AtomicBool>,
 
+    /// **MeBP-inspired memory mode.** When true, the per-layer forward
+    /// loop drains GPU and destroys each layer's weight tiles after its
+    /// submit, so peak weight memory during forward = ~1 layer worth
+    /// (~40 MiB on e2b) instead of ~all 35 layers (~1417 MiB). Backward's
+    /// gradient-checkpointing recompute re-fetches via `buffer_async`
+    /// (decompress per block, matching MeBP arxiv 2510.03425's lazy
+    /// load). Set true by `TrainingSession::new` on iPhone targets;
+    /// false for chat-side inference where the weights need to stay
+    /// cached across tokens (per-token re-fetch destroys generation
+    /// perf). Costs ~32-42% extra forward time (per MeBP §4.2) in
+    /// exchange for fitting under the iOS WebContent jetsam ceiling.
+    forward_destroy_per_layer: bool,
+
     // Cached scale factor for the final logits softcap dispatch.
     pos: u32,
 }
@@ -448,6 +461,7 @@ impl Forward {
             dummy,
             max_context,
             cancel_flag: Arc::new(AtomicBool::new(false)),
+            forward_destroy_per_layer: false,
             pos: 0,
         })
     }
@@ -476,6 +490,14 @@ impl Forward {
         } else {
             Ok(())
         }
+    }
+
+    /// Enable MeBP-style per-layer weight destroy during forward. See
+    /// the field doc on `forward_destroy_per_layer`. Call once after
+    /// constructing `Forward` for training; never set for chat-side
+    /// inference.
+    pub fn set_forward_destroy_per_layer(&mut self, on: bool) {
+        self.forward_destroy_per_layer = on;
     }
 
     /// Shared cancel-flag handle so `TrainingSession::cancel` can
@@ -1728,6 +1750,24 @@ impl Forward {
             // this submission strategy. Bounded latency: one layer
             // (~300 ms - 1 s on browser) instead of one full step.
             self.check_cancelled()?;
+            // **MeBP-inspired per-layer weight destroy.** When enabled
+            // (training mode on memory-tight targets — see
+            // forward_destroy_per_layer field doc), drain the GPU
+            // (force the just-submitted layer's commands to complete
+            // so no bind group still references blk.{i}.* buffers),
+            // then destroy this layer's weight tiles. Peak weight cache
+            // during forward drops from ~1417 MiB (all 35 layers) to
+            // ~40 MiB (one layer at a time). Backward's
+            // gradient-checkpointing recompute re-fetches via the same
+            // lazy buffer_async path the forward used originally —
+            // identical correctness, ~32-42% extra forward time (per
+            // MeBP arxiv 2510.03425 §4.2). This is the smallest-change
+            // approximation of MeBP's per-block lazy-load architecture
+            // adapted to wgpu + OPFS (our analog to their mmap).
+            if self.forward_destroy_per_layer {
+                let _drain = read_buf_stats(&self.ctx, &self.hidden, 1).await?;
+                let _ = self.wcache.drop_blk_layer_range_destroy(i, i + 1);
+            }
             // Per-layer progress beacon — fired AFTER the submit so
             // the caller's "layer N done" message correlates with the
             // GPU having actually finished it. `i + 1` is 1-based for
