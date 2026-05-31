@@ -3593,24 +3593,27 @@ impl Forward {
                 cb("bwd.loop.enter", logical, n_layers as u32);
             }
             // **JS yield at head→backward boundary (wasm only).** No GPU
-            // sync — just a `setTimeout(0)` Promise so the wasm task
-            // releases the event loop for a tick. Two iOS-specific wins:
-            //   (1) The browser gets to drive its WebGPU work queue:
-            //       any head submits still draining can complete in the
-            //       GPU process before recompute pushes new pressure on
-            //       top.
-            //   (2) iOS Safari memory pressure handlers get a chance to
-            //       run between phases (the WebContent jetsam check
-            //       and the GPU-process reclaim are event-loop-driven).
-            // A read_buf_stats drain HERE killed the page (real-device
-            // trail: `head_rmsnorm 4/4 gpuMiB=38` → 💥 — sync forced
-            // Metal pipeline-compile RSS past jetsam). A pure JS yield
-            // doesn't force anything; the GPU naturally drains in the
-            // background while we wait. ~1ms total cost.
+            // sync — a setTimeout-delay Promise so the wasm task releases
+            // the event loop and gives iOS Metal time to drain the head
+            // section's just-compiled backward kernels (cross_entropy_
+            // backward, matmul_q6_k_backward_input, lora_outer_add,
+            // lora_matmul_col, rmsnorm_backward — all NEW first-use in
+            // this step) BEFORE recompute's encode_layer pushes 12 more
+            // dispatches on top.
+            //
+            // The 0ms variant tested previously didn't move the crash
+            // (page still died right after bwd.loop.enter 1/35). 500ms
+            // is empirically enough for iOS Safari to settle the head
+            // submits and lets pressure handlers run between phases.
+            // ~5s/step total (10 backward layers × 500ms) on a step
+            // that takes minutes; perf is irrelevant next to surviving.
+            //
+            // A read_buf_stats drain HERE killed the page in earlier
+            // tests (the forced sync at high pipeline-compile RSS
+            // tripped jetsam). A pure JS yield doesn't force anything;
+            // the GPU naturally drains in the background while we wait.
             #[cfg(target_arch = "wasm32")]
             {
-                // Worker contexts have `self` (WorkerGlobalScope) not
-                // `window`; reach setTimeout via the global object.
                 use wasm_bindgen::JsCast;
                 let promise = js_sys::Promise::new(&mut |resolve, _reject| {
                     let global = js_sys::global();
@@ -3621,7 +3624,7 @@ impl Forward {
                     .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
                     if let Some(st) = set_timeout {
                         let _ = st.call2(
-                            &global, &resolve.into(), &wasm_bindgen::JsValue::from_f64(0.0),
+                            &global, &resolve.into(), &wasm_bindgen::JsValue::from_f64(500.0),
                         );
                     }
                 });
