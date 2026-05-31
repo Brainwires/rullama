@@ -3516,44 +3516,25 @@ impl Forward {
             cb("head_rmsnorm", 4, 4);
         }
 
-        // **GPU drain at head→backward boundary.** Without this, iOS
-        // Metal has 4 head submits queued + Metal-side compiles still
-        // settling when the next iteration's encode_layer recompute
-        // submit stacks ~12-15 forward dispatches on top. read_buf_stats
-        // on a tiny scratch slice does a map_async + await, forcing
-        // every prior submit to complete and every pending Metal
-        // compile to settle before the backward starts. Cost: ~1ms.
-        // Cf. WWDC25 'Unlock GPU computing with WebGPU' on bounding
-        // lazy-compile spikes.
-        let _drain = read_buf_stats(&self.ctx, scratch.d_hidden, self.cfg.d_model as usize).await?;
-        if let Some(cb) = progress_cb {
-            cb("bwd.head.drain", 0, 1);
-        }
-
-        // **Destroy token_embd at the drain point.** Real-device test
-        // matrix had 3 iPhone runs with this same wasm-family (split +
-        // targeted destroy + single-pass + drain) all dying within the
-        // head→backward window at varying beacons (forward 35/35, head
-        // section, bwd.loop.enter). Variance at the iOS-jetsam ceiling.
-        // token_embd is the largest single weight in the cache (~637 MiB
-        // on e2b for Q6_K → f32 dequant) and is NEVER read in backward:
-        //   • The output-projection backward (head_outproj submit, just
-        //     finished) was its last consumer in this step.
-        //   • head_lm_head_lora uses the lm_head LoRA pair, not token_embd.
-        //   • head_rmsnorm uses output_norm.
-        //   • The backward-layer walk uses blk.{i}.* weights only.
-        //   • The embed_tokens LoRA backward at end of layer walk uses
-        //     the LoRA's A/B buffers, not token_embd itself.
-        //   • The next training step's forward re-fetches it via the
-        //     same lazy buffer_async path the first step used —
-        //     identical cost.
-        // Drain above guarantees Metal has flushed the head's submits
-        // so destroy() doesn't race a pending command buffer.
-        // ~637 MiB freed at the most-loaded moment of the step.
-        let _embd_dropped = wc.drop_prefix_destroy("token_embd");
-        if let Some(cb) = progress_cb {
-            cb("bwd.head.destroy_embd", 0, 1);
-        }
+        // **No drain at head→backward boundary.** Earlier versions of
+        // this code did a read_buf_stats(scratch.d_hidden, ...) here to
+        // force iOS Metal to settle pending head submits before backward
+        // started. Real-device beacon trail proved that drain itself was
+        // the jetsam trigger — `head_rmsnorm 4/4 gpuMiB=38` fires (our
+        // tracked memory is tiny by then), then 💥. The drain forces a
+        // map_async + await on a GPU process that's at the pipeline-
+        // compile RSS limit, and the sync push tips it past jetsam.
+        //
+        // Without the drain, the head's submits and the next layer's
+        // recompute submit interleave naturally — Metal handles the
+        // queuing. The MeBP per-layer destroy during forward + the early
+        // token_embd destroy after head_outproj already keep the
+        // *tracked* memory low; the residual jetsam pressure is iOS
+        // pipeline-compile RSS, which a drain only makes worse.
+        //
+        // The late destroy_embd is also gone: token_embd was already
+        // destroyed inline after head_outproj's submit (see ~30 lines
+        // above), so any further destroy("token_embd") is a no-op.
 
         let trace_hidden = std::env::var("RULLAMA_TRACE_DHIDDEN").is_ok();
         // Adaptive max-abs clip on d_hidden between layers. Defaults to
