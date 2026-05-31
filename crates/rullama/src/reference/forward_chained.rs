@@ -522,6 +522,216 @@ impl Forward {
         self.ctx.bind_cache.clear();
     }
 
+    /// **Pre-warm every backward kernel at session start (Patch 7).**
+    ///
+    /// Dispatches each backward + optimizer + lora kernel ONCE against
+    /// tiny throwaway scratch buffers, all in one submit, then awaits a
+    /// readback to force GPU completion before returning. Purpose: any
+    /// first-execution Metal state setup (argument-buffer staging,
+    /// threadgroup memory reservation, intermediate compilation) happens
+    /// HERE — when the GPU process has plenty of headroom and no
+    /// weights resident — instead of mid-step 2 when 1.4 GiB of weights
+    /// are already loaded and iOS jetsam is one resident-set increment
+    /// away.
+    ///
+    /// Inputs to the warmup are garbage (zero-initialised buffers); the
+    /// outputs are discarded. We just need Metal to EXECUTE each kernel
+    /// once.
+    ///
+    /// Cost: ~15 throwaway dispatches in one submit + one tiny
+    /// readback. ~50 ms wall time, one-shot at session start.
+    ///
+    /// The throwaway buffers go out of scope at function end, but the
+    /// `BindGroupCache` would otherwise hold them alive via the
+    /// CachedDispatch's bind_group strong-refs. We `clear()` at the
+    /// end to drop those entries so the throwaway buffers actually die.
+    pub async fn warmup_backward_pipelines(&mut self) -> Result<()> {
+        use crate::backend::dispatch::*;
+
+        let device = &self.ctx.device;
+        let mk = |size: u64, label: &str| -> wgpu::Buffer {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: size.max(4),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+
+        // Distinct throwaway buffer pool. Within one compute dispatch
+        // the same wgpu::Buffer cannot be bound as both read and
+        // read_write (wgpu validation error: "conflicting usages").
+        // Allocate enough distinct buffers that every kernel's binding
+        // slots can each take a unique buffer. Each kernel call below
+        // explicitly picks distinct buffers per binding.
+        //
+        // Sizes:
+        //   small (4 elements)  — uniforms / scalars / loss_out / Adam state
+        //   row   (256 elements) — vector-sized scratch / matmul out / vocab vec
+        //   big   (4 k elements) — generously sized buffer for larger output writes
+        //   q4k/q6k — single super-block of quantized weight bytes
+        let s0 = mk(16, "warmup.small.0");
+        let s1 = mk(16, "warmup.small.1");
+        let s2 = mk(16, "warmup.small.2");
+        let s3 = mk(16, "warmup.small.3");
+        let r0 = mk(1024, "warmup.row.0");
+        let r1 = mk(1024, "warmup.row.1");
+        let r2 = mk(1024, "warmup.row.2");
+        let r3 = mk(1024, "warmup.row.3");
+        let r4 = mk(1024, "warmup.row.4");
+        let r5 = mk(1024, "warmup.row.5");
+        let r6 = mk(1024, "warmup.row.6");
+        let b0 = mk(16 * 1024, "warmup.big.0");
+        let b1 = mk(16 * 1024, "warmup.big.1");
+        let q4k = mk(256, "warmup.q4k");
+        let q6k = mk(256, "warmup.q6k");
+        let dummy = mk(4, "warmup.dummy");
+
+        // Each kernel goes in its own command encoder + submit so wgpu's
+        // per-command-buffer usage tracker doesn't pessimise. Cost is 15
+        // submits at session start — one-shot, no real wall-time impact
+        // (each submit is a 1-dispatch tiny command buffer).
+        macro_rules! one_submit {
+            ($label:expr, |$enc:ident| $body:block) => {{
+                let mut $enc = device.create_command_encoder(
+                    &wgpu::CommandEncoderDescriptor { label: Some($label) },
+                );
+                $body
+                self.ctx.queue.submit(Some($enc.finish()));
+            }};
+        }
+
+        // cross_entropy_backward(logits=read, d_logits=read_write,
+        // loss_out=read_write).
+        one_submit!("warmup.xent_bwd", |enc| {
+            cross_entropy_backward_chained(
+                &self.ctx, &self.pipes, &mut enc, &r0, &r1, &s0, 256, 0,
+            );
+        });
+        // matmul_q4_k_backward_input(weight=read, dy=read, dx=read_write).
+        one_submit!("warmup.q4k_bwd", |enc| {
+            matmul_q4_k_backward_input_chained(
+                &self.ctx, &self.pipes, &mut enc, &q4k, &s1, &r2, 256, 1,
+            );
+        });
+        // matmul_q6_k_backward_input — same shape.
+        one_submit!("warmup.q6k_bwd", |enc| {
+            matmul_q6_k_backward_input_chained(
+                &self.ctx, &self.pipes, &mut enc, &q6k, &s2, &r3, 256, 1,
+            );
+        });
+        // rmsnorm_backward(x=read, w=read, dy=read, dx=read_write).
+        one_submit!("warmup.rms_bwd", |enc| {
+            rmsnorm_backward_chained(
+                &self.ctx, &self.pipes, &mut enc, &s0, &s1, &s2, &s3, 4, 1e-5, true,
+            );
+        });
+        // rmsnorm_per_row_backward — same role pattern.
+        one_submit!("warmup.rms_pr_bwd", |enc| {
+            rmsnorm_per_row_backward_chained(
+                &self.ctx, &self.pipes, &mut enc, &r0, &r1, &r2, &r3, 1, 16, 1e-5, true,
+            );
+        });
+        // geglu_backward(gate=read, up=read, dy=read, d_gate=read_write,
+        // d_up=read_write).
+        one_submit!("warmup.geglu_bwd", |enc| {
+            geglu_backward_chained(
+                &self.ctx, &self.pipes, &mut enc, &r0, &r1, &r2, &r3, &r4, 16,
+            );
+        });
+        // rope_neox_backward(x=read_write, factors=read|None, dummy).
+        one_submit!("warmup.rope_bwd", |enc| {
+            rope_neox_backward_chained(
+                &self.ctx, &self.pipes, &mut enc, &r0, None, &dummy,
+                128, 1, 0, 128, 10000.0,
+            );
+        });
+        // attention_backward_dq — 6 distinct buffers needed.
+        one_submit!("warmup.attn_bwd_dq", |enc| {
+            attention_backward_dq_chained(
+                &self.ctx, &self.pipes, &mut enc,
+                &r0, &r1, &s0, &r2, &s1, &r3, 64, 1, 1, 1,
+            );
+        });
+        // attention_backward_dkv — 6 distinct.
+        one_submit!("warmup.attn_bwd_dkv", |enc| {
+            attention_backward_dkv_chained(
+                &self.ctx, &self.pipes, &mut enc,
+                &r4, &s2, &r5, &s3, &r6, &b0, 64, 1, 1, 1,
+            );
+        });
+        // attention_probs(q=read, k_hist=read, probs=read_write).
+        one_submit!("warmup.attn_probs", |enc| {
+            attention_probs_chained(
+                &self.ctx, &self.pipes, &mut enc,
+                &r0, &r1, &b1, 64, 1, 1, 0, 1, 0,
+            );
+        });
+        // lora_outer_add(dy=read, z=read, dB=read_write).
+        one_submit!("warmup.lora_outer", |enc| {
+            lora_outer_add_chained(
+                &self.ctx, &self.pipes, &mut enc, &s0, &s1, &r0, 4, 4, 1.0, true,
+            );
+        });
+        // lora_matmul_col(W=read, x=read, y=read_write).
+        one_submit!("warmup.lora_mm_col", |enc| {
+            lora_matmul_col_chained(
+                &self.ctx, &self.pipes, &mut enc, &r1, &s2, &s3, 4, 4, 1.0, false,
+            );
+        });
+        // lora_matmul_row.
+        one_submit!("warmup.lora_mm_row", |enc| {
+            lora_matmul_row_chained(
+                &self.ctx, &self.pipes, &mut enc, &r2, &s0, &s1, 4, 4, 1.0, false,
+            );
+        });
+        // adam_step(grad=read, param=read_write, m=read_write, v=read_write).
+        let adam_cfg = AdamConfig::default();
+        one_submit!("warmup.adam", |enc| {
+            adam_step_chained(
+                &self.ctx, &self.pipes, &mut enc, &s0, &s1, &s2, &s3, 4, adam_cfg,
+            );
+        });
+        // sum_of_squares(input=read, output=read_write).
+        one_submit!("warmup.sos", |enc| {
+            sum_of_squares_chained(
+                &self.ctx, &self.pipes, &mut enc, &r0, &s0, 16, 1.0,
+            );
+        });
+
+        // Force GPU to actually run everything before we return.
+        // `read_buf_stats` issues a `copy_buffer_to_buffer` from the
+        // source buffer into a MAP_READ staging buffer; the source
+        // needs `COPY_SRC` usage, which our STORAGE-only warmup pool
+        // doesn't have. Use a dedicated drain buffer with the right
+        // usage flag; the warmup dispatches above will have queued
+        // their work, and one `queue.submit` for this drain buffer's
+        // ensuing copy is enough to fence them.
+        let drain_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("warmup.drain"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let _drain = read_buf_stats(&self.ctx, &drain_buf, 1).await?;
+
+        // Drop bind-cache entries created against the throwaway
+        // buffers — otherwise the cache holds them alive via bind_group
+        // strong refs and they never die.
+        self.ctx.bind_cache.clear();
+
+        // Use the buffer handles explicitly so they live across the
+        // submits above (the dispatchers only borrow them).
+        let _ = (
+            &s0, &s1, &s2, &s3,
+            &r0, &r1, &r2, &r3, &r4, &r5, &r6,
+            &b0, &b1, &q4k, &q6k, &dummy,
+        );
+        Ok(())
+    }
+
     /// Shared cancel-flag handle so `TrainingSession::cancel` can
     /// reach the flag without taking a `&mut` borrow on the model.
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {

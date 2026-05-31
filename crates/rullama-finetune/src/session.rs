@@ -103,6 +103,14 @@ pub struct TrainingSession {
     /// 1-based step counter used by Adam's bias correction. Increments
     /// at the end of every successful `step()` call.
     step_num: u32,
+    /// Patch 7 — backward-kernel warmup flag. Pre-warm runs once on the
+    /// FIRST call to `step_with_progress` / `step_per_position_with_progress`
+    /// (not in `new()` because warmup is async and `new()` is sync to
+    /// support wasm-bindgen's constructor). After warmup, every
+    /// backward kernel has been executed once with throwaway buffers,
+    /// triggering Metal's first-use state setup BEFORE the 1.4 GiB
+    /// weight set tips iOS jetsam.
+    warmed_up: bool,
 }
 
 /// Names of the two "global" LoRA targets — i.e. targets whose state is
@@ -378,6 +386,7 @@ impl TrainingSession {
             loras,
             scratch,
             adam_cfg,
+            warmed_up: false,
             loss_mode: hp.loss_mode,
             lr_schedule: None,
             base_lr: hp.learning_rate,
@@ -945,6 +954,22 @@ impl TrainingSession {
         target_id: u32,
         progress_cb: Option<&'cb TrainingProgressCb<'cb>>,
     ) -> Result<f32, TrainingError> {
+        // Patch 7: pre-warm backward kernels on first step. See the
+        // `warmed_up` field doc and Forward::warmup_backward_pipelines.
+        if !self.warmed_up {
+            if let Some(cb) = progress_cb {
+                cb("warmup.bwd.start", 0, 1);
+            }
+            self.model
+                .forward_mut()
+                .warmup_backward_pipelines()
+                .await
+                .map_err(|e| TrainingError::Backend(format!("{e:?}")))?;
+            self.warmed_up = true;
+            if let Some(cb) = progress_cb {
+                cb("warmup.bwd.done", 1, 1);
+            }
+        }
         self.zero_grads();
         let loss = self
             .forward_backward_with_progress(input_ids, target_id, progress_cb)
@@ -1272,6 +1297,21 @@ impl TrainingSession {
         targets: &[u32],
         progress_cb: Option<&'cb TrainingProgressCb<'cb>>,
     ) -> Result<f32, TrainingError> {
+        // Patch 7: pre-warm backward kernels on first step.
+        if !self.warmed_up {
+            if let Some(cb) = progress_cb {
+                cb("warmup.bwd.start", 0, 1);
+            }
+            self.model
+                .forward_mut()
+                .warmup_backward_pipelines()
+                .await
+                .map_err(|e| TrainingError::Backend(format!("{e:?}")))?;
+            self.warmed_up = true;
+            if let Some(cb) = progress_cb {
+                cb("warmup.bwd.done", 1, 1);
+            }
+        }
         self.zero_grads();
         let loss = self
             .forward_backward_per_position_with_progress(input_ids, targets, progress_cb)
