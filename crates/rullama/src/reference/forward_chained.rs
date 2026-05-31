@@ -3381,18 +3381,21 @@ impl Forward {
         }
 
         // **Destroy token_embd RIGHT HERE — its last consumer just
-        // submitted.** Real-device beacon trail showed the iPhone
-        // dying right after head_rmsnorm (gpuMiB=668) before the
-        // post-rmsnorm drain+destroy_embd could fire. Moving the
-        // destroy up to here cuts ~637 MiB of resident tracked memory
-        // (token_embd Q6_K dequant) WHILE we're still in the head
-        // section, dropping head_lm_head_lora + head_rmsnorm peak from
-        // ~668 to ~31 MiB.
+        // submitted.** No drain: WebGPU GPUBuffer.destroy() is
+        // non-blocking by spec ("existing usages complete normally;
+        // only future usages are affected"). The runtime holds the
+        // buffer alive until the head_outproj matmul finishes, then
+        // actually frees. A drain HERE would force iOS Metal to sync
+        // the 262K × 1536 outproj matmul mid-submission, which spiked
+        // RSS at the worst possible moment and tripped jetsam in the
+        // real-device test before this destroy could even fire.
         //
         // Safety: token_embd is read by exactly TWO sites in this
         // step's backward —
         //   (1) head_outproj's matmul_q*_backward_input (just submitted
-        //       on the line above)
+        //       on the line above) — this submit's queue ordering
+        //       guarantees the destroy() takes effect only after the
+        //       matmul has consumed its bind group.
         //   (2) the embed_tokens LoRA backward at the end of the layer
         //       walk uses `slot.b` (the LoRA's own buffer), NOT
         //       token_embd directly.
@@ -3401,10 +3404,6 @@ impl Forward {
         // no token_embd. final-rmsnorm backward reads scratch.norm_x_final
         // + final_norm — no token_embd. Layer walks read blk.{i}.* —
         // no token_embd. So the head_outproj submit IS its last user.
-        //
-        // Drain first so its submit drains before destroy() races with
-        // any pending Metal command buffer.
-        let _drain_outproj = read_buf_stats(&self.ctx, scratch.d_hidden_final, 1).await?;
         let _embd_dropped_early = wc.drop_prefix_destroy("token_embd");
         if let Some(cb) = progress_cb {
             cb("bwd.head.early_destroy_embd", 0, 1);
