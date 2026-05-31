@@ -27,8 +27,10 @@ use crate::backend::dispatch::{
     attention_probs_chained, cross_entropy_backward_chained, geglu_backward_chained, geglu_chained,
     lora_matmul_col_chained, lora_matmul_fused_chained, lora_matmul_row_chained,
     lora_outer_add_chained, make_dummy_storage,
-    matmul_q4_k_backward_input_chained, matmul_q4_k_chained, matmul_q6_k_backward_input_chained,
-    matmul_q6_k_chained, residual_add_chained, rmsnorm_backward_chained, rmsnorm_chained,
+    matmul_q4_k_backward_input_chained, matmul_q4_k_backward_input_tile_chained,
+    matmul_q4_k_chained, matmul_q6_k_backward_input_chained,
+    matmul_q6_k_backward_input_tile_chained, matmul_q6_k_chained, residual_add_chained,
+    rmsnorm_backward_chained, rmsnorm_chained,
     rmsnorm_per_row_backward_chained, rmsnorm_per_row_chained, rope_neox_backward_chained,
     rope_neox_chained, scale_chained, softcap_chained,
 };
@@ -3391,40 +3393,71 @@ impl Forward {
         }
 
         // ─── (2) Output projection backward (embedᵀ · d_logits) ──────
-        let mut enc = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("bwd.head.outproj"),
-            });
-        match token_embd_dtype {
-            GgmlDtype::Q6_K => matmul_q6_k_backward_input_chained(
-                &self.ctx,
-                &self.pipes,
-                &mut enc,
-                &token_embd,
-                scratch.d_logits,
-                scratch.d_hidden_final,
-                d_model,
-                vocab,
-            ),
-            GgmlDtype::Q4_K => matmul_q4_k_backward_input_chained(
-                &self.ctx,
-                &self.pipes,
-                &mut enc,
-                &token_embd,
-                scratch.d_logits,
-                scratch.d_hidden_final,
-                d_model,
-                vocab,
-            ),
-            other => {
-                return Err(RullamaError::Inference(format!(
-                    "backward_step: token_embd dtype {other:?} unsupported"
-                )));
+        // **Vocab-axis tiled (Patch 6).** The non-tiled dispatch was the
+        // largest single instruction in a training step: at vocab=262144
+        // it brought ~400 MB of dequantized f32 through Metal's
+        // execution path in ONE command buffer, and was the most likely
+        // single cause of iOS jetsam in the head section. Tile along
+        // the vocab axis: each tile dispatches over j ∈
+        // [t*vocab/N, (t+1)*vocab/N), gets its OWN command encoder +
+        // submit, so each Metal command buffer carries ~1/N of the
+        // working set. arxiv 2604.02344 confirms Safari Metal prefers
+        // tiled matmul (2× speedup on the same total work).
+        //
+        // Math is identical: `Σ_{j=0..n} dy[j] · W[j,i] = Σ_t Σ ...`.
+        // Tile 0 writes (accumulate=false); tiles 1..N add into
+        // scratch.d_hidden_final.
+        const VOCAB_TILES: u32 = 8;
+        let vocab_u32 = vocab as u32;
+        let tile_size = vocab_u32.div_ceil(VOCAB_TILES);
+        for t in 0..VOCAB_TILES {
+            let j_start = t * tile_size;
+            let j_end = (j_start + tile_size).min(vocab_u32);
+            if j_start >= j_end {
+                break;
             }
+            let mut enc = self
+                .ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("bwd.head.outproj.tile"),
+                });
+            let accumulate = t > 0;
+            match token_embd_dtype {
+                GgmlDtype::Q6_K => matmul_q6_k_backward_input_tile_chained(
+                    &self.ctx,
+                    &self.pipes,
+                    &mut enc,
+                    &token_embd,
+                    scratch.d_logits,
+                    scratch.d_hidden_final,
+                    d_model,
+                    vocab,
+                    j_start,
+                    j_end,
+                    accumulate,
+                ),
+                GgmlDtype::Q4_K => matmul_q4_k_backward_input_tile_chained(
+                    &self.ctx,
+                    &self.pipes,
+                    &mut enc,
+                    &token_embd,
+                    scratch.d_logits,
+                    scratch.d_hidden_final,
+                    d_model,
+                    vocab,
+                    j_start,
+                    j_end,
+                    accumulate,
+                ),
+                other => {
+                    return Err(RullamaError::Inference(format!(
+                        "backward_step: token_embd dtype {other:?} unsupported"
+                    )));
+                }
+            }
+            self.ctx.queue.submit(Some(enc.finish()));
         }
-        self.ctx.queue.submit(Some(enc.finish()));
         if let Some(cb) = progress_cb {
             cb("head_outproj", 2, 4);
         }

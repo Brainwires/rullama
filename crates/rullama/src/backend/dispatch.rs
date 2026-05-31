@@ -62,6 +62,28 @@ struct MatmulParams {
     _p1: u32,
 }
 
+/// Params for the `matmul_q*_backward_input` kernels (Patch 6).
+///
+/// `j_start..j_end` bounds the sum-axis loop so callers can tile a big
+/// matmul into N submits. Non-tiled callers pass `j_start=0, j_end=n,
+/// accumulate=0` and get the same behavior as the pre-Patch-6 kernels.
+/// Tiled callers set `accumulate=0` on the first tile (write) and
+/// `accumulate=1` on tiles 1..N (add to `dx`). Used by the head
+/// `outproj` backward where the single dispatch over vocab=262144 was
+/// the largest Metal heap working-set spike in a training step.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct MatmulBackInputParams {
+    k: u32,
+    n: u32,
+    j_start: u32,
+    j_end: u32,
+    accumulate: u32,
+    _p0: u32,
+    _p1: u32,
+    _p2: u32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct RmsParams {
@@ -4183,14 +4205,65 @@ pub fn matmul_q4_k_backward_input_chained(
         k.is_multiple_of(256),
         "k must be divisible by 256 for Q4_K backward"
     );
-    let params = MatmulParams {
+    let params = MatmulBackInputParams {
         k: k as u32,
         n: n as u32,
+        j_start: 0,
+        j_end: n as u32,
+        accumulate: 0,
         _p0: 0,
         _p1: 0,
+        _p2: 0,
     };
     cached_dispatch(
         ctx, enc, &p.matmul_q4_k_backward_input, "q4k_bwd",
+        &[weight, dy, dx], &params, ((k / 256) as u32, 1, 1),
+    );
+}
+
+/// **Single-tile variant of `matmul_q4_k_backward_input_chained`
+/// (Patch 6).** Dispatches ONE tile of the sum-axis loop with
+/// explicit `j_start..j_end` bounds and explicit `accumulate` flag —
+/// caller-driven tiling. Used for the head `outproj` backward against
+/// Gemma 4's 262144 vocab: the caller loops N times, each iteration
+/// creates its own command encoder + submits, so each tile lands as
+/// its own Metal command buffer instead of one giant buffer with the
+/// full 400 MB dequant working set.
+///
+/// Caller must arrange `accumulate=false` on the first tile (write)
+/// and `accumulate=true` on subsequent tiles (add). Math is identical
+/// to the non-tiled kernel: `Σ_{j=0..n} = Σ_t Σ_{j=t*c..(t+1)*c}`.
+#[allow(clippy::too_many_arguments)]
+pub fn matmul_q4_k_backward_input_tile_chained(
+    ctx: &WgpuCtx,
+    p: &Pipelines,
+    enc: &mut wgpu::CommandEncoder,
+    weight: &wgpu::Buffer,
+    dy: &wgpu::Buffer,
+    dx: &wgpu::Buffer,
+    k: usize,
+    n: usize,
+    j_start: u32,
+    j_end: u32,
+    accumulate: bool,
+) {
+    assert!(
+        k.is_multiple_of(256),
+        "k must be divisible by 256 for Q4_K backward"
+    );
+    assert!(j_start <= j_end && (j_end as usize) <= n, "tile out of range");
+    let params = MatmulBackInputParams {
+        k: k as u32,
+        n: n as u32,
+        j_start,
+        j_end,
+        accumulate: if accumulate { 1 } else { 0 },
+        _p0: 0,
+        _p1: 0,
+        _p2: 0,
+    };
+    cached_dispatch(
+        ctx, enc, &p.matmul_q4_k_backward_input, "q4k_bwd_tile",
         &[weight, dy, dx], &params, ((k / 256) as u32, 1, 1),
     );
 }
@@ -4213,14 +4286,57 @@ pub fn matmul_q6_k_backward_input_chained(
         k.is_multiple_of(256),
         "k must be divisible by 256 for Q6_K backward"
     );
-    let params = MatmulParams {
+    let params = MatmulBackInputParams {
         k: k as u32,
         n: n as u32,
+        j_start: 0,
+        j_end: n as u32,
+        accumulate: 0,
         _p0: 0,
         _p1: 0,
+        _p2: 0,
     };
     cached_dispatch(
         ctx, enc, &p.matmul_q6_k_backward_input, "q6k_bwd",
+        &[weight, dy, dx], &params, ((k / 256) as u32, 1, 1),
+    );
+}
+
+/// **Single-tile variant of `matmul_q6_k_backward_input_chained`
+/// (Patch 6).** See the matching Q4_K function for the full rationale.
+/// This is the primary user — Gemma 4's `token_embd` is Q6_K, so the
+/// head outproj backward (vocab=262144) routes through this kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn matmul_q6_k_backward_input_tile_chained(
+    ctx: &WgpuCtx,
+    p: &Pipelines,
+    enc: &mut wgpu::CommandEncoder,
+    weight: &wgpu::Buffer,
+    dy: &wgpu::Buffer,
+    dx: &wgpu::Buffer,
+    k: usize,
+    n: usize,
+    j_start: u32,
+    j_end: u32,
+    accumulate: bool,
+) {
+    assert!(
+        k.is_multiple_of(256),
+        "k must be divisible by 256 for Q6_K backward"
+    );
+    assert!(j_start <= j_end && (j_end as usize) <= n, "tile out of range");
+    let params = MatmulBackInputParams {
+        k: k as u32,
+        n: n as u32,
+        j_start,
+        j_end,
+        accumulate: if accumulate { 1 } else { 0 },
+        _p0: 0,
+        _p1: 0,
+        _p2: 0,
+    };
+    cached_dispatch(
+        ctx, enc, &p.matmul_q6_k_backward_input, "q6k_bwd_tile",
         &[weight, dy, dx], &params, ((k / 256) as u32, 1, 1),
     );
 }
