@@ -3647,6 +3647,16 @@ impl Forward {
             // the next iteration's recompute submit lands on top.
             #[cfg(target_arch = "wasm32")]
             {
+                // **0 ms yield, not 500.** The 500 ms variant died at
+                // `bwd.loop.enter 1/35` with no `bwd.post_yield` beacon —
+                // implying the typed setTimeout DID yield (the wasm task
+                // suspended) but the 500 ms wait at high GPUProcess RSS
+                // gave iOS jetsam time to kill the WebContent process
+                // before we resumed. A 0 ms setTimeout still yields to
+                // the JS event loop (returns control, lets pending
+                // microtasks + GPUProcess message-pipe drains run) but
+                // resumes on the very next tick — minimizes the
+                // jetsam-eligibility window.
                 use wasm_bindgen::JsCast;
                 let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global()
                     .dyn_into()
@@ -3655,7 +3665,7 @@ impl Forward {
                     let resolve_fn: js_sys::Function = resolve.into();
                     let _ = scope.set_timeout_with_callback_and_timeout_and_arguments_0(
                         &resolve_fn,
-                        500,
+                        0,
                     );
                 });
                 let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
