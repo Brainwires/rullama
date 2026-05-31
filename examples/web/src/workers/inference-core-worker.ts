@@ -1399,20 +1399,27 @@ const RPC: Record<string, Handler> = {
             const wbDone = (() => { try { return Math.round(s.cachedWeightBytes / 1048576); } catch { return -1; } })();
             log(`training: step ${stepNum} loss=${lossStr} lossMode=${lossMode} inputLen=${inputIds.length}`);
             logBeacon("info", "trn", `step ${stepNum} done loss=${lossStr} weightCacheMB=${wbDone}`);
-            // **iOS reclaim window.** The backward destroy()'d the whole
-            // weight cache at its GPU-idle point (step done at
-            // weightCacheMB=0), but WebGPU/Metal frees the GPUBuffer
-            // memory ASYNCHRONOUSLY — our tracked counter hits 0 long
-            // before iOS actually reclaims the RSS. With the targeted-
-            // destroy fix (commit 5487cb8) step 2 completes cleanly on
-            // iPhone (loss=0.0343, weightCacheMB=0 at done), but step 3
-            // still died at its first dispatch after 2 s of yield —
-            // step 3's forward re-allocation of ~1.4 GB stacks on top of
-            // step 2's not-yet-reclaimed Metal heap. Stretch the yield to
-            // 5 s across many event-loop turns to give iOS more time to
-            // drain its deferred frees before the next forward starts.
-            // Slow per step, but training correctness/no-crash >> speed.
-            for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 250));
+            // **iOS reclaim window.** Backward destroy()'d the cache at
+            // its GPU-idle point (step done at weightCacheMB=0), but
+            // WebGPU/Metal frees the underlying GPUBuffer memory
+            // ASYNCHRONOUSLY — our tracked counter hits 0 long before
+            // iOS reclaims the RSS. With the full MeBP stack (per-layer
+            // destroy + early token_embd destroy + 500ms head yield) the
+            // FIRST step (#2 internally) now completes cleanly on iPhone
+            // (loss=0.0343, all 10 backward layers, peak gpuMiB=80). But
+            // step 3 dies at the same head→backward boundary step 2
+            // survived — Metal heap accumulation from step 2's backward
+            // kernels + their compile state + the aliasable-but-not-
+            // returned token_embd region adds up across steps.
+            //
+            // Stretch the yield to 15 s. Comprises (a) the same 5 s
+            // we used to use (proven enough on the prior wasm-family
+            // for early step 2 starts) + (b) an extra 10 s for the
+            // backward kernels' Metal heap regions to actually drain
+            // back to the OS. Wall-clock cost: 15 s per step on a step
+            // that takes 30-60 s of compute; not great for training
+            // throughput but the alternative is no multi-step training.
+            for (let i = 0; i < 60; i++) await new Promise((r) => setTimeout(r, 250));
             return result;
         } catch (e) {
             // Log + rethrow. The session stays alive (the wasm side
