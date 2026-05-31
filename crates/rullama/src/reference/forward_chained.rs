@@ -3344,35 +3344,33 @@ impl Forward {
         // memory one pipeline at a time, and gives the post-crash log
         // a phase trail that pinpoints any future regression.
 
-        // **Single-encoder head (Patch 4).** All 4 head sub-phases (CE
-        // backward, output projection backward, optional lm_head LoRA
-        // backward, final rmsnorm backward) accumulate into ONE encoder
-        // and submit ONCE at the end. Previously each sub-phase had its
-        // own encoder + submit (4 × CommandEncoder + 4 × queue.submit
-        // round-trips); the agent's pipelines.rs verification confirmed
-        // all kernels are eagerly built at session start, so per-phase
-        // submits don't help Metal compile timing and only burn
-        // GPUProcess IPC volume.
+        // **Head section keeps its 4 sub-submits (Patch 4 partial revert).**
+        // The first iPhone real-device test of the head-collapse variant
+        // died at `step 2 forward 35/35` — earlier than the pre-collapse
+        // wall — because the single collapsed head submit packed the
+        // 262K × 1536 outproj matmul together with CE_back, the 4
+        // lm_head LoRA dispatches, and rmsnorm_back. That single
+        // monster submit overflowed iOS Metal's heap reservation
+        // window. The OLD 4-submit shape gave each sub-phase (especially
+        // the giant outproj) its own command buffer, which Metal handles
+        // fine.
         //
-        // The per-phase `cb(...)` beacons are KEPT — they cost nothing
-        // (just a function pointer call) and the post-crash log still
-        // localizes any future regression to the exact sub-phase.
+        // `backward_layer` per-phase collapse (which removes 5 submits
+        // per layer × 10 layers = 50 IPCs/step) is kept — `backward_layer`
+        // doesn't have a single-dispatch monster like outproj, just many
+        // medium dispatches that benefit from batching into one submit.
         //
-        // `token_embd` destroy moves to AFTER the head's single submit.
-        // The early destroy was a memory optimization that, after
-        // Patch 2's bind_cache invalidation makes destroy safe, no
-        // longer needs to fire mid-head. token_embd stays resident for
-        // ~5 ms longer (across head_lm_head_lora + head_rmsnorm); that's
-        // ~637 MiB extra Metal heap residence in a step where the iPhone
-        // already holds 1.4 GiB for inference happily.
+        // `token_embd` destroy stays inline after head_outproj (early
+        // destroy), restoring the prior shape that reached bwd.loop.enter
+        // consistently before this patch.
+
+        // ─── (1) Cross-entropy backward ──────────────────────────────
         let mut enc = self
             .ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("bwd.head"),
+                label: Some("bwd.head.ce"),
             });
-
-        // ─── (1) Cross-entropy backward ──────────────────────────────
         // d_logits + scalar loss — unless caller pre-populated
         // scratch.d_logits (e.g. for KL preservation in ROME).
         if !skip_ce {
@@ -3387,11 +3385,18 @@ impl Forward {
                 target_id,
             );
         }
+        self.ctx.queue.submit(Some(enc.finish()));
         if let Some(cb) = progress_cb {
             cb("head_ce", 1, 4);
         }
 
         // ─── (2) Output projection backward (embedᵀ · d_logits) ──────
+        let mut enc = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bwd.head.outproj"),
+            });
         match token_embd_dtype {
             GgmlDtype::Q6_K => matmul_q6_k_backward_input_chained(
                 &self.ctx,
@@ -3419,20 +3424,30 @@ impl Forward {
                 )));
             }
         }
+        self.ctx.queue.submit(Some(enc.finish()));
         if let Some(cb) = progress_cb {
             cb("head_outproj", 2, 4);
         }
 
+        // Destroy token_embd inline after the outproj submit. Patch 2's
+        // bind_cache.invalidate_buffers fires inside drop_prefix_destroy
+        // BEFORE Buffer::destroy(), so the outproj submit (still being
+        // consumed by Metal) keeps its bind-group reference safely.
+        let _embd_dropped_early = wc.drop_prefix_destroy("token_embd");
+        if let Some(cb) = progress_cb {
+            cb("bwd.head.early_destroy_embd", 0, 1);
+        }
+
         // ─── (3) lm_head LoRA backward (optional) ────────────────────
-        // Pattern mirrors the per-layer ffn_down backward (lines ~3875–3925):
-        //   dB += s · d_logits ⊗ z       (z = A_lmh · norm_x captured in fwd)
-        //   z  = Bᵀ · d_logits            (overwrites z with u)
-        //   d_hidden_final += s · Aᵀ · u  (accumulates LoRA contribution to
-        //                                   the gradient feeding rmsnorm_back)
-        //   dA += s · u ⊗ norm_x_final
         if let (Some(g), Some(gg)) = (globals, global_grads)
             && let (Some(slot), Some(d_pair)) = (g.lm_head.as_ref(), gg.lm_head.as_ref())
         {
+            let mut enc = self
+                .ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("bwd.head.lm_head_lora"),
+                });
             let r = slot.rank as usize;
             let s = slot.scale;
             // dB += s · d_logits ⊗ z (shape [vocab, rank])
@@ -3461,8 +3476,7 @@ impl Forward {
                 1.0,
                 false,
             );
-            // d_hidden_final += s · Aᵀ · u   (so the next rmsnorm_back sees
-            // the LoRA's contribution to the residual stream gradient)
+            // d_hidden_final += s · Aᵀ · u
             lora_matmul_col_chained(
                 &self.ctx,
                 &self.pipes,
@@ -3473,9 +3487,9 @@ impl Forward {
                 r,
                 d_model,
                 s,
-                true, // accumulate into d_hidden_final
+                true,
             );
-            // dA += s · u ⊗ norm_x_final  (norm_x is still populated from fwd)
+            // dA += s · u ⊗ norm_x_final
             lora_outer_add_chained(
                 &self.ctx,
                 &self.pipes,
@@ -3488,14 +3502,19 @@ impl Forward {
                 s,
                 true,
             );
+            self.ctx.queue.submit(Some(enc.finish()));
         }
         if let Some(cb) = progress_cb {
             cb("head_lm_head_lora", 3, 4);
         }
 
         // ─── (4) Final rmsnorm backward ──────────────────────────────
-        // d_hidden (running, top-of-stack) = rmsnorm_back(self.hidden,
-        // output_norm.weight, d_norm_x_final).
+        let mut enc = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bwd.head.rmsnorm"),
+            });
         rmsnorm_backward_chained(
             &self.ctx,
             &self.pipes,
@@ -3508,17 +3527,7 @@ impl Forward {
             eps,
             true,
         );
-
-        // **One submit for the entire head section.**
         self.ctx.queue.submit(Some(enc.finish()));
-        // Destroy token_embd now that the head's submit has consumed
-        // its last use. bind_cache.invalidate_buffers fires inside
-        // drop_prefix_destroy BEFORE Buffer::destroy(), so no future
-        // encoding can pick up a stale bind group referencing it.
-        let _embd_dropped = wc.drop_prefix_destroy("token_embd");
-        if let Some(cb) = progress_cb {
-            cb("bwd.head.early_destroy_embd", 0, 1);
-        }
         if let Some(cb) = progress_cb {
             cb("head_rmsnorm", 4, 4);
         }
