@@ -335,17 +335,20 @@ impl TrainingSession {
         let cfg = model.forward().cfg().clone();
         let ctx = Arc::new(model.forward().ctx().clone());
 
-        // **MeBP per-layer weight destroy during forward** — see
-        // `Forward::set_forward_destroy_per_layer` doc and the
-        // [[project-mebp-adaptation-plan]] memory. Activated for every
-        // training session: forward peak weight memory drops from
-        // ~1.4 GB (all 35 layers) to ~40 MiB (one layer), at the cost
-        // of ~32-42% extra forward time (weights re-decompressed each
-        // step). Backward's gradient_checkpointing recompute path
-        // already lazy-fetches via `buffer_async` — no extra change
-        // needed. Native compute is unaffected by VRAM pressure but
-        // pays the same time cost; safe to enable unconditionally.
-        model.forward_mut().set_forward_destroy_per_layer(true);
+        // **MeBP per-layer destroy is now OFF.** The bind-group cache
+        // (commit d34f56a) eliminated per-dispatch alloc churn (~30K
+        // (uniform, bind_group) allocations/step → ~5K). With that
+        // structural fix, the iPhone training crash isn't resident
+        // weight pressure — it's GPUProcess buffer-alloc pressure
+        // during MeBP's per-layer recompute re-fetches. iOS Safari
+        // WebGPU happily holds 1.4 GiB of resident weights for
+        // inference (4.65 tok/s on iPhone 16e); the kill comes from
+        // re-allocating those same weights mid-step. Disabling MeBP
+        // destroy lets training hold the same resident set inference
+        // does, with the bind cache absorbing the dispatch-side cost.
+        // Re-enable if a future test shows we need weight RAM
+        // below 1.4 GiB.
+        model.forward_mut().set_forward_destroy_per_layer(false);
         let max_seq_len = hp.max_seq_len as u32;
         // `gradient_checkpointing=true` collapses the per-layer scratch
         // to one shared `LayerActivations` (cloned references) +
