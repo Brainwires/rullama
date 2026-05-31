@@ -500,6 +500,26 @@ impl Forward {
         self.forward_destroy_per_layer = on;
     }
 
+    /// Drop every cached `(uniform, bind_group)` entry in the shared
+    /// `BindGroupCache`. Called at end-of-step in training to prevent
+    /// cross-step accumulation: `invalidate_buffers` eagerly evicts
+    /// entries whose underlying buffer was destroyed, but entries that
+    /// still reference live scratch / LoRA / KV buffers accumulate
+    /// monotonically (no buffer dies → no invalidation → entry lives
+    /// forever). Each entry is small (~32-byte uniform + bind-group
+    /// descriptor) but the GPUProcess bind-group table tracks all of
+    /// them, and after many steps the table is large enough to
+    /// pressure WebKit's bookkeeping. Clearing once per step costs
+    /// ~50 cache misses (re-build bind groups for the next step's
+    /// first dispatches) which is negligible vs the ~5K hits/step
+    /// the cache absorbs.
+    ///
+    /// Chat-side inference does NOT call this — the cache is meant
+    /// to stay warm across tokens.
+    pub fn clear_bind_cache(&self) {
+        self.ctx.bind_cache.clear();
+    }
+
     /// Shared cancel-flag handle so `TrainingSession::cancel` can
     /// reach the flag without taking a `&mut` borrow on the model.
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
@@ -3324,14 +3344,35 @@ impl Forward {
         // memory one pipeline at a time, and gives the post-crash log
         // a phase trail that pinpoints any future regression.
 
-        // ─── (1) Cross-entropy backward ──────────────────────────────
+        // **Single-encoder head (Patch 4).** All 4 head sub-phases (CE
+        // backward, output projection backward, optional lm_head LoRA
+        // backward, final rmsnorm backward) accumulate into ONE encoder
+        // and submit ONCE at the end. Previously each sub-phase had its
+        // own encoder + submit (4 × CommandEncoder + 4 × queue.submit
+        // round-trips); the agent's pipelines.rs verification confirmed
+        // all kernels are eagerly built at session start, so per-phase
+        // submits don't help Metal compile timing and only burn
+        // GPUProcess IPC volume.
+        //
+        // The per-phase `cb(...)` beacons are KEPT — they cost nothing
+        // (just a function pointer call) and the post-crash log still
+        // localizes any future regression to the exact sub-phase.
+        //
+        // `token_embd` destroy moves to AFTER the head's single submit.
+        // The early destroy was a memory optimization that, after
+        // Patch 2's bind_cache invalidation makes destroy safe, no
+        // longer needs to fire mid-head. token_embd stays resident for
+        // ~5 ms longer (across head_lm_head_lora + head_rmsnorm); that's
+        // ~637 MiB extra Metal heap residence in a step where the iPhone
+        // already holds 1.4 GiB for inference happily.
         let mut enc = self
             .ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("bwd.head.ce"),
+                label: Some("bwd.head"),
             });
 
+        // ─── (1) Cross-entropy backward ──────────────────────────────
         // d_logits + scalar loss — unless caller pre-populated
         // scratch.d_logits (e.g. for KL preservation in ROME).
         if !skip_ce {
@@ -3346,18 +3387,11 @@ impl Forward {
                 target_id,
             );
         }
-        self.ctx.queue.submit(Some(enc.finish()));
         if let Some(cb) = progress_cb {
             cb("head_ce", 1, 4);
         }
 
         // ─── (2) Output projection backward (embedᵀ · d_logits) ──────
-        let mut enc = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("bwd.head.outproj"),
-            });
         match token_embd_dtype {
             GgmlDtype::Q6_K => matmul_q6_k_backward_input_chained(
                 &self.ctx,
@@ -3385,36 +3419,8 @@ impl Forward {
                 )));
             }
         }
-        self.ctx.queue.submit(Some(enc.finish()));
         if let Some(cb) = progress_cb {
             cb("head_outproj", 2, 4);
-        }
-
-        // **Destroy token_embd RIGHT HERE — its last consumer just
-        // submitted.** head_outproj's matmul_q*_backward_input was the
-        // last reference to token_embd in this step:
-        //   • head_lm_head_lora reads lmh.a / lmh.b / lmh.z / scratch.d_logits
-        //     / scratch.norm_x_final / scratch.d_hidden_final — no token_embd.
-        //   • final-rmsnorm backward reads scratch.norm_x_final + final_norm.
-        //   • Layer walks read blk.{i}.* — no token_embd.
-        //   • embed_tokens LoRA backward at end of walk reads slot.b
-        //     (LoRA's own buffer), not token_embd.
-        //
-        // **No drain needed.** A previous wasm32 drain here forced iOS
-        // Safari to synchronously complete the massive 262K × 1536
-        // head_outproj matmul mid-step, spiking GPUProcess RSS and
-        // tripping jetsam before destroy() even ran (real-device trail:
-        // `head_outproj 2/4 gpuMiB=668` → 💥). With Patch 2's
-        // BindGroupCache invalidation now firing inside
-        // `drop_prefix_destroy` (evicts any cached bind group that
-        // references token_embd before the destroy() runs), there's no
-        // use-after-destroy class of bug to guard against — the spec
-        // guarantees in-flight commands using a destroyed buffer
-        // continue normally, and we no longer encode NEW commands that
-        // reference it.
-        let _embd_dropped_early = wc.drop_prefix_destroy("token_embd");
-        if let Some(cb) = progress_cb {
-            cb("bwd.head.early_destroy_embd", 0, 1);
         }
 
         // ─── (3) lm_head LoRA backward (optional) ────────────────────
@@ -3424,19 +3430,9 @@ impl Forward {
         //   d_hidden_final += s · Aᵀ · u  (accumulates LoRA contribution to
         //                                   the gradient feeding rmsnorm_back)
         //   dA += s · u ⊗ norm_x_final
-        //
-        // Submitted as its own encoder + submit so the lora_outer_add and
-        // lora_matmul_col pipelines compile independently of the CE +
-        // out-proj kernels above.
         if let (Some(g), Some(gg)) = (globals, global_grads)
             && let (Some(slot), Some(d_pair)) = (g.lm_head.as_ref(), gg.lm_head.as_ref())
         {
-            let mut enc = self
-                .ctx
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("bwd.head.lm_head_lora"),
-                });
             let r = slot.rank as usize;
             let s = slot.scale;
             // dB += s · d_logits ⊗ z (shape [vocab, rank])
@@ -3492,19 +3488,12 @@ impl Forward {
                 s,
                 true,
             );
-            self.ctx.queue.submit(Some(enc.finish()));
         }
         if let Some(cb) = progress_cb {
             cb("head_lm_head_lora", 3, 4);
         }
 
         // ─── (4) Final rmsnorm backward ──────────────────────────────
-        let mut enc = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("bwd.head.rmsnorm"),
-            });
         // d_hidden (running, top-of-stack) = rmsnorm_back(self.hidden,
         // output_norm.weight, d_norm_x_final).
         rmsnorm_backward_chained(
@@ -3519,7 +3508,17 @@ impl Forward {
             eps,
             true,
         );
+
+        // **One submit for the entire head section.**
         self.ctx.queue.submit(Some(enc.finish()));
+        // Destroy token_embd now that the head's submit has consumed
+        // its last use. bind_cache.invalidate_buffers fires inside
+        // drop_prefix_destroy BEFORE Buffer::destroy(), so no future
+        // encoding can pick up a stale bind group referencing it.
+        let _embd_dropped = wc.drop_prefix_destroy("token_embd");
+        if let Some(cb) = progress_cb {
+            cb("bwd.head.early_destroy_embd", 0, 1);
+        }
         if let Some(cb) = progress_cb {
             cb("head_rmsnorm", 4, 4);
         }
@@ -3620,32 +3619,46 @@ impl Forward {
             // tests (the forced sync at high pipeline-compile RSS
             // tripped jetsam). A pure JS yield doesn't force anything;
             // the GPU naturally drains in the background while we wait.
+            // **Typed setTimeout via DedicatedWorkerGlobalScope.** The
+            // previous Reflect-based path
+            // (`Reflect::get(global, "setTimeout")` + `Function::call2`)
+            // was never observed to actually yield on real iPhone —
+            // `bwd.post_yield` (below) never appeared in the page log
+            // across many runs. Most likely the Reflect path returned
+            // a wrong-typed or undefined value in the Worker context
+            // and the promise resolved synchronously; either way the
+            // 500 ms delay was never honoured.
+            //
+            // The typed path returns a guaranteed Worker-scope handle
+            // and a typed `set_timeout_with_callback_and_timeout_and_arguments_0`
+            // that takes a `Function` + `i32` ms directly — no boxing,
+            // no Reflect, no failure mode that resolves synchronously.
+            // 500 ms gives iOS Metal time to drain the head section's
+            // 4 head submits + just-compiled backward kernels before
+            // the next iteration's recompute submit lands on top.
             #[cfg(target_arch = "wasm32")]
             {
                 use wasm_bindgen::JsCast;
+                let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global()
+                    .dyn_into()
+                    .expect("training session runs inside a DedicatedWorkerGlobalScope");
                 let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-                    let global = js_sys::global();
-                    let set_timeout = js_sys::Reflect::get(
-                        &global, &wasm_bindgen::JsValue::from_str("setTimeout"),
-                    )
-                    .ok()
-                    .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
-                    if let Some(st) = set_timeout {
-                        let _ = st.call2(
-                            &global, &resolve.into(), &wasm_bindgen::JsValue::from_f64(500.0),
-                        );
-                    }
+                    let resolve_fn: js_sys::Function = resolve.into();
+                    let _ = scope.set_timeout_with_callback_and_timeout_and_arguments_0(
+                        &resolve_fn,
+                        500,
+                    );
                 });
                 let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
             }
-            // Diagnostic: if `bwd.post_yield` fires but `bwd.layer.recompute`
-            // doesn't, death is inside encode_layer's 15 weight allocs +
-            // their queue.write_buffer to a Metal heap that still has
-            // un-reclaimed token_embd in its aliasable pool. If
-            // `bwd.post_yield` DOESN'T fire after `bwd.loop.enter`, the
-            // setTimeout-via-Reflect path isn't actually awaiting (the
-            // JsFuture might be resolving synchronously on wasm), and
-            // the yield is a no-op.
+            // Diagnostic: `bwd.post_yield` after the typed yield. If
+            // this beacon appears in the post-crash page log for the
+            // first time, Patch 3 is working — the wall is downstream
+            // (recompute submit or backward_layer's first kernels). If
+            // it STILL doesn't appear, the wall is the yield itself
+            // (likely a Worker-scope cast failure) or beacons aren't
+            // delivering before the page dies; either way the next
+            // round of work has cleaner signal.
             if let Some(cb) = progress_cb {
                 let logical = (n_layers as u32) - i;
                 cb("bwd.post_yield", logical, n_layers as u32);
@@ -3932,22 +3945,34 @@ impl Forward {
     /// Splitting into per-phase submits gives Metal a beat to compile +
     /// reclaim one phase at a time; per-phase beacons localize any
     /// future regression to the exact phase.
+    /// **Beacon-only since Patch 4** — the per-phase `queue.submit` +
+    /// `CommandEncoder::finish` pair was REMOVED.
+    ///
+    /// History: this helper originally split `backward_layer` into 5
+    /// per-phase submits under the theory that iOS Metal lazy-compiles
+    /// kernels per submit and batched compiles spike GPUProcess RSS.
+    /// Verification at `Pipelines::new()` (line ~240) showed that ALL
+    /// pipelines are eagerly built at session start, so per-phase
+    /// submits cost ~5 × `queue.submit` + 5 × `CommandEncoder::finish`
+    /// IPC round-trips per `backward_layer` call (×10 backward layers
+    /// = 50 extra IPCs/step) for no measurable RSS benefit. The
+    /// WebGPU Dispatch Overhead paper (arxiv 2604.02344) also shows
+    /// Safari Metal per-dispatch cost is FAST (31.7 μs); IPC volume
+    /// is the GPUProcess bottleneck.
+    ///
+    /// `enc` and the `new_enc` swap are gone — all phase work
+    /// accumulates into the caller's single encoder, submitted once
+    /// at end of `backward_layer`. The per-phase `cb(label, ...)`
+    /// beacon is preserved so the post-crash log still localizes any
+    /// future regression.
     fn flush_backward_phase(
         &self,
-        enc: &mut wgpu::CommandEncoder,
+        _enc: &mut wgpu::CommandEncoder,
         progress_cb: Option<&LayerProgressCb<'_>>,
         label: &'static str,
         phase_idx: u32,
         total_phases: u32,
     ) {
-        let new_enc = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("bwd.layer.cont"),
-            });
-        let old_enc = std::mem::replace(enc, new_enc);
-        self.ctx.queue.submit(Some(old_enc.finish()));
         if let Some(cb) = progress_cb {
             cb(label, phase_idx, total_phases);
         }

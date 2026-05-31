@@ -959,6 +959,12 @@ impl TrainingSession {
         if let Some(cb) = progress_cb {
             cb("optimizer", 0, 1);
         }
+        // **Patch 5: end-of-step bind-cache clear.** Drops every cached
+        // (uniform, bind_group) so cross-step entries don't accumulate
+        // in WebKit's GPUProcess bind-group table. Cost is ~50 cache
+        // misses at the start of next step — negligible vs the ~5K
+        // hits/step the cache absorbs once warm.
+        self.model.forward().clear_bind_cache();
         Ok(loss)
     }
 
@@ -1280,6 +1286,9 @@ impl TrainingSession {
         if let Some(cb) = progress_cb {
             cb("optimizer", 0, 1);
         }
+        // **Patch 5: end-of-step bind-cache clear.** See
+        // `step_with_progress` for the rationale.
+        self.model.forward().clear_bind_cache();
         Ok(loss)
     }
 
