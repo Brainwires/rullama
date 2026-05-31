@@ -3592,6 +3592,41 @@ impl Forward {
                 let logical = (n_layers as u32) - i;
                 cb("bwd.loop.enter", logical, n_layers as u32);
             }
+            // **JS yield at head→backward boundary (wasm only).** No GPU
+            // sync — just a `setTimeout(0)` Promise so the wasm task
+            // releases the event loop for a tick. Two iOS-specific wins:
+            //   (1) The browser gets to drive its WebGPU work queue:
+            //       any head submits still draining can complete in the
+            //       GPU process before recompute pushes new pressure on
+            //       top.
+            //   (2) iOS Safari memory pressure handlers get a chance to
+            //       run between phases (the WebContent jetsam check
+            //       and the GPU-process reclaim are event-loop-driven).
+            // A read_buf_stats drain HERE killed the page (real-device
+            // trail: `head_rmsnorm 4/4 gpuMiB=38` → 💥 — sync forced
+            // Metal pipeline-compile RSS past jetsam). A pure JS yield
+            // doesn't force anything; the GPU naturally drains in the
+            // background while we wait. ~1ms total cost.
+            #[cfg(target_arch = "wasm32")]
+            {
+                // Worker contexts have `self` (WorkerGlobalScope) not
+                // `window`; reach setTimeout via the global object.
+                use wasm_bindgen::JsCast;
+                let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+                    let global = js_sys::global();
+                    let set_timeout = js_sys::Reflect::get(
+                        &global, &wasm_bindgen::JsValue::from_str("setTimeout"),
+                    )
+                    .ok()
+                    .and_then(|v| v.dyn_into::<js_sys::Function>().ok());
+                    if let Some(st) = set_timeout {
+                        let _ = st.call2(
+                            &global, &resolve.into(), &wasm_bindgen::JsValue::from_f64(0.0),
+                        );
+                    }
+                });
+                let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+            }
             let cap = &capture[li];
             let lora = &loras[li];
             let grad = &grads[li];
