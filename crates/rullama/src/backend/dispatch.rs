@@ -988,9 +988,88 @@ pub fn make_dummy_storage(device: &wgpu::Device, label: &str) -> wgpu::Buffer {
     })
 }
 
+/// **The hot path for every chained dispatcher.** Looks up (or builds
+/// on first miss) the cached `(uniform, bind_group)` for this
+/// `pipeline` × `buffers` combo, writes the per-call `params` into the
+/// persistent uniform, then dispatches.
+///
+/// On iOS Safari WebGPU every `create_buffer` and `create_bind_group`
+/// is an IPC round-trip to GPUProcess + descriptor bookkeeping. A
+/// training step does ~30,000 of each without caching — directly
+/// matching the WebKit-bug-302711 GPUProcess pressure pattern that
+/// jetsam'd the WebContent tab in our iPhone tests. Cache hits skip
+/// both — only the `write_buffer` of fresh params runs, which is what
+/// the GPUProcess is designed for at scale.
+///
+/// Bindings 1..=buffers.len() — binding 0 is always the uniform.
+/// Supports 2..=7 storage buffers (covers every shape in this file —
+/// `attention_backward_dq_chained` at 6 is the verified worst case).
+fn cached_dispatch<T: bytemuck::Pod>(
+    ctx: &WgpuCtx,
+    enc: &mut wgpu::CommandEncoder,
+    pipeline: &wgpu::ComputePipeline,
+    label: &str,
+    buffers: &[&wgpu::Buffer],
+    params: &T,
+    wg: (u32, u32, u32),
+) {
+    let key = match buffers.len() {
+        1 => crate::backend::CacheKey::one(pipeline, buffers[0]),
+        2 => crate::backend::CacheKey::two(pipeline, buffers[0], buffers[1]),
+        3 => crate::backend::CacheKey::three(pipeline, buffers[0], buffers[1], buffers[2]),
+        4 => crate::backend::CacheKey::four(
+            pipeline, buffers[0], buffers[1], buffers[2], buffers[3],
+        ),
+        5 => crate::backend::CacheKey::five(
+            pipeline, buffers[0], buffers[1], buffers[2], buffers[3], buffers[4],
+        ),
+        6 => crate::backend::CacheKey::six(
+            pipeline, buffers[0], buffers[1], buffers[2], buffers[3], buffers[4], buffers[5],
+        ),
+        7 => crate::backend::CacheKey::seven(
+            pipeline, buffers[0], buffers[1], buffers[2], buffers[3], buffers[4], buffers[5],
+            buffers[6],
+        ),
+        n => panic!("cached_dispatch supports 1..=7 storage buffers, got {n}"),
+    };
+    let cached = ctx.bind_cache.get_or_create(key, || {
+        let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(&format!("{label}.params")),
+            size: std::mem::size_of::<T>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut entries: Vec<wgpu::BindGroupEntry> = Vec::with_capacity(buffers.len() + 1);
+        entries.push(wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform.as_entire_binding(),
+        });
+        for (i, b) in buffers.iter().enumerate() {
+            entries.push(wgpu::BindGroupEntry {
+                binding: (i + 1) as u32,
+                resource: b.as_entire_binding(),
+            });
+        }
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&format!("{label}.bg")),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &entries,
+        });
+        crate::backend::CachedDispatch { uniform, bind_group }
+    });
+    ctx.queue
+        .write_buffer(&cached.uniform, 0, bytemuck::bytes_of(params));
+    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some(label),
+        timestamp_writes: None,
+    });
+    cp.set_pipeline(pipeline);
+    cp.set_bind_group(0, &cached.bind_group, &[]);
+    cp.dispatch_workgroups(wg.0, wg.1, wg.2);
+}
+
 fn matmul_chained_inner(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+    ctx: &WgpuCtx,
     enc: &mut wgpu::CommandEncoder,
     pipeline: &wgpu::ComputePipeline,
     label: &str,
@@ -1006,36 +1085,15 @@ fn matmul_chained_inner(
         _p0: 0,
         _p1: 0,
     };
-    let p_buf = write_uniform(device, queue, &format!("{label}.params"), &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some(&format!("{label}.bg")),
-        layout: &pipeline.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: w.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: x.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: y.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some(label),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(pipeline);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+    cached_dispatch(
+        ctx,
+        enc,
+        pipeline,
+        label,
+        &[w, x, y],
+        &params,
+        ((n as u32).div_ceil(64), 1, 1),
+    );
 }
 
 // Tiled-kernel threshold: empirically the naive matvec (one thread per output)
@@ -1065,8 +1123,7 @@ pub fn matmul_q4_k_chained(
     //   tiled    WG=64 + f16 LDS  : 975 ms/tok  (-4%)
     // The 3 alternatives are built (when relevant features) but unrouted.
     matmul_chained_inner(
-        &ctx.device,
-        &ctx.queue,
+        ctx,
         enc,
         &p.q4_k_matmul,
         "q4k_chain",
@@ -1089,8 +1146,7 @@ pub fn matmul_q6_k_chained(
     n: usize,
 ) {
     matmul_chained_inner(
-        &ctx.device,
-        &ctx.queue,
+        ctx,
         enc,
         &p.q6_k_matmul,
         "q6k_chain",
@@ -1114,8 +1170,7 @@ pub fn matmul_f16_chained(
     n: usize,
 ) {
     matmul_chained_inner(
-        &ctx.device,
-        &ctx.queue,
+        ctx,
         enc,
         &p.f16_matmul,
         "f16_chain",
@@ -1141,8 +1196,7 @@ pub fn matmul_bf16_chained(
     n: usize,
 ) {
     matmul_chained_inner(
-        &ctx.device,
-        &ctx.queue,
+        ctx,
         enc,
         &p.bf16_matmul,
         "bf16_chain",
@@ -1167,45 +1221,14 @@ pub fn rmsnorm_chained(
     n: usize,
     eps: f32,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = RmsParams {
         n: n as u32,
         eps,
         has_weight: weight.is_some() as u32,
         _p: 0,
     };
-    let p_buf = write_uniform(device, queue, "rms_chain.params", &params);
     let w_buf = weight.unwrap_or(dummy);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rms_chain.bg"),
-        layout: &p.rmsnorm.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: x.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: w_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: y.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("rms_chain.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.rmsnorm);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups(1, 1, 1);
+    cached_dispatch(ctx, enc, &p.rmsnorm, "rms_chain", &[x, w_buf, y], &params, (1, 1, 1));
 }
 
 /// Half-residual add: x[i] = x[i] + 0.5 * y[i] (Conformer FFW).
@@ -2297,40 +2320,16 @@ pub fn scale_per_inner_dim_chained(
     n: usize,
     inner_dim: usize,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = ScalePerInnerDimParams {
         n: n as u32,
         inner_dim: inner_dim as u32,
         _p0: 0,
         _p1: 0,
     };
-    let p_buf = write_uniform(device, queue, "scale_pd.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("scale_pd.bg"),
-        layout: &p.scale_per_inner_dim.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: x.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: s.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("scale_pd.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.scale_per_inner_dim);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.scale_per_inner_dim, "scale_pd",
+        &[x, s], &params, ((n as u32).div_ceil(64), 1, 1),
+    );
 }
 
 /// In-place per-output-dim bias add: y[b, j] += bias[j]. Used by the audio
@@ -3343,45 +3342,17 @@ pub fn rmsnorm_per_row_chained(
     row_dim: usize,
     eps: f32,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = RmsPerRowParams {
         n_rows: n_rows as u32,
         row_dim: row_dim as u32,
         eps,
         has_weight: weight.is_some() as u32,
     };
-    let p_buf = write_uniform(device, queue, "rmspr_chain.params", &params);
     let w_buf = weight.unwrap_or(dummy);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rmspr_chain.bg"),
-        layout: &p.rmsnorm_per_row.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: x.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: w_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: y.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("rmspr_chain.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.rmsnorm_per_row);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups(n_rows as u32, 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.rmsnorm_per_row, "rmspr_chain",
+        &[x, w_buf, y], &params, (n_rows as u32, 1, 1),
+    );
 }
 
 #[repr(C)]
@@ -3440,12 +3411,12 @@ pub fn adam_step_chained(
     n: usize,
     cfg: AdamConfig,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let total_groups = (n as u32).div_ceil(64);
     // Chunk dispatches to stay under wgpu's 65_535 workgroups-per-dim
     // cap. lm_head + embed_tokens LoRA B buffers (vocab × rank ≈ 4.2M
-    // f32s) need exactly 65_536 workgroups, JUST over the limit.
+    // f32s) need exactly 65_536 workgroups, JUST over the limit. The
+    // bind-group cache key is identical across iterations — chunks
+    // after the first are cache hits, only the uniform write differs.
     const MAX_GROUPS_PER_DISPATCH: u32 = 65535;
     let mut groups_done: u32 = 0;
     while groups_done < total_groups {
@@ -3464,41 +3435,10 @@ pub fn adam_step_chained(
             _pad3: 0.0,
             _pad4: 0.0,
         };
-        let p_buf = write_uniform(device, queue, "adam.params", &params);
-        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("adam.bg"),
-            layout: &p.adam_step.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: p_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: grad.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: param.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: m.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: v.as_entire_binding(),
-                },
-            ],
-        });
-        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("adam.pass"),
-            timestamp_writes: None,
-        });
-        cp.set_pipeline(&p.adam_step);
-        cp.set_bind_group(0, &bg, &[]);
-        cp.dispatch_workgroups(groups_this, 1, 1);
-        drop(cp);
+        cached_dispatch(
+            ctx, enc, &p.adam_step, "adam",
+            &[grad, param, m, v], &params, (groups_this, 1, 1),
+        );
         groups_done += groups_this;
     }
 }
@@ -3524,40 +3464,16 @@ pub fn sum_of_squares_chained(
     n: usize,
     scale_in: f32,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = SumOfSquaresParams {
         n: n as u32,
         scale_in,
         _p0: 0,
         _p1: 0,
     };
-    let p_buf = write_uniform(device, queue, "sos.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("sos.bg"),
-        layout: &p.sum_of_squares.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: input.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: output.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("sos.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.sum_of_squares);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups(1, 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.sum_of_squares, "sos",
+        &[input, output], &params, (1, 1, 1),
+    );
 }
 
 #[repr(C)]
@@ -3612,7 +3528,7 @@ pub fn lora_matmul_row_chained(
         _pad4: 0,
     };
     let key = crate::backend::CacheKey::three(&p.lora_matmul_row, w, x, y);
-    let cached = ctx.lora_bind_cache.get_or_create(key, || {
+    let cached = ctx.bind_cache.get_or_create(key, || {
         let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lora_mm_row.params"),
             size: std::mem::size_of::<LoraMatmulParams>() as u64,
@@ -3671,7 +3587,7 @@ pub fn lora_matmul_col_chained(
         _pad4: 0,
     };
     let key = crate::backend::CacheKey::three(&p.lora_matmul_col, w, x, y);
-    let cached = ctx.lora_bind_cache.get_or_create(key, || {
+    let cached = ctx.bind_cache.get_or_create(key, || {
         let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lora_mm_col.params"),
             size: std::mem::size_of::<LoraMatmulParams>() as u64,
@@ -3726,7 +3642,7 @@ pub fn lora_outer_add_chained(
         _pad4: 0,
     };
     let key = crate::backend::CacheKey::three(&p.lora_outer_add, a, b, out);
-    let cached = ctx.lora_bind_cache.get_or_create(key, || {
+    let cached = ctx.bind_cache.get_or_create(key, || {
         let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lora_outer.params"),
             size: std::mem::size_of::<LoraOuterParams>() as u64,
@@ -3801,7 +3717,7 @@ pub fn lora_embed_col_read_chained(
         _pad: 0,
     };
     let key = crate::backend::CacheKey::two(&p.lora_embed_col_read, a, z);
-    let cached = ctx.lora_bind_cache.get_or_create(key, || {
+    let cached = ctx.bind_cache.get_or_create(key, || {
         let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lora_embed_col_read.params"),
             size: std::mem::size_of::<LoraEmbedColParams>() as u64,
@@ -3856,7 +3772,7 @@ pub fn lora_embed_col_scatter_add_chained(
         _pad4: 0,
     };
     let key = crate::backend::CacheKey::two(&p.lora_embed_col_scatter_add, u, da);
-    let cached = ctx.lora_bind_cache.get_or_create(key, || {
+    let cached = ctx.bind_cache.get_or_create(key, || {
         let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lora_embed_col_scatter.params"),
             size: std::mem::size_of::<LoraEmbedColScatterParams>() as u64,
@@ -3942,7 +3858,7 @@ pub fn lora_matmul_fused_chained(
     // the key — every call with the same A/B/x/y also uses the same
     // z_out.
     let key = crate::backend::CacheKey::four(&p.lora_matmul_fused, a, b, x, y);
-    let cached = ctx.lora_bind_cache.get_or_create(key, || {
+    let cached = ctx.bind_cache.get_or_create(key, || {
         let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lora_fused.params"),
             size: std::mem::size_of::<LoraFusedParams>() as u64,
@@ -4004,7 +3920,7 @@ pub fn lora_matmul_fused_f16b_chained(
         _pad2: 0,
     };
     let key = crate::backend::CacheKey::four(&p.lora_matmul_fused_f16b, a, b, x, y);
-    let cached = ctx.lora_bind_cache.get_or_create(key, || {
+    let cached = ctx.bind_cache.get_or_create(key, || {
         let uniform = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lora_fused_f16b.params"),
             size: std::mem::size_of::<LoraFusedParams>() as u64,
@@ -4068,8 +3984,6 @@ pub fn attention_backward_dq_chained(
     n_kv_heads: usize,
     history_len: usize,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let heads_per_kv = n_heads / n_kv_heads;
     let params = AttnBackParams {
         head_dim: head_dim as u32,
@@ -4081,48 +3995,11 @@ pub fn attention_backward_dq_chained(
         _pad1: 0,
         _pad2: 0,
     };
-    let p_buf = write_uniform(device, queue, "attn_bwd_dq.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("attn_bwd_dq.bg"),
-        layout: &p.attention_backward_dq.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: k_hist.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: v_hist.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: probs.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: d_out.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: d_scores.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 6,
-                resource: d_q.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("attn_bwd_dq.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.attention_backward_dq);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups(n_heads as u32, 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.attention_backward_dq, "attn_bwd_dq",
+        &[k_hist, v_hist, probs, d_out, d_scores, d_q],
+        &params, (n_heads as u32, 1, 1),
+    );
 }
 
 /// Attention backward, pass 2 of 2 — consumes the staged `d_scores`
@@ -4144,8 +4021,6 @@ pub fn attention_backward_dkv_chained(
     n_kv_heads: usize,
     history_len: usize,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let heads_per_kv = n_heads / n_kv_heads;
     let params = AttnBackParams {
         head_dim: head_dim as u32,
@@ -4157,48 +4032,11 @@ pub fn attention_backward_dkv_chained(
         _pad1: 0,
         _pad2: 0,
     };
-    let p_buf = write_uniform(device, queue, "attn_bwd_dkv.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("attn_bwd_dkv.bg"),
-        layout: &p.attention_backward_dkv.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: q.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: probs.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: d_out.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: d_scores.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: d_k_hist.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 6,
-                resource: d_v_hist.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("attn_bwd_dkv.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.attention_backward_dkv);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups(n_kv_heads as u32, history_len as u32, 1);
+    cached_dispatch(
+        ctx, enc, &p.attention_backward_dkv, "attn_bwd_dkv",
+        &[q, probs, d_out, d_scores, d_k_hist, d_v_hist],
+        &params, (n_kv_heads as u32, history_len as u32, 1),
+    );
 }
 
 /// RMSNorm backward w.r.t. the input. Weight `w` is frozen (LoRA
@@ -4216,48 +4054,16 @@ pub fn rmsnorm_backward_chained(
     eps: f32,
     has_weight: bool,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = RmsParams {
         n: n as u32,
         eps,
         has_weight: has_weight as u32,
         _p: 0,
     };
-    let p_buf = write_uniform(device, queue, "rms_bwd.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rms_bwd.bg"),
-        layout: &p.rmsnorm_backward.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: x.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: w.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: dy.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: dx.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("rms_bwd.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.rmsnorm_backward);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups(1, 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.rmsnorm_backward, "rms_bwd",
+        &[x, w, dy, dx], &params, (1, 1, 1),
+    );
 }
 
 #[repr(C)]
@@ -4286,48 +4092,16 @@ pub fn rmsnorm_per_row_backward_chained(
     eps: f32,
     has_weight: bool,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = RmsPerRowBackParams {
         n_rows: n_rows as u32,
         n: n as u32,
         eps,
         has_weight: has_weight as u32,
     };
-    let p_buf = write_uniform(device, queue, "rms_pr_bwd.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rms_pr_bwd.bg"),
-        layout: &p.rmsnorm_per_row_backward.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: x.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: w.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: dy.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: dx.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("rms_pr_bwd.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.rmsnorm_per_row_backward);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups(n_rows as u32, 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.rmsnorm_per_row_backward, "rms_pr_bwd",
+        &[x, w, dy, dx], &params, (n_rows as u32, 1, 1),
+    );
 }
 
 /// GeGLU backward — produces `d_gate` and `d_up` from `dy`, `gate`, `up`.
@@ -4342,52 +4116,16 @@ pub fn geglu_backward_chained(
     d_up: &wgpu::Buffer,
     n: usize,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = GegluParams {
         n: n as u32,
         _p0: 0,
         _p1: 0,
         _p2: 0,
     };
-    let p_buf = write_uniform(device, queue, "geglu_bwd.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("geglu_bwd.bg"),
-        layout: &p.geglu_backward.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: gate.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: up.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: dy.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: d_gate.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: d_up.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("geglu_bwd.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.geglu_backward);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.geglu_backward, "geglu_bwd",
+        &[gate, up, dy, d_gate, d_up], &params, ((n as u32).div_ceil(64), 1, 1),
+    );
 }
 
 /// NeoX RoPE backward — inverse in-place rotation. Reuses the same
@@ -4405,8 +4143,6 @@ pub fn rope_neox_backward_chained(
     rope_dims: usize,
     base: f32,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = RopeParams {
         head_dim: head_dim as u32,
         n_heads: n_heads as u32,
@@ -4417,34 +4153,12 @@ pub fn rope_neox_backward_chained(
         _p0: 0,
         _p1: 0,
     };
-    let p_buf = write_uniform(device, queue, "rope_bwd.params", &params);
     let f_buf = factors.unwrap_or(dummy);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rope_bwd.bg"),
-        layout: &p.rope_neox_backward.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: x.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: f_buf.as_entire_binding(),
-            },
-        ],
-    });
     let total = (n_heads * (rope_dims / 2)) as u32;
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("rope_bwd.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.rope_neox_backward);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.rope_neox_backward, "rope_bwd",
+        &[x, f_buf], &params, (total.div_ceil(64), 1, 1),
+    );
 }
 
 /// Backward of `y = matmul_q4_k(W, x)` w.r.t. the input.
@@ -4469,44 +4183,16 @@ pub fn matmul_q4_k_backward_input_chained(
         k.is_multiple_of(256),
         "k must be divisible by 256 for Q4_K backward"
     );
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = MatmulParams {
         k: k as u32,
         n: n as u32,
         _p0: 0,
         _p1: 0,
     };
-    let p_buf = write_uniform(device, queue, "q4k_bwd.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("q4k_bwd.bg"),
-        layout: &p.matmul_q4_k_backward_input.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: weight.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: dy.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: dx.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("q4k_bwd.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.matmul_q4_k_backward_input);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups((k / 256) as u32, 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.matmul_q4_k_backward_input, "q4k_bwd",
+        &[weight, dy, dx], &params, ((k / 256) as u32, 1, 1),
+    );
 }
 
 /// Backward of `y = matmul_q6_k(W, x)` w.r.t. the input. Same convention
@@ -4527,44 +4213,16 @@ pub fn matmul_q6_k_backward_input_chained(
         k.is_multiple_of(256),
         "k must be divisible by 256 for Q6_K backward"
     );
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = MatmulParams {
         k: k as u32,
         n: n as u32,
         _p0: 0,
         _p1: 0,
     };
-    let p_buf = write_uniform(device, queue, "q6k_bwd.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("q6k_bwd.bg"),
-        layout: &p.matmul_q6_k_backward_input.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: weight.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: dy.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: dx.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("q6k_bwd.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.matmul_q6_k_backward_input);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups((k / 256) as u32, 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.matmul_q6_k_backward_input, "q6k_bwd",
+        &[weight, dy, dx], &params, ((k / 256) as u32, 1, 1),
+    );
 }
 
 /// Cross-entropy forward + backward over a single logit vector.
@@ -4585,44 +4243,16 @@ pub fn cross_entropy_backward_chained(
     vocab_size: usize,
     target: u32,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = XEntParams {
         vocab_size: vocab_size as u32,
         target,
         _p0: 0,
         _p1: 0,
     };
-    let p_buf = write_uniform(device, queue, "xent_bwd.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("xent_bwd.bg"),
-        layout: &p.cross_entropy_backward.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: logits.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: d_logits.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: loss_out.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("xent_bwd.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.cross_entropy_backward);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups(1, 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.cross_entropy_backward, "xent_bwd",
+        &[logits, d_logits, loss_out], &params, (1, 1, 1),
+    );
 }
 
 /// Chained softcap: in-place would be ideal, but the WGSL has separate `x`, `y`
@@ -4637,40 +4267,16 @@ pub fn softcap_chained(
     n: usize,
     cap: f32,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = CapParams {
         n: n as u32,
         cap,
         _p0: 0,
         _p1: 0,
     };
-    let p_buf = write_uniform(device, queue, "cap_chain.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("cap_chain.bg"),
-        layout: &p.softcap.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: x.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: y.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("cap_chain.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.softcap);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.softcap, "cap_chain",
+        &[x, y], &params, ((n as u32).div_ceil(64), 1, 1),
+    );
 }
 
 pub fn geglu_chained(
@@ -4682,44 +4288,16 @@ pub fn geglu_chained(
     y: &wgpu::Buffer,
     n: usize,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = GegluParams {
         n: n as u32,
         _p0: 0,
         _p1: 0,
         _p2: 0,
     };
-    let p_buf = write_uniform(device, queue, "geglu_chain.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("geglu_chain.bg"),
-        layout: &p.geglu.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: gate.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: up.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: y.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("geglu_chain.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.geglu);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.geglu, "geglu_chain",
+        &[gate, up, y], &params, ((n as u32).div_ceil(64), 1, 1),
+    );
 }
 
 /// Chained NeoX RoPE. The WGSL writes in-place into the `x` buffer.
@@ -4736,8 +4314,6 @@ pub fn rope_neox_chained(
     rope_dims: usize,
     base: f32,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = RopeParams {
         head_dim: head_dim as u32,
         n_heads: n_heads as u32,
@@ -4748,34 +4324,12 @@ pub fn rope_neox_chained(
         _p0: 0,
         _p1: 0,
     };
-    let p_buf = write_uniform(device, queue, "rope_chain.params", &params);
     let f_buf = factors.unwrap_or(dummy);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("rope_chain.bg"),
-        layout: &p.rope_neox.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: x.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: f_buf.as_entire_binding(),
-            },
-        ],
-    });
     let total = (n_heads * (rope_dims / 2)) as u32;
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("rope_chain.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.rope_neox);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups(total.div_ceil(64), 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.rope_neox, "rope_chain",
+        &[x, f_buf], &params, (total.div_ceil(64), 1, 1),
+    );
 }
 
 /// Chained residual_add: x[i] += y[i], in-place into `x`.
@@ -4787,40 +4341,16 @@ pub fn residual_add_chained(
     y: &wgpu::Buffer,
     n: usize,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = ResAddParams {
         n: n as u32,
         _p0: 0,
         _p1: 0,
         _p2: 0,
     };
-    let p_buf = write_uniform(device, queue, "resadd_chain.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("resadd_chain.bg"),
-        layout: &p.residual_add.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: x.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: y.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("resadd_chain.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.residual_add);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups((n as u32).div_ceil(64), 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.residual_add, "resadd_chain",
+        &[x, y], &params, ((n as u32).div_ceil(64), 1, 1),
+    );
 }
 
 /// Chained scale: x[i] *= s, in-place into `x`.
@@ -4832,14 +4362,16 @@ pub fn scale_chained(
     n: usize,
     s: f32,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let total_groups = (n as u32).div_ceil(64);
     // wgpu hard caps dispatch_workgroups at 65535 per dimension. For
     // very large buffers (lm_head / embed_tokens LoRA B = vocab × rank
     // ≈ 4.2M f32s → 65_536 workgroups, JUST over the cap), chunk the
     // dispatch across multiple submissions and use `offset` in the
     // shader to keep linear indexing correct.
+    //
+    // The bind-group cache key is identical across iterations (same
+    // pipeline, same `x` buffer), so all loop iterations after the
+    // first are cache hits — only the per-call uniform write differs.
     const MAX_GROUPS_PER_DISPATCH: u32 = 65535;
     let mut groups_done: u32 = 0;
     while groups_done < total_groups {
@@ -4850,29 +4382,10 @@ pub fn scale_chained(
             offset: groups_done * 64,
             _p1: 0,
         };
-        let p_buf = write_uniform(device, queue, "scale_chain.params", &params);
-        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("scale_chain.bg"),
-            layout: &p.scale.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: p_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: x.as_entire_binding(),
-                },
-            ],
-        });
-        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("scale_chain.pass"),
-            timestamp_writes: None,
-        });
-        cp.set_pipeline(&p.scale);
-        cp.set_bind_group(0, &bg, &[]);
-        cp.dispatch_workgroups(groups_this, 1, 1);
-        drop(cp);
+        cached_dispatch(
+            ctx, enc, &p.scale, "scale_chain",
+            &[x], &params, (groups_this, 1, 1),
+        );
         groups_done += groups_this;
     }
 }
@@ -4892,8 +4405,6 @@ pub fn attention_chained(
     history_len: usize,
     window: usize,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = AttnParams {
         head_dim: head_dim as u32,
         n_heads: n_heads as u32,
@@ -4904,40 +4415,10 @@ pub fn attention_chained(
         window: window as u32,
         _p: 0,
     };
-    let p_buf = write_uniform(device, queue, "attn_chain.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("attn_chain.bg"),
-        layout: &p.attention.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: q.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: k_hist.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: v_hist.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: out.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("attn_chain.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.attention);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups(n_heads as u32, 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.attention, "attn_chain",
+        &[q, k_hist, v_hist, out], &params, (n_heads as u32, 1, 1),
+    );
 }
 
 /// Compute attention softmax probabilities only (no V multiply). Mirrors
@@ -4960,8 +4441,6 @@ pub fn attention_probs_chained(
     history_len: usize,
     window: usize,
 ) {
-    let device = &ctx.device;
-    let queue = &ctx.queue;
     let params = AttnParams {
         head_dim: head_dim as u32,
         n_heads: n_heads as u32,
@@ -4972,36 +4451,10 @@ pub fn attention_probs_chained(
         window: window as u32,
         _p: 0,
     };
-    let p_buf = write_uniform(device, queue, "attn_probs.params", &params);
-    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("attn_probs.bg"),
-        layout: &p.attention_probs.get_bind_group_layout(0),
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: p_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: q.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: k_hist.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: probs.as_entire_binding(),
-            },
-        ],
-    });
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: Some("attn_probs.pass"),
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(&p.attention_probs);
-    cp.set_bind_group(0, &bg, &[]);
-    cp.dispatch_workgroups(n_heads as u32, 1, 1);
+    cached_dispatch(
+        ctx, enc, &p.attention_probs, "attn_probs",
+        &[q, k_hist, probs], &params, (n_heads as u32, 1, 1),
+    );
 }
 
 // ---------- attention ----------

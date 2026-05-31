@@ -286,6 +286,7 @@ impl Model {
             r_arc.clone(),
             ctx.device.clone(),
             ctx.queue.clone(),
+            Arc::clone(&ctx.bind_cache),
         ));
 
         // Detect vision tower (presence of v.patch_embd.weight). Build VisionForward
@@ -791,7 +792,7 @@ impl Model {
         // adapter — its old keys reference buffer pointers that the
         // previous adapter owned. The new adapter allocates fresh
         // buffers; first dispatch repopulates the cache.
-        self.forward.ctx().lora_bind_cache.clear();
+        self.forward.ctx().bind_cache.clear();
         let ctx = Arc::new(self.forward.ctx().clone());
         let cfg = self.forward.cfg().clone();
         let adapter = crate::lora::InferenceAdapter::from_safetensors_bytes(ctx, &cfg, bytes)?;
@@ -803,7 +804,7 @@ impl Model {
     /// Drop the active adapter (subsequent generation uses base weights only).
     pub fn clear_adapter_native(&mut self) {
         // Same invalidation rationale as `load_adapter_native`.
-        self.forward.ctx().lora_bind_cache.clear();
+        self.forward.ctx().bind_cache.clear();
         self.adapter = None;
     }
 

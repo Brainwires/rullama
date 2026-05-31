@@ -3280,6 +3280,21 @@ impl Forward {
         // GPUBuffer.destroy() IPC dispatches on iOS Safari (real-device
         // trail: `forward 35/35 gpuMiB=1417` → jetsam in the gap before
         // head_ce). One traversal, one batch of destroys.
+        //
+        // **wasm32 fence (Patch 1 / use-after-destroy guard).** WebGPU
+        // spec says destroy is non-blocking and the runtime tracks
+        // in-flight refs, but WebKit's iOS WebGPU implementation has
+        // been observed (webkit bug 302711 family) to track via
+        // bind-group strong-refs rather than pending-command refs. With
+        // Patch 2's BindGroupCache now holding persistent strong-refs
+        // across submits, destroying a cached buffer mid-flight is a
+        // device-lost trigger. A tiny 1-element read_buf_stats forces
+        // every prior submit to drain before destroy(). Native (wgpu's
+        // own backends) handles destroy ordering correctly without
+        // this fence.
+        #[cfg(target_arch = "wasm32")]
+        let _drain_before_blk_destroy =
+            read_buf_stats(&self.ctx, &self.hidden, 1).await?;
         let dropped = wc.drop_blk_layer_range_destroy(0, floor_u32);
         #[cfg(target_arch = "wasm32")]
         if dropped > 0 {
@@ -3381,29 +3396,28 @@ impl Forward {
         }
 
         // **Destroy token_embd RIGHT HERE — its last consumer just
-        // submitted.** No drain: WebGPU GPUBuffer.destroy() is
-        // non-blocking by spec ("existing usages complete normally;
-        // only future usages are affected"). The runtime holds the
-        // buffer alive until the head_outproj matmul finishes, then
-        // actually frees. A drain HERE would force iOS Metal to sync
-        // the 262K × 1536 outproj matmul mid-submission, which spiked
-        // RSS at the worst possible moment and tripped jetsam in the
-        // real-device test before this destroy could even fire.
+        // submitted.** head_outproj's matmul_q*_backward_input was the
+        // last reference to token_embd in this step:
+        //   • head_lm_head_lora reads lmh.a / lmh.b / lmh.z / scratch.d_logits
+        //     / scratch.norm_x_final / scratch.d_hidden_final — no token_embd.
+        //   • final-rmsnorm backward reads scratch.norm_x_final + final_norm.
+        //   • Layer walks read blk.{i}.* — no token_embd.
+        //   • embed_tokens LoRA backward at end of walk reads slot.b
+        //     (LoRA's own buffer), not token_embd.
         //
-        // Safety: token_embd is read by exactly TWO sites in this
-        // step's backward —
-        //   (1) head_outproj's matmul_q*_backward_input (just submitted
-        //       on the line above) — this submit's queue ordering
-        //       guarantees the destroy() takes effect only after the
-        //       matmul has consumed its bind group.
-        //   (2) the embed_tokens LoRA backward at the end of the layer
-        //       walk uses `slot.b` (the LoRA's own buffer), NOT
-        //       token_embd directly.
-        // The lm_head LoRA backward (next sub-phase) reads lmh.a / lmh.b /
-        // lmh.z / scratch.d_logits / scratch.norm_x_final / scratch.d_hidden_final —
-        // no token_embd. final-rmsnorm backward reads scratch.norm_x_final
-        // + final_norm — no token_embd. Layer walks read blk.{i}.* —
-        // no token_embd. So the head_outproj submit IS its last user.
+        // **wasm32 fence (Patch 1 / use-after-destroy guard).** Earlier
+        // versions skipped the drain on the theory that WebGPU
+        // destroy() is non-blocking per spec. WebKit's iOS WebGPU is
+        // observably non-spec-compliant on this point — and with
+        // Patch 2's BindGroupCache now persistently strong-ref'ing the
+        // head_outproj bind group (which still references token_embd
+        // when this line runs), destroying without first draining IS a
+        // use-after-destroy on iOS. The drain is a small map_async on
+        // scratch.d_hidden_final — cheap; the head_outproj submit has
+        // already populated it.
+        #[cfg(target_arch = "wasm32")]
+        let _drain_before_embd_destroy =
+            read_buf_stats(&self.ctx, scratch.d_hidden_final, 1).await?;
         let _embd_dropped_early = wc.drop_prefix_destroy("token_embd");
         if let Some(cb) = progress_cb {
             cb("bwd.head.early_destroy_embd", 0, 1);

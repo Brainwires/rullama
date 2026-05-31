@@ -385,11 +385,15 @@ watch_training() {
         local current_last
         current_last=$(printf '%s\n' "$since" | tail -1)
 
-        # Success?
-        if printf '%s\n' "$since" | grep -qE "step [0-9]+ done loss="; then
-            ok "SUCCESS — training step completed"
-            echo "----- last 10 beacons -----"
-            printf '%s\n' "$since" | tail -10
+        # Success: configurable via SUCCESS_STEPS (default 5 — proves
+        # cross-step survival, since step 2 alone was passing previously).
+        local success_steps="${SUCCESS_STEPS:-5}"
+        local steps_done
+        steps_done=$(printf '%s\n' "$since" | grep -cE "step [0-9]+ done loss=")
+        if [[ "$steps_done" -ge "$success_steps" ]]; then
+            ok "SUCCESS — $steps_done training steps completed (target=$success_steps)"
+            echo "----- last 12 beacons -----"
+            printf '%s\n' "$since" | tail -12
             return 0
         fi
 

@@ -21,6 +21,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::backend::{buf_id, BindGroupCache};
 use crate::error::{Result, RullamaError};
 use crate::gguf::{GgmlDtype, GgufReader};
 
@@ -42,17 +43,29 @@ pub struct WeightCache {
     reader: Arc<GgufReader>,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Shared bind-group cache (same handle as `WgpuCtx::bind_cache`).
+    /// Each `drop_*_destroy` invalidates any cached bind groups that
+    /// reference the buffers about to be destroyed, BEFORE calling
+    /// `Buffer::destroy()` — guards against the use-after-destroy
+    /// observed on iOS Safari WebGPU.
+    bind_cache: Arc<BindGroupCache>,
     buffers: RefCell<HashMap<String, wgpu::Buffer>>,
     tiles: RefCell<HashMap<TileKey, Vec<wgpu::Buffer>>>,
     tile_meta: RefCell<HashMap<TileKey, TileMeta>>,
 }
 
 impl WeightCache {
-    pub fn new(reader: Arc<GgufReader>, device: wgpu::Device, queue: wgpu::Queue) -> Self {
+    pub fn new(
+        reader: Arc<GgufReader>,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        bind_cache: Arc<BindGroupCache>,
+    ) -> Self {
         Self {
             reader,
             device,
             queue,
+            bind_cache,
             buffers: RefCell::new(HashMap::new()),
             tiles: RefCell::new(HashMap::new()),
             tile_meta: RefCell::new(HashMap::new()),
@@ -213,6 +226,28 @@ impl WeightCache {
     /// (post loss-readback, GPU drained) and by
     /// `Model::release_vision_weights` between inference turns.
     pub fn drop_prefix_destroy(&self, prefix: &str) -> usize {
+        // **Use-after-destroy guard.** Collect ids of every buffer
+        // about to be destroyed and invalidate any cached bind groups
+        // referencing them BEFORE we call `Buffer::destroy()`. On iOS
+        // Safari WebGPU a bind group referencing a destroyed buffer
+        // becomes a device-lost trigger on next use; per WebGPU spec
+        // destroy is supposed to be safe but WebKit's implementation
+        // is observably non-compliant (bug 302711 family).
+        let mut victims: Vec<u64> = Vec::new();
+        for (k, v) in self.buffers.borrow().iter() {
+            if k.starts_with(prefix) {
+                victims.push(buf_id(v));
+            }
+        }
+        for ((k, _), tiles) in self.tiles.borrow().iter() {
+            if k.starts_with(prefix) {
+                for b in tiles {
+                    victims.push(buf_id(b));
+                }
+            }
+        }
+        self.bind_cache.invalidate_buffers(&victims);
+
         let mut removed = 0usize;
         self.buffers.borrow_mut().retain(|k, v| {
             if k.starts_with(prefix) {
@@ -273,6 +308,23 @@ impl WeightCache {
                 None => false,
             }
         };
+
+        // **Use-after-destroy guard** — see drop_prefix_destroy.
+        let mut victims: Vec<u64> = Vec::new();
+        for (k, v) in self.buffers.borrow().iter() {
+            if in_range(k) {
+                victims.push(buf_id(v));
+            }
+        }
+        for ((k, _), tiles) in self.tiles.borrow().iter() {
+            if in_range(k) {
+                for b in tiles {
+                    victims.push(buf_id(b));
+                }
+            }
+        }
+        self.bind_cache.invalidate_buffers(&victims);
+
         let mut removed = 0usize;
         self.buffers.borrow_mut().retain(|k, v| {
             if in_range(k) {
