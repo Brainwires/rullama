@@ -3281,20 +3281,15 @@ impl Forward {
         // trail: `forward 35/35 gpuMiB=1417` → jetsam in the gap before
         // head_ce). One traversal, one batch of destroys.
         //
-        // **wasm32 fence (Patch 1 / use-after-destroy guard).** WebGPU
-        // spec says destroy is non-blocking and the runtime tracks
-        // in-flight refs, but WebKit's iOS WebGPU implementation has
-        // been observed (webkit bug 302711 family) to track via
-        // bind-group strong-refs rather than pending-command refs. With
-        // Patch 2's BindGroupCache now holding persistent strong-refs
-        // across submits, destroying a cached buffer mid-flight is a
-        // device-lost trigger. A tiny 1-element read_buf_stats forces
-        // every prior submit to drain before destroy(). Native (wgpu's
-        // own backends) handles destroy ordering correctly without
-        // this fence.
-        #[cfg(target_arch = "wasm32")]
-        let _drain_before_blk_destroy =
-            read_buf_stats(&self.ctx, &self.hidden, 1).await?;
+        // **No drain needed here.** Patch 2's BindGroupCache invalidation
+        // hooks into `drop_blk_layer_range_destroy` and evicts any
+        // cached bind group whose key references one of the buffers
+        // about to be destroyed BEFORE the underlying `Buffer::destroy()`
+        // runs (see `BindGroupCache::invalidate_buffers` and the call in
+        // `WeightCache::drop_blk_layer_range_destroy`). That removes the
+        // class of use-after-destroy that an earlier wasm32 drain was
+        // guarding against. WebGPU spec §3.4.3.1: commands already
+        // encoded using a destroyed buffer continue to execute normally.
         let dropped = wc.drop_blk_layer_range_destroy(0, floor_u32);
         #[cfg(target_arch = "wasm32")]
         if dropped > 0 {
@@ -3405,19 +3400,18 @@ impl Forward {
         //   • embed_tokens LoRA backward at end of walk reads slot.b
         //     (LoRA's own buffer), not token_embd.
         //
-        // **wasm32 fence (Patch 1 / use-after-destroy guard).** Earlier
-        // versions skipped the drain on the theory that WebGPU
-        // destroy() is non-blocking per spec. WebKit's iOS WebGPU is
-        // observably non-spec-compliant on this point — and with
-        // Patch 2's BindGroupCache now persistently strong-ref'ing the
-        // head_outproj bind group (which still references token_embd
-        // when this line runs), destroying without first draining IS a
-        // use-after-destroy on iOS. The drain is a small map_async on
-        // scratch.d_hidden_final — cheap; the head_outproj submit has
-        // already populated it.
-        #[cfg(target_arch = "wasm32")]
-        let _drain_before_embd_destroy =
-            read_buf_stats(&self.ctx, scratch.d_hidden_final, 1).await?;
+        // **No drain needed.** A previous wasm32 drain here forced iOS
+        // Safari to synchronously complete the massive 262K × 1536
+        // head_outproj matmul mid-step, spiking GPUProcess RSS and
+        // tripping jetsam before destroy() even ran (real-device trail:
+        // `head_outproj 2/4 gpuMiB=668` → 💥). With Patch 2's
+        // BindGroupCache invalidation now firing inside
+        // `drop_prefix_destroy` (evicts any cached bind group that
+        // references token_embd before the destroy() runs), there's no
+        // use-after-destroy class of bug to guard against — the spec
+        // guarantees in-flight commands using a destroyed buffer
+        // continue normally, and we no longer encode NEW commands that
+        // reference it.
         let _embd_dropped_early = wc.drop_prefix_destroy("token_embd");
         if let Some(cb) = progress_cb {
             cb("bwd.head.early_destroy_embd", 0, 1);
