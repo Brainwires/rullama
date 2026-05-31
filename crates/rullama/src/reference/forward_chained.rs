@@ -3630,6 +3630,18 @@ impl Forward {
                 });
                 let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
             }
+            // Diagnostic: if `bwd.post_yield` fires but `bwd.layer.recompute`
+            // doesn't, death is inside encode_layer's 15 weight allocs +
+            // their queue.write_buffer to a Metal heap that still has
+            // un-reclaimed token_embd in its aliasable pool. If
+            // `bwd.post_yield` DOESN'T fire after `bwd.loop.enter`, the
+            // setTimeout-via-Reflect path isn't actually awaiting (the
+            // JsFuture might be resolving synchronously on wasm), and
+            // the yield is a no-op.
+            if let Some(cb) = progress_cb {
+                let logical = (n_layers as u32) - i;
+                cb("bwd.post_yield", logical, n_layers as u32);
+            }
             let cap = &capture[li];
             let lora = &loras[li];
             let grad = &grads[li];
