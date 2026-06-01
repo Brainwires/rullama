@@ -154,7 +154,7 @@ export function LogsTab({ initialSelectedId }: Props) {
 
             <div className="flex min-h-0 flex-1 flex-col gap-3 md:flex-row">
                 {/* Session list — scrollable. */}
-                <ul className="flex shrink-0 flex-col gap-0.5 overflow-y-auto rounded-md border border-border bg-card/50 p-1 md:w-64">
+                <ul className="flex max-h-[40dvh] shrink-0 flex-col gap-0.5 overflow-y-auto rounded-md border border-border bg-card/50 p-1 md:w-64">
                     {sessions != null && sessions.length === 0 && (
                         <li className="px-2 py-3 text-center text-xs text-muted-foreground">
                             No logs yet — they appear here after first use.
