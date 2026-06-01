@@ -343,20 +343,22 @@ impl TrainingSession {
         let cfg = model.forward().cfg().clone();
         let ctx = Arc::new(model.forward().ctx().clone());
 
-        // **MeBP per-layer destroy is now OFF.** The bind-group cache
-        // (commit d34f56a) eliminated per-dispatch alloc churn (~30K
-        // (uniform, bind_group) allocations/step → ~5K). With that
-        // structural fix, the iPhone training crash isn't resident
-        // weight pressure — it's GPUProcess buffer-alloc pressure
-        // during MeBP's per-layer recompute re-fetches. iOS Safari
-        // WebGPU happily holds 1.4 GiB of resident weights for
-        // inference (4.65 tok/s on iPhone 16e); the kill comes from
-        // re-allocating those same weights mid-step. Disabling MeBP
-        // destroy lets training hold the same resident set inference
-        // does, with the bind cache absorbing the dispatch-side cost.
-        // Re-enable if a future test shows we need weight RAM
-        // below 1.4 GiB.
-        model.forward_mut().set_forward_destroy_per_layer(false);
+        // **MeBP per-layer destroy ON.** Tested OFF first because
+        // the recompute alloc churn caused crashes — but that was with
+        // Patches 1+2 only. With the full stack (bind_cache + eager
+        // invalidate + Hash-based buf_id + per-layer flush_backward_phase
+        // collapse + tiled outproj + backward-kernel warmup), the
+        // recompute's per-layer alloc churn is heavily reduced (cache
+        // hits, no first-compile cost, fewer IPC round-trips). The
+        // 1417 MiB resident peak (without MeBP) was iPhone's actual
+        // wall — running iPhone tests showed jetsam firing at the
+        // forward→head transition where 1417 MiB resident + Metal's
+        // forward-end transient state exceeded GPUProcess ceiling.
+        //
+        // Per-layer destroy holds the cache at ~40 MiB throughout
+        // (one layer at a time during prefill, one at a time during
+        // backward recompute). iOS can't jetsam at 40 MiB.
+        model.forward_mut().set_forward_destroy_per_layer(true);
         let max_seq_len = hp.max_seq_len as u32;
         // `gradient_checkpointing=true` collapses the per-layer scratch
         // to one shared `LayerActivations` (cloned references) +
