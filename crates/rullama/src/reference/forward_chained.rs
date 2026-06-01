@@ -3887,78 +3887,26 @@ impl Forward {
                 let logical = (n_layers as u32) - i;
                 cb("bwd.loop.enter", logical, n_layers as u32);
             }
-            // **JS yield at head→backward boundary (wasm only).** No GPU
-            // sync — a setTimeout-delay Promise so the wasm task releases
-            // the event loop and gives iOS Metal time to drain the head
-            // section's just-compiled backward kernels (cross_entropy_
-            // backward, matmul_q6_k_backward_input, lora_outer_add,
-            // lora_matmul_col, rmsnorm_backward — all NEW first-use in
-            // this step) BEFORE recompute's encode_layer pushes 12 more
-            // dispatches on top.
+            // **JS yield REMOVED (Patch 9 diagnostic).** Across all
+            // prior iPhone runs `bwd.post_yield` NEVER fired — the
+            // page consistently died right at `bwd.loop.enter 1/35`,
+            // before this cb could emit. Both 0 ms and 500 ms typed
+            // setTimeouts produced the same wall. Tracked memory at
+            // crash was 38 MiB (MeBP on) or 415 MiB (MeBP off) —
+            // memory is NOT the trigger.
             //
-            // The 0ms variant tested previously didn't move the crash
-            // (page still died right after bwd.loop.enter 1/35). 500ms
-            // is empirically enough for iOS Safari to settle the head
-            // submits and lets pressure handlers run between phases.
-            // ~5s/step total (10 backward layers × 500ms) on a step
-            // that takes minutes; perf is irrelevant next to surviving.
+            // If the page now reaches `bwd.post_yield` (with the
+            // setTimeout gone), the yield itself was the killer:
+            // iOS Safari is jetsam'ing the WebContent process while
+            // the Worker is suspended in setTimeout, OR the keepalive
+            // beacons from bwd.loop.enter are stacking and pushing
+            // a per-request limit.
             //
-            // A read_buf_stats drain HERE killed the page in earlier
-            // tests (the forced sync at high pipeline-compile RSS
-            // tripped jetsam). A pure JS yield doesn't force anything;
-            // the GPU naturally drains in the background while we wait.
-            // **Typed setTimeout via DedicatedWorkerGlobalScope.** The
-            // previous Reflect-based path
-            // (`Reflect::get(global, "setTimeout")` + `Function::call2`)
-            // was never observed to actually yield on real iPhone —
-            // `bwd.post_yield` (below) never appeared in the page log
-            // across many runs. Most likely the Reflect path returned
-            // a wrong-typed or undefined value in the Worker context
-            // and the promise resolved synchronously; either way the
-            // 500 ms delay was never honoured.
-            //
-            // The typed path returns a guaranteed Worker-scope handle
-            // and a typed `set_timeout_with_callback_and_timeout_and_arguments_0`
-            // that takes a `Function` + `i32` ms directly — no boxing,
-            // no Reflect, no failure mode that resolves synchronously.
-            // 500 ms gives iOS Metal time to drain the head section's
-            // 4 head submits + just-compiled backward kernels before
-            // the next iteration's recompute submit lands on top.
-            #[cfg(target_arch = "wasm32")]
-            {
-                // **500 ms yield, restored.** Tested both 0 ms and
-                // 500 ms variants on real iPhone — the 0 ms run died
-                // EARLIER (`forward 35/35`) than the 500 ms run
-                // (`bwd.loop.enter 1/35`), implying the wait time was
-                // helping Metal drain pending work. `bwd.post_yield`
-                // didn't fire in either case (iOS jetsam likely
-                // firing INSIDE the yield window regardless), but
-                // the longer drain is empirically less bad. The
-                // recompute submit that comes after this yield is
-                // the next pressure peak; future work to reduce that
-                // submit's footprint (tile outproj, pre-warm
-                // pipelines) may move the wall further.
-                use wasm_bindgen::JsCast;
-                let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global()
-                    .dyn_into()
-                    .expect("training session runs inside a DedicatedWorkerGlobalScope");
-                let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-                    let resolve_fn: js_sys::Function = resolve.into();
-                    let _ = scope.set_timeout_with_callback_and_timeout_and_arguments_0(
-                        &resolve_fn,
-                        500,
-                    );
-                });
-                let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-            }
-            // Diagnostic: `bwd.post_yield` after the typed yield. If
-            // this beacon appears in the post-crash page log for the
-            // first time, Patch 3 is working — the wall is downstream
-            // (recompute submit or backward_layer's first kernels). If
-            // it STILL doesn't appear, the wall is the yield itself
-            // (likely a Worker-scope cast failure) or beacons aren't
-            // delivering before the page dies; either way the next
-            // round of work has cleaner signal.
+            // If `bwd.post_yield` still doesn't fire, the issue is
+            // immediately downstream — most likely the recompute's
+            // first `wcache.buffer_async` call against a freshly-
+            // destroyed (MeBP on) blk.N weight, triggering the alloc
+            // churn we saw before.
             if let Some(cb) = progress_cb {
                 let logical = (n_layers as u32) - i;
                 cb("bwd.post_yield", logical, n_layers as u32);
