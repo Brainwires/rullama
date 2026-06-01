@@ -251,7 +251,7 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged, se
     const initialDefaults = useMemo(deviceDefaults, []);
     const [lora, setLora] = useState<TrainingLoraConfig>(initialDefaults.lora);
     const [hp, setHp] = useState<TrainingHyperparams>(initialDefaults.hp);
-    const [stepsBudget, setStepsBudget] = useState<number>(32);
+    const [stepsBudget, setStepsBudget] = useState<number>(50);
     const [adapterName, setAdapterName] = useState<string>("");
 
     // **B2 — Memory-tight preset.** When on, force-applies the
@@ -983,14 +983,14 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged, se
                             gradient_accumulation_steps: 1,
                             gradient_checkpointing: true,
                         }));
-                        setStepsBudget(32);
+                        setStepsBudget(50);
                         if (memoryTight) {
                             setMemoryTight(false);
                         }
                         toast.info("Reset to canonical recipe");
                     }}
                     className="gap-1 text-[11px]"
-                    title="Reset all hyperparameters to the verified recipe (rank=16, α=32, all 9 targets, lr=2e-4, PerPosition, 32 steps)."
+                    title="Reset all hyperparameters to the verified recipe (rank=16, α=32, all 9 targets, lr=2e-4, PerPosition, 50 steps)."
                 >
                     <RefreshCw className="size-3" /> Reset to canonical
                 </Button>

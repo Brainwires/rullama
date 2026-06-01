@@ -36,7 +36,7 @@ export const DEFAULT_SAMPLING: SamplingOptions = {
     temperature:        0.7,
     top_k:              40,
     top_p:              0.95,
-    repetition_penalty: 1.1,
+    repetition_penalty: 1.3,
     seed:               0,
 };
 
