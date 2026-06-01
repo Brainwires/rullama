@@ -4080,6 +4080,23 @@ impl Forward {
                 cb("backward", logical, n_layers as u32);
             }
 
+            // **0 ms yield between backward_layer submit and the rest
+            // of the per-layer epilogue.** Real-device data: with the
+            // floor+5 patch we got bwd.ple/ffn.down/ffn.gateup/
+            // attn.proj/attn.qkv all fired (an ENTIRE backward layer
+            // ran), then died right after `backward 1/35` cb — before
+            // `bwd.layer.end`. The just-submitted backward_layer
+            // command buffer was still in Metal's pipeline; the
+            // clip's read_buf_stats drain + drop_prefix_destroy
+            // racing against it tripped jetsam.
+            //
+            // Same fix as the head→recompute and recompute→
+            // backward_layer transitions: a 1-tick event-loop release
+            // lets Metal absorb the backward_layer submit before the
+            // epilogue's drain + destroy IPCs land.
+            #[cfg(target_arch = "wasm32")]
+            self.wasm_yield_zero().await;
+
             // Adaptive renorm of d_hidden — if max-abs exceeds the
             // configured ceiling, scale d_hidden in-place to bring
             // max-abs back down. Preserves direction (every element
