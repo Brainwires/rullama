@@ -267,6 +267,17 @@ pub struct Forward {
     /// exchange for fitting under the iOS WebContent jetsam ceiling.
     forward_destroy_per_layer: bool,
 
+    /// Lower bound for backward_layer iteration. Layers `i < floor`
+    /// are NOT walked in backward (no LoRA gradient, no recompute).
+    /// When `forward_destroy_per_layer` is on, we destroy blk.i's
+    /// weights only for `i < floor` — layers at or above the floor
+    /// stay cached so backward's recompute hits the WeightCache
+    /// instead of re-uploading from OPFS (the re-upload was what
+    /// killed iPhone after we removed the head→backward yield).
+    /// Set by `TrainingSession::new` from
+    /// `TrainingHyperparams::backward_layer_floor`.
+    forward_destroy_layer_floor: u32,
+
     // Cached scale factor for the final logits softcap dispatch.
     pos: u32,
 }
@@ -464,6 +475,10 @@ impl Forward {
             max_context,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             forward_destroy_per_layer: false,
+            // u32::MAX = no floor restriction (every layer destroyed
+            // when forward_destroy_per_layer is on). TrainingSession::new
+            // overrides this to the actual backward_layer_floor.
+            forward_destroy_layer_floor: u32::MAX,
             pos: 0,
         })
     }
@@ -500,6 +515,16 @@ impl Forward {
     /// inference.
     pub fn set_forward_destroy_per_layer(&mut self, on: bool) {
         self.forward_destroy_per_layer = on;
+    }
+
+    /// Set the floor used by per-layer forward destroy. Only layers
+    /// `i < floor` are destroyed during forward — layers at or above
+    /// the floor stay cached so backward's recompute hits the
+    /// `WeightCache` instead of re-uploading from OPFS. Pass the
+    /// training session's `backward_layer_floor`; for inference (which
+    /// never sets `forward_destroy_per_layer = true`) this is a no-op.
+    pub fn set_forward_destroy_layer_floor(&mut self, floor: u32) {
+        self.forward_destroy_layer_floor = floor;
     }
 
     /// Drop every cached `(uniform, bind_group)` entry in the shared
@@ -1996,7 +2021,15 @@ impl Forward {
             // MeBP arxiv 2510.03425 §4.2). This is the smallest-change
             // approximation of MeBP's per-block lazy-load architecture
             // adapted to wgpu + OPFS (our analog to their mmap).
-            if self.forward_destroy_per_layer {
+            // Only destroy below the backward floor — layers at or above
+            // the floor are walked in backward and their weights stay
+            // cached so the recompute hits the WeightCache instead of
+            // re-uploading. (iPhone real-device test confirmed: with
+            // unconditional destroy, recompute alloc churn killed the
+            // page immediately after `bwd.post_yield`. With the floor
+            // gating, backward layer 34's recompute finds blk.34 still
+            // in cache.)
+            if self.forward_destroy_per_layer && i < self.forward_destroy_layer_floor {
                 let _drain = read_buf_stats(&self.ctx, &self.hidden, 1).await?;
                 let _ = self.wcache.drop_blk_layer_range_destroy(i, i + 1);
             }

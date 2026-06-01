@@ -359,6 +359,21 @@ impl TrainingSession {
         // (one layer at a time during prefill, one at a time during
         // backward recompute). iOS can't jetsam at 40 MiB.
         model.forward_mut().set_forward_destroy_per_layer(true);
+        // Critical: tell Forward NOT to destroy blk.{floor..N-1} during
+        // the per-layer forward destroy. Those layers are walked by
+        // backward — their recompute does buffer_async fetches that
+        // hit the WeightCache when the weights stayed cached, OR
+        // re-uploads from OPFS when they didn't. The re-upload alloc
+        // churn was killing the iPhone page right after
+        // `bwd.post_yield` (real-device data point: the YIELD wasn't
+        // the issue once we removed it — the very next instruction,
+        // recompute's encode_layer, was). Without this floor, MeBP
+        // destroys every layer; with it, prefill peak is ~400 MiB
+        // (10 cached backward layers + token_embd at head) instead of
+        // ~38 MiB, but the recompute no longer thrashes.
+        model
+            .forward_mut()
+            .set_forward_destroy_layer_floor(hp.backward_layer_floor);
         let max_seq_len = hp.max_seq_len as u32;
         // `gradient_checkpointing=true` collapses the per-layer scratch
         // to one shared `LayerActivations` (cloned references) +
