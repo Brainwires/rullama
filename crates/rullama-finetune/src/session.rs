@@ -371,9 +371,21 @@ impl TrainingSession {
         // destroys every layer; with it, prefill peak is ~400 MiB
         // (10 cached backward layers + token_embd at head) instead of
         // ~38 MiB, but the recompute no longer thrashes.
+        // Real-device test result: floor==backward_layer_floor kept 10
+        // layers cached (~400 MiB) + token_embd (~315 MiB) = ~730 MiB
+        // peak during prefill. iOS jetsam fired at the forward→head
+        // transition. Bumping forward-destroy floor 5 above the
+        // backward-walk floor cuts cached layers to 5 (~200 MiB),
+        // dropping prefill peak to ~515 MiB. The 5 layers
+        // (`backward_layer_floor`..`+5`) recompute-refetches from OPFS
+        // during backward — accepting bounded alloc churn (5 layers
+        // worth, paced by the per-layer encoder submit) to keep prefill
+        // peak under the wall.
+        let fwd_destroy_floor = (hp.backward_layer_floor.saturating_add(5))
+            .min(model.forward().cfg().n_layers);
         model
             .forward_mut()
-            .set_forward_destroy_layer_floor(hp.backward_layer_floor);
+            .set_forward_destroy_layer_floor(fwd_destroy_floor);
         let max_seq_len = hp.max_seq_len as u32;
         // `gradient_checkpointing=true` collapses the per-layer scratch
         // to one shared `LayerActivations` (cloned references) +
