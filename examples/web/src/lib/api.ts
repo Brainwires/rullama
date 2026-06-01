@@ -113,11 +113,18 @@ export async function listModels(signal?: AbortSignal): Promise<ModelEntry[]> {
  *  cross-origin` to satisfy the isolation policy.
  */
 export function blobUrl(m: ModelEntry): string {
-    if (m.url) return m.url;
+    // **`?localBlob` wins over the baked-in CDN URL.** Otherwise the
+    // baked-in entries (which always carry `m.url` pointing at the R2
+    // CDN) silently ignore the override — the very case the override
+    // exists for (split origin: PWA from Cloudflare, GGUF from local
+    // devserver to save home upload bandwidth). The localBlob target
+    // is the user's own machine, so the trust model is the same as
+    // any other localhost dev fetch.
     const port = localBlobPort();
     if (port != null) {
         return `http://localhost:${port}/api/blob/${encodeURIComponent(m.name)}`;
     }
+    if (m.url) return m.url;
     return "/api/blob/" + encodeURIComponent(m.name);
 }
 

@@ -60,13 +60,17 @@ pub fn build_app(state: Arc<AppState>, cfg: SecurityConfig) -> Router {
     } else {
         app.fallback(proxy::fallback_handler)
     };
+    // **Layer order matters.** axum applies `.layer()` calls in
+    // reverse-of-call order — the LAST `.layer()` is the FIRST to
+    // receive an incoming request. We want:
+    //   Trace → Timeout → Extension → security middleware → handler
+    // so the security middleware can read `SecurityConfig` from the
+    // request extensions (which the Extension layer injects). The
+    // ordering below produces that flow.
     app
         .with_state(state)
-        .layer(Extension(cfg))
         .layer(middleware::from_fn(security::apply_security_headers))
-        // 30 s timeout is generous enough for the /api/blob streaming
-        // case (we send chunks regularly so the inactivity timer
-        // resets) while still cutting off slow-loris attempts.
+        .layer(Extension(cfg))
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(30),
