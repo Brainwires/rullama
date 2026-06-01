@@ -87,6 +87,112 @@ const DEFAULT_TARGETS = [...ALL_TARGETS];
 // that's roughly `seq * 40 MB` of GPU memory total. Desktop 128 → ~5 GB
 // budget hit, mobile 32 → ~1.3 GB. These are safe starting points;
 // users with headroom can crank seq via the form.
+// **Device capability check for training.**
+// Training needs WebGPU + a non-trivial GPU heap + enough system RAM to
+// hold activation captures. We refuse to render the form on devices we
+// know will fail mid-step, so the user sees a clear "not supported"
+// state instead of a 30-second wait → crash.
+export type TrainingCapability =
+    | { status: "checking" }
+    | { status: "ok" }
+    | { status: "blocked"; title: string; reason: string };
+
+export function useTrainingCapability(): TrainingCapability {
+    const [cap, setCap] = useState<TrainingCapability>({ status: "checking" });
+    useEffect(() => {
+        let cancelled = false;
+        const check = async () => {
+            const ua = navigator.userAgent;
+            // iPhone / iPod always blocked. iPadOS reports a Mac UA but
+            // exposes touch — treat as iOS.
+            const isIPhone = /iPhone|iPod/i.test(ua);
+            const isIPad = /iPad/i.test(ua) || (ua.includes("Mac") && "ontouchend" in document);
+            if (isIPhone || isIPad) {
+                if (!cancelled) setCap({
+                    status: "blocked",
+                    title: "iOS training isn't supported yet",
+                    reason: "The iPhone-targeted Memory-tight code path is still under development — it currently crashes mid-step on iPhone 16e. Use a desktop browser (Mac / Windows / Linux Chrome or Edge) to train. Inference works on iOS today.",
+                });
+                return;
+            }
+            const gpu = (navigator as Navigator & { gpu?: GPU }).gpu;
+            if (!gpu) {
+                if (!cancelled) setCap({
+                    status: "blocked",
+                    title: "WebGPU not available",
+                    reason: "Training runs the LoRA gradient kernels on WebGPU. This browser doesn't expose `navigator.gpu`. Try Chrome 113+, Edge 113+, or Safari Tech Preview.",
+                });
+                return;
+            }
+            let adapter: GPUAdapter | null = null;
+            try {
+                adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+            } catch (err) {
+                if (!cancelled) setCap({
+                    status: "blocked",
+                    title: "WebGPU init failed",
+                    reason: `requestAdapter() threw: ${String(err)}. This usually means the GPU driver is denying WebGPU access.`,
+                });
+                return;
+            }
+            if (!adapter) {
+                if (!cancelled) setCap({
+                    status: "blocked",
+                    title: "No WebGPU adapter",
+                    reason: "Your browser exposes WebGPU but couldn't get an adapter — usually means there's no compatible GPU, or the integrated GPU is disabled.",
+                });
+                return;
+            }
+            // 512 MB single-buffer ceiling means we can't hold a Q4_K
+            // weight tile for the largest tensors. Reject below that.
+            const maxBuf = adapter.limits.maxBufferSize ?? 0;
+            if (maxBuf < 512 * 1024 * 1024) {
+                if (!cancelled) setCap({
+                    status: "blocked",
+                    title: "GPU memory too small",
+                    reason: `Your GPU advertises a max-buffer-size of ${Math.round(maxBuf / 1024 / 1024)} MB. Training needs at least 512 MB to hold the per-layer weight tiles. (Inference can still work on smaller GPUs.)`,
+                });
+                return;
+            }
+            // System RAM check — `navigator.deviceMemory` is rounded to
+            // 0.25/0.5/1/2/4/8 and caps at 8 in most Chromium builds.
+            // We want ≥4 GB system RAM so the activation-capture mmap
+            // can land somewhere.
+            const memGB = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8;
+            if (memGB < 4) {
+                if (!cancelled) setCap({
+                    status: "blocked",
+                    title: "Not enough system RAM",
+                    reason: `Browser reports ${memGB} GB system RAM (rounded). Training needs at least 4 GB so the activation captures + gradient buffers don't get swapped under the GPU.`,
+                });
+                return;
+            }
+            if (!cancelled) setCap({ status: "ok" });
+        };
+        void check();
+        return () => { cancelled = true; };
+    }, []);
+    return cap;
+}
+
+export function TrainingBlockedScreen({ title, reason }: { title: string; reason: string }) {
+    return (
+        <div className="flex h-full min-h-0 items-center justify-center p-8">
+            <Card className="max-w-lg">
+                <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-base">
+                        <AlertTriangle className="size-4 text-amber-500" />
+                        {title}
+                    </CardTitle>
+                </CardHeader>
+                <CardContent>
+                    <p className="text-sm text-muted-foreground">{reason}</p>
+                </CardContent>
+            </Card>
+        </div>
+    );
+}
+
 function deviceDefaults(): { hp: TrainingHyperparams; lora: TrainingLoraConfig; tight: boolean } {
     const nav = navigator as Navigator & { deviceMemory?: number };
     const memGB = nav.deviceMemory ?? 8;
@@ -995,11 +1101,6 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged, se
                     <RefreshCw className="size-3" /> Reset to canonical
                 </Button>
             </div>
-            <MemoryTightToggle
-                on={memoryTight}
-                onChange={applyMemoryTight}
-                disabled={isTraining}
-            />
             <ObjectiveCard
                 hp={hp} setHp={setHp}
                 stepsBudget={stepsBudget} setStepsBudget={setStepsBudget}
@@ -1013,6 +1114,13 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged, se
             />
             <AdvancedCard
                 hp={hp} setHp={setHp}
+                disabled={isTraining}
+            />
+            {/* Highly-experimental preset — moved to the END of the
+             *  settings stack so a beginner doesn't trip on it. */}
+            <MemoryTightToggle
+                on={memoryTight}
+                onChange={applyMemoryTight}
                 disabled={isTraining}
             />
         </div>
@@ -1975,12 +2083,21 @@ function MemoryTightToggle(props: {
                         className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer accent-primary"
                     />
                     <div className="min-w-0 flex-1">
-                        <div className="text-sm font-medium">Memory-tight (iPhone-safe) preset</div>
+                        <div className="flex items-center gap-2">
+                            <div className="text-sm font-medium">Memory-tight preset</div>
+                            <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-500">
+                                Highly experimental
+                            </span>
+                        </div>
                         <div className="mt-0.5 text-xs text-muted-foreground">
-                            Smallest config that's expected to fit on iPhone 16e:
+                            iPhone-targeted code path — still under development. Forces
                             rank&nbsp;1, alpha&nbsp;2, attn_q + attn_v only, seq_len&nbsp;16,
-                            next-token loss, gradient checkpointing. Locks the LoRA shape
-                            and max&nbsp;seq_len so the preset can't drift.
+                            next-token loss, gradient checkpointing, and enables a
+                            per-layer destroy / re-fetch backward walk to fit in the
+                            mobile GPU heap. <strong>Slower on Mac</strong> than the
+                            default fast path, and currently crashes mid-step on
+                            iPhone 16e. Do not enable unless you're debugging the
+                            mobile path.
                         </div>
                     </div>
                 </label>

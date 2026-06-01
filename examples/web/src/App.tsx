@@ -25,7 +25,11 @@ import { preprocessImage } from "@/lib/image_preprocess";
 import { decodeAudioFile } from "@/lib/audio_decode";
 import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
 import { DEFAULT_VOICE_OPTIONS, VOICE_BOUNDS, type VoiceOptions } from "@/lib/voice";
-import { FineTunePanel } from "@/components/FineTunePanel";
+import {
+    FineTunePanel,
+    TrainingBlockedScreen,
+    useTrainingCapability,
+} from "@/components/FineTunePanel";
 import { Badge } from "@/components/ui/badge";
 import { UpdateBanner } from "@/components/UpdateBanner";
 import { ApplyingOverlay } from "@/components/ApplyingOverlay";
@@ -133,6 +137,12 @@ function suggestTitle(text: string): string {
 }
 
 export function App() {
+    // Training capability — drives Fine-tune tab gating + the
+    // "training not supported" screen. Detected once on mount via
+    // `useTrainingCapability()` (WebGPU + min GPU buffer + min system
+    // RAM + non-iOS UA).
+    const trainingCap = useTrainingCapability();
+
     // Model load state
     const [modelStatus, setModelStatus] = useState<ModelStatus>("idle");
     const [loadingPercent, setLoadingPercent] = useState(0);
@@ -2245,12 +2255,23 @@ export function App() {
                 }
             >
                 {view === "finetune" ? (
-                    <FineTunePanel
-                        modelStatus={modelStatus}
-                        activeAdapter={activeAdapter}
-                        onAdapterChanged={setActiveAdapter}
-                        settingsHostEl={fineTuneSettingsEl}
-                    />
+                    trainingCap.status === "blocked" ? (
+                        <TrainingBlockedScreen
+                            title={trainingCap.title}
+                            reason={trainingCap.reason}
+                        />
+                    ) : trainingCap.status === "checking" ? (
+                        <div className="flex h-full min-h-0 items-center justify-center p-8 text-sm text-muted-foreground">
+                            Checking device capability…
+                        </div>
+                    ) : (
+                        <FineTunePanel
+                            modelStatus={modelStatus}
+                            activeAdapter={activeAdapter}
+                            onAdapterChanged={setActiveAdapter}
+                            settingsHostEl={fineTuneSettingsEl}
+                        />
+                    )
                 ) : view === "settings" ? (
                     // Centered max-width wrapper so the form controls
                     // don't stretch across the full main-content width
