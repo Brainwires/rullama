@@ -38,7 +38,7 @@ export function WelcomeScreen({ modelName, onSuggest, className }: Props) {
             <img
                 src={iconUrl}
                 alt="rullama"
-                className="size-20 sm:size-24"
+                className="size-36 sm:size-44"
                 draggable={false}
             />
 
