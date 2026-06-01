@@ -26,11 +26,10 @@ use crate::backend::dispatch::{
     attention_backward_dkv_chained, attention_backward_dq_chained, attention_chained,
     attention_probs_chained, cross_entropy_backward_chained, geglu_backward_chained, geglu_chained,
     lora_matmul_col_chained, lora_matmul_fused_chained, lora_matmul_row_chained,
-    lora_outer_add_chained, make_dummy_storage,
-    matmul_q4_k_backward_input_chained, matmul_q4_k_backward_input_tile_chained,
-    matmul_q4_k_chained, matmul_q6_k_backward_input_chained,
-    matmul_q6_k_backward_input_tile_chained, matmul_q6_k_chained, residual_add_chained,
-    rmsnorm_backward_chained, rmsnorm_chained,
+    lora_outer_add_chained, make_dummy_storage, matmul_q4_k_backward_input_chained,
+    matmul_q4_k_backward_input_tile_chained, matmul_q4_k_chained,
+    matmul_q6_k_backward_input_chained, matmul_q6_k_backward_input_tile_chained,
+    matmul_q6_k_chained, residual_add_chained, rmsnorm_backward_chained, rmsnorm_chained,
     rmsnorm_per_row_backward_chained, rmsnorm_per_row_chained, rope_neox_backward_chained,
     rope_neox_chained, scale_chained, softcap_chained,
 };
@@ -593,8 +592,7 @@ impl Forward {
                 .expect("training session runs inside a DedicatedWorkerGlobalScope");
             let promise = js_sys::Promise::new(&mut |resolve, _reject| {
                 let resolve_fn: js_sys::Function = resolve.into();
-                let _ = scope
-                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve_fn, 0);
+                let _ = scope.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve_fn, 0);
             });
             let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
         }
@@ -682,99 +680,212 @@ impl Forward {
         // cross_entropy_backward(logits=read, d_logits=read_write,
         // loss_out=read_write).
         one_submit!("warmup.xent_bwd", |enc| {
-            cross_entropy_backward_chained(
-                &self.ctx, &self.pipes, &mut enc, &r0, &r1, &s0, 256, 0,
-            );
+            cross_entropy_backward_chained(&self.ctx, &self.pipes, &mut enc, &r0, &r1, &s0, 256, 0);
         });
         // matmul_q4_k_backward_input(weight=read, dy=read, dx=read_write).
         one_submit!("warmup.q4k_bwd", |enc| {
             matmul_q4_k_backward_input_chained(
-                &self.ctx, &self.pipes, &mut enc, &q4k, &s1, &r2, 256, 1,
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &q4k,
+                &s1,
+                &r2,
+                256,
+                1,
             );
         });
         // matmul_q6_k_backward_input — same shape.
         one_submit!("warmup.q6k_bwd", |enc| {
             matmul_q6_k_backward_input_chained(
-                &self.ctx, &self.pipes, &mut enc, &q6k, &s2, &r3, 256, 1,
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &q6k,
+                &s2,
+                &r3,
+                256,
+                1,
             );
         });
         // rmsnorm_backward(x=read, w=read, dy=read, dx=read_write).
         one_submit!("warmup.rms_bwd", |enc| {
             rmsnorm_backward_chained(
-                &self.ctx, &self.pipes, &mut enc, &s0, &s1, &s2, &s3, 4, 1e-5, true,
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &s0,
+                &s1,
+                &s2,
+                &s3,
+                4,
+                1e-5,
+                true,
             );
         });
         // rmsnorm_per_row_backward — same role pattern.
         one_submit!("warmup.rms_pr_bwd", |enc| {
             rmsnorm_per_row_backward_chained(
-                &self.ctx, &self.pipes, &mut enc, &r0, &r1, &r2, &r3, 1, 16, 1e-5, true,
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &r0,
+                &r1,
+                &r2,
+                &r3,
+                1,
+                16,
+                1e-5,
+                true,
             );
         });
         // geglu_backward(gate=read, up=read, dy=read, d_gate=read_write,
         // d_up=read_write).
         one_submit!("warmup.geglu_bwd", |enc| {
             geglu_backward_chained(
-                &self.ctx, &self.pipes, &mut enc, &r0, &r1, &r2, &r3, &r4, 16,
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &r0,
+                &r1,
+                &r2,
+                &r3,
+                &r4,
+                16,
             );
         });
         // rope_neox_backward(x=read_write, factors=read|None, dummy).
         one_submit!("warmup.rope_bwd", |enc| {
             rope_neox_backward_chained(
-                &self.ctx, &self.pipes, &mut enc, &r0, None, &dummy,
-                128, 1, 0, 128, 10000.0,
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &r0,
+                None,
+                &dummy,
+                128,
+                1,
+                0,
+                128,
+                10000.0,
             );
         });
         // attention_backward_dq — 6 distinct buffers needed.
         one_submit!("warmup.attn_bwd_dq", |enc| {
             attention_backward_dq_chained(
-                &self.ctx, &self.pipes, &mut enc,
-                &r0, &r1, &s0, &r2, &s1, &r3, 64, 1, 1, 1,
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &r0,
+                &r1,
+                &s0,
+                &r2,
+                &s1,
+                &r3,
+                64,
+                1,
+                1,
+                1,
             );
         });
         // attention_backward_dkv — 6 distinct.
         one_submit!("warmup.attn_bwd_dkv", |enc| {
             attention_backward_dkv_chained(
-                &self.ctx, &self.pipes, &mut enc,
-                &r4, &s2, &r5, &s3, &r6, &b0, 64, 1, 1, 1,
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &r4,
+                &s2,
+                &r5,
+                &s3,
+                &r6,
+                &b0,
+                64,
+                1,
+                1,
+                1,
             );
         });
         // attention_probs(q=read, k_hist=read, probs=read_write).
         one_submit!("warmup.attn_probs", |enc| {
             attention_probs_chained(
-                &self.ctx, &self.pipes, &mut enc,
-                &r0, &r1, &b1, 64, 1, 1, 0, 1, 0,
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &r0,
+                &r1,
+                &b1,
+                64,
+                1,
+                1,
+                0,
+                1,
+                0,
             );
         });
         // lora_outer_add(dy=read, z=read, dB=read_write).
         one_submit!("warmup.lora_outer", |enc| {
             lora_outer_add_chained(
-                &self.ctx, &self.pipes, &mut enc, &s0, &s1, &r0, 4, 4, 1.0, true,
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &s0,
+                &s1,
+                &r0,
+                4,
+                4,
+                1.0,
+                true,
             );
         });
         // lora_matmul_col(W=read, x=read, y=read_write).
         one_submit!("warmup.lora_mm_col", |enc| {
             lora_matmul_col_chained(
-                &self.ctx, &self.pipes, &mut enc, &r1, &s2, &s3, 4, 4, 1.0, false,
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &r1,
+                &s2,
+                &s3,
+                4,
+                4,
+                1.0,
+                false,
             );
         });
         // lora_matmul_row.
         one_submit!("warmup.lora_mm_row", |enc| {
             lora_matmul_row_chained(
-                &self.ctx, &self.pipes, &mut enc, &r2, &s0, &s1, 4, 4, 1.0, false,
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &r2,
+                &s0,
+                &s1,
+                4,
+                4,
+                1.0,
+                false,
             );
         });
         // adam_step(grad=read, param=read_write, m=read_write, v=read_write).
         let adam_cfg = AdamConfig::default();
         one_submit!("warmup.adam", |enc| {
             adam_step_chained(
-                &self.ctx, &self.pipes, &mut enc, &s0, &s1, &s2, &s3, 4, adam_cfg,
+                &self.ctx,
+                &self.pipes,
+                &mut enc,
+                &s0,
+                &s1,
+                &s2,
+                &s3,
+                4,
+                adam_cfg,
             );
         });
         // sum_of_squares(input=read, output=read_write).
         one_submit!("warmup.sos", |enc| {
-            sum_of_squares_chained(
-                &self.ctx, &self.pipes, &mut enc, &r0, &s0, 16, 1.0,
-            );
+            sum_of_squares_chained(&self.ctx, &self.pipes, &mut enc, &r0, &s0, 16, 1.0);
         });
 
         // Force GPU to actually run everything before we return.
@@ -803,9 +914,7 @@ impl Forward {
         // Use the buffer handles explicitly so they live across the
         // submits above (the dispatchers only borrow them).
         let _ = (
-            &s0, &s1, &s2, &s3,
-            &r0, &r1, &r2, &r3, &r4, &r5, &r6,
-            &b0, &b1, &q4k, &q6k, &dummy,
+            &s0, &s1, &s2, &s3, &r0, &r1, &r2, &r3, &r4, &r5, &r6, &b0, &b1, &q4k, &q6k, &dummy,
         );
         Ok(())
     }
@@ -1315,15 +1424,8 @@ impl Forward {
                 rome_delta.target_layer, self.cfg.n_layers
             )));
         }
-        self.step_inner_with_progress(
-            token_id,
-            Some(capture),
-            None,
-            None,
-            None,
-            Some(rome_delta),
-        )
-        .await
+        self.step_inner_with_progress(token_id, Some(capture), None, None, None, Some(rome_delta))
+            .await
     }
 
     /// Run one forward step **with per-layer activation capture** into
@@ -1433,7 +1535,9 @@ impl Forward {
         let v_w_name = format!("{prefix}attn_v.weight");
         let v_w = wc.buffer_async(&v_w_name).await?;
         let v_w_dtype = wc.dtype(&v_w_name)?;
-        let attn_norm_w = wc.buffer_async(&format!("{prefix}attn_norm.weight")).await?;
+        let attn_norm_w = wc
+            .buffer_async(&format!("{prefix}attn_norm.weight"))
+            .await?;
         let factors_w = if matches!(kind, LayerKind::Global) {
             wc.buffer_opt_async("rope_freqs.weight").await?
         } else {
@@ -1792,12 +1896,12 @@ impl Forward {
             && let Some(embed) = g.embed_tokens.as_ref()
         {
             let vocab = self.cfg.vocab_size;
-            let mut enc =
-                self.ctx
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("fwd.embed_tokens_lora"),
-                    });
+            let mut enc = self
+                .ctx
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("fwd.embed_tokens_lora"),
+                });
             crate::backend::dispatch::lora_embed_col_read_chained(
                 &self.ctx,
                 &self.pipes,
@@ -1824,14 +1928,8 @@ impl Forward {
             self.ctx.queue.submit(Some(enc.finish()));
         }
 
-        self.run_forward_from_hidden_with_progress(
-            capture,
-            loras,
-            globals,
-            progress_cb,
-            rome_delta,
-        )
-        .await
+        self.run_forward_from_hidden_with_progress(capture, loras, globals, progress_cb, rome_delta)
+            .await
     }
 
     /// Run one forward step from a pre-computed `[d_model]` embedding (vision soft
@@ -2209,17 +2307,35 @@ impl Forward {
             // path (which reads B as f32) stays correct by construction.
             if lmh.b_is_f16 {
                 crate::backend::dispatch::lora_matmul_fused_f16b_chained(
-                    &self.ctx, &self.pipes, &mut enc,
-                    lmh.a, lmh.b, &self.norm_x, &self.logits, lmh.z,
-                    d_model, vocab, lmh.rank as usize,
-                    lmh.scale, true,
+                    &self.ctx,
+                    &self.pipes,
+                    &mut enc,
+                    lmh.a,
+                    lmh.b,
+                    &self.norm_x,
+                    &self.logits,
+                    lmh.z,
+                    d_model,
+                    vocab,
+                    lmh.rank as usize,
+                    lmh.scale,
+                    true,
                 );
             } else {
                 lora_matmul_fused_chained(
-                    &self.ctx, &self.pipes, &mut enc,
-                    lmh.a, lmh.b, &self.norm_x, &self.logits, lmh.z,
-                    d_model, vocab, lmh.rank as usize,
-                    lmh.scale, true,
+                    &self.ctx,
+                    &self.pipes,
+                    &mut enc,
+                    lmh.a,
+                    lmh.b,
+                    &self.norm_x,
+                    &self.logits,
+                    lmh.z,
+                    d_model,
+                    vocab,
+                    lmh.rank as usize,
+                    lmh.scale,
+                    true,
                 );
             }
             self.ctx.queue.submit(Some(enc.finish()));
@@ -2426,10 +2542,19 @@ impl Forward {
         // slot.z is still written by the kernel for the backward path.
         if let Some(slot) = loras.and_then(|l| l.q.as_ref()) {
             lora_matmul_fused_chained(
-                &self.ctx, &self.pipes, enc,
-                slot.a, slot.b, &self.norm_x, &self.q, slot.z,
-                d_model, n_heads * head_dim, slot.rank as usize,
-                slot.scale, true,
+                &self.ctx,
+                &self.pipes,
+                enc,
+                slot.a,
+                slot.b,
+                &self.norm_x,
+                &self.q,
+                slot.z,
+                d_model,
+                n_heads * head_dim,
+                slot.rank as usize,
+                slot.scale,
+                true,
             );
         }
 
@@ -2509,10 +2634,19 @@ impl Forward {
             // ---- LoRA forward correction (k) — fused ----
             if let Some(slot) = loras.and_then(|l| l.k.as_ref()) {
                 lora_matmul_fused_chained(
-                    &self.ctx, &self.pipes, enc,
-                    slot.a, slot.b, &self.norm_x, &self.k, slot.z,
-                    d_model, n_kv_heads * head_dim, slot.rank as usize,
-                    slot.scale, true,
+                    &self.ctx,
+                    &self.pipes,
+                    enc,
+                    slot.a,
+                    slot.b,
+                    &self.norm_x,
+                    &self.k,
+                    slot.z,
+                    d_model,
+                    n_kv_heads * head_dim,
+                    slot.rank as usize,
+                    slot.scale,
+                    true,
                 );
             }
 
@@ -2585,10 +2719,19 @@ impl Forward {
             // ---- LoRA forward correction (v) — fused ----
             if let Some(slot) = loras.and_then(|l| l.v.as_ref()) {
                 lora_matmul_fused_chained(
-                    &self.ctx, &self.pipes, enc,
-                    slot.a, slot.b, &self.norm_x, &self.v, slot.z,
-                    d_model, n_kv_heads * head_dim, slot.rank as usize,
-                    slot.scale, true,
+                    &self.ctx,
+                    &self.pipes,
+                    enc,
+                    slot.a,
+                    slot.b,
+                    &self.norm_x,
+                    &self.v,
+                    slot.z,
+                    d_model,
+                    n_kv_heads * head_dim,
+                    slot.rank as usize,
+                    slot.scale,
+                    true,
                 );
             }
 
@@ -2690,10 +2833,19 @@ impl Forward {
         // ---- LoRA forward correction (o) — fused ----
         if let Some(slot) = loras.and_then(|l| l.o.as_ref()) {
             lora_matmul_fused_chained(
-                &self.ctx, &self.pipes, enc,
-                slot.a, slot.b, &self.attn_out_buf, &self.attn_proj, slot.z,
-                n_heads * head_dim, d_model, slot.rank as usize,
-                slot.scale, true,
+                &self.ctx,
+                &self.pipes,
+                enc,
+                slot.a,
+                slot.b,
+                &self.attn_out_buf,
+                &self.attn_proj,
+                slot.z,
+                n_heads * head_dim,
+                d_model,
+                slot.rank as usize,
+                slot.scale,
+                true,
             );
         }
 
@@ -2779,10 +2931,19 @@ impl Forward {
         // ---- LoRA forward correction (ffn_gate) — fused ----
         if let Some(slot) = loras.and_then(|l| l.ffn_gate.as_ref()) {
             lora_matmul_fused_chained(
-                &self.ctx, &self.pipes, enc,
-                slot.a, slot.b, &self.norm_x, &self.ffn_gate, slot.z,
-                d_model, ffn_n, slot.rank as usize,
-                slot.scale, true,
+                &self.ctx,
+                &self.pipes,
+                enc,
+                slot.a,
+                slot.b,
+                &self.norm_x,
+                &self.ffn_gate,
+                slot.z,
+                d_model,
+                ffn_n,
+                slot.rank as usize,
+                slot.scale,
+                true,
             );
         }
 
@@ -2800,10 +2961,19 @@ impl Forward {
         // ---- LoRA forward correction (ffn_up) — fused ----
         if let Some(slot) = loras.and_then(|l| l.ffn_up.as_ref()) {
             lora_matmul_fused_chained(
-                &self.ctx, &self.pipes, enc,
-                slot.a, slot.b, &self.norm_x, &self.ffn_up, slot.z,
-                d_model, ffn_n, slot.rank as usize,
-                slot.scale, true,
+                &self.ctx,
+                &self.pipes,
+                enc,
+                slot.a,
+                slot.b,
+                &self.norm_x,
+                &self.ffn_up,
+                slot.z,
+                d_model,
+                ffn_n,
+                slot.rank as usize,
+                slot.scale,
+                true,
             );
         }
 
@@ -2872,10 +3042,19 @@ impl Forward {
         // ---- LoRA forward correction (ffn_down) — fused ----
         if let Some(slot) = loras.and_then(|l| l.ffn_down.as_ref()) {
             lora_matmul_fused_chained(
-                &self.ctx, &self.pipes, enc,
-                slot.a, slot.b, &self.ffn_act, &self.ffn_out, slot.z,
-                ffn_n, d_model, slot.rank as usize,
-                slot.scale, true,
+                &self.ctx,
+                &self.pipes,
+                enc,
+                slot.a,
+                slot.b,
+                &self.ffn_act,
+                &self.ffn_out,
+                slot.z,
+                ffn_n,
+                d_model,
+                slot.rank as usize,
+                slot.scale,
+                true,
             );
         }
 
@@ -3430,11 +3609,9 @@ impl Forward {
                 custom_d_logits.len()
             )));
         }
-        self.ctx.queue.write_buffer(
-            scratch.d_logits,
-            0,
-            bytemuck::cast_slice(custom_d_logits),
-        );
+        self.ctx
+            .queue
+            .write_buffer(scratch.d_logits, 0, bytemuck::cast_slice(custom_d_logits));
         self.backward_step_inner(
             u32::MAX,
             capture,
@@ -3627,7 +3804,11 @@ impl Forward {
         // anything when iOS Metal needs the IPC backlog to drain. On
         // Mac browsers / native the GPUProcess keeps up fine, so the
         // yields are pure latency.
-        let chunk_layers: u32 = if self.mobile_mode { 5 } else { floor_u32.max(1) };
+        let chunk_layers: u32 = if self.mobile_mode {
+            5
+        } else {
+            floor_u32.max(1)
+        };
         let mut dropped: usize = 0;
         let mut chunk_start = 0u32;
         while chunk_start < floor_u32 {
@@ -3645,8 +3826,8 @@ impl Forward {
                     .expect("training session runs inside a DedicatedWorkerGlobalScope");
                 let promise = js_sys::Promise::new(&mut |resolve, _reject| {
                     let resolve_fn: js_sys::Function = resolve.into();
-                    let _ = scope
-                        .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve_fn, 0);
+                    let _ =
+                        scope.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve_fn, 0);
                 });
                 let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
             }
@@ -4086,8 +4267,8 @@ impl Forward {
                     .expect("training session runs inside a DedicatedWorkerGlobalScope");
                 let promise = js_sys::Promise::new(&mut |resolve, _reject| {
                     let resolve_fn: js_sys::Function = resolve.into();
-                    let _ = scope
-                        .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve_fn, 0);
+                    let _ =
+                        scope.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve_fn, 0);
                 });
                 let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
             }
@@ -4098,8 +4279,18 @@ impl Forward {
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("bwd.layer"),
                     });
-            self.backward_layer(&mut lenc, i, history_len, pos, cap, lora, grad, scratch, progress_cb)
-                .await?;
+            self.backward_layer(
+                &mut lenc,
+                i,
+                history_len,
+                pos,
+                cap,
+                lora,
+                grad,
+                scratch,
+                progress_cb,
+            )
+            .await?;
             // Caller's submit handles the FINAL phase (attn_norm rmsnorm +
             // residual_add) — backward_layer flushed phases 1..=4
             // internally. Phase 5's last beacon is the outer
@@ -4452,8 +4643,8 @@ impl Forward {
         // does, death is between buffer_async fetches and phase 1's
         // submit — i.e. capture pre-copies or the PLE backward block.
         if let Some(cb) = progress_cb {
-            let logical = (self.cfg.n_layers as u32) - i;
-            cb("bwd.layer.entry", logical, self.cfg.n_layers as u32);
+            let logical = self.cfg.n_layers - i;
+            cb("bwd.layer.entry", logical, self.cfg.n_layers);
         }
 
         // Undo per-layer output scale.

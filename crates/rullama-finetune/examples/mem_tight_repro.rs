@@ -93,10 +93,9 @@ async fn run() -> Result<(), BoxError> {
             // PerPosition targets: next-token shift, last position targets
             // itself (matches the worker's construction).
             let mut targets = vec![0u32; seq.len()];
-            for i in 0..seq.len() - 1 {
-                targets[i] = seq[i + 1];
-            }
-            targets[seq.len() - 1] = seq[seq.len() - 1];
+            let last = seq.len() - 1;
+            targets[..last].copy_from_slice(&seq[1..]);
+            targets[last] = seq[last];
             eprintln!(
                 "[step {step}] (epoch {epoch}) per_position inputLen={} …",
                 seq.len()

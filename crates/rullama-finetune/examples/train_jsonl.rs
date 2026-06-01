@@ -206,7 +206,10 @@ async fn run() -> Result<(), BoxError> {
         // it'll see at inference time in the browser.
         let prompt_text = if apply_chat_template {
             model.render_chat_native(
-                &[ChatMessage { role: ChatRole::User, content: ex.prompt.clone() }],
+                &[ChatMessage {
+                    role: ChatRole::User,
+                    content: ex.prompt.clone(),
+                }],
                 false,
             )
         } else {
@@ -284,7 +287,10 @@ async fn run() -> Result<(), BoxError> {
         })
         .filter(|v| !v.is_empty());
     if let Some(layers) = &target_layers {
-        eprintln!("[hp] target_layers = {:?} (other layers stay frozen)", layers);
+        eprintln!(
+            "[hp] target_layers = {:?} (other layers stay frozen)",
+            layers
+        );
     }
     let lora_cfg = LoraConfig {
         rank,

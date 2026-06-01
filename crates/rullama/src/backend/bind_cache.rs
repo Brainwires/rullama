@@ -177,6 +177,11 @@ impl CacheKey {
             b6: None,
         }
     }
+    // Sibling builder for 7-buffer bind groups (the head section's lm_head
+    // LoRA path). The 8-arg shape is intentional symmetry with the rest of
+    // the `n_buffers` constructor family above; no destructuring win to
+    // collapse them.
+    #[allow(clippy::too_many_arguments)]
     pub fn seven(
         p: &wgpu::ComputePipeline,
         b0: &wgpu::Buffer,
@@ -288,6 +293,10 @@ impl BindGroupCache {
 
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().unwrap().is_empty()
     }
 }
 

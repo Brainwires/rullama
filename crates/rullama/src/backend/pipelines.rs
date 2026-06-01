@@ -281,11 +281,7 @@ impl Pipelines {
             lora_matmul_row: build(device, "lora_matmul_row", kernels::LORA_MATMUL_ROW),
             lora_matmul_col: build(device, "lora_matmul_col", kernels::LORA_MATMUL_COL),
             lora_outer_add: build(device, "lora_outer_add", kernels::LORA_OUTER_ADD),
-            lora_embed_col_read: build(
-                device,
-                "lora_embed_col_read",
-                kernels::LORA_EMBED_COL_READ,
-            ),
+            lora_embed_col_read: build(device, "lora_embed_col_read", kernels::LORA_EMBED_COL_READ),
             lora_embed_col_scatter_add: build(
                 device,
                 "lora_embed_col_scatter_add",

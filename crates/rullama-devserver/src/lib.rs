@@ -41,8 +41,7 @@ pub fn build_app(state: Arc<AppState>, cfg: SecurityConfig) -> Router {
     if cfg.allow_log_write {
         // /api/log gets a tight body limit so a hostile client can't
         // fill the user's disk with a single oversized POST.
-        let log = api::log_router()
-            .layer(RequestBodyLimitLayer::new(cfg.api_log_max_bytes));
+        let log = api::log_router().layer(RequestBodyLimitLayer::new(cfg.api_log_max_bytes));
         app = app.merge(log);
     }
     // /api/blob is mounted in BOTH modes — without it the PWA can't
@@ -67,8 +66,7 @@ pub fn build_app(state: Arc<AppState>, cfg: SecurityConfig) -> Router {
     // so the security middleware can read `SecurityConfig` from the
     // request extensions (which the Extension layer injects). The
     // ordering below produces that flow.
-    app
-        .with_state(state)
+    app.with_state(state)
         .layer(middleware::from_fn(security::apply_security_headers))
         .layer(Extension(cfg))
         .layer(TimeoutLayer::with_status_code(

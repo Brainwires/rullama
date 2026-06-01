@@ -21,48 +21,60 @@ use rullama_devserver::{vite, watcher};
     about = "Local dev server: /api/* + /pkg/* + Vite reverse-proxy + Rust → WASM watch.\n\nFor tunneled (Cloudflare) public hosting use `--public`."
 )]
 struct Args {
-    #[arg(long, default_value_t = 25321)] port: u16,
-    #[arg(long, default_value = "127.0.0.1")] host: String,
-    #[arg(long, default_value_t = 5173)] vite_port: u16,
-    #[arg(long)] no_watch: bool,
-    #[arg(long)] no_vite: bool,
-    #[arg(long)] ollama_models: Option<PathBuf>,
-    #[arg(long)] repo_root: Option<PathBuf>,
+    #[arg(long, default_value_t = 25321)]
+    port: u16,
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    #[arg(long, default_value_t = 5173)]
+    vite_port: u16,
+    #[arg(long)]
+    no_watch: bool,
+    #[arg(long)]
+    no_vite: bool,
+    #[arg(long)]
+    ollama_models: Option<PathBuf>,
+    #[arg(long)]
+    repo_root: Option<PathBuf>,
 
     // --- security knobs (see crates/rullama-devserver/src/config.rs) ---
-
     /// Apply tunnel-safe defaults: serve dist/ instead of Vite proxy,
     /// disable /api/log, /api/models, /__rullama-dev-ws. Use this when
     /// cloudflared is up and the devserver is exposed at a public URL.
-    #[arg(long)] public: bool,
+    #[arg(long)]
+    public: bool,
 
     /// Serve `examples/web/dist/*` as the SPA root instead of reverse-
     /// proxying to Vite. Implied by `--public`.
-    #[arg(long)] serve_dist: bool,
+    #[arg(long)]
+    serve_dist: bool,
 
     /// Disable Vite reverse-proxy fallback (404 instead). Useful for
     /// `--public` + a separately-hosted dist via CDN, or for hermetic
     /// tests.
-    #[arg(long)] no_proxy: bool,
+    #[arg(long)]
+    no_proxy: bool,
 
     /// Explicit CORS origin allow-list (repeatable). Default for public
     /// mode: empty (no cross-origin reads). Default for local-dev: empty
     /// (relies on same-origin; pass --cors-origins to enable).
-    #[arg(long, value_delimiter = ',')] cors_origins: Vec<String>,
+    #[arg(long, value_delimiter = ',')]
+    cors_origins: Vec<String>,
 
     /// Override individual `--public` defaults if you really want to.
-    #[arg(long)] allow_models: bool,
-    #[arg(long)] allow_log_write: bool,
-    #[arg(long)] allow_dev_ws: bool,
+    #[arg(long)]
+    allow_models: bool,
+    #[arg(long)]
+    allow_log_write: bool,
+    #[arg(long)]
+    allow_dev_ws: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("rullama_devserver=info,tower_http=info,axum=info,warn")),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("rullama_devserver=info,tower_http=info,axum=info,warn")
+        }))
         .with_target(false)
         .init();
 
@@ -81,7 +93,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("    lsof -nP -iTCP:{} -sTCP:LISTEN", args.port);
         eprintln!("    kill <pid>");
         eprintln!("  Then re-run `cargo dev`.");
-        eprintln!("  Do NOT kill cloudflared — it auto-reconnects to whatever's at :{}.", args.port);
+        eprintln!(
+            "  Do NOT kill cloudflared — it auto-reconnects to whatever's at :{}.",
+            args.port
+        );
         std::process::exit(1);
     }
 
@@ -94,12 +109,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         SecurityConfig::default()
     };
-    if args.serve_dist { cfg.serve_dist = true; }
-    if args.no_proxy { cfg.serve_dist = true; } // no proxy ≈ static-only
-    if args.allow_models { cfg.allow_models = true; }
-    if args.allow_log_write { cfg.allow_log_write = true; }
-    if args.allow_dev_ws { cfg.allow_dev_ws = true; }
-    if !args.cors_origins.is_empty() { cfg.cors_origins = args.cors_origins.clone(); }
+    if args.serve_dist {
+        cfg.serve_dist = true;
+    }
+    if args.no_proxy {
+        cfg.serve_dist = true;
+    } // no proxy ≈ static-only
+    if args.allow_models {
+        cfg.allow_models = true;
+    }
+    if args.allow_log_write {
+        cfg.allow_log_write = true;
+    }
+    if args.allow_dev_ws {
+        cfg.allow_dev_ws = true;
+    }
+    if !args.cors_origins.is_empty() {
+        cfg.cors_origins = args.cors_origins.clone();
+    }
     tracing::info!("mode           = {:?}", cfg.mode);
     tracing::info!("serve_dist     = {}", cfg.serve_dist);
     tracing::info!("allow_models   = {}", cfg.allow_models);
@@ -135,23 +162,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     tracing::info!("listening on http://{}", bind_addr);
-    tracing::info!("  → React dev (Vite HMR) reverse-proxied from :{}", args.vite_port);
+    tracing::info!(
+        "  → React dev (Vite HMR) reverse-proxied from :{}",
+        args.vite_port
+    );
     tracing::info!("  → /api/* served natively (parity with serve-tunnel.sh)");
     tracing::info!("  → /pkg/* served from {}", paths.pkg_dir.display());
     tracing::info!("  → WS broadcast at /__rullama-dev-ws");
 
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
-    let server = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_rx.recv().await;
-            tracing::info!("shutting down…");
-        });
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        let _ = shutdown_rx.recv().await;
+        tracing::info!("shutting down…");
+    });
 
     if let Err(e) = server.await {
         tracing::error!("axum serve error: {e}");
     }
 
-    if let Some(mut h) = vite_handle { h.shutdown().await; }
-    if let Some(h) = watcher_handle { drop(h); }
+    if let Some(mut h) = vite_handle {
+        h.shutdown().await;
+    }
+    if let Some(h) = watcher_handle {
+        drop(h);
+    }
     Ok(())
 }

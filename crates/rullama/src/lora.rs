@@ -148,8 +148,7 @@ impl InferenceAdapter {
                         )));
                     }
                 };
-                let layer =
-                    InferenceLoraLayer::alloc(&ctx, in_dim, rank, out_dim, alpha, false);
+                let layer = InferenceLoraLayer::alloc(&ctx, in_dim, rank, out_dim, alpha, false);
                 layers.insert(LoraKey::new(li, proj.clone()), layer);
             }
         }
@@ -168,9 +167,8 @@ impl InferenceAdapter {
             // dominates LoRA bandwidth per token; quantizing halves the
             // phase-2 B·z read. embed_tokens uses the column-indexed
             // path, not the fused kernel — leave it f32.
-            let b_is_f16 = proj == "lm_head" && rank % 2 == 0;
-            let layer =
-                InferenceLoraLayer::alloc(&ctx, in_dim, rank, out_dim, alpha, b_is_f16);
+            let b_is_f16 = proj == "lm_head" && rank.is_multiple_of(2);
+            let layer = InferenceLoraLayer::alloc(&ctx, in_dim, rank, out_dim, alpha, b_is_f16);
             layers.insert(LoraKey::new(0, proj.clone()), layer);
         }
 
@@ -292,10 +290,7 @@ impl InferenceAdapter {
                 .layers
                 .get(&LoraKey::new(0, "embed_tokens"))
                 .map(slot_view),
-            lm_head: self
-                .layers
-                .get(&LoraKey::new(0, "lm_head"))
-                .map(slot_view),
+            lm_head: self.layers.get(&LoraKey::new(0, "lm_head")).map(slot_view),
         }
     }
 
@@ -380,7 +375,7 @@ fn slot_view(l: &InferenceLoraLayer) -> LoraSlot<'_> {
 /// the f16-B fused kernel. `src.len()` must be even (kernel constraint
 /// is even `rank`; `out_dim * rank` is therefore always even).
 fn pack_f32_to_f16_pairs(src: &[f32]) -> Vec<u32> {
-    debug_assert!(src.len() % 2 == 0);
+    debug_assert!(src.len().is_multiple_of(2));
     let mut out = Vec::with_capacity(src.len() / 2);
     for pair in src.chunks_exact(2) {
         let lo = half::f16::from_f32(pair[0]).to_bits() as u32;

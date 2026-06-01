@@ -101,10 +101,7 @@ async fn run() -> Result<(), BoxError> {
 
     let n_layers = model.forward().cfg().n_layers;
     if target_layer >= n_layers {
-        return Err(format!(
-            "target_layer {target_layer} out of range (have {n_layers})"
-        )
-        .into());
+        return Err(format!("target_layer {target_layer} out of range (have {n_layers})").into());
     }
     let d_ffn = model.forward().cfg().ffn(target_layer) as usize;
     eprintln!("[cfg]  layer={target_layer}, d_ffn={d_ffn}, ridge={ridge}");
@@ -233,10 +230,7 @@ async fn run() -> Result<(), BoxError> {
     eprintln!("[chol] Cholesky factor of (C + {ridge}·I), d = {d_ffn} …");
     let chol_start = Instant::now();
     cholesky_in_place(&mut cov, d_ffn).map_err(|e| -> BoxError { e.into() })?;
-    eprintln!(
-        "[chol] done in {:.1}s",
-        chol_start.elapsed().as_secs_f64()
-    );
+    eprintln!("[chol] done in {:.1}s", chol_start.elapsed().as_secs_f64());
 
     // Zero the upper triangle for cleanliness (Cholesky writes only the
     // lower; existing upper-tri entries are stale `C` values).

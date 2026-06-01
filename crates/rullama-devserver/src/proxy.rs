@@ -24,17 +24,14 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri, header, ur
 use axum::response::{IntoResponse, Response};
 use http_body_util::BodyExt;
 use hyper_util::client::legacy::{Client, connect::HttpConnector};
-use hyper_util::rt::TokioIo;
 use hyper_util::rt::TokioExecutor;
+use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::state::AppState;
 
-pub async fn fallback_handler(
-    State(state): State<Arc<AppState>>,
-    req: Request<Body>,
-) -> Response {
+pub async fn fallback_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
     if is_websocket_upgrade(req.headers()) {
         return proxy_ws_upgrade(state, req).await;
     }
@@ -45,7 +42,10 @@ fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
     let conn_has_upgrade = headers
         .get(header::CONNECTION)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.split(',').any(|p| p.trim().eq_ignore_ascii_case("upgrade")))
+        .map(|s| {
+            s.split(',')
+                .any(|p| p.trim().eq_ignore_ascii_case("upgrade"))
+        })
         .unwrap_or(false);
     let upgrade_is_ws = headers
         .get(header::UPGRADE)
@@ -69,14 +69,19 @@ async fn proxy_http(state: Arc<AppState>, mut req: Request<Body>) -> Response {
     {
         Ok(u) => u,
         Err(e) => {
-            return (StatusCode::BAD_GATEWAY, format!("proxy: build uri failed: {e}"))
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("proxy: build uri failed: {e}"),
+            )
                 .into_response();
         }
     };
     *req.uri_mut() = upstream;
 
     let h = req.headers_mut();
-    for name in HOP_BY_HOP { h.remove(*name); }
+    for name in HOP_BY_HOP {
+        h.remove(*name);
+    }
     h.remove("host");
 
     let client: Client<HttpConnector, Body> = Client::builder(TokioExecutor::new())
@@ -100,11 +105,20 @@ async fn proxy_http(state: Arc<AppState>, mut req: Request<Body>) -> Response {
     let (parts, body) = resp.into_parts();
     let bytes = match body.collect().await {
         Ok(b) => b.to_bytes(),
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("proxy: read upstream body: {e}")).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("proxy: read upstream body: {e}"),
+            )
+                .into_response();
+        }
     };
     let mut builder = Response::builder().status(parts.status);
     for (k, v) in parts.headers.iter() {
-        if HOP_BY_HOP.iter().any(|n| n.eq_ignore_ascii_case(k.as_str())) {
+        if HOP_BY_HOP
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(k.as_str()))
+        {
             continue;
         }
         builder = builder.header(k, v);
@@ -150,7 +164,9 @@ async fn proxy_ws_upgrade(state: Arc<AppState>, req: Request<Body>) -> Response 
     wire.push_str(" HTTP/1.1\r\n");
     wire.push_str(&format!("Host: 127.0.0.1:{port}\r\n"));
     for (k, v) in headers.iter() {
-        if k == header::HOST { continue; }
+        if k == header::HOST {
+            continue;
+        }
         if let Ok(s) = v.to_str() {
             wire.push_str(k.as_str());
             wire.push_str(": ");
@@ -160,7 +176,11 @@ async fn proxy_ws_upgrade(state: Arc<AppState>, req: Request<Body>) -> Response 
     }
     wire.push_str("\r\n");
     if let Err(e) = upstream.write_all(wire.as_bytes()).await {
-        return (StatusCode::BAD_GATEWAY, format!("ws-proxy: write handshake: {e}")).into_response();
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!("ws-proxy: write handshake: {e}"),
+        )
+            .into_response();
     }
 
     // Read the upstream response (must be 101 Switching Protocols on the
@@ -171,15 +191,23 @@ async fn proxy_ws_upgrade(state: Arc<AppState>, req: Request<Body>) -> Response 
     let mut buf = vec![0u8; 8192];
     let mut total = 0usize;
     let (upstream_status, upstream_headers, prefix_tail) = loop {
-        if total == buf.len() { buf.resize(buf.len() * 2, 0); }
+        if total == buf.len() {
+            buf.resize(buf.len() * 2, 0);
+        }
         let n = match upstream.read(&mut buf[total..]).await {
             Ok(0) => {
-                return (StatusCode::BAD_GATEWAY, "ws-proxy: vite closed during handshake")
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    "ws-proxy: vite closed during handshake",
+                )
                     .into_response();
             }
             Ok(n) => n,
             Err(e) => {
-                return (StatusCode::BAD_GATEWAY, format!("ws-proxy: read handshake: {e}"))
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("ws-proxy: read handshake: {e}"),
+                )
                     .into_response();
             }
         };
@@ -191,8 +219,12 @@ async fn proxy_ws_upgrade(state: Arc<AppState>, req: Request<Body>) -> Response 
                 let status = resp.code.unwrap_or(502);
                 let mut hm = HeaderMap::new();
                 for h in resp.headers.iter() {
-                    let Ok(name) = HeaderName::from_bytes(h.name.as_bytes()) else { continue };
-                    let Ok(val) = HeaderValue::from_bytes(h.value) else { continue };
+                    let Ok(name) = HeaderName::from_bytes(h.name.as_bytes()) else {
+                        continue;
+                    };
+                    let Ok(val) = HeaderValue::from_bytes(h.value) else {
+                        continue;
+                    };
                     hm.append(name, val);
                 }
                 let tail = buf[consumed..total].to_vec();
@@ -200,7 +232,10 @@ async fn proxy_ws_upgrade(state: Arc<AppState>, req: Request<Body>) -> Response 
             }
             Ok(httparse::Status::Partial) => continue,
             Err(e) => {
-                return (StatusCode::BAD_GATEWAY, format!("ws-proxy: parse upstream response: {e}"))
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("ws-proxy: parse upstream response: {e}"),
+                )
                     .into_response();
             }
         }
@@ -217,7 +252,9 @@ async fn proxy_ws_upgrade(state: Arc<AppState>, req: Request<Body>) -> Response 
         // Skip Content-Length (would be wrong) and Transfer-Encoding
         // (irrelevant after upgrade). Keep Upgrade + Connection — those
         // are what tell the browser the upgrade completed.
-        if matches!(k.as_str(), "content-length" | "transfer-encoding") { continue; }
+        if matches!(k.as_str(), "content-length" | "transfer-encoding") {
+            continue;
+        }
         builder = builder.header(k, v);
     }
     let our_resp = match builder.body(Body::empty()) {
@@ -251,15 +288,17 @@ async fn proxy_ws_upgrade(state: Arc<AppState>, req: Request<Body>) -> Response 
         };
         let mut inbound = TokioIo::new(inbound);
         // Push the prefix bytes we over-read while parsing the 101.
-        if !prefix_tail.is_empty() {
-            if let Err(e) = inbound.write_all(&prefix_tail).await {
-                tracing::warn!("ws-proxy: write prefix: {e}");
-                return;
-            }
+        if !prefix_tail.is_empty()
+            && let Err(e) = inbound.write_all(&prefix_tail).await
+        {
+            tracing::warn!("ws-proxy: write prefix: {e}");
+            return;
         }
         // Bidirectional copy until either side closes.
         match tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await {
-            Ok((tx, rx)) => tracing::debug!("ws-proxy: closed (client→up {tx} B, up→client {rx} B)"),
+            Ok((tx, rx)) => {
+                tracing::debug!("ws-proxy: closed (client→up {tx} B, up→client {rx} B)")
+            }
             Err(e) => tracing::debug!("ws-proxy: closed with error: {e}"),
         }
     });

@@ -38,17 +38,15 @@ async fn run() -> Result<(), BoxError> {
     let mut args = env::args().skip(1);
     let gguf_path: PathBuf = args
         .next()
-        .ok_or_else(|| -> BoxError {
-            "usage: rome_k_extract <gguf-path> <layer> <prompt>".into()
-        })?
+        .ok_or_else(|| -> BoxError { "usage: rome_k_extract <gguf-path> <layer> <prompt>".into() })?
         .into();
     let layer: u32 = args
         .next()
         .ok_or_else(|| -> BoxError { "missing <layer>".into() })?
         .parse()?;
-    let prompt: String = args.next().ok_or_else(|| -> BoxError {
-        "missing <prompt> (quoted string)".into()
-    })?;
+    let prompt: String = args
+        .next()
+        .ok_or_else(|| -> BoxError { "missing <prompt> (quoted string)".into() })?;
 
     eprintln!("[load] reading {} …", gguf_path.display());
     let bytes = fs::read(&gguf_path)?;
@@ -95,7 +93,10 @@ async fn run() -> Result<(), BoxError> {
     println!("  min:           {min:.6e}");
     println!("  max:           {max:.6e}");
     println!("  nan count:     {nan_count}");
-    println!("  zero count:    {zero_count} ({:.1}%)", 100.0 * zero_count as f64 / n as f64);
+    println!(
+        "  zero count:    {zero_count} ({:.1}%)",
+        100.0 * zero_count as f64 / n as f64
+    );
     println!();
     println!("  first 4:       {:?}", &k_star[..4.min(n)]);
     println!("  last  4:       {:?}", &k_star[n.saturating_sub(4)..]);
@@ -110,7 +111,9 @@ async fn run() -> Result<(), BoxError> {
         std::process::exit(1);
     }
     if std < 1e-6 {
-        eprintln!("\n[WARN] k* std is suspiciously small ({std:.3e}) — RMSNorm output should be O(1)");
+        eprintln!(
+            "\n[WARN] k* std is suspiciously small ({std:.3e}) — RMSNorm output should be O(1)"
+        );
     } else {
         eprintln!("\n[PASS] k* extracted: length={n}, std={std:.3e}, finite, non-zero");
     }

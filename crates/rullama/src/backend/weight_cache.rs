@@ -21,7 +21,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::backend::{buf_id, BindGroupCache};
+use crate::backend::{BindGroupCache, buf_id};
 use crate::error::{Result, RullamaError};
 use crate::gguf::{GgmlDtype, GgufReader};
 
@@ -348,9 +348,7 @@ impl WeightCache {
                 true
             }
         });
-        self.tile_meta
-            .borrow_mut()
-            .retain(|(k, _), _| !in_range(k));
+        self.tile_meta.borrow_mut().retain(|(k, _), _| !in_range(k));
         removed
     }
 

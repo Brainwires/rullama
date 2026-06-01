@@ -19,10 +19,7 @@ use crate::state::AppState;
 
 const CHUNK: usize = 64 * 1024;
 
-pub async fn fallback_handler(
-    State(state): State<Arc<AppState>>,
-    req: Request,
-) -> Response {
+pub async fn fallback_handler(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let path = req.uri().path().trim_start_matches('/');
     let dist_dir = state.paths.repo_root.join("examples/web/dist");
     // Canonicalize the base ONCE and reject any path that escapes it.
@@ -39,12 +36,21 @@ pub async fn fallback_handler(
                 .into_response();
         }
     };
-    let candidate = if path.is_empty() { base.join("index.html") } else { base.join(path) };
+    let candidate = if path.is_empty() {
+        base.join("index.html")
+    } else {
+        base.join(path)
+    };
     let resolved = match tokio::fs::canonicalize(&candidate).await {
         Ok(r) => r,
         Err(_) => {
             // SPA fallback: missing file AND no extension → serve index.html.
-            if path.split('/').next_back().map(|p| !p.contains('.')).unwrap_or(true) {
+            if path
+                .split('/')
+                .next_back()
+                .map(|p| !p.contains('.'))
+                .unwrap_or(true)
+            {
                 match tokio::fs::canonicalize(base.join("index.html")).await {
                     Ok(r) => r,
                     Err(e) => {

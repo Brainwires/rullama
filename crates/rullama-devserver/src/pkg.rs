@@ -7,12 +7,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::Router;
 use bytes::Bytes;
 use futures_util::stream;
 use tokio::io::AsyncReadExt;
@@ -22,13 +22,14 @@ use crate::state::AppState;
 const CHUNK: usize = 64 * 1024;
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/pkg/*path", get(serve_pkg).head(head_pkg))
+    Router::new().route("/pkg/*path", get(serve_pkg).head(head_pkg))
 }
 
 async fn resolve_safe(state: &AppState, sub: &str) -> Option<PathBuf> {
     // Component-level reject (cheap, catches plain `..`).
-    if sub.split('/').any(|p| p == ".." || p.is_empty()) { return None; }
+    if sub.split('/').any(|p| p == ".." || p.is_empty()) {
+        return None;
+    }
     let candidate = state.paths.pkg_dir.join(sub);
     if !tokio::fs::metadata(&candidate).await.ok()?.is_file() {
         return None;
@@ -39,14 +40,13 @@ async fn resolve_safe(state: &AppState, sub: &str) -> Option<PathBuf> {
     // it's defense-in-depth), and any future bug in the component check.
     let canon = tokio::fs::canonicalize(&candidate).await.ok()?;
     let base = tokio::fs::canonicalize(&state.paths.pkg_dir).await.ok()?;
-    if !canon.starts_with(&base) { return None; }
+    if !canon.starts_with(&base) {
+        return None;
+    }
     Some(canon)
 }
 
-async fn head_pkg(
-    State(state): State<Arc<AppState>>,
-    AxumPath(sub): AxumPath<String>,
-) -> Response {
+async fn head_pkg(State(state): State<Arc<AppState>>, AxumPath(sub): AxumPath<String>) -> Response {
     let Some(path) = resolve_safe(&state, &sub).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -118,7 +118,10 @@ fn mime_for(path: &std::path::Path) -> &'static str {
 fn add_no_store_for_assets(path: &std::path::Path, headers: &mut axum::http::HeaderMap) {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if matches!(ext, "js" | "html" | "wasm" | "ts" | "css" | "mjs" | "map") {
-        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"));
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+        );
         headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
         headers.insert(header::EXPIRES, HeaderValue::from_static("0"));
     }

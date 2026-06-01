@@ -50,14 +50,21 @@ fn dev() -> ExitCode {
     // wasm32-unknown-unknown`). Run it via --manifest-path.
     let manifest = Path::new("crates/rullama-devserver/Cargo.toml");
     if !manifest.is_file() {
-        eprintln!("xtask: {} not found; are you in the repo root?", manifest.display());
+        eprintln!(
+            "xtask: {} not found; are you in the repo root?",
+            manifest.display()
+        );
         return ExitCode::from(1);
     }
     let forwarded: Vec<String> = std::env::args().skip(2).collect();
     eprintln!(
         "$ cargo run -q --manifest-path {} --release --{}",
         manifest.display(),
-        if forwarded.is_empty() { "".into() } else { format!(" {}", forwarded.join(" ")) }
+        if forwarded.is_empty() {
+            "".into()
+        } else {
+            format!(" {}", forwarded.join(" "))
+        }
     );
     let mut cmd = Command::new("cargo");
     cmd.arg("run")
@@ -88,18 +95,16 @@ fn compose(args: &[&str]) -> ExitCode {
     // falls back to "nogit" and the timestamp is still unique.
     let mut cmd = Command::new("docker");
     cmd.arg("compose").args(args);
-    if std::env::var_os("RULLAMA_COMMIT").is_none() {
-        if let Ok(output) = Command::new("git")
+    if std::env::var_os("RULLAMA_COMMIT").is_none()
+        && let Ok(output) = Command::new("git")
             .args(["rev-parse", "--short", "HEAD"])
             .output()
-        {
-            if output.status.success() {
-                let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !sha.is_empty() {
-                    cmd.env("RULLAMA_COMMIT", &sha);
-                    eprintln!("(setting RULLAMA_COMMIT={sha})");
-                }
-            }
+        && output.status.success()
+    {
+        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !sha.is_empty() {
+            cmd.env("RULLAMA_COMMIT", &sha);
+            eprintln!("(setting RULLAMA_COMMIT={sha})");
         }
     }
     let status = cmd.status();

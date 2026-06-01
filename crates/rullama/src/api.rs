@@ -178,9 +178,11 @@ async fn read_d_hidden_buf(
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let mut enc = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("rome.read_d_hidden_buf"),
-    });
+    let mut enc = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("rome.read_d_hidden_buf"),
+        });
     enc.copy_buffer_to_buffer(buf, 0, &staging, 0, bytes);
     ctx.queue.submit(Some(enc.finish()));
     let slice = staging.slice(..);
@@ -929,11 +931,8 @@ impl Model {
         }
 
         // Allocate backward scratch sized for this sequence length.
-        let scratch = crate::reference::rome::RomeBackwardScratch::new(
-            self.forward.ctx(),
-            &cfg,
-            seq_len,
-        );
+        let scratch =
+            crate::reference::rome::RomeBackwardScratch::new(self.forward.ctx(), &cfg, seq_len);
         let scratch_view = scratch.view();
 
         // All-None LoRA slots + grads — we don't have an adapter and
@@ -973,9 +972,10 @@ impl Model {
             )
             .await?;
         // Drop borrows before the readback's separate encoder
-        // submission.
-        drop(scratch_view);
-        drop(captures);
+        // submission. (Bindings are not `Drop` impls, but releasing the
+        // names here makes the borrow-end explicit to the reader.)
+        let _ = scratch_view;
+        let _ = captures;
 
         scratch.read_d_hidden(self.forward.ctx()).await
     }
@@ -1131,7 +1131,10 @@ impl Model {
             let captures = capture.as_captures();
             self.forward.reset();
             for &tok in prompt_tokens {
-                let _ = self.forward.step_capture(tok, &captures, None, None).await?;
+                let _ = self
+                    .forward
+                    .step_capture(tok, &captures, None, None)
+                    .await?;
             }
         }
         let target_init = capture.read_ffn_out(target_layer, subject_last_pos).await?;
@@ -1174,15 +1177,17 @@ impl Model {
             let probe_seq_len = prefix.len() as u32;
             let probe_subject_last_pos = probe_seq_len - 1;
             let probe_capture = RomeCapture::new(&ctx_arc, &cfg, probe_seq_len);
-            let probe_scratch =
-                RomeBackwardScratch::new(self.forward.ctx(), &cfg, probe_seq_len);
+            let probe_scratch = RomeBackwardScratch::new(self.forward.ctx(), &cfg, probe_seq_len);
             // Clean probe forward (no δ) → cache base probe logits at last position
             let mut base_probe_logits: Vec<f32> = Vec::new();
             {
                 let captures = probe_capture.as_captures();
                 self.forward.reset();
                 for &tok in prefix {
-                    let logits = self.forward.step_capture(tok, &captures, None, None).await?;
+                    let logits = self
+                        .forward
+                        .step_capture(tok, &captures, None, None)
+                        .await?;
                     base_probe_logits = logits;
                 }
             }
@@ -1191,7 +1196,11 @@ impl Model {
                 .iter()
                 .cloned()
                 .fold(f32::NEG_INFINITY, f32::max);
-            let lse = (base_probe_logits.iter().map(|&l| (l - max_l).exp()).sum::<f32>()).ln()
+            let lse = (base_probe_logits
+                .iter()
+                .map(|&l| (l - max_l).exp())
+                .sum::<f32>())
+            .ln()
                 + max_l;
             let base_probe_log_probs: Vec<f32> =
                 base_probe_logits.iter().map(|&l| l - lse).collect();
@@ -1249,7 +1258,10 @@ impl Model {
                             )
                             .await?;
                     } else {
-                        let _ = self.forward.step_capture(tok, &captures, None, None).await?;
+                        let _ = self
+                            .forward
+                            .step_capture(tok, &captures, None, None)
+                            .await?;
                     }
                 }
             }
@@ -1320,8 +1332,10 @@ impl Model {
             // and accumulates into d_hidden at the probe's subject-last
             // (= probe's last position).
             let mut kl_loss = 0.0_f32;
-            if let (Some((p_capture, p_scratch, p_seq_len, p_subj_last, p_prefix)),
-                    Some(base_log_probs)) = (kl_state.as_ref(), base_probe_log_probs.as_ref())
+            if let (
+                Some((p_capture, p_scratch, p_seq_len, p_subj_last, p_prefix)),
+                Some(base_log_probs),
+            ) = (kl_state.as_ref(), base_probe_log_probs.as_ref())
             {
                 // Edited probe forward (δ at probe's subject-last position).
                 let mut edited_probe_logits: Vec<f32> = Vec::new();
@@ -1343,7 +1357,10 @@ impl Model {
                                 .await?;
                             edited_probe_logits = logits;
                         } else {
-                            let logits = self.forward.step_capture(tok, &captures, None, None).await?;
+                            let logits = self
+                                .forward
+                                .step_capture(tok, &captures, None, None)
+                                .await?;
                             edited_probe_logits = logits;
                         }
                     }
@@ -1361,10 +1378,8 @@ impl Model {
                     .sum::<f32>())
                 .ln()
                     + max_l;
-                let edited_log_probs: Vec<f32> = edited_probe_logits
-                    .iter()
-                    .map(|&l| l - lse)
-                    .collect();
+                let edited_log_probs: Vec<f32> =
+                    edited_probe_logits.iter().map(|&l| l - lse).collect();
                 // KL(P_base ‖ P_edited) = Σ P_base[v] · (log P_base[v] − log P_edited[v])
                 kl_loss = 0.0;
                 for v in 0..vocab_size {
@@ -1375,8 +1390,7 @@ impl Model {
                 // d_logits_kl[v] = kl_factor · (P_edited[v] − P_base[v])
                 let d_logits_kl: Vec<f32> = (0..vocab_size)
                     .map(|v| {
-                        hparams.kl_factor
-                            * (edited_log_probs[v].exp() - base_log_probs[v].exp())
+                        hparams.kl_factor * (edited_log_probs[v].exp() - base_log_probs[v].exp())
                     })
                     .collect();
                 // Backward from custom d_logits at probe's subject-last position.
@@ -1505,7 +1519,10 @@ impl Model {
             ("rome_mode".to_string(), "iterative".to_string()),
             ("rome_layer".to_string(), target_layer.to_string()),
             ("rome_target_token".to_string(), target_token_id.to_string()),
-            ("rome_subject_last_pos".to_string(), subject_last_pos.to_string()),
+            (
+                "rome_subject_last_pos".to_string(),
+                subject_last_pos.to_string(),
+            ),
             ("rome_num_steps".to_string(), hparams.num_steps.to_string()),
             ("rome_v_lr".to_string(), hparams.v_lr.to_string()),
             ("rome_final_loss".to_string(), format!("{final_loss:.6e}")),
@@ -1604,8 +1621,9 @@ impl Model {
         // Storage:
         //   k_per_layer[L_idx][edit_idx][d_ffn_at_L]
         //   v_per_edit[edit_idx][d_model]
-        let mut k_per_layer: Vec<Vec<Vec<f32>>> =
-            (0..n_layers_in_range).map(|_| Vec::with_capacity(n_edits)).collect();
+        let mut k_per_layer: Vec<Vec<Vec<f32>>> = (0..n_layers_in_range)
+            .map(|_| Vec::with_capacity(n_edits))
+            .collect();
         let mut v_per_edit: Vec<Vec<f32>> = Vec::with_capacity(n_edits);
 
         for (edit_idx, edit) in edits.iter().enumerate() {
@@ -1633,7 +1651,10 @@ impl Model {
                 let captures = capture.as_captures();
                 self.forward.reset();
                 for &tok in &edit.prompt_tokens {
-                    let _ = self.forward.step_capture(tok, &captures, None, None).await?;
+                    let _ = self
+                        .forward
+                        .step_capture(tok, &captures, None, None)
+                        .await?;
                 }
             }
             // Collect k_i^L for every L in range from this clean forward.
@@ -1645,11 +1666,7 @@ impl Model {
             let target_init = capture
                 .read_ffn_out(edit_layer, edit.subject_last_pos)
                 .await?;
-            let target_init_norm = target_init
-                .iter()
-                .map(|x| x * x)
-                .sum::<f32>()
-                .sqrt();
+            let target_init_norm = target_init.iter().map(|x| x * x).sum::<f32>().sqrt();
 
             // ---- Iterative δ optimization at edit_layer (Phase 2.b loop) ----
             let d = d_model;
@@ -1659,8 +1676,7 @@ impl Model {
             let beta1 = 0.9_f32;
             let beta2 = 0.999_f32;
             let eps = 1e-8_f32;
-            let max_norm =
-                hparams.iter_hparams.clamp_norm_factor * target_init_norm.max(1e-6);
+            let max_norm = hparams.iter_hparams.clamp_norm_factor * target_init_norm.max(1e-6);
             let mut final_loss = f32::INFINITY;
 
             for it in 0..hparams.iter_hparams.num_steps {
@@ -1682,7 +1698,10 @@ impl Model {
                                 )
                                 .await?;
                         } else {
-                            let _ = self.forward.step_capture(tok, &captures, None, None).await?;
+                            let _ = self
+                                .forward
+                                .step_capture(tok, &captures, None, None)
+                                .await?;
                         }
                     }
                 }
@@ -1791,11 +1810,7 @@ impl Model {
             // Load + dequantize W_L = ffn_down.weight for this layer.
             // Shape from GGUF: [d_model rows × d_ffn cols] in row-major.
             let w_name = format!("blk.{}.ffn_down.weight", layer);
-            let w_vec = self
-                .forward
-                .weights()
-                .load_async(&w_name)
-                .await?;
+            let w_vec = self.forward.weights().load_async(&w_name).await?;
             if w_vec.len() != d_model * d_ffn {
                 return Err(crate::error::RullamaError::Inference(format!(
                     "memit: {w_name} len {} != d_model*d_ffn = {}",
@@ -1854,9 +1869,7 @@ impl Model {
             // Cholesky factor M = L Lᵀ (in-place: m_mat → L in lower triangle).
             eprintln!("[memit]   Cholesky factor of M (d_ffn={}) …", d_ffn);
             cholesky_in_place_f32(&mut m_mat, d_ffn).map_err(|e| {
-                crate::error::RullamaError::Inference(format!(
-                    "memit layer {layer} Cholesky: {e}"
-                ))
+                crate::error::RullamaError::Inference(format!("memit layer {layer} Cholesky: {e}"))
             })?;
 
             // Solve M · X = K_L, i.e. L·Y = K_L (forward), Lᵀ·X = Y (back).
@@ -1926,7 +1939,10 @@ impl Model {
             ("dtype".to_string(), "f32".to_string()),
             ("memit".to_string(), "1".to_string()),
             ("memit_n_edits".to_string(), n_edits.to_string()),
-            ("memit_layer_start".to_string(), hparams.layer_start.to_string()),
+            (
+                "memit_layer_start".to_string(),
+                hparams.layer_start.to_string(),
+            ),
             ("memit_layer_end".to_string(), hparams.layer_end.to_string()),
             ("memit_lambda".to_string(), hparams.lambda.to_string()),
         ]

@@ -2,20 +2,17 @@
 //! in `bin/server.rs`; the most important is `Mode::Public`, which
 //! switches the safe defaults for tunnel-exposed operation.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
     /// Local dev — Vite reverse proxy, /api/log writable, /api/models
     /// listed, /__rullama-dev-ws broadcasting. Convenient but leaks the
     /// whole repo via Vite if any public origin can reach :PORT.
+    #[default]
     LocalDev,
     /// Tunnel-safe — Vite proxy replaced by a static serve of
     /// `examples/web/dist/`, model list disabled, log write disabled,
     /// dev WS disabled. The mode you want when cloudflared is up.
     Public,
-}
-
-impl Default for Mode {
-    fn default() -> Self { Self::LocalDev }
 }
 
 #[derive(Debug, Clone)]

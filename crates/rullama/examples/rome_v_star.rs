@@ -70,9 +70,7 @@ async fn run() -> Result<(), BoxError> {
     }
     let target_token_id = target_tokens[0];
     let target_str = model.token_str_native(target_token_id).unwrap_or_default();
-    eprintln!(
-        "[encode] target_token = {target_token_id} ({target_str:?})"
-    );
+    eprintln!("[encode] target_token = {target_token_id} ({target_str:?})");
 
     eprintln!("[rome] computing v* gradient at layer {layer}…");
     let grad = model
@@ -127,9 +125,7 @@ async fn run() -> Result<(), BoxError> {
             "\n[WARN] gradient std is suspiciously small ({std:.3e}) — model may already predict target with prob≈1"
         );
     } else {
-        eprintln!(
-            "\n[PASS] v* gradient computed: length={n}, std={std:.3e}, finite, non-zero"
-        );
+        eprintln!("\n[PASS] v* gradient computed: length={n}, std={std:.3e}, finite, non-zero");
     }
     Ok(())
 }

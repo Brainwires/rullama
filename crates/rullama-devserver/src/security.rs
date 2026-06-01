@@ -13,20 +13,17 @@
 //! is in `SecurityConfig::cors_origins`. Public mode defaults to an empty
 //! allow-list; dev mode defaults to permissive echo.
 
+use axum::extract::Request;
 use axum::http::{HeaderValue, Method, header};
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::extract::Request;
 
 use crate::config::SecurityConfig;
 
 /// Tower middleware: COOP/COEP/CORP + conditional CORS echo + always
 /// `Vary: Origin`. Lives at the Router root so it runs after every
 /// handler.
-pub async fn apply_security_headers(
-    req: Request,
-    next: Next,
-) -> Response {
+pub async fn apply_security_headers(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     let origin = req
         .headers()
@@ -52,35 +49,39 @@ pub async fn apply_security_headers(
         HeaderValue::from_static("require-corp"),
     );
     // CORP — pick cross-origin for the two cross-origin-fetch routes.
-    let corp = if path.starts_with("/api/blob/") || path == "/api/models" || path.starts_with("/pkg/") {
-        "cross-origin"
-    } else {
-        "same-origin"
-    };
-    h.insert("cross-origin-resource-policy", HeaderValue::from_static(corp));
+    let corp =
+        if path.starts_with("/api/blob/") || path == "/api/models" || path.starts_with("/pkg/") {
+            "cross-origin"
+        } else {
+            "same-origin"
+        };
+    h.insert(
+        "cross-origin-resource-policy",
+        HeaderValue::from_static(corp),
+    );
     // CORS — only echo allowed origins. `Vary: Origin` so caches don't
     // serve the wrong allow-origin to the wrong client.
     h.insert(header::VARY, HeaderValue::from_static("Origin"));
-    if let Some(origin) = origin {
-        if cfg.allow_origin(&origin) {
-            if let Ok(v) = HeaderValue::from_str(&origin) {
-                h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
-            }
-            h.insert(
-                header::ACCESS_CONTROL_ALLOW_HEADERS,
-                HeaderValue::from_static("Range, Content-Type"),
-            );
-            h.insert(
-                header::ACCESS_CONTROL_EXPOSE_HEADERS,
-                HeaderValue::from_static(
-                    "Content-Length, Content-Range, Accept-Ranges, X-Model-Name, X-Total-Size",
-                ),
-            );
-            h.insert(
-                header::ACCESS_CONTROL_ALLOW_METHODS,
-                HeaderValue::from_static("GET, HEAD, OPTIONS, POST"),
-            );
+    if let Some(origin) = origin
+        && cfg.allow_origin(&origin)
+    {
+        if let Ok(v) = HeaderValue::from_str(&origin) {
+            h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
         }
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("Range, Content-Type"),
+        );
+        h.insert(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            HeaderValue::from_static(
+                "Content-Length, Content-Range, Accept-Ranges, X-Model-Name, X-Total-Size",
+            ),
+        );
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, HEAD, OPTIONS, POST"),
+        );
     }
     // Mute the OPTIONS preflight body — already 204 from the handler.
     if method == Method::OPTIONS {

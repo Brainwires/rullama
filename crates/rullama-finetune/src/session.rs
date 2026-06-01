@@ -234,8 +234,8 @@ fn build_lora_state(
             // (layer * 7919 + proj_idx * 17) value, so global LoRA
             // init is reproducible but doesn't reuse a per-layer slot.
             let proj_offset: u64 = match proj.as_str() {
-                LM_HEAD => 0x4C4D_4845_4144_u64,       // "LMHEAD"
-                EMBED_TOKENS => 0x454D_4254_4F4B_u64,  // "EMBTOK"
+                LM_HEAD => 0x4C4D_4845_4144_u64,      // "LMHEAD"
+                EMBED_TOKENS => 0x454D_4254_4F4B_u64, // "EMBTOK"
                 _ => unreachable!("filter above admits only GLOBAL_TARGETS"),
             };
             let seed = seed_base.wrapping_add(proj_offset);
@@ -400,8 +400,8 @@ impl TrainingSession {
         // during backward — accepting bounded alloc churn (5 layers
         // worth, paced by the per-layer encoder submit) to keep prefill
         // peak under the wall.
-        let fwd_destroy_floor = (hp.backward_layer_floor.saturating_add(5))
-            .min(model.forward().cfg().n_layers);
+        let fwd_destroy_floor =
+            (hp.backward_layer_floor.saturating_add(5)).min(model.forward().cfg().n_layers);
         model
             .forward_mut()
             .set_forward_destroy_layer_floor(fwd_destroy_floor);

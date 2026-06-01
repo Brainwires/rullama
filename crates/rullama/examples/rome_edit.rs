@@ -169,8 +169,7 @@ async fn run() -> Result<(), BoxError> {
             .ok_or_else(|| -> BoxError {
                 format!("KL probe: subject {subject:?} not found in {probe_text:?}").into()
             })?;
-        let probe_prefix: Vec<u32> =
-            probe_tokens[..=probe_subject_last as usize].to_vec();
+        let probe_prefix: Vec<u32> = probe_tokens[..=probe_subject_last as usize].to_vec();
         eprintln!(
             "[rome] KL probe = {:?} → {} tokens, subj_last_in_probe = {}",
             probe_text,

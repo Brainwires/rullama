@@ -10,7 +10,7 @@ pub mod pipelines;
 mod spike;
 pub mod weight_cache;
 
-pub use bind_cache::{buf_id, BindGroupCache, CacheKey, CachedDispatch};
+pub use bind_cache::{BindGroupCache, CacheKey, CachedDispatch, buf_id};
 pub use context::WgpuCtx;
 pub use pipelines::Pipelines;
 pub use spike::compute_spike;

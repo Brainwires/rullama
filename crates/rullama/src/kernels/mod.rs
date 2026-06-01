@@ -83,8 +83,7 @@ pub const LORA_MATMUL_ROW: &str = include_str!("wgsl/lora_matmul_row.wgsl");
 pub const LORA_MATMUL_COL: &str = include_str!("wgsl/lora_matmul_col.wgsl");
 pub const LORA_OUTER_ADD: &str = include_str!("wgsl/lora_outer_add.wgsl");
 pub const LORA_EMBED_COL_READ: &str = include_str!("wgsl/lora_embed_col_read.wgsl");
-pub const LORA_EMBED_COL_SCATTER_ADD: &str =
-    include_str!("wgsl/lora_embed_col_scatter_add.wgsl");
+pub const LORA_EMBED_COL_SCATTER_ADD: &str = include_str!("wgsl/lora_embed_col_scatter_add.wgsl");
 pub const LORA_MATMUL_FUSED: &str = include_str!("wgsl/lora_matmul_fused.wgsl");
 pub const LORA_MATMUL_FUSED_F16B: &str = include_str!("wgsl/lora_matmul_fused_f16b.wgsl");
 pub const ADAM_STEP: &str = include_str!("wgsl/adam_step.wgsl");

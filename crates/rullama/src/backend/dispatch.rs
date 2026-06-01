@@ -1039,9 +1039,9 @@ fn cached_dispatch<T: bytemuck::Pod>(
         1 => crate::backend::CacheKey::one(pipeline, buffers[0]),
         2 => crate::backend::CacheKey::two(pipeline, buffers[0], buffers[1]),
         3 => crate::backend::CacheKey::three(pipeline, buffers[0], buffers[1], buffers[2]),
-        4 => crate::backend::CacheKey::four(
-            pipeline, buffers[0], buffers[1], buffers[2], buffers[3],
-        ),
+        4 => {
+            crate::backend::CacheKey::four(pipeline, buffers[0], buffers[1], buffers[2], buffers[3])
+        }
         5 => crate::backend::CacheKey::five(
             pipeline, buffers[0], buffers[1], buffers[2], buffers[3], buffers[4],
         ),
@@ -1077,7 +1077,10 @@ fn cached_dispatch<T: bytemuck::Pod>(
             layout: &pipeline.get_bind_group_layout(0),
             entries: &entries,
         });
-        crate::backend::CachedDispatch { uniform, bind_group }
+        crate::backend::CachedDispatch {
+            uniform,
+            bind_group,
+        }
     });
     ctx.queue
         .write_buffer(&cached.uniform, 0, bytemuck::bytes_of(params));
@@ -1144,17 +1147,7 @@ pub fn matmul_q4_k_chained(
     //   tiled    WG=64            : 996 ms/tok  (-6%)
     //   tiled    WG=64 + f16 LDS  : 975 ms/tok  (-4%)
     // The 3 alternatives are built (when relevant features) but unrouted.
-    matmul_chained_inner(
-        ctx,
-        enc,
-        &p.q4_k_matmul,
-        "q4k_chain",
-        w,
-        x,
-        y,
-        k,
-        n,
-    );
+    matmul_chained_inner(ctx, enc, &p.q4_k_matmul, "q4k_chain", w, x, y, k, n);
 }
 
 pub fn matmul_q6_k_chained(
@@ -1167,17 +1160,7 @@ pub fn matmul_q6_k_chained(
     k: usize,
     n: usize,
 ) {
-    matmul_chained_inner(
-        ctx,
-        enc,
-        &p.q6_k_matmul,
-        "q6k_chain",
-        w,
-        x,
-        y,
-        k,
-        n,
-    );
+    matmul_chained_inner(ctx, enc, &p.q6_k_matmul, "q6k_chain", w, x, y, k, n);
 }
 
 #[allow(dead_code)]
@@ -1191,17 +1174,7 @@ pub fn matmul_f16_chained(
     k: usize,
     n: usize,
 ) {
-    matmul_chained_inner(
-        ctx,
-        enc,
-        &p.f16_matmul,
-        "f16_chain",
-        w,
-        x,
-        y,
-        k,
-        n,
-    );
+    matmul_chained_inner(ctx, enc, &p.f16_matmul, "f16_chain", w, x, y, k, n);
 }
 
 /// BF16 weight matmul. Used by the audio Conformer tower (every block
@@ -1217,17 +1190,7 @@ pub fn matmul_bf16_chained(
     k: usize,
     n: usize,
 ) {
-    matmul_chained_inner(
-        ctx,
-        enc,
-        &p.bf16_matmul,
-        "bf16_chain",
-        w,
-        x,
-        y,
-        k,
-        n,
-    );
+    matmul_chained_inner(ctx, enc, &p.bf16_matmul, "bf16_chain", w, x, y, k, n);
 }
 
 /// Chained RMSNorm. `weight` of None binds a dummy zero buffer + sets `has_weight=0`,
@@ -1250,7 +1213,15 @@ pub fn rmsnorm_chained(
         _p: 0,
     };
     let w_buf = weight.unwrap_or(dummy);
-    cached_dispatch(ctx, enc, &p.rmsnorm, "rms_chain", &[x, w_buf, y], &params, (1, 1, 1));
+    cached_dispatch(
+        ctx,
+        enc,
+        &p.rmsnorm,
+        "rms_chain",
+        &[x, w_buf, y],
+        &params,
+        (1, 1, 1),
+    );
 }
 
 /// Half-residual add: x[i] = x[i] + 0.5 * y[i] (Conformer FFW).
@@ -2349,8 +2320,13 @@ pub fn scale_per_inner_dim_chained(
         _p1: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.scale_per_inner_dim, "scale_pd",
-        &[x, s], &params, ((n as u32).div_ceil(64), 1, 1),
+        ctx,
+        enc,
+        &p.scale_per_inner_dim,
+        "scale_pd",
+        &[x, s],
+        &params,
+        ((n as u32).div_ceil(64), 1, 1),
     );
 }
 
@@ -3372,8 +3348,13 @@ pub fn rmsnorm_per_row_chained(
     };
     let w_buf = weight.unwrap_or(dummy);
     cached_dispatch(
-        ctx, enc, &p.rmsnorm_per_row, "rmspr_chain",
-        &[x, w_buf, y], &params, (n_rows as u32, 1, 1),
+        ctx,
+        enc,
+        &p.rmsnorm_per_row,
+        "rmspr_chain",
+        &[x, w_buf, y],
+        &params,
+        (n_rows as u32, 1, 1),
     );
 }
 
@@ -3458,8 +3439,13 @@ pub fn adam_step_chained(
             _pad4: 0.0,
         };
         cached_dispatch(
-            ctx, enc, &p.adam_step, "adam",
-            &[grad, param, m, v], &params, (groups_this, 1, 1),
+            ctx,
+            enc,
+            &p.adam_step,
+            "adam",
+            &[grad, param, m, v],
+            &params,
+            (groups_this, 1, 1),
         );
         groups_done += groups_this;
     }
@@ -3493,8 +3479,13 @@ pub fn sum_of_squares_chained(
         _p1: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.sum_of_squares, "sos",
-        &[input, output], &params, (1, 1, 1),
+        ctx,
+        enc,
+        &p.sum_of_squares,
+        "sos",
+        &[input, output],
+        &params,
+        (1, 1, 1),
     );
 }
 
@@ -3561,15 +3552,31 @@ pub fn lora_matmul_row_chained(
             label: Some("lora_mm_row.bg"),
             layout: &p.lora_matmul_row.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: w.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: x.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: y.as_entire_binding(),
+                },
             ],
         });
-        crate::backend::CachedDispatch { uniform, bind_group }
+        crate::backend::CachedDispatch {
+            uniform,
+            bind_group,
+        }
     });
-    ctx.queue.write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
+    ctx.queue
+        .write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("lora_mm_row.pass"),
         timestamp_writes: None,
@@ -3620,15 +3627,31 @@ pub fn lora_matmul_col_chained(
             label: Some("lora_mm_col.bg"),
             layout: &p.lora_matmul_col.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: w.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: x.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: y.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: w.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: x.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: y.as_entire_binding(),
+                },
             ],
         });
-        crate::backend::CachedDispatch { uniform, bind_group }
+        crate::backend::CachedDispatch {
+            uniform,
+            bind_group,
+        }
     });
-    ctx.queue.write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
+    ctx.queue
+        .write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("lora_mm_col.pass"),
         timestamp_writes: None,
@@ -3675,15 +3698,31 @@ pub fn lora_outer_add_chained(
             label: Some("lora_outer.bg"),
             layout: &p.lora_outer_add.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: a.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: b.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: out.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: b.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: out.as_entire_binding(),
+                },
             ],
         });
-        crate::backend::CachedDispatch { uniform, bind_group }
+        crate::backend::CachedDispatch {
+            uniform,
+            bind_group,
+        }
     });
-    ctx.queue.write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
+    ctx.queue
+        .write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("lora_outer.pass"),
         timestamp_writes: None,
@@ -3750,14 +3789,27 @@ pub fn lora_embed_col_read_chained(
             label: Some("lora_embed_col_read.bg"),
             layout: &p.lora_embed_col_read.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: a.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: z.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: z.as_entire_binding(),
+                },
             ],
         });
-        crate::backend::CachedDispatch { uniform, bind_group }
+        crate::backend::CachedDispatch {
+            uniform,
+            bind_group,
+        }
     });
-    ctx.queue.write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
+    ctx.queue
+        .write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("lora_embed_col_read.pass"),
         timestamp_writes: None,
@@ -3805,14 +3857,27 @@ pub fn lora_embed_col_scatter_add_chained(
             label: Some("lora_embed_col_scatter.bg"),
             layout: &p.lora_embed_col_scatter_add.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: u.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: da.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: u.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: da.as_entire_binding(),
+                },
             ],
         });
-        crate::backend::CachedDispatch { uniform, bind_group }
+        crate::backend::CachedDispatch {
+            uniform,
+            bind_group,
+        }
     });
-    ctx.queue.write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
+    ctx.queue
+        .write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("lora_embed_col_scatter.pass"),
         timestamp_writes: None,
@@ -3891,17 +3956,39 @@ pub fn lora_matmul_fused_chained(
             label: Some("lora_fused.bg"),
             layout: &p.lora_matmul_fused.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: a.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: b.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: x.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: y.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: z_out.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: b.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: x.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: y.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: z_out.as_entire_binding(),
+                },
             ],
         });
-        crate::backend::CachedDispatch { uniform, bind_group }
+        crate::backend::CachedDispatch {
+            uniform,
+            bind_group,
+        }
     });
-    ctx.queue.write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
+    ctx.queue
+        .write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("lora_fused.pass"),
         timestamp_writes: None,
@@ -3953,17 +4040,39 @@ pub fn lora_matmul_fused_f16b_chained(
             label: Some("lora_fused_f16b.bg"),
             layout: &p.lora_matmul_fused_f16b.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: a.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: b.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: x.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: y.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: z_out.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: a.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: b.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: x.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: y.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: z_out.as_entire_binding(),
+                },
             ],
         });
-        crate::backend::CachedDispatch { uniform, bind_group }
+        crate::backend::CachedDispatch {
+            uniform,
+            bind_group,
+        }
     });
-    ctx.queue.write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
+    ctx.queue
+        .write_buffer(&cached.uniform, 0, bytemuck::bytes_of(&params));
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("lora_fused_f16b.pass"),
         timestamp_writes: None,
@@ -4018,9 +4127,13 @@ pub fn attention_backward_dq_chained(
         _pad2: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.attention_backward_dq, "attn_bwd_dq",
+        ctx,
+        enc,
+        &p.attention_backward_dq,
+        "attn_bwd_dq",
         &[k_hist, v_hist, probs, d_out, d_scores, d_q],
-        &params, (n_heads as u32, 1, 1),
+        &params,
+        (n_heads as u32, 1, 1),
     );
 }
 
@@ -4055,9 +4168,13 @@ pub fn attention_backward_dkv_chained(
         _pad2: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.attention_backward_dkv, "attn_bwd_dkv",
+        ctx,
+        enc,
+        &p.attention_backward_dkv,
+        "attn_bwd_dkv",
         &[q, probs, d_out, d_scores, d_k_hist, d_v_hist],
-        &params, (n_kv_heads as u32, history_len as u32, 1),
+        &params,
+        (n_kv_heads as u32, history_len as u32, 1),
     );
 }
 
@@ -4083,8 +4200,13 @@ pub fn rmsnorm_backward_chained(
         _p: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.rmsnorm_backward, "rms_bwd",
-        &[x, w, dy, dx], &params, (1, 1, 1),
+        ctx,
+        enc,
+        &p.rmsnorm_backward,
+        "rms_bwd",
+        &[x, w, dy, dx],
+        &params,
+        (1, 1, 1),
     );
 }
 
@@ -4121,8 +4243,13 @@ pub fn rmsnorm_per_row_backward_chained(
         has_weight: has_weight as u32,
     };
     cached_dispatch(
-        ctx, enc, &p.rmsnorm_per_row_backward, "rms_pr_bwd",
-        &[x, w, dy, dx], &params, (n_rows as u32, 1, 1),
+        ctx,
+        enc,
+        &p.rmsnorm_per_row_backward,
+        "rms_pr_bwd",
+        &[x, w, dy, dx],
+        &params,
+        (n_rows as u32, 1, 1),
     );
 }
 
@@ -4145,8 +4272,13 @@ pub fn geglu_backward_chained(
         _p2: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.geglu_backward, "geglu_bwd",
-        &[gate, up, dy, d_gate, d_up], &params, ((n as u32).div_ceil(64), 1, 1),
+        ctx,
+        enc,
+        &p.geglu_backward,
+        "geglu_bwd",
+        &[gate, up, dy, d_gate, d_up],
+        &params,
+        ((n as u32).div_ceil(64), 1, 1),
     );
 }
 
@@ -4178,8 +4310,13 @@ pub fn rope_neox_backward_chained(
     let f_buf = factors.unwrap_or(dummy);
     let total = (n_heads * (rope_dims / 2)) as u32;
     cached_dispatch(
-        ctx, enc, &p.rope_neox_backward, "rope_bwd",
-        &[x, f_buf], &params, (total.div_ceil(64), 1, 1),
+        ctx,
+        enc,
+        &p.rope_neox_backward,
+        "rope_bwd",
+        &[x, f_buf],
+        &params,
+        (total.div_ceil(64), 1, 1),
     );
 }
 
@@ -4216,8 +4353,13 @@ pub fn matmul_q4_k_backward_input_chained(
         _p2: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.matmul_q4_k_backward_input, "q4k_bwd",
-        &[weight, dy, dx], &params, ((k / 256) as u32, 1, 1),
+        ctx,
+        enc,
+        &p.matmul_q4_k_backward_input,
+        "q4k_bwd",
+        &[weight, dy, dx],
+        &params,
+        ((k / 256) as u32, 1, 1),
     );
 }
 
@@ -4251,7 +4393,10 @@ pub fn matmul_q4_k_backward_input_tile_chained(
         k.is_multiple_of(256),
         "k must be divisible by 256 for Q4_K backward"
     );
-    assert!(j_start <= j_end && (j_end as usize) <= n, "tile out of range");
+    assert!(
+        j_start <= j_end && (j_end as usize) <= n,
+        "tile out of range"
+    );
     let params = MatmulBackInputParams {
         k: k as u32,
         n: n as u32,
@@ -4263,8 +4408,13 @@ pub fn matmul_q4_k_backward_input_tile_chained(
         _p2: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.matmul_q4_k_backward_input, "q4k_bwd_tile",
-        &[weight, dy, dx], &params, ((k / 256) as u32, 1, 1),
+        ctx,
+        enc,
+        &p.matmul_q4_k_backward_input,
+        "q4k_bwd_tile",
+        &[weight, dy, dx],
+        &params,
+        ((k / 256) as u32, 1, 1),
     );
 }
 
@@ -4297,8 +4447,13 @@ pub fn matmul_q6_k_backward_input_chained(
         _p2: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.matmul_q6_k_backward_input, "q6k_bwd",
-        &[weight, dy, dx], &params, ((k / 256) as u32, 1, 1),
+        ctx,
+        enc,
+        &p.matmul_q6_k_backward_input,
+        "q6k_bwd",
+        &[weight, dy, dx],
+        &params,
+        ((k / 256) as u32, 1, 1),
     );
 }
 
@@ -4324,7 +4479,10 @@ pub fn matmul_q6_k_backward_input_tile_chained(
         k.is_multiple_of(256),
         "k must be divisible by 256 for Q6_K backward"
     );
-    assert!(j_start <= j_end && (j_end as usize) <= n, "tile out of range");
+    assert!(
+        j_start <= j_end && (j_end as usize) <= n,
+        "tile out of range"
+    );
     let params = MatmulBackInputParams {
         k: k as u32,
         n: n as u32,
@@ -4336,8 +4494,13 @@ pub fn matmul_q6_k_backward_input_tile_chained(
         _p2: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.matmul_q6_k_backward_input, "q6k_bwd_tile",
-        &[weight, dy, dx], &params, ((k / 256) as u32, 1, 1),
+        ctx,
+        enc,
+        &p.matmul_q6_k_backward_input,
+        "q6k_bwd_tile",
+        &[weight, dy, dx],
+        &params,
+        ((k / 256) as u32, 1, 1),
     );
 }
 
@@ -4366,8 +4529,13 @@ pub fn cross_entropy_backward_chained(
         _p1: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.cross_entropy_backward, "xent_bwd",
-        &[logits, d_logits, loss_out], &params, (1, 1, 1),
+        ctx,
+        enc,
+        &p.cross_entropy_backward,
+        "xent_bwd",
+        &[logits, d_logits, loss_out],
+        &params,
+        (1, 1, 1),
     );
 }
 
@@ -4390,8 +4558,13 @@ pub fn softcap_chained(
         _p1: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.softcap, "cap_chain",
-        &[x, y], &params, ((n as u32).div_ceil(64), 1, 1),
+        ctx,
+        enc,
+        &p.softcap,
+        "cap_chain",
+        &[x, y],
+        &params,
+        ((n as u32).div_ceil(64), 1, 1),
     );
 }
 
@@ -4411,8 +4584,13 @@ pub fn geglu_chained(
         _p2: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.geglu, "geglu_chain",
-        &[gate, up, y], &params, ((n as u32).div_ceil(64), 1, 1),
+        ctx,
+        enc,
+        &p.geglu,
+        "geglu_chain",
+        &[gate, up, y],
+        &params,
+        ((n as u32).div_ceil(64), 1, 1),
     );
 }
 
@@ -4443,8 +4621,13 @@ pub fn rope_neox_chained(
     let f_buf = factors.unwrap_or(dummy);
     let total = (n_heads * (rope_dims / 2)) as u32;
     cached_dispatch(
-        ctx, enc, &p.rope_neox, "rope_chain",
-        &[x, f_buf], &params, (total.div_ceil(64), 1, 1),
+        ctx,
+        enc,
+        &p.rope_neox,
+        "rope_chain",
+        &[x, f_buf],
+        &params,
+        (total.div_ceil(64), 1, 1),
     );
 }
 
@@ -4464,8 +4647,13 @@ pub fn residual_add_chained(
         _p2: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.residual_add, "resadd_chain",
-        &[x, y], &params, ((n as u32).div_ceil(64), 1, 1),
+        ctx,
+        enc,
+        &p.residual_add,
+        "resadd_chain",
+        &[x, y],
+        &params,
+        ((n as u32).div_ceil(64), 1, 1),
     );
 }
 
@@ -4499,8 +4687,13 @@ pub fn scale_chained(
             _p1: 0,
         };
         cached_dispatch(
-            ctx, enc, &p.scale, "scale_chain",
-            &[x], &params, (groups_this, 1, 1),
+            ctx,
+            enc,
+            &p.scale,
+            "scale_chain",
+            &[x],
+            &params,
+            (groups_this, 1, 1),
         );
         groups_done += groups_this;
     }
@@ -4532,8 +4725,13 @@ pub fn attention_chained(
         _p: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.attention, "attn_chain",
-        &[q, k_hist, v_hist, out], &params, (n_heads as u32, 1, 1),
+        ctx,
+        enc,
+        &p.attention,
+        "attn_chain",
+        &[q, k_hist, v_hist, out],
+        &params,
+        (n_heads as u32, 1, 1),
     );
 }
 
@@ -4568,8 +4766,13 @@ pub fn attention_probs_chained(
         _p: 0,
     };
     cached_dispatch(
-        ctx, enc, &p.attention_probs, "attn_probs",
-        &[q, k_hist, probs], &params, (n_heads as u32, 1, 1),
+        ctx,
+        enc,
+        &p.attention_probs,
+        "attn_probs",
+        &[q, k_hist, probs],
+        &params,
+        (n_heads as u32, 1, 1),
     );
 }
 
@@ -4727,14 +4930,17 @@ mod tests {
         };
         // Most logits modest, scatter ~5% of them out to ±50 to
         // exercise the LogSumExp stability path.
-        let logits: Vec<f32> = (0..vocab).map(|i| {
-            let n = next();
-            if i % 19 == 0 { n * 100.0 } else { n * 4.0 }
-        }).collect();
+        let logits: Vec<f32> = (0..vocab)
+            .map(|i| {
+                let n = next();
+                if i % 19 == 0 { n * 100.0 } else { n * 4.0 }
+            })
+            .collect();
         let target: u32 = 137;
 
         let mut cpu_grad = vec![0.0f32; vocab];
-        let cpu_loss = crate::reference::ops::cross_entropy_backward(&logits, target, &mut cpu_grad);
+        let cpu_loss =
+            crate::reference::ops::cross_entropy_backward(&logits, target, &mut cpu_grad);
 
         let (gpu_grad, gpu_loss) =
             pollster::block_on(cross_entropy_backward_cached(&ctx, &p, &logits, target))
@@ -4750,9 +4956,14 @@ mod tests {
         let mut max_diff = 0.0f32;
         for (c, g) in cpu_grad.iter().zip(gpu_grad.iter()) {
             let d = (c - g).abs();
-            if d > max_diff { max_diff = d; }
+            if d > max_diff {
+                max_diff = d;
+            }
         }
-        assert!(max_diff < 1e-4, "wide-magnitude d_logits max_diff = {max_diff}");
+        assert!(
+            max_diff < 1e-4,
+            "wide-magnitude d_logits max_diff = {max_diff}"
+        );
     }
 
     /// GPU vs CPU parity for `matmul_q4_k_backward_input`. Synthesizes a
@@ -4933,8 +5144,12 @@ mod tests {
         let p = Pipelines::new(&ctx.device);
         let n = 256usize;
         // Wider, asymmetric range; mix of small and large weights.
-        let x: Vec<f32> = (0..n).map(|i| ((i as f32 - 128.0) * 0.15).sin() * 20.0).collect();
-        let w: Vec<f32> = (0..n).map(|i| if i % 4 == 0 { 5.0 } else { 0.05 }).collect();
+        let x: Vec<f32> = (0..n)
+            .map(|i| ((i as f32 - 128.0) * 0.15).sin() * 20.0)
+            .collect();
+        let w: Vec<f32> = (0..n)
+            .map(|i| if i % 4 == 0 { 5.0 } else { 0.05 })
+            .collect();
         let dy: Vec<f32> = (0..n).map(|i| (i as f32 * 0.7).cos() * 10.0).collect();
         let eps = 1e-6f32;
 
@@ -4960,9 +5175,14 @@ mod tests {
         let mut max_diff = 0.0f32;
         for (c, g) in cpu_dx.iter().zip(gpu_dx.iter()) {
             let d = (c - g).abs();
-            if d > max_diff { max_diff = d; }
+            if d > max_diff {
+                max_diff = d;
+            }
         }
-        assert!(max_diff < 5e-3, "rmsnorm_bwd wide-magnitude max_diff = {max_diff}");
+        assert!(
+            max_diff < 5e-3,
+            "rmsnorm_bwd wide-magnitude max_diff = {max_diff}"
+        );
     }
 
     /// GPU vs CPU parity for `rmsnorm_per_row_backward`.
@@ -5164,7 +5384,9 @@ mod tests {
         let p = Pipelines::new(&ctx.device);
         let n = 128usize;
         // Gate values that exercise both saturation tails of GELU/tanh.
-        let gate: Vec<f32> = (0..n).map(|i| ((i as f32 / (n as f32)) - 0.5) * 80.0).collect();
+        let gate: Vec<f32> = (0..n)
+            .map(|i| ((i as f32 / (n as f32)) - 0.5) * 80.0)
+            .collect();
         let up: Vec<f32> = (0..n).map(|i| (i as f32 * 0.31).sin() * 10.0).collect();
         let dy: Vec<f32> = (0..n).map(|i| (i as f32 * 0.17).cos() * 5.0).collect();
 

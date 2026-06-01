@@ -44,18 +44,21 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 pub fn models_router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/models", get(get_models).head(head_models).options(options_204))
+    Router::new().route(
+        "/api/models",
+        get(get_models).head(head_models).options(options_204),
+    )
 }
 
 pub fn blob_router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/blob/*key", get(get_blob).head(head_blob).options(options_204))
+    Router::new().route(
+        "/api/blob/*key",
+        get(get_blob).head(head_blob).options(options_204),
+    )
 }
 
 pub fn log_router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/log", post(post_log).options(options_204))
+    Router::new().route("/api/log", post(post_log).options(options_204))
 }
 
 async fn options_204() -> impl IntoResponse {
@@ -103,33 +106,61 @@ async fn discover_models(state: &AppState) -> Vec<ModelEntry> {
         };
         while let Ok(Some(entry)) = rd.next_entry().await {
             let path = entry.path();
-            let ft = match entry.file_type().await { Ok(t) => t, Err(_) => continue };
+            let ft = match entry.file_type().await {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
             if ft.is_dir() {
                 stack.push(path);
                 continue;
             }
             // Treat any plain file under manifests/ as a candidate (no .json
             // suffix on disk for newer Ollama versions either).
-            let bytes = match fs::read(&path).await { Ok(b) => b, Err(_) => continue };
+            let bytes = match fs::read(&path).await {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
             let manifest: OllamaManifest = match serde_json::from_slice(&bytes) {
-                Ok(m) => m, Err(_) => continue,
+                Ok(m) => m,
+                Err(_) => continue,
             };
             // family/tag = the last two path segments under manifests/ —
             // e.g. registry.ollama.ai/library/gemma4/e2b → family=gemma4 tag=e2b.
-            let rel = match path.strip_prefix(&manifests) { Ok(r) => r, Err(_) => continue };
+            let rel = match path.strip_prefix(&manifests) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
             let parts: Vec<_> = rel.components().collect();
-            if parts.len() < 2 { continue; }
-            let tag = parts[parts.len() - 1].as_os_str().to_string_lossy().to_string();
-            let family = parts[parts.len() - 2].as_os_str().to_string_lossy().to_string();
+            if parts.len() < 2 {
+                continue;
+            }
+            let tag = parts[parts.len() - 1]
+                .as_os_str()
+                .to_string_lossy()
+                .to_string();
+            let family = parts[parts.len() - 2]
+                .as_os_str()
+                .to_string_lossy()
+                .to_string();
             for layer in manifest.layers.iter() {
-                if layer.media_type != MODEL_LAYER_MEDIA_TYPE { continue; }
-                let digest = layer.digest.strip_prefix("sha256:").unwrap_or(&layer.digest).to_string();
+                if layer.media_type != MODEL_LAYER_MEDIA_TYPE {
+                    continue;
+                }
+                let digest = layer
+                    .digest
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&layer.digest)
+                    .to_string();
                 let blob_path = blobs.join(format!("sha256-{digest}"));
                 let blob_size = match fs::metadata(&blob_path).await {
                     Ok(m) => m.len(),
                     Err(_) => continue,
                 };
-                let size = if layer.size > 0 { layer.size } else { blob_size };
+                let size = if layer.size > 0 {
+                    layer.size
+                } else {
+                    blob_size
+                };
                 let name = format!("{family}:{tag}");
                 out.push(ModelEntry {
                     name: name.clone(),
@@ -224,7 +255,9 @@ async fn get_blob(
     // Stream in 1 MiB chunks. We bound by `remaining` so we don't over-read.
     let mut remaining = length;
     let body_stream = stream::unfold((file, remaining), |(mut f, mut rem)| async move {
-        if rem == 0 { return None; }
+        if rem == 0 {
+            return None;
+        }
         let want = rem.min(CHUNK as u64) as usize;
         let mut buf = vec![0u8; want];
         match f.read(&mut buf).await {
@@ -240,7 +273,11 @@ async fn get_blob(
     let _ = &mut remaining; // silence move warning
     let body = Body::from_stream(body_stream);
 
-    let status = if partial { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK };
+    let status = if partial {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
     let mut builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/octet-stream")
@@ -249,10 +286,7 @@ async fn get_blob(
         .header("X-Model-Name", &key)
         .header("X-Total-Size", size.to_string());
     if partial {
-        builder = builder.header(
-            header::CONTENT_RANGE,
-            format!("bytes {start}-{end}/{size}"),
-        );
+        builder = builder.header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"));
     }
     builder.body(body).unwrap()
 }
@@ -292,7 +326,11 @@ async fn post_log(
     axum::extract::Extension(cfg): axum::extract::Extension<crate::config::SecurityConfig>,
     Json(payload): Json<LogPayload>,
 ) -> Response {
-    let tag = if payload.tag.is_empty() { "?".to_string() } else { payload.tag };
+    let tag = if payload.tag.is_empty() {
+        "?".to_string()
+    } else {
+        payload.tag
+    };
     let line = format!("[{tag}] {}\n", payload.msg);
     let log_path = cfg.api_log_path.clone().unwrap_or_else(page_log_path);
     let res = async {

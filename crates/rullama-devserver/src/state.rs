@@ -30,12 +30,22 @@ impl Paths {
                     .map(|h| h.join(".ollama").join("models"))
                     .unwrap_or_else(|| PathBuf::from("/Users/nightness/.ollama/models"))
             });
-        Ok(Paths { repo_root, pkg_dir, ollama_models })
+        Ok(Paths {
+            repo_root,
+            pkg_dir,
+            ollama_models,
+        })
     }
 
-    pub fn web_dir(&self) -> PathBuf { self.repo_root.join("examples/web") }
-    pub fn manifests_dir(&self) -> PathBuf { self.ollama_models.join("manifests") }
-    pub fn blobs_dir(&self) -> PathBuf { self.ollama_models.join("blobs") }
+    pub fn web_dir(&self) -> PathBuf {
+        self.repo_root.join("examples/web")
+    }
+    pub fn manifests_dir(&self) -> PathBuf {
+        self.ollama_models.join("manifests")
+    }
+    pub fn blobs_dir(&self) -> PathBuf {
+        self.ollama_models.join("blobs")
+    }
     pub fn rust_watch_dirs(&self) -> Vec<PathBuf> {
         vec![
             self.repo_root.join("crates/rullama/src"),

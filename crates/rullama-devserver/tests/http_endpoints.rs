@@ -5,9 +5,6 @@
 //! the plan, against a synthetic Ollama tree under a tempdir so the
 //! tests don't depend on the user's `~/.ollama/models`.
 
-use std::path::PathBuf;
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
@@ -31,7 +28,11 @@ fn build_fixture() -> Fixture {
     let tempdir = TempDir::new().expect("create tempdir");
     let root = tempdir.path().to_path_buf();
     let models = root.join(".ollama").join("models");
-    let manifests = models.join("manifests").join("registry.ollama.ai").join("library").join("gemma4");
+    let manifests = models
+        .join("manifests")
+        .join("registry.ollama.ai")
+        .join("library")
+        .join("gemma4");
     let blobs = models.join("blobs");
     std::fs::create_dir_all(&manifests).unwrap();
     std::fs::create_dir_all(&blobs).unwrap();
@@ -67,7 +68,11 @@ fn build_fixture() -> Fixture {
         ]
     });
     let manifest_path = manifests.join("e2b");
-    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
 
     // We need a `repo_root` too because Paths::resolve auto-detects from
     // CWD. Build a minimal stub structure the resolver accepts: a dir
@@ -109,10 +114,12 @@ mod sha2_ {
 
 async fn router_with_fixture(fx: &Fixture) -> axum::Router {
     let state = test_state(fx.paths.clone());
-    let mut cfg = rullama_devserver::SecurityConfig::default();
     // Per-fixture log path so parallel tests don't collide on the
     // global default /tmp/rullama-page.log.
-    cfg.api_log_path = Some(fx._tempdir.path().join("api-log.txt"));
+    let cfg = rullama_devserver::SecurityConfig {
+        api_log_path: Some(fx._tempdir.path().join("api-log.txt")),
+        ..Default::default()
+    };
     build_app(state, cfg)
 }
 
@@ -162,12 +169,16 @@ async fn api_models_returns_synthetic_entry() {
     let ct = resp.headers().get(header::CONTENT_TYPE).cloned();
     let body = body_bytes(resp).await;
     assert!(
-        ct.map(|v| v.to_str().unwrap_or("").contains("application/json")).unwrap_or(false),
+        ct.map(|v| v.to_str().unwrap_or("").contains("application/json"))
+            .unwrap_or(false),
         "content-type should be JSON"
     );
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let arr = value.as_array().expect("models is an array");
-    assert!(!arr.is_empty(), "should discover at least the fixture model");
+    assert!(
+        !arr.is_empty(),
+        "should discover at least the fixture model"
+    );
     let m = &arr[0];
     assert_eq!(m["name"], "gemma4:e2b");
     assert_eq!(m["family"], "gemma4");
@@ -185,7 +196,13 @@ async fn api_models_head_is_metadata_only() {
     let app = router_with_fixture(&fx).await;
     let resp = app.oneshot(req_head("/api/models")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap().to_string();
+    let ct = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     assert!(ct.contains("application/json"));
     let body = body_bytes(resp).await;
     assert!(body.is_empty(), "HEAD body must be empty");
@@ -221,7 +238,13 @@ async fn api_blob_full_get_streams_correct_bytes() {
     let app = router_with_fixture(&fx).await;
     let resp = app.oneshot(req_get("/api/blob/gemma4:e2b")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let cl = resp.headers().get(header::CONTENT_LENGTH).unwrap().to_str().unwrap().to_string();
+    let cl = resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     assert_eq!(cl, fx.blob_size.to_string());
     let body = body_bytes(resp).await;
     assert_eq!(body.len() as u64, fx.blob_size);
@@ -232,14 +255,25 @@ async fn api_blob_full_get_streams_correct_bytes() {
 async fn api_blob_range_returns_206_with_content_range() {
     let fx = build_fixture();
     let app = router_with_fixture(&fx).await;
-    let resp = app.oneshot(req_range("/api/blob/gemma4:e2b", "bytes=0-15")).await.unwrap();
+    let resp = app
+        .oneshot(req_range("/api/blob/gemma4:e2b", "bytes=0-15"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(
-        resp.headers().get(header::CONTENT_LENGTH).unwrap().to_str().unwrap(),
+        resp.headers()
+            .get(header::CONTENT_LENGTH)
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "16"
     );
     assert_eq!(
-        resp.headers().get(header::CONTENT_RANGE).unwrap().to_str().unwrap(),
+        resp.headers()
+            .get(header::CONTENT_RANGE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
         format!("bytes 0-15/{}", fx.blob_size)
     );
     let body = body_bytes(resp).await;
@@ -253,12 +287,24 @@ async fn api_blob_range_open_ended_extends_to_eof() {
     let app = router_with_fixture(&fx).await;
     let start = fx.blob_size - 4;
     let resp = app
-        .oneshot(req_range("/api/blob/gemma4:e2b", &format!("bytes={start}-")))
+        .oneshot(req_range(
+            "/api/blob/gemma4:e2b",
+            &format!("bytes={start}-"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
-    let cr = resp.headers().get(header::CONTENT_RANGE).unwrap().to_str().unwrap().to_string();
-    assert_eq!(cr, format!("bytes {}-{}/{}", start, fx.blob_size - 1, fx.blob_size));
+    let cr = resp
+        .headers()
+        .get(header::CONTENT_RANGE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        cr,
+        format!("bytes {}-{}/{}", start, fx.blob_size - 1, fx.blob_size)
+    );
     let body = body_bytes(resp).await;
     assert_eq!(body.len(), 4);
 }
@@ -267,7 +313,10 @@ async fn api_blob_range_open_ended_extends_to_eof() {
 async fn api_blob_unknown_model_returns_404() {
     let fx = build_fixture();
     let app = router_with_fixture(&fx).await;
-    let resp = app.oneshot(req_get("/api/blob/does-not-exist:tag")).await.unwrap();
+    let resp = app
+        .oneshot(req_get("/api/blob/does-not-exist:tag"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -275,7 +324,10 @@ async fn api_blob_unknown_model_returns_404() {
 async fn options_preflight_returns_204() {
     let fx = build_fixture();
     let app = router_with_fixture(&fx).await;
-    let resp = app.oneshot(req_options("/api/blob/gemma4:e2b")).await.unwrap();
+    let resp = app
+        .oneshot(req_options("/api/blob/gemma4:e2b"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
 
@@ -307,9 +359,19 @@ async fn pkg_serves_files_with_no_store_cache() {
     let app = router_with_fixture(&fx).await;
     let resp = app.oneshot(req_get("/pkg/rullama.js")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let cc = resp.headers().get(header::CACHE_CONTROL).unwrap().to_str().unwrap();
+    let cc = resp
+        .headers()
+        .get(header::CACHE_CONTROL)
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(cc.contains("no-store"));
-    let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("javascript"));
     let body = body_bytes(resp).await;
     assert!(String::from_utf8_lossy(&body).contains("fixture"));
@@ -321,7 +383,12 @@ async fn pkg_serves_wasm_with_correct_mime() {
     let app = router_with_fixture(&fx).await;
     let resp = app.oneshot(req_get("/pkg/rullama_bg.wasm")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert_eq!(ct, "application/wasm");
     let body = body_bytes(resp).await;
     assert!(body.starts_with(b"\x00asm"));
@@ -331,7 +398,10 @@ async fn pkg_serves_wasm_with_correct_mime() {
 async fn pkg_missing_returns_404() {
     let fx = build_fixture();
     let app = router_with_fixture(&fx).await;
-    let resp = app.oneshot(req_get("/pkg/does-not-exist.js")).await.unwrap();
+    let resp = app
+        .oneshot(req_get("/pkg/does-not-exist.js"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -367,7 +437,11 @@ async fn public_mode_rejects_api_log_writes() {
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    assert_ne!(resp.status(), StatusCode::NO_CONTENT, "should not accept log writes in public mode");
+    assert_ne!(
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "should not accept log writes in public mode"
+    );
 }
 
 #[tokio::test]
@@ -377,17 +451,26 @@ async fn coop_coep_corp_present_on_every_response() {
     let resp = app.oneshot(req_get("/api/models")).await.unwrap();
     let h = resp.headers().clone();
     assert_eq!(
-        h.get("cross-origin-opener-policy").unwrap().to_str().unwrap(),
+        h.get("cross-origin-opener-policy")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "same-origin"
     );
     assert_eq!(
-        h.get("cross-origin-embedder-policy").unwrap().to_str().unwrap(),
+        h.get("cross-origin-embedder-policy")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "require-corp"
     );
     // /api/models gets cross-origin CORP so the page on a CF tunnel
     // hostname can fetch the model list from a localhost dev origin.
     assert_eq!(
-        h.get("cross-origin-resource-policy").unwrap().to_str().unwrap(),
+        h.get("cross-origin-resource-policy")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "cross-origin"
     );
 }
@@ -403,7 +486,9 @@ async fn cors_default_denies_unknown_origin() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert!(
-        resp.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none(),
+        resp.headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none(),
         "no allow-origin should be echoed for unlisted origins"
     );
 }
@@ -414,7 +499,10 @@ async fn pkg_path_traversal_via_dotdot_components_blocked() {
     let app = router_with_fixture(&fx).await;
     // `../examples/web/serve-tunnel.sh` would, before canonicalisation,
     // resolve to a real file. We expect 404.
-    let resp = app.oneshot(req_get("/pkg/../examples/web/serve-tunnel.sh")).await.unwrap();
+    let resp = app
+        .oneshot(req_get("/pkg/../examples/web/serve-tunnel.sh"))
+        .await
+        .unwrap();
     assert!(
         resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::FORBIDDEN,
         "expected 404/403, got {}",
@@ -438,12 +526,13 @@ async fn api_log_body_size_limit_enforced() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert!(
-        resp.status() == StatusCode::PAYLOAD_TOO_LARGE
-            || resp.status() == StatusCode::BAD_REQUEST,
+        resp.status() == StatusCode::PAYLOAD_TOO_LARGE || resp.status() == StatusCode::BAD_REQUEST,
         "oversized POST should be rejected, got {}",
         resp.status()
     );
     // And nothing should have hit disk.
-    let exists = std::fs::read_to_string(&log_file).map(|c| !c.is_empty()).unwrap_or(false);
+    let exists = std::fs::read_to_string(&log_file)
+        .map(|c| !c.is_empty())
+        .unwrap_or(false);
     assert!(!exists, "oversized payload should not have been written");
 }

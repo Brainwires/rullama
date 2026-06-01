@@ -114,7 +114,10 @@ async fn run() -> Result<(), BoxError> {
             .iter()
             .map(|p| {
                 model.render_chat_native(
-                    &[ChatMessage { role: ChatRole::User, content: p.clone() }],
+                    &[ChatMessage {
+                        role: ChatRole::User,
+                        content: p.clone(),
+                    }],
                     false,
                 )
             })
@@ -144,8 +147,14 @@ async fn run() -> Result<(), BoxError> {
     let mut adapted: Vec<String> = Vec::with_capacity(rendered_prompts.len());
     for prompt in &rendered_prompts {
         model.reset_native();
-        let out =
-            greedy_generate(&mut model, prompt, max_new, Some(&state), repetition_penalty).await?;
+        let out = greedy_generate(
+            &mut model,
+            prompt,
+            max_new,
+            Some(&state),
+            repetition_penalty,
+        )
+        .await?;
         adapted.push(out);
     }
 

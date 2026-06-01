@@ -11,6 +11,130 @@ and may move in any patch release.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-01
+
+Mac fast path + dev-server overhaul.
+
+The iPhone-targeted code path that landed in 0.3.x trades wall-clock for
+GPU heap headroom — fine when the heap is the bottleneck, very much not
+fine on a 32 GB MacBook with no heap pressure. 0.4.0 puts that path
+behind a `Memory-tight` flag (default `false`) and adds a small native
+Rust dev server that finally retires the two Python `http.server`
+scripts the repo has been carrying.
+
+### Public API (semver-covered modules)
+
+No changes to `api`, `error`, `sampling`, `lora`. Everything below is
+either internal (the engine path that finetune drives) or the PWA / dev
+tooling.
+
+### Engine (rullama)
+
+- New `Forward::mobile_mode` flag gates **eight** previously-unconditional
+  iPhone workarounds (`mobile_mode = false` on Mac is the fast path):
+  - per-layer `drop_blk_layer_range_destroy` between forward layers
+  - per-layer `drop_prefix_destroy("blk.{i}.")` between backward layers
+  - early `drop_prefix_destroy("token_embd")` after the head outproj
+  - cross-step `drop_prefix_destroy("")` at end-of-step
+  - chunked-destroy yields + per-layer epilogue yield
+  - 0-ms JS yield between recompute submit and backward_layer
+  - 0-ms JS yields between prefill tokens
+  - tiled head_outproj over the vocab axis (8 tiles when mobile, 1 otherwise)
+- Result on Mac: 1772 MiB resident through the entire backward walk,
+  cross-step weight cache survives → ~25% wall-clock reduction on the
+  Mac CDP harness vs the 0.3.x iPhone-tuned path.
+
+### Fine-tune (rullama-finetune)
+
+- `TrainingHyperparams::memory_tight: bool` (serde-default `false`) —
+  what the new `mobile_mode` reads. PWA's `Memory-tight (iPhone-safe)
+  preset` toggle plumbs through `trainingStart`'s hparams JSON.
+- `mem_tight_repro` example explicitly sets `memory_tight: true` so the
+  native canonical run still exercises the iPhone path. Bit-identical:
+  9.0703 / 11.0554 / 9.1028 across 3 epochs.
+
+### PWA (examples/web)
+
+- Fine-tune tab — `Memory-tight` toggle moved to the bottom of the
+  settings stack and labelled **Highly experimental** (slower on Mac,
+  currently crashes mid-step on iPhone 16e). Default state is off on
+  devices with `navigator.deviceMemory ≥ 4 GB` and non-iOS UA.
+- New device-capability gate (`useTrainingCapability`) blocks the
+  Fine-tune tab on iOS UA, missing WebGPU, `maxBufferSize < 512 MB`, or
+  `deviceMemory < 4 GB`, rendering a `TrainingBlockedScreen` with a
+  clear reason instead of a 30-second wait into a crash.
+- `lib/api.ts::blobUrl(m)` — `?localBlob=PORT` now wins over the baked-in
+  CDN URL. Before this, the override was silently ignored for any model
+  in `BAKED_IN_MODELS` — the very case the override exists for.
+- Crash-detect — the false "Last session ended unexpectedly" toast on
+  every refresh is gone. Mount handler now consults BOTH the manifest's
+  `cleanExit` flag AND the pagehide-written `localStorage` marker; only
+  flags when both are absent. The pagehide handler was also fixed to
+  cache the worker session id synchronously into a `useRef` so it can
+  write the marker without an async RPC (which the tab teardown beats).
+- Defaults realigned to the verified garlic-acceptance recipe: initial
+  `stepsBudget` 32 → 50, default `repetition_penalty` 1.1 → 1.3.
+- shadcn `AlertDialog` + `useConfirm()` hook replace the old
+  `window.confirm` for the >200 MB download prompt — works under
+  Playwright/CDP automation, which the native dialog didn't.
+
+### Dev tooling
+
+- New crate `crates/rullama-devserver/` — native Rust dev server.
+  Replaces `examples/web/serve-iphone.sh` (LAN HTTPS) and
+  `examples/web/serve-tunnel.sh` (HTTP behind Cloudflare tunnel).
+  - `cargo dev` brings up the full stack: axum on `:25321` +
+    Vite child on `:5173` (with HMR WebSocket forwarding so editing
+    React works through either port) + fs watcher on
+    `crates/{rullama,rullama-finetune}/src/**` that auto-runs
+    `wasm-pack build` and broadcasts a `wasm-rebuilt` event over WS,
+    triggering a page reload in `examples/web/src/lib/dev-hmr.ts`.
+  - `cargo dev -- --public` composes tunnel-safe defaults: serves
+    `examples/web/dist/` instead of reverse-proxying Vite (Vite's
+    `fs.allow=[repoRoot]` would otherwise leak the entire repo), disables
+    `/api/log` writes, disables `/api/models` listing, disables
+    `/__rullama-dev-ws`.
+  - Endpoints are wire-identical to `serve-tunnel.sh`: GET/HEAD on
+    `/api/models`, GET/HEAD on `/api/blob/{family}:{tag}` with 1 MiB
+    range streaming, POST `/api/log` (8 KiB body cap), OPTIONS preflight.
+  - COOP / COEP / per-route CORP headers on every response; CORS is
+    allow-list only (no wildcard), driven by `--cors-origins`.
+  - Path-traversal hardened via canonicalization + base-dir prefix check
+    on `/pkg/*` and the `dist/` fallback.
+  - 18 integration tests in `tests/http_endpoints.rs` covering every
+    route shape, security header, public-mode disabling, and the
+    8 KiB body cap (`cargo test --manifest-path
+    crates/rullama-devserver/Cargo.toml --release`).
+- PM2 ops at `ops/pm2/`:
+  - `ecosystem.config.cjs` — runs `rullama-devserver --public --cors-origins
+    https://rullama.brainwires.net` directly off the release binary
+    (NOT through `cargo run`).
+  - `setup.sh` — idempotent bring-up: builds binary + dist, restarts
+    the PM2 entry, saves the process list.
+  - `README-for-next-agent.md` — hand-off note describing the two
+    modes, the security boundary, the right way to add a new route.
+- `cargo dev` is an xtask alias (`.cargo/config.toml`) dispatching to
+  `cargo run --manifest-path crates/rullama-devserver/Cargo.toml --release`.
+  The crate is **excluded** from the workspace so
+  `cargo build --workspace --target wasm32-unknown-unknown` doesn't try
+  to compile axum / notify / tokio for wasm.
+- Mac CDP automation harness (`examples/web/test/mac-cdp-test.mjs`) —
+  direct Chrome DevTools Protocol harness bypassing the Playwright
+  React 18 click bug, with dataset save+reuse, explicit Memory-tight
+  uncheck before training, and post-click worker-beacon verification
+  that `memory_tight=false` actually reached the Rust side.
+
+### Migration notes
+
+- `TrainingHyperparams::memory_tight` is `serde(default = false)`, so
+  older JSON payloads keep working — but they will now run the
+  **Mac fast path** instead of the iPhone code path. If you were
+  depending on the per-layer destroy behavior on a memory-tight device,
+  pass `memory_tight: true` explicitly.
+- `serve-iphone.sh` is left in place for the (paused) iPhone path; it
+  is **NOT** deprecated. `serve-tunnel.sh` is superseded by
+  `cargo dev -- --public` and can be removed in a future patch release.
+
 ## [0.3.0] — 2026-05-19
 
 Two flagship landings:

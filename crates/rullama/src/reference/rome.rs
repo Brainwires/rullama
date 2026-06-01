@@ -193,11 +193,7 @@ impl RomeCapture {
     ///
     /// Capture buffer is seq-shaped (`[seq_len × ffn_inter]`);
     /// extract slice at byte offset `position × ffn_inter × 4`.
-    pub async fn read_ffn_act(
-        &self,
-        target_layer: u32,
-        position: u32,
-    ) -> Result<Vec<f32>> {
+    pub async fn read_ffn_act(&self, target_layer: u32, position: u32) -> Result<Vec<f32>> {
         let layer = target_layer as usize;
         if layer >= self.layers.len() {
             return Err(RullamaError::Inference(format!(
@@ -823,4 +819,3 @@ pub fn empty_lora_grads(n_layers: u32) -> Vec<LayerLoraGrads<'static>> {
         })
         .collect()
 }
-

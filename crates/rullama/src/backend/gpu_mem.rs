@@ -28,7 +28,10 @@ static OTHER_BYTES: AtomicI64 = AtomicI64::new(0);
 fn category(label: &str) -> &'static AtomicI64 {
     if label.starts_with("weight:") {
         &WEIGHT_BYTES
-    } else if label.starts_with("scratch") || label.starts_with("ckpt") || label.starts_with("layer.") {
+    } else if label.starts_with("scratch")
+        || label.starts_with("ckpt")
+        || label.starts_with("layer.")
+    {
         &SCRATCH_BYTES
     } else if label.starts_with("kv") {
         &KV_BYTES
@@ -41,6 +44,9 @@ fn category(label: &str) -> &'static AtomicI64 {
 
 /// Only log individual events at or above this size (smaller buffers
 /// still count toward the total, they just don't spam a line each).
+/// Native-only: wasm32 callers don't reference it (per-alloc logging is
+/// suppressed on wasm to keep the WebKit console buffer from inflating).
+#[cfg(not(target_arch = "wasm32"))]
 const LOG_THRESHOLD: u64 = 1 << 20; // 1 MiB
 
 /// Snapshot of the current tracked GPU buffer totals, in MiB.
@@ -81,7 +87,11 @@ pub fn record_alloc(label: &str, bytes: u64) {
     category(label).fetch_add(bytes as i64, Ordering::Relaxed);
     #[cfg(not(target_arch = "wasm32"))]
     if bytes >= LOG_THRESHOLD {
-        log_line(&format!("ALLOC {label} +{}MiB  total={}MiB", bytes >> 20, total >> 20));
+        log_line(&format!(
+            "ALLOC {label} +{}MiB  total={}MiB",
+            bytes >> 20,
+            total >> 20
+        ));
     }
     #[cfg(target_arch = "wasm32")]
     let _ = total;
@@ -93,7 +103,11 @@ pub fn record_free(label: &str, bytes: u64) {
     category(label).fetch_sub(bytes as i64, Ordering::Relaxed);
     #[cfg(not(target_arch = "wasm32"))]
     if bytes >= LOG_THRESHOLD {
-        log_line(&format!("FREE  {label} -{}MiB  total={}MiB", bytes >> 20, total >> 20));
+        log_line(&format!(
+            "FREE  {label} -{}MiB  total={}MiB",
+            bytes >> 20,
+            total >> 20
+        ));
     }
     #[cfg(target_arch = "wasm32")]
     let _ = total;

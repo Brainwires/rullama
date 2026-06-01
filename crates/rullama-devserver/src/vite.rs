@@ -25,10 +25,7 @@ impl ViteHandle {
                 let _ = unsafe { libc_kill(pid as i32, 15) };
             }
         }
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            self.child.wait(),
-        ).await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), self.child.wait()).await;
         let _ = self.child.kill().await;
         tracing::info!("[vite:{}] terminated", self.port);
     }
@@ -50,7 +47,8 @@ pub async fn spawn_vite(web_dir: PathBuf, port: u16) -> std::io::Result<ViteHand
     cmd.current_dir(&web_dir)
         .arg("exec")
         .arg("vite")
-        .arg("--port").arg(port.to_string())
+        .arg("--port")
+        .arg(port.to_string())
         .arg("--strictPort")
         // Vite needs to know which host to advertise to HMR clients —
         // since our devserver loads pages from :25321 but HMR connects

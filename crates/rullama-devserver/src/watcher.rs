@@ -23,8 +23,8 @@ pub struct WatcherHandle {
 
 pub fn spawn(paths: Paths, events: broadcast::Sender<DevEvent>) -> WatcherHandle {
     let (notify_tx, notify_rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
-    let mut watcher = RecommendedWatcher::new(notify_tx, notify::Config::default())
-        .expect("create fs watcher");
+    let mut watcher =
+        RecommendedWatcher::new(notify_tx, notify::Config::default()).expect("create fs watcher");
     for dir in paths.rust_watch_dirs() {
         if dir.exists() {
             tracing::info!("watching {}", dir.display());
@@ -40,8 +40,13 @@ pub fn spawn(paths: Paths, events: broadcast::Sender<DevEvent>) -> WatcherHandle
     let (debounce_tx, mut debounce_rx) = mpsc::channel::<()>(64);
     std::thread::spawn(move || {
         for ev in notify_rx.iter() {
-            let ev = match ev { Ok(e) => e, Err(_) => continue };
-            if !is_relevant(&ev) { continue; }
+            let ev = match ev {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if !is_relevant(&ev) {
+                continue;
+            }
             let _ = debounce_tx.blocking_send(());
         }
     });
@@ -49,7 +54,9 @@ pub fn spawn(paths: Paths, events: broadcast::Sender<DevEvent>) -> WatcherHandle
     let task = tokio::spawn(async move {
         loop {
             // Block until first event.
-            if debounce_rx.recv().await.is_none() { break; }
+            if debounce_rx.recv().await.is_none() {
+                break;
+            }
             // Drain any further events that fired in the next 300 ms.
             sleep(Duration::from_millis(300)).await;
             while debounce_rx.try_recv().is_ok() {}
@@ -63,21 +70,29 @@ pub fn spawn(paths: Paths, events: broadcast::Sender<DevEvent>) -> WatcherHandle
                     let _ = events.send(DevEvent::WasmRebuilt { at_ms });
                 }
                 Err(tail) => {
-                    tracing::warn!("[watcher] wasm-pack FAILED ({} chars stderr tail)", tail.len());
+                    tracing::warn!(
+                        "[watcher] wasm-pack FAILED ({} chars stderr tail)",
+                        tail.len()
+                    );
                     let _ = events.send(DevEvent::WasmFailed { stderr_tail: tail });
                 }
             }
         }
     });
 
-    WatcherHandle { _watcher: watcher, _task: task }
+    WatcherHandle {
+        _watcher: watcher,
+        _task: task,
+    }
 }
 
 fn is_relevant(ev: &Event) -> bool {
     // Only react to Create/Modify/Remove. Metadata-only access events
     // (e.g. spotlight indexing) are noise.
-    matches!(ev.kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_))
-        && ev.paths.iter().any(|p| is_rs_or_wgsl(p))
+    matches!(
+        ev.kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    ) && ev.paths.iter().any(|p| is_rs_or_wgsl(p))
 }
 
 fn is_rs_or_wgsl(p: &std::path::Path) -> bool {
@@ -91,15 +106,23 @@ async fn build_wasm(paths: &Paths) -> Result<(), String> {
     cmd.current_dir(&paths.repo_root)
         .arg("build")
         .arg("crates/rullama-finetune")
-        .arg("--target").arg("web")
+        .arg("--target")
+        .arg("web")
         .arg("--release")
-        .arg("--out-dir").arg("../../pkg")
-        .arg("--out-name").arg("rullama")
+        .arg("--out-dir")
+        .arg("../../pkg")
+        .arg("--out-name")
+        .arg("rullama")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let child = cmd.spawn().map_err(|e| format!("spawn wasm-pack: {e}"))?;
-    let out = child.wait_with_output().await.map_err(|e| format!("wait: {e}"))?;
-    if out.status.success() { return Ok(()); }
+    let out = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("wait: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
     let combined = {
         let mut s = String::new();
         s.push_str(&String::from_utf8_lossy(&out.stdout));
@@ -118,6 +141,8 @@ async fn build_wasm(paths: &Paths) -> Result<(), String> {
 
 fn now_ms() -> u128 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
-
