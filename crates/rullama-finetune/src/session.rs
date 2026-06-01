@@ -816,6 +816,9 @@ impl TrainingSession {
             if let Some(cb) = progress_cb {
                 cb("prefill", (i + 1) as u32, prefill_total);
             }
+            // 0 ms yield between prefill tokens (see same call in the
+            // per_position path for the rationale).
+            self.model.forward().wasm_yield_zero().await;
         }
         // Final position — capture activations + compute logits.
         let final_tok = *input_ids.last().unwrap();
@@ -1173,6 +1176,13 @@ impl TrainingSession {
             if let Some(cb) = progress_cb {
                 cb("prefill", (idx + 1) as u32, prefill_total);
             }
+            // 0 ms yield between prefill tokens. Each token's prefill
+            // bursts 35 layer-submits; on iPhone real-device tests
+            // the cumulative IPC pressure across 20 tokens was tipping
+            // us over the GPUProcess wall right at forward 35/35. A
+            // 1-tick event-loop release between tokens lets Metal's
+            // message pipe drain before the next token's burst lands.
+            self.model.forward().wasm_yield_zero().await;
         }
 
         // 2. Build grad views + scratch view (mirrors `forward_backward`).

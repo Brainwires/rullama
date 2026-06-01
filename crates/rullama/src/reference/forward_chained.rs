@@ -547,6 +547,33 @@ impl Forward {
         self.ctx.bind_cache.clear();
     }
 
+    /// **0 ms JS event-loop yield (wasm32 only).** Used by training
+    /// callers between bursts of GPU submits (per-prefill-token,
+    /// fwd→bwd, recompute→backward_layer) to let iOS Safari's
+    /// GPUProcess message pipe drain a tick of pending IPCs before
+    /// the next burst lands. On native this is a no-op `await`.
+    ///
+    /// 0 ms specifically (not >0): real-device data showed
+    /// `setTimeout(500)` at the head→backward boundary was killing
+    /// the Worker (iOS reaped the suspended process). 0 ms releases
+    /// the event loop for one tick without exposing us to the
+    /// suspended-process reaper.
+    pub async fn wasm_yield_zero(&self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsCast;
+            let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global()
+                .dyn_into()
+                .expect("training session runs inside a DedicatedWorkerGlobalScope");
+            let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+                let resolve_fn: js_sys::Function = resolve.into();
+                let _ = scope
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve_fn, 0);
+            });
+            let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+        }
+    }
+
     /// **Pre-warm every backward kernel at session start (Patch 7).**
     ///
     /// Dispatches each backward + optimizer + lora kernel ONCE against
