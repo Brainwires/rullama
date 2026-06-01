@@ -16,6 +16,7 @@ import { saveInflightImage, saveInflightAudio, readInflightImages, readInflightA
 import { getNetworkHint } from "@/lib/network";
 import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
+import { useConfirm } from "@/lib/confirm";
 import { usePersistedState } from "@/lib/persisted";
 import { useIOSKeyboard } from "@/lib/useIOSKeyboard";
 import { useWakeLock } from "@/lib/wakeLock";
@@ -24,7 +25,11 @@ import { preprocessImage } from "@/lib/image_preprocess";
 import { decodeAudioFile } from "@/lib/audio_decode";
 import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
 import { DEFAULT_VOICE_OPTIONS, VOICE_BOUNDS, type VoiceOptions } from "@/lib/voice";
-import { FineTunePanel } from "@/components/FineTunePanel";
+import {
+    FineTunePanel,
+    TrainingBlockedScreen,
+    useTrainingCapability,
+} from "@/components/FineTunePanel";
 import { Badge } from "@/components/ui/badge";
 import { UpdateBanner } from "@/components/UpdateBanner";
 import { ApplyingOverlay } from "@/components/ApplyingOverlay";
@@ -132,6 +137,12 @@ function suggestTitle(text: string): string {
 }
 
 export function App() {
+    // Training capability — drives Fine-tune tab gating + the
+    // "training not supported" screen. Detected once on mount via
+    // `useTrainingCapability()` (WebGPU + min GPU buffer + min system
+    // RAM + non-iOS UA).
+    const trainingCap = useTrainingCapability();
+
     // Model load state
     const [modelStatus, setModelStatus] = useState<ModelStatus>("idle");
     const [loadingPercent, setLoadingPercent] = useState(0);
@@ -171,9 +182,26 @@ export function App() {
     // View routing — Chat tab vs Fine-tune tab. Persisted so a reload
     // doesn't bounce the user out of the tab they were in.
     const [view, setView] = usePersistedState<"chat" | "finetune" | "settings">("rullama:view", "chat");
-    // Adapter currently active in chat. Kept here (not just inside
-    // FineTunePanel) so the header badge stays in sync.
-    const [activeAdapter, setActiveAdapter] = useState<string | null>(null);
+    // **D3 — chat-during-training gate.** When a Fine-tune run is
+    // active in this (or any other) tab, the Model is owned by the
+    // training session and chat-side step RPCs would fail with
+    // "model is owned by an active training session". Reflect that
+    // in the UI so the user sees a clear "training in progress"
+    // affordance instead of an opaque error toast on Send. Sourced
+    // from the worker's `trainingStarted` / `trainingFinished`
+    // notifies, which fan out across tabs via the SharedWorker
+    // router.
+    const [trainingInProgress, setTrainingInProgress] = useState<boolean>(false);
+
+    // Adapter currently active in chat. Persisted across reloads so a
+    // page refresh doesn't silently drop a trained adapter — the bytes
+    // are in OPFS regardless, but the "this one is loaded into Model"
+    // state used to reset to null on boot, forcing the user to
+    // re-apply manually via the Fine-tune tab. The restore-on-boot
+    // effect below re-applies the saved adapter once the model is
+    // ready; failure clears the persisted name so we don't keep
+    // trying.
+    const [activeAdapter, setActiveAdapter] = usePersistedState<string | null>("activeAdapter", null);
 
     // Chat state
     const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -203,6 +231,14 @@ export function App() {
     // own tab so it doesn't compete with chat content for screen
     // real-estate on small displays.
     const [historyOpen, setHistoryOpen] = usePersistedState<boolean>("ui.historyOpen", false);
+    // Fine-tune view's right sidebar (hyperparameter settings column).
+    // Defaults open the first time — discoverability — and persists
+    // the user's last choice across reloads.
+    const [fineTuneSettingsOpen, setFineTuneSettingsOpen] = usePersistedState<boolean>("ui.fineTuneSettingsOpen", true);
+    // DOM mount point for FineTunePanel's portal-rendered settings
+    // column. useState (not useRef) so the ref-callback re-renders
+    // FineTunePanel with the now-non-null host on mount.
+    const [fineTuneSettingsEl, setFineTuneSettingsEl] = useState<HTMLDivElement | null>(null);
 
     // Persisted tunables.
     const [systemPrompt, setSystemPrompt] = usePersistedState<string>("systemPrompt", DEFAULT_SYSTEM_PROMPT);
@@ -237,6 +273,7 @@ export function App() {
     // as model state changes, but we want to attempt resume at most once.
     const resumeAttemptedRef = useRef(false);
     const { showToast, dismissToast } = useToast();
+    const confirm = useConfirm();
 
     // iOS keyboard handling — snaps the visual viewport back to the top
     // when the keyboard dismisses, so the page doesn't end up offset
@@ -380,6 +417,105 @@ export function App() {
         })();
     }, [showToast]);
 
+    // Crash-detect on mount. A "crash" is: the previous session
+    // exists AND neither end-of-life signal fired for it. There are
+    // two signals; either is sufficient evidence of a clean exit.
+    //
+    //   1. The worker's shutdown handler wrote `cleanExit: true` into
+    //      the session manifest. Reliable on a graceful close where
+    //      the worker actually runs its shutdown. UNRELIABLE on a
+    //      hard reload (Cmd+R), where the worker is terminated by
+    //      the browser before postMessage round-trips complete.
+    //
+    //   2. The page's `pagehide` listener wrote the session id into
+    //      `localStorage["rullama:session:clean"]`. Reliable on any
+    //      page navigation/reload (pagehide is synchronous, runs
+    //      before the page is torn down) — this is the path that was
+    //      previously written but never read, which is why every
+    //      reload looked like a crash.
+    //
+    // Either signal == clean. Only when BOTH are absent do we toast.
+    useEffect(() => {
+        const client = getClient();
+        (async () => {
+            try {
+                const [list, currentId] = await Promise.all([
+                    client.logs.list(),
+                    client.logs.currentId().catch(() => "" as string),
+                ]);
+                const previous = list.find((s) => s.id !== currentId);
+                if (!previous) return;
+                if (previous.cleanExit) return;
+                let pagehideMarker = "";
+                try { pagehideMarker = localStorage.getItem("rullama:session:clean") || ""; } catch { /* */ }
+                if (pagehideMarker && pagehideMarker === previous.id) {
+                    // Clean exit per pagehide; clear the marker so the
+                    // next reload's check starts from a clean slate.
+                    try { localStorage.removeItem("rullama:session:clean"); } catch { /* */ }
+                    return;
+                }
+                showToast({
+                    level: "warn",
+                    title: "Last session ended unexpectedly",
+                    message: "The tab may have been terminated (iOS jetsam, OOM, or a hard kill). Open the logs to see what fired right before the kill.",
+                    persist: true,
+                    action: {
+                        label: "Open Logs",
+                        onClick: () => {
+                            try { localStorage.setItem("rullama:settings:tab", JSON.stringify("logs")); } catch { /* */ }
+                            setView("settings");
+                        },
+                    },
+                });
+            } catch { /* logger unavailable — silently skip */ }
+        })();
+    }, [showToast, setView]);
+
+    // pagehide is the reliable "tab is going away" signal across
+    // browsers — fires before iOS suspends, before unload would on
+    // desktop, and iOS Safari does NOT fire `beforeunload`. We write
+    // a localStorage marker with the current session id; the next
+    // mount's crash-detect treats a matching marker as proof of a
+    // clean exit even if the worker's manifest shutdown didn't
+    // complete.
+    //
+    // Critical: `client.logs.currentId()` is an async RPC over
+    // postMessage, and pagehide CANNOT await. By the time the worker
+    // responds, the tab is gone and `localStorage.setItem` never
+    // runs. Cache the id synchronously on mount, then read the cached
+    // value inside the listener so the marker is written without an
+    // RPC round-trip.
+    const currentSessionIdRef = useRef<string>("");
+    useEffect(() => {
+        let cancelled = false;
+        const client = getClient();
+        // Cache the worker's session id once on mount. Re-cache when
+        // visibility flips back to "visible" — the SharedWorker may
+        // have rotated session ids while the tab was hidden.
+        const refresh = async () => {
+            try {
+                const id = await client.logs.currentId().catch(() => "");
+                if (!cancelled && id) currentSessionIdRef.current = id;
+            } catch { /* */ }
+        };
+        void refresh();
+        const onVis = () => { if (document.visibilityState === "visible") void refresh(); };
+        document.addEventListener("visibilitychange", onVis);
+        return () => {
+            cancelled = true;
+            document.removeEventListener("visibilitychange", onVis);
+        };
+    }, []);
+    useEffect(() => {
+        const onHide = () => {
+            const id = currentSessionIdRef.current;
+            if (!id) return;
+            try { localStorage.setItem("rullama:session:clean", id); } catch { /* */ }
+        };
+        window.addEventListener("pagehide", onHide);
+        return () => window.removeEventListener("pagehide", onHide);
+    }, []);
+
     // Has the SharedWorker pushed at least one `meta` notification? Until
     // it has, we don't know whether another tab already loaded a model,
     // so auto-load is gated on this flag (see effect below).
@@ -469,6 +605,14 @@ export function App() {
             client.subscribe("adapterChanged", (p) => {
                 setActiveAdapter((p.active as string | null | undefined) ?? null);
             }),
+            // **D3 — training-in-progress tracking.** The worker
+            // broadcasts these notifies across tabs via the
+            // SharedWorker router; every tab learns about it and the
+            // chat input gates uniformly. Without this, the Send
+            // button would fail with "model is owned by training
+            // session" on click and the user wouldn't know why.
+            client.subscribe("trainingStarted", () => { setTrainingInProgress(true); }),
+            client.subscribe("trainingFinished", () => { setTrainingInProgress(false); }),
             // Worker is waiting on the OPFS read-syncHandle while the
             // previous worker's exclusive lock GCs. Surface to the boot
             // splash AND the in-app waitInfo state so the user knows
@@ -527,13 +671,59 @@ export function App() {
                 });
             }),
         ];
-        // Probe initial adapter state once the model is ready (worker
-        // remembers what was applied across page reloads).
+        // Probe initial adapter state. The worker's `active` is its
+        // in-memory state for THIS core session — empty on a fresh
+        // boot. If we have a persisted activeAdapter (from a prior
+        // tab that applied one), prefer ours and trust the
+        // restore-on-ready effect below to re-apply it via
+        // `trainingApplyAdapter`. If we don't, take whatever the
+        // worker says (could be non-null if another tab is already
+        // running with one applied).
         void getClient().trainingListAdapters()
-            .then((r) => setActiveAdapter(r.active))
+            .then((r) => {
+                // Only overwrite if BOTH the persisted name is null
+                // and the worker has nothing. Otherwise the persisted
+                // (or the worker's existing) name wins.
+                setActiveAdapter((cur) => cur ?? r.active);
+            })
             .catch(() => { /* */ });
         return () => { for (const o of offs) o(); };
     }, []);
+
+    // **D1 — restore active adapter on reload.** The adapter bytes
+    // survive in OPFS but the "this one is loaded into Model" state
+    // used to reset to null on every boot, leaving the user to manually
+    // re-apply via the Fine-tune tab. Once the model is ready and an
+    // activeAdapter is persisted but not yet applied to the worker,
+    // re-apply it. A single retry on the next-`modelStatus` change is
+    // enough; failure clears the persisted name so we don't keep
+    // trying for a missing/incompatible adapter.
+    const adapterRestoredRef = useRef(false);
+    useEffect(() => {
+        if (adapterRestoredRef.current) return;
+        if (modelStatus !== "ready") return;
+        if (!activeAdapter) return;
+        adapterRestoredRef.current = true;
+        (async () => {
+            const c = getClient();
+            try {
+                const list = await c.trainingListAdapters();
+                if (list.active === activeAdapter) return; // already applied
+                if (!list.entries.some((e) => e.name === activeAdapter)) {
+                    console.warn(`[rullama] persisted activeAdapter '${activeAdapter}' is no longer in the library — clearing`);
+                    setActiveAdapter(null);
+                    return;
+                }
+                // trainingApplyAdapter is session-gated. Wrap in
+                // withSession so the apply queues behind any other
+                // tab's active work and releases cleanly when done.
+                await c.withSession(() => c.trainingApplyAdapter(activeAdapter));
+            } catch (e) {
+                console.warn(`[rullama] failed to restore activeAdapter '${activeAdapter}' on boot:`, e);
+                setActiveAdapter(null);
+            }
+        })();
+    }, [modelStatus, activeAdapter, setActiveAdapter]);
 
     // Boot-time PWA update check. Fetches /version.json (server's
     // currently-deployed version) and compares against the version
@@ -853,13 +1043,15 @@ export function App() {
             if (needBytes >= CONFIRM_BYTES) {
                 const hint = getNetworkHint();
                 const sizeLabel = fmtBytes(needBytes);
-                const head = hint.metered
-                    ? `⚠️ ${hint.reason}.`
-                    : `Heads up:`;
-                const msg = `${head}\n\nDownloading "${m.name}" needs ${sizeLabel} over the network. ` +
-                    `It will be cached locally so subsequent loads are free.\n\n` +
-                    `Continue?`;
-                if (!window.confirm(msg)) {
+                const title = hint.metered ? `⚠️ ${hint.reason}` : `Download "${m.name}"`;
+                const description =
+                    `Downloading "${m.name}" needs ${sizeLabel} over the network. ` +
+                    `It will be cached locally so subsequent loads are free.`;
+                // Shadcn modal replaces window.confirm — see lib/confirm.tsx.
+                // The OK/Cancel buttons are real DOM <button>s so they're
+                // automatable via Playwright/CDP (window.confirm() renders
+                // a browser-chrome modal that's hard to drive).
+                if (!(await confirm({ title, description, okLabel: "OK", cancelLabel: "Cancel" }))) {
                     setModelStatus("idle");
                     setStatusText("no model");
                     setLoadingLabel("");
@@ -2073,9 +2265,10 @@ export function App() {
                 leftOpen={view === "chat" && historyOpen}
                 onToggleLeft={setHistoryOpen}
                 leftWidth={280}
-                // Left sidebar (conversation list) is chat-specific —
-                // hide on Fine-tune and Settings tabs. The right
-                // sidebar is gone entirely now that Settings is a tab.
+                // Left sidebar (conversation list) is chat-specific.
+                // Right sidebar (fine-tune hyperparameter settings) is
+                // fine-tune-specific. Each tab gets the chevron toggle
+                // it needs, hidden on the other tabs.
                 leftSidebar={
                     view === "chat" ? (
                         <ConversationList
@@ -2087,13 +2280,37 @@ export function App() {
                         />
                     ) : undefined
                 }
+                rightOpen={view === "finetune" && fineTuneSettingsOpen}
+                onToggleRight={setFineTuneSettingsOpen}
+                rightWidth={340}
+                rightSidebar={
+                    view === "finetune" ? (
+                        // The ref-callback runs on mount and pushes the
+                        // DOM element up into App state — that triggers
+                        // a FineTunePanel re-render which then portals
+                        // its settings column into this div.
+                        <div ref={setFineTuneSettingsEl} className="h-full" />
+                    ) : undefined
+                }
             >
                 {view === "finetune" ? (
-                    <FineTunePanel
-                        modelStatus={modelStatus}
-                        activeAdapter={activeAdapter}
-                        onAdapterChanged={setActiveAdapter}
-                    />
+                    trainingCap.status === "blocked" ? (
+                        <TrainingBlockedScreen
+                            title={trainingCap.title}
+                            reason={trainingCap.reason}
+                        />
+                    ) : trainingCap.status === "checking" ? (
+                        <div className="flex h-full min-h-0 items-center justify-center p-8 text-sm text-muted-foreground">
+                            Checking device capability…
+                        </div>
+                    ) : (
+                        <FineTunePanel
+                            modelStatus={modelStatus}
+                            activeAdapter={activeAdapter}
+                            onAdapterChanged={setActiveAdapter}
+                            settingsHostEl={fineTuneSettingsEl}
+                        />
+                    )
                 ) : view === "settings" ? (
                     // Centered max-width wrapper so the form controls
                     // don't stretch across the full main-content width
@@ -2158,15 +2375,19 @@ export function App() {
                             />
                         )
                     }
-                    canType={modelStatus === "ready"}
+                    canType={modelStatus === "ready" && !trainingInProgress}
                     canSend={
                         modelStatus === "ready"
                         && !busy
+                        && !trainingInProgress
                         && (prompt.trim().length > 0 || pendingImages.length > 0 || pendingAudio.length > 0)
                     }
                     canStop={busy}
-                    canAttach={modelStatus === "ready" && (hasVision || hasAudio)}
-                    canRecord={modelStatus === "ready" && hasAudio && !busy}
+                    canAttach={modelStatus === "ready" && (hasVision || hasAudio) && !trainingInProgress}
+                    canRecord={modelStatus === "ready" && hasAudio && !busy && !trainingInProgress}
+                    statusLine={trainingInProgress
+                        ? "Training session is active — open the Fine-tune tab and Save / Apply / Discard the adapter to return chat."
+                        : statusLine}
                     pendingImages={pendingImages}
                     pendingAudio={pendingAudio.map((a) => ({ durationMs: a.durationMs }))}
                     voice={voice}
@@ -2187,7 +2408,6 @@ export function App() {
                     onRemoveAudio={onRemoveAudio}
                     onAudioError={onAudioError}
                     pipelineProgress={visionEncodeState}
-                    statusLine={statusLine}
                 />
                 )}
             </DualSidebarLayout>

@@ -51,6 +51,7 @@ fn overfit_one_smoke_drops_loss_by_half() {
                 "attn_v".into(),
                 "attn_o".into(),
             ],
+            target_layers: None,
         };
         let hp = TrainingHyperparams {
             learning_rate: 1e-3,

@@ -60,7 +60,20 @@ export default defineConfig({
                 // to drop the precache and start clean.
                 //   docs: https://developer.chrome.com/docs/workbox/modules/workbox-precaching
                 //   issue: https://github.com/GoogleChrome/workbox/issues/2757
-                cacheId: "rullama-v6",
+                // **cacheId bumped on every build.** Suffixed with the
+                // build timestamp so each `vite build` invalidates ALL
+                // previously cached SW buckets — no more stale-wasm
+                // archaeology after a rebuild. Combined with the
+                // NetworkFirst /pkg/ handler below, this makes any
+                // cache-related staleness structurally impossible:
+                // the bucket name is unique to this build AND the
+                // wasm handler prefers network anyway.
+                //
+                // History: we lost ~6 iPhone test cycles in a row to a
+                // stale wasm because the previous static `rullama-v6` +
+                // CacheFirst (30-day TTL) silently served bundles built
+                // by older commits. Never again.
+                cacheId: `rullama-${BUILD_VERSION}-${Date.now()}`,
                 cleanupOutdatedCaches: true,
                 // index.html is intentionally OMITTED from precache: it
                 // goes through the NetworkFirst navigation handler below
@@ -85,20 +98,53 @@ export default defineConfig({
                             request.mode === "navigate",
                         handler: "NetworkFirst",
                         options: {
-                            cacheName: "rullama-pages",
+                            // **Per-build cacheName** — see the `/pkg/`
+                            // handler below for the full rationale.
+                            cacheName: `rullama-pages-${BUILD_VERSION}-${Date.now()}`,
                             networkTimeoutSeconds: 3,
                             expiration: { maxEntries: 5 },
                             cacheableResponse: { statuses: [0, 200] },
                         },
                     },
-                    // The wasm bundle is large; we don't want Workbox to
-                    // inline-precache it but we *do* want it cached on
-                    // first fetch.
+                    // **wasm bundle: NetworkFirst with a generous cache
+                    // fallback.** Previously this was CacheFirst with a
+                    // 30-day TTL, which meant: a new wasm-pack build was
+                    // INVISIBLE to any iPhone (or any user) who'd already
+                    // fetched the prior bundle, for up to 30 days. The
+                    // page log showed stale beacons and made debugging
+                    // training crashes much harder — every iteration
+                    // since `5487cb8` was actually running 5487cb8's
+                    // wasm until v7 of this cache rolled out. This burned
+                    // ~6 commits worth of iPhone test cycles silently.
+                    //
+                    // NetworkFirst with networkTimeoutSeconds=5 means:
+                    //   • Online (always our case): fetch network → cache
+                    //     stays warm but is never served if network's up.
+                    //     Rebuilds are visible on next page load.
+                    //   • Slow network: 5 s timeout falls back to cache,
+                    //     so users don't sit on a blank page.
+                    //   • Offline (PWA edge case): cache hit, app boots
+                    //     against last-known-good bundle.
+                    // The bundle is ~4 MB so network re-fetch on each
+                    // navigation is cheap (~30-50ms on broadband).
                     {
                         urlPattern: /\/pkg\/.*\.(js|wasm)$/,
-                        handler:    "CacheFirst",
+                        handler:    "NetworkFirst",
                         options: {
-                            cacheName: "rullama-wasm",
+                            // **Per-build cacheName** — the prior hardcoded
+                            // `rullama-wasm-v2` persisted across builds.
+                            // Combined with the 5 s NetworkFirst fallback,
+                            // a slow network response on one file could
+                            // mix a NEW `rullama.js` with a CACHED
+                            // `rullama_bg.wasm` from a previous build,
+                            // producing silently non-deterministic
+                            // behavior. Bumping the cache name on every
+                            // build means each build has its own isolated
+                            // runtime cache bucket — even if a fallback
+                            // hits, it's a fallback within THIS build's
+                            // bundle, not the prior one.
+                            cacheName: `rullama-wasm-${BUILD_VERSION}-${Date.now()}`,
+                            networkTimeoutSeconds: 5,
                             expiration: { maxEntries: 4, maxAgeSeconds: 60 * 60 * 24 * 30 },
                             cacheableResponse: { statuses: [0, 200] },
                         },
@@ -153,11 +199,14 @@ export default defineConfig({
             // Allow serving files from project root (so /pkg/ works).
             allow: [repoRoot],
         },
+        // Direct Vite users (`pnpm dev:web`) get /api/* + /pkg/* + dev-WS
+        // proxied to the native devserver on :25321 (started via
+        // `cargo dev`). Pages loaded from :25321 don't need this since
+        // the devserver serves /api + /pkg natively.
         proxy: {
-            "/api": {
-                target: "http://localhost:8088",
-                changeOrigin: true,
-            },
+            "/api":                { target: "http://localhost:25321", changeOrigin: true },
+            "/pkg":                { target: "http://localhost:25321", changeOrigin: true },
+            "/__rullama-dev-ws":   { target: "ws://localhost:25321",   ws: true,           changeOrigin: true },
         },
     },
     // Vite handles workers when imported via `?worker` or `new URL(...)`.

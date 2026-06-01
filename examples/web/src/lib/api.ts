@@ -96,17 +96,74 @@ export async function listModels(signal?: AbortSignal): Promise<ModelEntry[]> {
 }
 
 /** Where to fetch the GGUF bytes from. The baked entries all carry a
- *  url; this only falls back to /api/blob for local-Ollama dev mode. */
+ *  url; this only falls back to /api/blob for local-Ollama dev mode.
+ *
+ *  **Local-blob override** (debug/automation): when the page URL has
+ *  `?localBlob=PORT` (or localStorage.localBlobPort is set), GGUF
+ *  fetches go to `http://localhost:PORT/api/blob/...` instead of the
+ *  same-origin /api/blob. Lets the Cloudflare-served PWA shell stay
+ *  on the public URL (small files, edge-cached) while the 7 GB GGUF
+ *  goes direct to the local server, sidestepping the user's home
+ *  upload speed.
+ *
+ *  Server (`serve-tunnel.sh`) must send the matching CORS + CORP
+ *  headers — the PWA loads inside a cross-origin-isolated context
+ *  (require-corp), so the cross-origin blob fetch needs
+ *  `Access-Control-Allow-Origin` AND `Cross-Origin-Resource-Policy:
+ *  cross-origin` to satisfy the isolation policy.
+ */
 export function blobUrl(m: ModelEntry): string {
+    // **`?localBlob` wins over the baked-in CDN URL.** Otherwise the
+    // baked-in entries (which always carry `m.url` pointing at the R2
+    // CDN) silently ignore the override — the very case the override
+    // exists for (split origin: PWA from Cloudflare, GGUF from local
+    // devserver to save home upload bandwidth). The localBlob target
+    // is the user's own machine, so the trust model is the same as
+    // any other localhost dev fetch.
+    const port = localBlobPort();
+    if (port != null) {
+        return `http://localhost:${port}/api/blob/${encodeURIComponent(m.name)}`;
+    }
     if (m.url) return m.url;
     return "/api/blob/" + encodeURIComponent(m.name);
 }
 
+/** Returns the local-blob port from `?localBlob=PORT` URL param or
+ *  `localStorage.localBlobPort`. URL param also writes to localStorage
+ *  so it persists across reloads. Returns null when neither is set. */
+function localBlobPort(): number | null {
+    if (typeof window === "undefined") return null;
+    try {
+        const fromUrl = new URLSearchParams(window.location.search).get("localBlob");
+        if (fromUrl) {
+            const n = parseInt(fromUrl, 10);
+            if (Number.isFinite(n) && n > 0 && n < 65536) {
+                window.localStorage.setItem("localBlobPort", String(n));
+                return n;
+            }
+        }
+        const stored = window.localStorage.getItem("localBlobPort");
+        if (stored) {
+            const n = parseInt(stored, 10);
+            if (Number.isFinite(n) && n > 0 && n < 65536) return n;
+        }
+    } catch {
+        // localStorage unavailable (Worker scope, privacy mode).
+    }
+    return null;
+}
+
 /**
- * Fire-and-forget diagnostic beacon. Used to record load events to the
- * dev server's /tmp/rullama-page.log. Offline / production deploys
- * silently no-op because the server has no /api/log handler or the
- * tab is offline — fine either way, the app doesn't depend on it.
+ * Fire-and-forget diagnostic beacon. Records to TWO sinks:
+ *   1. Dev-server /api/log (lands at /tmp/rullama-page.log on the Mac
+ *      running the safaridriver harness). Silently no-ops offline /
+ *      in production where the endpoint doesn't exist.
+ *   2. OPFS via the worker — crash-surviving, viewable on-device in
+ *      Settings → Logs even after iOS jetsam kills the tab. This is
+ *      the path that actually matters for iPhone debugging.
+ *
+ * Both calls are fire-and-forget — beacons must never block the UI or
+ * propagate an error to the caller.
  */
 export function beacon(tag: string, msg: string) {
     try {
@@ -117,4 +174,12 @@ export function beacon(tag: string, msg: string) {
             keepalive: true,
         }).catch(() => {});
     } catch { /* no-op */ }
+    // Lazy-import to dodge a circular dependency: lib/inference.ts
+    // imports from lib/api.ts at module load. We need getClient at
+    // call time, not import time.
+    try {
+        void import("./inference").then(({ getClient }) => {
+            try { getClient().logs.append("info", tag, msg); } catch { /* */ }
+        }).catch(() => {});
+    } catch { /* */ }
 }

@@ -96,6 +96,7 @@ const STATEFUL_RPCS = new Set([
     "trainingForwardBackward",
     "trainingOptimizerStep",
     "trainingSaveAdapter",
+    "trainingSaveAdapterAndFinish",
     "trainingCancel",
     "trainingFinish",
     "trainingApplyAdapter",
@@ -386,7 +387,19 @@ function disconnectPort(port: MessagePort, reason: string) {
 }
 
 const HEARTBEAT_GC_INTERVAL = 15_000;
-const HEARTBEAT_DEAD_MS      = 30_000;
+// 5-minute reaper window. The original 30s value was too aggressive
+// for two cases that both manifest as "user clicks button, nothing
+// happens, no error":
+//   1. Long-running training (the user's 21-minute rank=8 run had
+//      no client→router traffic except the 10s heartbeat ping).
+//   2. Backgrounded tabs. Chrome throttles `setInterval` to >=1-minute
+//      after ~30s in the background, so the 10s heartbeat fires at
+//      1-minute cadence and misses a 30s reaper window. The tab
+//      still thinks its session is held; postMessage to the closed
+//      port silently does nothing.
+// 5min comfortably exceeds Chrome's 1-minute throttle floor while
+// still bounding stale-port retention to something tolerable.
+const HEARTBEAT_DEAD_MS      = 300_000;
 setInterval(() => {
     const now = Date.now();
     for (const port of PORTS) {

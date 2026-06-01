@@ -30,12 +30,58 @@ fn main() -> ExitCode {
         "docker:logs" => compose(&["logs", "-f", "--tail=200"]),
         "docker:ps" => compose(&["ps"]),
         "bump" => bump(),
+        "dev" => dev(),
         other => {
             eprintln!("xtask: unknown task `{other}`");
             eprintln!(
-                "tasks: docker:build, docker:start, docker:stop, docker:restart, docker:logs, docker:ps, bump"
+                "tasks: dev, docker:build, docker:start, docker:stop, docker:restart, docker:logs, docker:ps, bump"
             );
             ExitCode::from(2)
+        }
+    }
+}
+
+/// `cargo dev` — bring up the native dev server (replaces the Python
+/// serve-tunnel.sh / serve-iphone.sh scripts). Forwards any trailing
+/// argv to the binary so flags like `--no-vite` work.
+fn dev() -> ExitCode {
+    // rullama-devserver is excluded from the workspace (see Cargo.toml
+    // exclude list — keeps it out of `cargo build --workspace --target
+    // wasm32-unknown-unknown`). Run it via --manifest-path.
+    let manifest = Path::new("crates/rullama-devserver/Cargo.toml");
+    if !manifest.is_file() {
+        eprintln!(
+            "xtask: {} not found; are you in the repo root?",
+            manifest.display()
+        );
+        return ExitCode::from(1);
+    }
+    let forwarded: Vec<String> = std::env::args().skip(2).collect();
+    eprintln!(
+        "$ cargo run -q --manifest-path {} --release --{}",
+        manifest.display(),
+        if forwarded.is_empty() {
+            "".into()
+        } else {
+            format!(" {}", forwarded.join(" "))
+        }
+    );
+    let mut cmd = Command::new("cargo");
+    cmd.arg("run")
+        .arg("-q")
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--release")
+        .arg("--");
+    if !forwarded.is_empty() {
+        cmd.args(&forwarded);
+    }
+    match cmd.status() {
+        Ok(s) if s.success() => ExitCode::SUCCESS,
+        Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
+        Err(e) => {
+            eprintln!("xtask: failed to spawn cargo for rullama-devserver: {e}");
+            ExitCode::from(127)
         }
     }
 }
@@ -49,18 +95,16 @@ fn compose(args: &[&str]) -> ExitCode {
     // falls back to "nogit" and the timestamp is still unique.
     let mut cmd = Command::new("docker");
     cmd.arg("compose").args(args);
-    if std::env::var_os("RULLAMA_COMMIT").is_none() {
-        if let Ok(output) = Command::new("git")
+    if std::env::var_os("RULLAMA_COMMIT").is_none()
+        && let Ok(output) = Command::new("git")
             .args(["rev-parse", "--short", "HEAD"])
             .output()
-        {
-            if output.status.success() {
-                let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !sha.is_empty() {
-                    cmd.env("RULLAMA_COMMIT", &sha);
-                    eprintln!("(setting RULLAMA_COMMIT={sha})");
-                }
-            }
+        && output.status.success()
+    {
+        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !sha.is_empty() {
+            cmd.env("RULLAMA_COMMIT", &sha);
+            eprintln!("(setting RULLAMA_COMMIT={sha})");
         }
     }
     let status = cmd.status();

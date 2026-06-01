@@ -36,6 +36,13 @@ deps.
 ## Build / run
 
 ```sh
+# Native dev server — one command brings up the full stack with React HMR
+# AND Rust → WASM auto-rebuild + browser reload. Replaces the legacy
+# Python serve-tunnel.sh / serve-iphone.sh. See "Dev server modes" below.
+cargo dev                # local dev (Vite proxy, /api/log open, /api/models open)
+cargo dev -- --public    # tunnel-safe (dist/ static serve, hardened defaults)
+cargo dev -- --help      # all flags
+
 # WASM bundle — output lands at <repo>/pkg/ and is shared by BOTH example PWAs
 # Build via the finetune crate so the unified bundle exposes both inference
 # (Model) and training (TrainingSession) wasm-bindgen surfaces; --out-name
@@ -103,6 +110,36 @@ cargo docker:ps
 
 Add a task by appending a match arm in `xtask/src/main.rs` and the alias line in
 `.cargo/config.toml`.
+
+## Dev server modes (replaces `serve-tunnel.sh` / `serve-iphone.sh`)
+
+`cargo dev` runs the native Rust devserver at `crates/rullama-devserver/`. Two modes:
+
+| Mode | Command | Vite proxy? | `/api/log` writeable? | `/api/models` listed? | Use when |
+|------|---------|-------------|-----------------------|-----------------------|----------|
+| Local dev (default) | `cargo dev` | yes (HMR works through :25321) | yes | yes | working locally, **tunnel is OFF** |
+| Public / tunnel-safe | `cargo dev -- --public` | no (serves `examples/web/dist/`) | no | no | tunnel is up, public origin is reachable |
+
+**Important security boundary**: `cargo dev` (no flags) reverse-proxies `*` to Vite. Vite's `fs.allow=[repoRoot]` exposes every file under the repo to whatever can reach :25321 — including, transitively, anyone on the internet via `https://rullama.brainwires.net`. **Run `cargo dev --public` whenever the Cloudflare tunnel is up.**
+
+Headers honored on every response: `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`, `Cross-Origin-Resource-Policy: cross-origin` on `/api/blob`/`/api/models`/`/pkg/*` (so the cross-origin-isolated page on the tunnel hostname can fetch them from a localhost origin via `?localBlob=`), `same-origin` elsewhere. CORS is allow-list only (`--cors-origins https://rullama.brainwires.net,…`) — no wildcard.
+
+Tunnel-side hardening recommended (Cloudflare dashboard, not in repo):
+- WAF: block POST to anything except `/api/log` (and even that, optionally).
+- Rate limit: 100 req/min/IP per route.
+- Cloudflare Access: optional zero-trust gating (Google / GitHub auth) in front of the public hostname.
+
+Persistent background hosting via PM2: see `ops/pm2/setup.sh`. One-time bring-up:
+
+```sh
+./ops/pm2/setup.sh
+sudo pm2 startup launchd -u $USER --hp $HOME    # boot survival, once
+pm2 save
+# day-to-day:
+pm2 logs rullama-devserver
+pm2 restart rullama-devserver
+pm2 status
+```
 
 ## Architectural rules of the road
 

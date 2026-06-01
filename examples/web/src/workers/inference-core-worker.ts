@@ -14,7 +14,12 @@
 // (the router), one request at a time per stateful RPC.
 
 // @ts-expect-error — generated bundle, no .d.ts
-import init, { Model, TrainingSession, probeTrainingFit, WasmDatabase } from "/pkg/rullama.js";
+import init, { Model, TrainingSession, probeTrainingFit, WasmDatabase, gpuMemBreakdown, gpuMemTotalMib } from "/pkg/rullama.js";
+
+const gpuMemBreakdownFn = gpuMemBreakdown as unknown as () => string;
+const gpuMemTotalFn = gpuMemTotalMib as unknown as () => number;
+import * as opfsLogger from "./opfs_logger";
+import type { LogLevel } from "./opfs_logger";
 
 interface ProbeReport {
     ok:             boolean;
@@ -76,6 +81,14 @@ interface ModelHandle {
      *  fit under the WebContent jetsam cap. */
     releaseVisionWeights(): number;
     releaseAudioWeights(): number;
+    /** Re-allocate the per-layer KV cache at a new token capacity.
+     *  Returns the previous max_context so JS can restore later.
+     *  Discards cached KV content. Used by `trainingStart` /
+     *  `trainingFinish` to shrink chat's KV during a training run. */
+    shrinkKv(newMaxContext: number): number;
+    /** Current KV cache capacity in tokens. Read before `shrinkKv`
+     *  to remember what to restore. */
+    readonly maxContext: number;
     /** Total bytes resident in the shared GPU WeightCache. Useful as
      *  a coarse memory-pressure signal at phase boundaries
      *  (encode → release → prefill) so a jetsam kill can be localised
@@ -101,6 +114,7 @@ interface TrainingSessionHandle {
     readonly parameterCount: number;
     readonly gradientCheckpointing: boolean;
     readonly mixedPrecision: boolean;
+    readonly cachedWeightBytes: number;
     step(
         inputIds: Uint32Array,
         targetId: number,
@@ -116,9 +130,18 @@ interface TrainingSessionHandle {
     forwardBackwardPerPosition(inputIds: Uint32Array, targets: Uint32Array): Promise<number>;
     optimizerStep(): void;
     saveAdapter(): Promise<Uint8Array>;
+    saveAdapterAndFinish(): Promise<SaveAndFinishResultHandle>;
     setLrSchedule(totalSteps: number): void;
     finish(): ModelHandle;
     cancel(): void;
+}
+// Mirrors the wasm-bindgen `SaveAndFinishResult` returned by the
+// combined save+finish call. `bytes` getter consumes on read;
+// `takeModel()` consumes on first call. Both throw on second access.
+interface SaveAndFinishResultHandle {
+    free?(): void;
+    readonly bytes: Uint8Array;
+    takeModel(): ModelHandle;
 }
 interface TrainingSessionStatic {
     new(model: ModelHandle, loraConfigJson: string, hparamsJson: string): TrainingSessionHandle;
@@ -156,6 +179,11 @@ let dbReady: Promise<WasmDbHandle> | null = null;
 let trainingSession: TrainingSessionHandle | null = null;
 /** Name of the adapter currently loaded into Model, if any. */
 let activeAdapterName: string | null = null;
+
+/** KV cache capacity snapshot taken just before `trainingStart` shrinks
+ *  it. `trainingFinish` reads this and restores the model back to the
+ *  chat-sized KV. Null while no training session is active or pending. */
+let trainingOriginalKvContext: number | null = null;
 
 interface LoadedModelInfo {
     name: string | null;
@@ -199,6 +227,21 @@ let routerPort: MessagePort | null = null;
  *  fires cleanly. */
 let shuttingDown = false;
 
+/** Unique id for this worker's lifetime. Used as the OPFS log file
+ *  name + as the localStorage clean-exit marker key. Generated once
+ *  at module load; never reused. */
+const SESSION_ID: string = (() => {
+    const iso = new Date().toISOString().replace(/[:.]/g, "-");
+    const rand = Math.random().toString(36).slice(2, 8);
+    return `${iso}-${rand}`;
+})();
+
+/** True once `opfsLogger.init(SESSION_ID)` has resolved. Lazy: we
+ *  defer the init until the first `attach` so a worker that loses
+ *  the SharedWorker election (and gets `self.close()`d) doesn't
+ *  burn OPFS budget. */
+let loggerInited = false;
+
 function log(...args: unknown[]) {
     const argStrs = args.map((a) => String(a));
     const msg = argStrs.join(" ");
@@ -213,6 +256,26 @@ function log(...args: unknown[]) {
             keepalive: true,
         }).catch(() => {});
     } catch { /* */ }
+    try { opfsLogger.append("info", "wkr", msg); } catch { /* */ }
+}
+
+/** Explicit-level / explicit-tag beacon variant. Use for the `[trn]`
+ *  training-instrumentation beacons that need to be readable by
+ *  level (error vs info) in the post-crash viewer. Behaves like
+ *  `log()` otherwise — fans out to routerPort + /api/log + OPFS. */
+function logBeacon(level: LogLevel, tag: string, msg: string) {
+    if (routerPort) {
+        try { routerPort.postMessage({ type: "log", args: [`[${tag}] ${msg}`] }); } catch { /* */ }
+    }
+    try {
+        fetch("/api/log", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tag, msg, ts: Date.now() }),
+            keepalive: true,
+        }).catch(() => {});
+    } catch { /* */ }
+    try { opfsLogger.append(level, tag, msg); } catch { /* */ }
 }
 
 function notify(kind: string, payload: Record<string, unknown> = {}) {
@@ -380,6 +443,19 @@ interface LoadArgs {
 
 async function handleLoad(args: LoadArgs): Promise<LoadedModelInfo> {
     await ensureWasm();
+    // **Refuse to load while training is active.** The TrainingSession
+    // owns the Model + holds the OPFS syncHandle; trying to load a
+    // new model would close the syncHandle out from under it (or get
+    // stuck in the createSyncAccessHandle retry budget waiting for
+    // a lock that won't release until trainingFinish runs). Surface
+    // the situation explicitly so the user goes back to the Fine-tune
+    // tab and applies/discards their adapter first.
+    if (trainingSession) {
+        throw new Error(
+            "training session is active — apply / save / discard the adapter " +
+            "from the Fine-tune tab first, then try loading again",
+        );
+    }
     if (model && loadedInfo
         && loadedInfo.modelKey === args.modelKey
         && loadedInfo.filename === args.filename) {
@@ -416,9 +492,13 @@ async function handleLoad(args: LoadArgs): Promise<LoadedModelInfo> {
 }
 
 function requireModel(): ModelHandle {
-    if (!model) throw new Error("no model loaded — call load() first");
+    // Order matters: when training is active, `model` is null AND
+    // `trainingSession` is set. Surface the specific "owned by
+    // training" message first so the caller knows the model is alive
+    // but loaned out, not gone.
     if (trainingSession) throw new Error(
         "model is owned by an active training session — call trainingFinish() first");
+    if (!model) throw new Error("no model loaded — call load() first");
     return model;
 }
 
@@ -697,6 +777,27 @@ const RPC: Record<string, Handler> = {
     //    arrives in time the router treats the corePort as dead and
     //    re-elects a host, instead of waiting out the 30s heartbeat).
     pingCore: () => true,
+
+    // ── Diagnostic log RPCs (OPFS-backed; see workers/opfs_logger.ts).
+    //    The viewer in components/LogsTab.tsx calls these to enumerate
+    //    + read past sessions; beacon() in lib/api.ts calls logsAppend
+    //    fire-and-forget to persist main-thread beacons through this
+    //    worker's sync handle.
+    logsList:    async () => await opfsLogger.listSessions() as unknown,
+    logsRead:    async (a) => await opfsLogger.readSession(String(a.id)) as unknown,
+    logsDelete:  async (a) => { await opfsLogger.deleteSession(String(a.id)); return true; },
+    logsDeleteAll: async () => { await opfsLogger.deleteAll(); return true; },
+    logsAppend:  (a) => {
+        opfsLogger.append(String(a.level) as LogLevel, String(a.tag), String(a.msg));
+        return true;
+    },
+    logsCurrentSession: () => SESSION_ID,
+
+    // Queryable GPU-memory monitor — returns the tracked GPU buffer
+    // breakdown (`tot=… w=… s=… kv=… lora=… o=…` MiB) on demand. The
+    // test harness polls this between RPCs; the per-layer training
+    // beacons carry the live total for mid-step trajectory.
+    gpuMem: () => { try { return gpuMemBreakdownFn(); } catch { return "unavailable"; } },
 
     // ── Model lifecycle ────────────────────────────────────────────────
     load: (a) => handleLoad(a as unknown as LoadArgs),
@@ -1074,6 +1175,7 @@ const RPC: Record<string, Handler> = {
     // session is live. UI must mode-gate to avoid the throw.
 
     trainingStart: async (a) => {
+        logBeacon("info", "trn", `trainingStart enter loraCfg=${JSON.stringify(a.loraConfig ?? {})} hp=${JSON.stringify(a.hparams ?? {})}`);
         if (!model) throw new Error("load a model before starting training");
         if (trainingSession) throw new Error(
             "training already active — call trainingFinish() first");
@@ -1085,7 +1187,9 @@ const RPC: Record<string, Handler> = {
         // typed error WITHOUT consuming the Model handle. The chat
         // path stays alive; the user can lower rank / seq_len and
         // retry without re-loading the multi-GB GGUF.
+        logBeacon("info", "trn", "probeFit start");
         const probe = await probeFit(model, loraCfgJson, hpJson);
+        logBeacon("info", "trn", `probeFit done ok=${probe.ok} estMB=${(probe.estimatedBytes/(1024*1024)).toFixed(1)}`);
         log(`training: probe ok=${probe.ok} estimated=${(probe.estimatedBytes / (1024 * 1024)).toFixed(1)}MB ${probe.reason ?? ""}`);
         if (!probe.ok) {
             const mb = (probe.estimatedBytes / (1024 * 1024)).toFixed(0);
@@ -1096,26 +1200,124 @@ const RPC: Record<string, Handler> = {
             );
         }
 
+        // **B3 — probe safety margin.** The probe's `ok=true` means
+        // `wgpu` could currently allocate the requested scratch + LoRA
+        // + Adam buffers, but it doesn't account for the per-step
+        // backward transients (~1-2 MB per layer summed across the
+        // backward sweep) that get allocated on the actual first
+        // step. A config sitting at 95% of the device budget at
+        // probe time will OOM the first real backward. Apply a
+        // heuristic ceiling (85% of a per-platform budget) and reject
+        // before consuming the Model.
+        const ua = (typeof self !== "undefined" && self.navigator?.userAgent) ? self.navigator.userAgent : "";
+        const isMobile = /iPhone|iPad|iPod|Android/i.test(ua);
+        // iPhone WebContent process budget is ~3-4 GB shared with the
+        // already-loaded text tower (~2 GB). Desktop wgpu typically
+        // has multi-GB buffers available, so we set a high ceiling
+        // that still leaves headroom for chat-side allocations.
+        const budgetBytes = isMobile ? 3.5 * 1024 * 1024 * 1024 : 8 * 1024 * 1024 * 1024;
+        const ratio = probe.estimatedBytes / budgetBytes;
+        if (ratio > 0.85) {
+            const mb = (probe.estimatedBytes / (1024 * 1024)).toFixed(0);
+            const pct = (ratio * 100).toFixed(0);
+            throw new Error(
+                `Training config would use ~${mb} MB (${pct}% of the ${isMobile ? "iPhone" : "desktop"} GPU budget). ` +
+                `That's too close to the ceiling — the first backward step's transient buffers may push it over. ` +
+                `Lower the rank, shorten max_seq_len, drop FFN targets, or enable "Memory-tight" mode and try again.`,
+            );
+        }
+        log(`training: probe within margin (${(ratio * 100).toFixed(0)}% of ${(budgetBytes / (1024 * 1024)).toFixed(0)}MB ${isMobile ? "mobile" : "desktop"} budget)`);
+
         // If there's an active adapter loaded into Model from a previous
         // session, clear it — training initialises fresh LoRA state.
         if (activeAdapterName) {
-            try { model.clearAdapter(); } catch { /* */ }
+            try { model.clearAdapter(); }
+            catch (e) { log(`trainingStart: clearAdapter failed (ignored): ${(e as Error).message ?? e}`); }
             activeAdapterName = null;
             notify("adapterChanged", { active: null });
         }
-        const moved = model;
-        model = null; // Model is moved into TrainingSession.
+
+        // **A1 — release vision/audio GPU towers before allocating
+        // training scratch.** If the user did any image / audio chat
+        // before clicking "Start training", the ~3 GB tower(s) are still
+        // GPU-resident. On iPhone's ~3-4 GB WebContent budget, that's a
+        // guaranteed OOM the moment TrainingScratch + LoRA + Adam buffers
+        // try to allocate. The chat path's release calls already exist
+        // (`api.rs:330,343`) — `trainingStart` just never invoked them.
+        // Pattern mirrors `releaseAllHandles()` below.
         try {
-            trainingSession = new TrainingSessionClass(moved, loraCfgJson, hpJson);
+            // releaseVision/AudioWeights return the number of GPU
+            // weight-cache ENTRIES dropped (one per tile/tensor) —
+            // not bytes. Each entry is on the order of MBs in
+            // practice (Q4_K tile, etc.), but we don't have an
+            // accurate byte sum here. Log entries-freed and let the
+            // user infer.
+            const freedV = model.releaseVisionWeights?.() ?? 0;
+            const freedA = model.releaseAudioWeights?.() ?? 0;
+            log(`trainingStart: released ${freedV} vision + ${freedA} audio GPU cache entries before TrainingSession::new (plus per-tower scratch ~250 MB each if any was built)`);
+            logBeacon("info", "trn", `released vision=${freedV} audio=${freedA} cache entries`);
         } catch (e) {
-            // Probe said ok but the constructor still threw — likely a
-            // device-loss race. Drop loadedInfo so chat re-loads
-            // cleanly on next attempt rather than wedging on a
-            // half-consumed Model handle.
+            // Model lacks the methods (no multimodal towers in this
+            // GGUF) or release threw — neither is fatal for training.
+            log(`trainingStart: pre-training multimodal release skipped: ${(e as Error).message ?? e}`);
+        }
+
+        // **B1 — shrink KV cache for training.** Chat reserves
+        // `max_context` positions of K/V cache (~600 MB at 4096 on
+        // gemma4:e2b). Training's NextToken loss only needs 1 history
+        // position; PerPosition needs at most `seq_len`. Shrinking to
+        // `max(seq_len + 1, 64)` frees the bulk of that allocation back
+        // to the WebGPU device for training scratch / LoRA / Adam.
+        // Stash the original so trainingFinish can restore.
+        try {
+            const hp = (a.hparams ?? {}) as { max_seq_len?: number; seq_len?: number };
+            const seqLen = Math.max(1, Number(hp.max_seq_len ?? hp.seq_len ?? 32));
+            const targetKv = Math.max(seqLen + 1, 64);
+            const original = Number(model.maxContext ?? 0);
+            if (original > 0 && targetKv < original) {
+                model.shrinkKv(targetKv);
+                trainingOriginalKvContext = original;
+                log(`trainingStart: shrunk KV cache ${original} → ${targetKv} tokens (will restore on finish)`);
+            } else {
+                trainingOriginalKvContext = null;
+            }
+        } catch (e) {
+            // shrinkKv unsupported (older wasm bundle?) or threw — fall
+            // through. Training still works at the full KV size; only
+            // the iPhone-tight-RAM case suffers.
+            log(`trainingStart: KV shrink skipped: ${(e as Error).message ?? e}`);
+            trainingOriginalKvContext = null;
+        }
+
+        // **A2 — don't null `model` until TrainingSession::new
+        // succeeds.** Old code did `const moved = model; model = null;`
+        // before the constructor, so a throw mid-init left the JS-side
+        // model variable nulled even though the user could conceivably
+        // recover with a manual reload. Reorder so the null happens
+        // AFTER the constructor returns, and on failure surface a
+        // clear error + reset loadedInfo so the chat UI honestly
+        // reflects "no model — reload required" instead of letting
+        // the next chat-send vanish into a half-consumed handle.
+        logBeacon("info", "trn", "TrainingSession::new constructing");
+        let session: TrainingSessionHandle;
+        try {
+            session = new TrainingSessionClass(model, loraCfgJson, hpJson);
+        } catch (e) {
+            logBeacon("error", "trn", `TrainingSession::new threw: ${(e as Error).message ?? e}`);
+            log(`trainingStart: TrainingSession::new failed: ${(e as Error).message ?? e}`);
+            // wasm-bindgen takes ownership of the Model on entry; on
+            // throw, the handle is consumed regardless of where we
+            // null the JS variable. So we DO need to clean up the
+            // JS-side state here — but only after the throw, not
+            // pre-emptively.
+            model = null;
             loadedInfo = null;
             notify("modelFreed", {});
             throw e;
         }
+        logBeacon("info", "trn", "TrainingSession::new returned");
+        trainingSession = session;
+        model = null; // Ownership transferred — null now that it's safe.
         const totalSteps = Number(a.totalSteps ?? 0);
         if (totalSteps > 0) trainingSession.setLrSchedule(totalSteps);
         const info = {
@@ -1126,6 +1328,7 @@ const RPC: Record<string, Handler> = {
         };
         notify("trainingStarted", info);
         log(`training: started, params=${info.parameterCount} ckpt=${info.gradientCheckpointing} mp=${info.mixedPrecision}`);
+        logBeacon("info", "trn", `trainingStart done params=${info.parameterCount} ckpt=${info.gradientCheckpointing} mp=${info.mixedPrecision}`);
         return info;
     },
 
@@ -1141,24 +1344,89 @@ const RPC: Record<string, Handler> = {
         const s = requireTraining();
         const inputIds = a.inputIds as Uint32Array;
         const lossMode = String(a.lossMode ?? "next_token");
-        // Progress beacons: every per-layer + per-token tick fans out
-        // via the `trainingProgress` notify so the UI's
-        // TrainingProgress strip (modelled on PipelineProgress) updates
-        // mid-step. Fast (~3-5 Hz worth of postMessage traffic on
-        // browser); the strip prevents the "is it frozen?" panic
-        // during slow first steps.
+        const wbStart = (() => { try { return Math.round(s.cachedWeightBytes / 1048576); } catch { return -1; } })();
+        logBeacon("info", "trn", `step ${s.stepNum + 1} start mode=${lossMode} inputLen=${inputIds.length} weightCacheMB=${wbStart}`);
+        // **Capture stepNum/lr BEFORE calling step.** The progress
+        // callback fires from inside the Rust step's execution, which
+        // holds a `&mut self` RefMut on the TrainingSession. Reading
+        // `s.stepNum` / `s.lr` from inside the callback would attempt
+        // to acquire a `&self` Ref on the same RefCell, which fails
+        // with "attempted to take ownership of Rust value while it
+        // was borrowed" — observed under high-rank + many-step runs.
+        // The values are stable for the duration of the step anyway
+        // (stepNum bumps AFTER the optimizer call completes), so
+        // capturing them once is equivalent and avoids the borrow
+        // conflict. The captured `step` value is the index of the
+        // step that's about to run, which is exactly what the UI
+        // progress strip wants.
+        const stepBefore = s.stepNum;
+        const lrBefore = s.lr;
         const onProgress = (phase: string, current: number, total: number) => {
-            notify("trainingProgress", { phase, current, total, step: s.stepNum, lr: s.lr });
+            notify("trainingProgress", { phase, current, total, step: stepBefore, lr: lrBefore });
+            // Mirror to OPFS so a mid-step crash leaves an exact
+            // "last phase reached" trail — now WITH the live GPU-memory
+            // total so the post-crash log shows the on-device memory
+            // trajectory and the exact MiB at the moment iOS jetsam'd.
+            // gpuMemTotalFn is a free wasm fn reading a static counter —
+            // safe to call re-entrantly here mid-step.
+            let mem = -1;
+            try { mem = Math.round(gpuMemTotalFn()); } catch { /* */ }
+            logBeacon("info", "trn", `step ${stepBefore + 1} ${phase} ${current}/${total} gpuMiB=${mem}`);
         };
         try {
-            return lossMode === "per_position"
+            const result = lossMode === "per_position"
                 ? await s.stepPerPosition(inputIds, a.targets as Uint32Array, onProgress)
                 : await s.step(inputIds, Number(a.targetId), onProgress);
+            // **A3 — NaN/Inf auto-halt.** Without this, training would
+            // continue stepping with NaN-polluted Adam state and the
+            // user could unknowingly save a garbage adapter. Throw
+            // early; the UI's catch reports "training diverged" and
+            // moves to the error phase so the partial-adapter Save
+            // button isn't offered.
+            const loss = (result as { loss?: unknown })?.loss;
+            if (typeof loss === "number" && !Number.isFinite(loss)) {
+                throw new Error(
+                    `training diverged at step ${s.stepNum} — loss is ${loss}. ` +
+                    `Try a lower learning rate, smaller rank, or shorter seq_len.`,
+                );
+            }
+            // Log EVERY step now. Step-8-crash investigation needs the
+            // full trajectory leading to the failure, not a sampled
+            // every-10th view. Long stable runs will tolerate the log
+            // volume; if it gets noisy we can throttle later.
+            const stepNum = (result as { step?: number })?.step ?? 0;
+            const lossStr = typeof loss === "number" ? loss.toFixed(4) : String(loss);
+            const wbDone = (() => { try { return Math.round(s.cachedWeightBytes / 1048576); } catch { return -1; } })();
+            log(`training: step ${stepNum} loss=${lossStr} lossMode=${lossMode} inputLen=${inputIds.length}`);
+            logBeacon("info", "trn", `step ${stepNum} done loss=${lossStr} weightCacheMB=${wbDone}`);
+            // **iOS reclaim window.** Backward destroy()'d the cache at
+            // its GPU-idle point (step done at weightCacheMB=0), but
+            // WebGPU/Metal frees the underlying GPUBuffer memory
+            // ASYNCHRONOUSLY — our tracked counter hits 0 long before
+            // iOS reclaims the RSS. With the full MeBP stack (per-layer
+            // destroy + early token_embd destroy + 500ms head yield) the
+            // FIRST step (#2 internally) now completes cleanly on iPhone
+            // (loss=0.0343, all 10 backward layers, peak gpuMiB=80). But
+            // step 3 dies at the same head→backward boundary step 2
+            // survived — Metal heap accumulation from step 2's backward
+            // kernels + their compile state + the aliasable-but-not-
+            // returned token_embd region adds up across steps.
+            //
+            // Stretch the yield to 15 s. Comprises (a) the same 5 s
+            // we used to use (proven enough on the prior wasm-family
+            // for early step 2 starts) + (b) an extra 10 s for the
+            // backward kernels' Metal heap regions to actually drain
+            // back to the OS. Wall-clock cost: 15 s per step on a step
+            // that takes 30-60 s of compute; not great for training
+            // throughput but the alternative is no multi-step training.
+            for (let i = 0; i < 60; i++) await new Promise((r) => setTimeout(r, 250));
+            return result;
         } catch (e) {
             // Log + rethrow. The session stays alive (the wasm side
             // doesn't drop on a kernel error), so the UI can choose
             // Discard to release the Model cleanly.
             log(`training: step ${s.stepNum} failed (lossMode=${lossMode}, inputLen=${inputIds.length}): ${(e as Error).message}`);
+            logBeacon("error", "trn", `step ${s.stepNum} threw: ${(e as Error).message}`);
             throw e;
         }
     },
@@ -1169,13 +1437,25 @@ const RPC: Record<string, Handler> = {
         const s = requireTraining();
         const inputIds = a.inputIds as Uint32Array;
         const lossMode = String(a.lossMode ?? "next_token");
+        logBeacon("info", "trn", `fwdBwd ${s.stepNum + 1} start mode=${lossMode} inputLen=${inputIds.length}`);
         try {
             const loss = lossMode === "per_position"
                 ? await s.forwardBackwardPerPosition(inputIds, a.targets as Uint32Array)
                 : await s.forwardBackward(inputIds, Number(a.targetId));
+            logBeacon("info", "trn", `fwdBwd ${s.stepNum + 1} done loss=${typeof loss === "number" ? loss.toFixed(4) : String(loss)}`);
+            // **A3 — NaN/Inf auto-halt.** Same rationale as in
+            // `trainingStep`; this is the manual-accumulation entry
+            // point and needs the same defence.
+            if (typeof loss === "number" && !Number.isFinite(loss)) {
+                throw new Error(
+                    `training diverged at step ${s.stepNum} — loss is ${loss}. ` +
+                    `Try a lower learning rate, smaller rank, or shorter seq_len.`,
+                );
+            }
             return { loss, step: s.stepNum, lr: s.lr };
         } catch (e) {
             log(`training: forwardBackward step ${s.stepNum} failed (lossMode=${lossMode}, inputLen=${inputIds.length}): ${(e as Error).message}`);
+            logBeacon("error", "trn", `fwdBwd ${s.stepNum + 1} threw: ${(e as Error).message}`);
             throw e;
         }
     },
@@ -1183,7 +1463,9 @@ const RPC: Record<string, Handler> = {
     trainingOptimizerStep: async (a) => {
         void a;
         const s = requireTraining();
+        logBeacon("info", "trn", `adam start step ${s.stepNum + 1}`);
         s.optimizerStep();
+        logBeacon("info", "trn", `adam done step ${s.stepNum} lr=${s.lr}`);
         return { step: s.stepNum, lr: s.lr };
     },
 
@@ -1201,6 +1483,56 @@ const RPC: Record<string, Handler> = {
         return { name, size: written };
     },
 
+    // **Combined save+finish.** Calls the Rust-side
+    // `saveAdapterAndFinish(self)` which consumes the TrainingSession
+    // in a single await and returns both the safetensors bytes and the
+    // wrapped Model. Avoids the wasm-bindgen async-borrow problem the
+    // separated `saveAdapter` → `finish` pair hits:
+    //   • `save_adapter_js(&mut self).await` leaves a `Borrow` tracked
+    //     on the JS-side wrapper that persists past the await's
+    //     resolution (even with setTimeout-zero yields), so a
+    //     subsequent `finish_js(self)` call intermittently fails with
+    //     "attempted to take ownership of Rust value while it was
+    //     borrowed".
+    //   • `save_adapter_and_finish_js(self)` takes `self` at call
+    //     time — wasm-bindgen invalidates the JS handle on entry,
+    //     no `&self`/`&mut self` borrow is ever tracked, and the
+    //     consume-self happens deterministically inside the Rust
+    //     function body.
+    // This is now the recommended worker-side path for any flow that
+    // wants to save AND release the session. The old `saveAdapter`
+    // RPC stays for the rare save-without-finishing case.
+    trainingSaveAdapterAndFinish: async (a) => {
+        const session = requireTraining();
+        const name = String(a?.name ?? "").trim();
+        if (!name) throw new Error("trainingSaveAdapterAndFinish: 'name' required");
+        if (!/^[\w\-. ]+$/.test(name)) {
+            throw new Error("trainingSaveAdapterAndFinish: 'name' must match [\\w\\-. ]+");
+        }
+        const result = await session.saveAdapterAndFinish();
+        trainingSession = null;
+        const bytes = result.bytes;
+        const written = await writeAdapterBytes(name, bytes);
+        model = result.takeModel();
+        log(`training: saved+finished adapter '${name}' (${written} bytes) → OPFS:${ADAPTERS_DIR}/${name}.bin`);
+        notify("adapterSaved", { name, size: written });
+        // Restore the KV cache to chat-size, same as the standalone
+        // finish path. Fail-soft: a restore failure leaves the smaller
+        // cache in place but chat still works.
+        if (trainingOriginalKvContext != null) {
+            const original = trainingOriginalKvContext;
+            trainingOriginalKvContext = null;
+            try {
+                model.shrinkKv(original);
+                log(`trainingSaveAdapterAndFinish: restored KV cache to ${original} tokens`);
+            } catch (e) {
+                log(`trainingSaveAdapterAndFinish: KV restore failed (cache stays small): ${(e as Error).message ?? e}`);
+            }
+        }
+        notify("trainingFinished", {});
+        return { name, size: written };
+    },
+
     trainingCancel: async (a) => {
         void a;
         if (!trainingSession) return false;
@@ -1215,14 +1547,35 @@ const RPC: Record<string, Handler> = {
 
     trainingFinish: async (a) => {
         void a;
+        logBeacon("info", "trn", "trainingFinish enter");
         if (!trainingSession) throw new Error("no training session to finish");
-        try {
-            model = trainingSession.finish();
-        } finally {
-            trainingSession = null;
+        // No prior save call on this path (discard / cancel flow), so
+        // no async-borrow to drain. `finish()` synchronously consumes
+        // `self` — wasm-bindgen invalidates the JS handle on call.
+        // Only null `trainingSession` AFTER finish() returns
+        // successfully; if it throws, leave the session alive so the
+        // user can retry (or so the save+finish path can take over).
+        const finished = trainingSession.finish();
+        trainingSession = null;
+        model = finished;
+        // **B1 — restore chat's KV cache.** If trainingStart shrunk it,
+        // grow it back so chat's next turn has the full context window.
+        // Fail-soft: a restore failure just leaves the smaller cache in
+        // place; chat still works, just with a shorter history limit
+        // until the user reloads the model.
+        if (model && trainingOriginalKvContext != null) {
+            const original = trainingOriginalKvContext;
+            trainingOriginalKvContext = null;
+            try {
+                model.shrinkKv(original);
+                log(`trainingFinish: restored KV cache to ${original} tokens`);
+            } catch (e) {
+                log(`trainingFinish: KV restore failed (cache stays small): ${(e as Error).message ?? e}`);
+            }
         }
         notify("trainingFinished", {});
         log(`training: finished, Model returned to chat`);
+        logBeacon("info", "trn", "trainingFinish done");
         return true;
     },
 
@@ -1422,6 +1775,15 @@ function releaseAllHandles() {
         // above `shuttingDown` for why this race matters.
         shuttingDown = true;
         try { log("core: shutdown received — releasing handles"); } catch { /* */ }
+        // Mark the session log as clean-exit so the next-load crash
+        // detector doesn't flag this session. Fire-and-forget — we
+        // don't await because self.close() races with iOS jetsam in
+        // edge cases. The await inside markCleanExit() still gets a
+        // chance to land before self.close() runs since both are
+        // microtask-scheduled and JS doesn't pre-empt.
+        (async () => {
+            try { await opfsLogger.markCleanExit(); } catch { /* */ }
+        })();
         releaseAllHandles();
         try {
             (self as unknown as DedicatedWorkerGlobalScope).close();
@@ -1436,5 +1798,17 @@ function releaseAllHandles() {
         void handleRequest(e.data);
     });
     routerPort.start();
-    log(`core: attached to router`);
+    // Lazy-init the OPFS logger now that we know this worker won the
+    // SharedWorker election. Fire-and-forget — beacons fired before
+    // init completes are silently dropped (the append() guard returns
+    // early), which is acceptable since the first attached-and-active
+    // moment is the earliest interesting point anyway.
+    if (!loggerInited) {
+        loggerInited = true;
+        (async () => {
+            try { await opfsLogger.init(SESSION_ID); }
+            catch (e) { try { console.warn("[opfs_logger] init failed", e); } catch { /* */ } }
+        })();
+    }
+    log(`core: attached to router (session ${SESSION_ID})`);
 };

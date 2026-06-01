@@ -5,12 +5,14 @@ members = [
     "crates/rullama-finetune",
     "xtask",
 ]
-# The iOS bench tool is a separate cargo-target build (staticlib for an
-# Xcode project) and intentionally NOT a workspace member — keeping it
-# out lets `cargo build --workspace --target wasm32-unknown-unknown`
-# succeed without trying to build the staticlib for wasm.
+# Excluded from the workspace so `cargo build --workspace --target
+# wasm32-unknown-unknown` doesn't try to build host-only crates for wasm:
+#   - ios-bench: staticlib for Xcode (wgpu native staticlib build)
+#   - rullama-devserver: native dev HTTP server (axum/tokio/notify);
+#     invoked by xtask via `--manifest-path` rather than `-p`.
 exclude = [
     "tools/ios-bench",
+    "crates/rullama-devserver",
 ]
 
 [workspace.package]

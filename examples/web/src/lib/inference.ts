@@ -175,11 +175,22 @@ export class WorkerClient {
         window.addEventListener("pagehide", onLeave);
         window.addEventListener("beforeunload", onLeave);
 
-        // Heartbeat keeps the worker's port-liveness tracker happy. 10 s
-        // is well inside the 30 s reaper window (HEARTBEAT_DEAD_MS).
+        // Heartbeat keeps the worker's port-liveness tracker happy. 10s
+        // when the tab is foregrounded is well within the 5-minute
+        // reaper window (HEARTBEAT_DEAD_MS in inference-worker.ts).
+        // When the tab is BACKGROUNDED, Chrome throttles `setInterval`
+        // to >=1-minute, so we additionally fire an immediate ping on
+        // `visibilitychange` → visible. Without that, a tab returning
+        // from a long background can briefly have a stale port until
+        // the next throttled tick lands.
         setInterval(() => {
             try { this.port.postMessage({ requestId: -1, type: "ping" }); } catch { /* */ }
         }, 10_000);
+        document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "visible") {
+                try { this.port.postMessage({ requestId: -1, type: "ping" }); } catch { /* */ }
+            }
+        });
     }
 
     /**
@@ -370,6 +381,26 @@ export class WorkerClient {
     imageSoftTokenCount(h: number, w: number): Promise<number> {
         return this.rpc("imageSoftTokenCount", { h, w });
     }
+
+    // ── Diagnostic logs (OPFS-backed, see workers/opfs_logger.ts) ──────
+    /** Worker-side log file storage. `append` is fire-and-forget so
+     *  the main thread never blocks on a beacon; `list/read/delete`
+     *  back the Settings → Logs viewer. */
+    readonly logs = {
+        list:      ()                                  => this.rpc<LogSessionMeta[]>("logsList"),
+        read:      (id: string)                        => this.rpc<string>("logsRead", { id }),
+        delete:    (id: string)                        => this.rpc<boolean>("logsDelete", { id }),
+        deleteAll: ()                                  => this.rpc<boolean>("logsDeleteAll"),
+        append:    (level: LogLevel, tag: string, msg: string) => {
+            void this.rpc<boolean>("logsAppend", { level, tag, msg });
+        },
+        currentId: ()                                  => this.rpc<string>("logsCurrentSession"),
+    };
+
+    /** Queryable GPU-memory monitor — tracked GPU buffer breakdown in
+     *  MiB (`tot=… w=… s=… kv=… lora=… o=…`). For the iOS peak-memory
+     *  debugging harness. */
+    gpuMem(): Promise<string> { return this.rpc<string>("gpuMem"); }
 
     // ── Stateful inference (auto-inject sid) ───────────────────────────
     step(tokenId: number): Promise<number> {
@@ -581,6 +612,15 @@ export class WorkerClient {
     trainingSaveAdapter(name: string): Promise<{ name: string; size: number }> {
         return this.rpc("trainingSaveAdapter", { sid: this.session, name });
     }
+    /** Combined save + finish — atomic on the Rust side (one
+     *  consume-self call). Use this for any flow that wants to save
+     *  AND release the session in one shot; the two-call sequence
+     *  `trainingSaveAdapter` → `trainingFinish` is broken by a
+     *  wasm-bindgen async-borrow leak and should only be used when
+     *  the session needs to stay alive after save. */
+    trainingSaveAdapterAndFinish(name: string): Promise<{ name: string; size: number }> {
+        return this.rpc("trainingSaveAdapterAndFinish", { sid: this.session, name });
+    }
     trainingFinish(): Promise<boolean> {
         return this.rpc("trainingFinish", { sid: this.session });
     }
@@ -592,14 +632,34 @@ export class WorkerClient {
     trainingCancel(): Promise<boolean> {
         return this.rpc("trainingCancel", { sid: this.session });
     }
-    trainingApplyAdapter(name: string): Promise<{ name: string; slots: number }> {
-        return this.rpc("trainingApplyAdapter", { sid: this.session, name });
+    // Adapter-library ops: auto-acquire a session for the duration of
+    // the call ONLY IF no session is already held. These mutate the
+    // Model (apply / clear) or OPFS (delete), so the SharedWorker
+    // router gates them under SESSION_REQUIRED. On a fresh page load
+    // the user hasn't sent a chat turn yet, so `this.session` is null
+    // and the bare RPC fails with "no active session". This wrapper
+    // acquires the lock for the call's duration when needed, and is a
+    // no-op when an outer session is already active (e.g. user
+    // applying from the library mid-chat) — avoids deadlocking on
+    // re-acquire of an already-held session.
+    private async withSessionIfNone<T>(fn: () => Promise<T>): Promise<T> {
+        if (this.session != null) return fn();
+        return this.withSession(fn);
     }
-    trainingClearAdapter(): Promise<boolean> {
-        return this.rpc("trainingClearAdapter", { sid: this.session });
+    async trainingApplyAdapter(name: string): Promise<{ name: string; slots: number }> {
+        return this.withSessionIfNone(async () =>
+            this.rpc("trainingApplyAdapter", { sid: this.session, name }),
+        );
     }
-    trainingDeleteAdapter(name: string): Promise<boolean> {
-        return this.rpc("trainingDeleteAdapter", { sid: this.session, name });
+    async trainingClearAdapter(): Promise<boolean> {
+        return this.withSessionIfNone(async () =>
+            this.rpc("trainingClearAdapter", { sid: this.session }),
+        );
+    }
+    async trainingDeleteAdapter(name: string): Promise<boolean> {
+        return this.withSessionIfNone(async () =>
+            this.rpc("trainingDeleteAdapter", { sid: this.session, name }),
+        );
     }
     trainingListAdapters(): Promise<{ entries: AdapterListEntry[]; active: string | null }> {
         return this.rpc("trainingListAdapters", {});
@@ -607,6 +667,18 @@ export class WorkerClient {
     trainingStatus(): Promise<TrainingStatusInfo> {
         return this.rpc("trainingStatus", {});
     }
+}
+
+/** Log level for {@link WorkerClient.logs.append}. Mirrors
+ *  `LogLevel` in `workers/opfs_logger.ts`. */
+export type LogLevel = "info" | "warn" | "error";
+
+/** Session metadata returned by {@link WorkerClient.logs.list}. */
+export interface LogSessionMeta {
+    id:        string;
+    startMs:   number;
+    sizeBytes: number;
+    cleanExit: boolean;
 }
 
 export interface TrainingLoraConfig {
@@ -629,6 +701,30 @@ export interface TrainingHyperparams {
     loss_mode:                    "next_token" | "per_position";
     gradient_checkpointing:       boolean;
     mixed_precision:              boolean;
+    /** Truncated backward: only train layers >= this index. 0 (default)
+     *  means "backprop every layer" — the standard training path.
+     *  Larger values progressively narrow the trainable region to just
+     *  the top `n_layers - backward_layer_floor` layers, trading
+     *  adapter expressiveness for backward memory + compute savings.
+     *  Auto-applied by the Memory-tight preset on iPhone-class
+     *  devices; manually editable via AdvancedCard's "Trainable
+     *  depth" slider. */
+    backward_layer_floor?:        number;
+    /** Memory-tight (iPhone-safe) mode. Enables the iOS-Safari-WebGPU
+     *  survival workarounds in the Rust engine: MeBP per-layer
+     *  destroy during forward, tiled head_outproj backward matmul,
+     *  per-step JS event-loop yields at GPU submit boundaries,
+     *  backward-kernel pre-warm at session start, chunked destroy
+     *  IPC. All five are pure overhead on Mac browsers / desktops
+     *  where the GPUProcess doesn't have iPhone's jetsam ceiling —
+     *  they trade ~3-5× extra training wall time for memory pressure
+     *  relief.
+     *
+     *  Set true when the user enables "Memory-tight (iPhone-safe)" in
+     *  the Fine-tune panel (auto-applied on mobile UAs). Defaults
+     *  false. Matches `TrainingHyperparams::memory_tight` on the
+     *  Rust side. */
+    memory_tight?:                boolean;
 }
 export interface TrainingStepReport {
     loss: number;

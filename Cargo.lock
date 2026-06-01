@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "rullama"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytemuck",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "rullama-finetune"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytemuck",
  "futures-channel",

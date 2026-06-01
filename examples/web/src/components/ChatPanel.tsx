@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ThinkingBlock } from "@/components/ThinkingBlock";
@@ -142,6 +142,11 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
 export function ChatPanel(props: Props) {
     const historyRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    // Collapse the Attach + Mic buttons when the prompt input has focus
+    // so the textarea gets the full row width. The buttons animate
+    // back in when the input blurs (tap outside, switch tabs, etc.).
+    // Standard pattern from Slack / Discord / iMessage compose rows.
+    const [inputFocused, setInputFocused] = useState(false);
 
     // Auto-scroll to the latest message.
     useEffect(() => {
@@ -278,6 +283,8 @@ export function ChatPanel(props: Props) {
                     value={props.prompt}
                     onChange={(e) => props.onPromptChange(e.target.value)}
                     onKeyDown={onKeyDown}
+                    onFocus={() => setInputFocused(true)}
+                    onBlur={() => setInputFocused(false)}
                     disabled={!props.canType}
                     className="flex-1 min-w-0"
                 />
@@ -286,25 +293,40 @@ export function ChatPanel(props: Props) {
                 ) : (
                     <Button onClick={props.onSend} disabled={!props.canSend} title="Send"><Send /></Button>
                 )}
-                <Button
-                    onClick={onAttachClick}
-                    disabled={!props.canAttach || !props.canType}
-                    variant="outline"
-                    title={props.canAttach
-                        ? "Attach image or audio file for analysis"
-                        : "Multimodal tower unavailable for this model"}
+                {/* Attach + Mic collapse to width 0 when the input has
+                 *  focus, freeing horizontal space for the textarea.
+                 *  Send/Stop stay visible because they're needed while
+                 *  typing. To attach a file once the buttons are
+                 *  hidden, the user just taps outside the input (or
+                 *  presses Esc) — the buttons animate back in. */}
+                <div
+                    className={cn(
+                        "flex gap-1.5 overflow-hidden transition-[max-width,opacity] duration-200 ease-out",
+                        inputFocused
+                            ? "pointer-events-none max-w-0 opacity-0"
+                            : "max-w-[7rem] opacity-100",
+                    )}
                 >
-                    <Paperclip />
-                </Button>
-                {props.canRecord && (
-                    <MicButton
-                        disabled={!props.canType}
-                        voice={props.voice}
-                        onCapture={props.onCaptureAudio}
-                        onError={props.onAudioError}
-                        title="Record voice"
-                    />
-                )}
+                    <Button
+                        onClick={onAttachClick}
+                        disabled={!props.canAttach || !props.canType}
+                        variant="outline"
+                        title={props.canAttach
+                            ? "Attach image or audio file for analysis"
+                            : "Multimodal tower unavailable for this model"}
+                    >
+                        <Paperclip />
+                    </Button>
+                    {props.canRecord && (
+                        <MicButton
+                            disabled={!props.canType}
+                            voice={props.voice}
+                            onCapture={props.onCaptureAudio}
+                            onError={props.onAudioError}
+                            title="Record voice"
+                        />
+                    )}
+                </div>
             </div>
         </div>
     );
