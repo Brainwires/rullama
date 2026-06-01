@@ -3808,9 +3808,12 @@ impl Forward {
         // bind_cache.invalidate_buffers fires inside drop_prefix_destroy
         // BEFORE Buffer::destroy(), so the outproj submit (still being
         // consumed by Metal) keeps its bind-group reference safely.
-        let _embd_dropped_early = wc.drop_prefix_destroy("token_embd");
-        if let Some(cb) = progress_cb {
-            cb("bwd.head.early_destroy_embd", 0, 1);
+        // Mac fast path keeps token_embd resident — saves re-fetch.
+        if self.mobile_mode {
+            let _embd_dropped_early = wc.drop_prefix_destroy("token_embd");
+            if let Some(cb) = progress_cb {
+                cb("bwd.head.early_destroy_embd", 0, 1);
+            }
         }
 
         // ─── (3) lm_head LoRA backward (optional) ────────────────────
@@ -4190,7 +4193,14 @@ impl Forward {
             //    `blk.{i}.*` doesn't pull from the next layer's setup.
             //  • Any in-flight renorm-scale submit reads only
             //    `scratch.d_hidden` (not blk weights).
-            let _destroyed_layer = self.wcache.drop_prefix_destroy(&format!("blk.{i}."));
+            //
+            // **Mac fast path skips this.** On `mobile_mode = false`
+            // GPU heap pressure isn't the bottleneck — keeping the
+            // 35 backward-layer weight sets resident across the walk
+            // saves ~35 re-fetches per step and ~1 GiB of churn.
+            if self.mobile_mode {
+                let _destroyed_layer = self.wcache.drop_prefix_destroy(&format!("blk.{i}."));
+            }
             // Diagnostic: marks per-layer completion. If this fires for
             // layer N but no `bwd.layer.recompute` for layer N-1 does,
             // the death is in the inter-layer transition AFTER destroy
@@ -4305,7 +4315,13 @@ impl Forward {
         // over. Destroying everything makes step N start from the same
         // empty cache step 1 had; the next forward re-fetches what it
         // needs. GPU is idle (post loss-readback) so destroy() is safe.
-        let dropped_end = self.wcache.drop_prefix_destroy("");
+        // Mac fast path: skip — keep the full cache resident across
+        // steps. Mac has the RAM and this saves ~1 GiB of re-fetch.
+        let dropped_end = if self.mobile_mode {
+            self.wcache.drop_prefix_destroy("")
+        } else {
+            0
+        };
         #[cfg(target_arch = "wasm32")]
         if dropped_end > 0 {
             web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(

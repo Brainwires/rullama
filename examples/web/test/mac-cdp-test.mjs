@@ -259,7 +259,10 @@ async function main() {
     say("load model — detect path: auto-load vs fresh download");
     let alreadyLoaded = false;
     let needToClick = false;
-    const detectBy = Date.now() + 15_000;
+    // 60s: cold-start Chrome + SW bootstrap + auto-load model from OPFS
+    // can take 30-45s on the first request after launch; warm reruns
+    // finish in 1-2s.
+    const detectBy = Date.now() + 60_000;
     while (Date.now() < detectBy) {
         // Cheap: look at server-side beacons
         let runLog = "";
@@ -289,7 +292,7 @@ async function main() {
         await physicalClick(cdp, loc.x, loc.y);
         ok("physical mouse click dispatched");
     } else {
-        throw new Error("neither auto-load beacon nor Load button observed in 15s");
+        throw new Error("neither auto-load beacon nor Load button observed in 60s");
     }
 
     // ── confirm-dialog handler ──────────────────────────────────────
@@ -576,19 +579,18 @@ async function main() {
         const tightState = await evalInPage(
             cdp,
             `(() => {
-                // The shadcn Switch is role="switch"; the Memory-tight
-                // toggle is the one whose surrounding section text
-                // contains "Memory-tight".
-                const switches = Array.from(document.querySelectorAll('[role="switch"]'));
-                const target = switches.find((s) => {
-                    const ctx = (s.closest("section,div,label")?.textContent || "").toLowerCase();
+                // The Memory-tight toggle is a plain <input type="checkbox">
+                // inside a <label> whose text contains "Memory-tight".
+                const inputs = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+                const target = inputs.find((s) => {
+                    const ctx = (s.closest("label,section,div")?.textContent || "").toLowerCase();
                     return ctx.includes("memory-tight") || ctx.includes("memory tight");
                 });
                 if (!target) return { found: false };
                 const r = target.getBoundingClientRect();
                 return {
                     found: true,
-                    checked: target.getAttribute("aria-checked") === "true",
+                    checked: target.checked,
                     x: r.x + r.width / 2,
                     y: r.y + r.height / 2,
                 };
@@ -603,12 +605,12 @@ async function main() {
             const after = await evalInPage(
                 cdp,
                 `(() => {
-                    const switches = Array.from(document.querySelectorAll('[role="switch"]'));
-                    const target = switches.find((s) => {
-                        const ctx = (s.closest("section,div,label")?.textContent || "").toLowerCase();
+                    const inputs = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+                    const target = inputs.find((s) => {
+                        const ctx = (s.closest("label,section,div")?.textContent || "").toLowerCase();
                         return ctx.includes("memory-tight") || ctx.includes("memory tight");
                     });
-                    return target ? target.getAttribute("aria-checked") === "true" : null;
+                    return target ? target.checked : null;
                 })()`
             );
             if (after === true) {
