@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import iconUrl from "../assets/icon-192.png";
+import iconUrl from "../assets/icon-512.png";
 
 interface Props {
     modelName: string;
