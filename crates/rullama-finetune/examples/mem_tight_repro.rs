@@ -57,6 +57,12 @@ async fn run() -> Result<(), BoxError> {
         loss_mode: LossMode::PerPosition,
         gradient_checkpointing: true,
         backward_layer_floor: 25,
+        // The example tests the iPhone-Memory-tight code path
+        // (per-layer MeBP destroy, tiled outproj, kernel warmup,
+        // per-step yields). On native the yields are no-ops, but
+        // MeBP destroy + tiled outproj exercise the full stack so
+        // we catch any regression to the iPhone path natively.
+        memory_tight: true,
         ..Default::default()
     };
     eprintln!(

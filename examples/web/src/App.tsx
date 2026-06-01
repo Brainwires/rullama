@@ -16,6 +16,7 @@ import { saveInflightImage, saveInflightAudio, readInflightImages, readInflightA
 import { getNetworkHint } from "@/lib/network";
 import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
+import { useConfirm } from "@/lib/confirm";
 import { usePersistedState } from "@/lib/persisted";
 import { useIOSKeyboard } from "@/lib/useIOSKeyboard";
 import { useWakeLock } from "@/lib/wakeLock";
@@ -262,6 +263,7 @@ export function App() {
     // as model state changes, but we want to attempt resume at most once.
     const resumeAttemptedRef = useRef(false);
     const { showToast, dismissToast } = useToast();
+    const confirm = useConfirm();
 
     // iOS keyboard handling — snaps the visual viewport back to the top
     // when the keyboard dismisses, so the page doesn't end up offset
@@ -992,13 +994,15 @@ export function App() {
             if (needBytes >= CONFIRM_BYTES) {
                 const hint = getNetworkHint();
                 const sizeLabel = fmtBytes(needBytes);
-                const head = hint.metered
-                    ? `⚠️ ${hint.reason}.`
-                    : `Heads up:`;
-                const msg = `${head}\n\nDownloading "${m.name}" needs ${sizeLabel} over the network. ` +
-                    `It will be cached locally so subsequent loads are free.\n\n` +
-                    `Continue?`;
-                if (!window.confirm(msg)) {
+                const title = hint.metered ? `⚠️ ${hint.reason}` : `Download "${m.name}"`;
+                const description =
+                    `Downloading "${m.name}" needs ${sizeLabel} over the network. ` +
+                    `It will be cached locally so subsequent loads are free.`;
+                // Shadcn modal replaces window.confirm — see lib/confirm.tsx.
+                // The OK/Cancel buttons are real DOM <button>s so they're
+                // automatable via Playwright/CDP (window.confirm() renders
+                // a browser-chrome modal that's hard to drive).
+                if (!(await confirm({ title, description, okLabel: "OK", cancelLabel: "Cancel" }))) {
                     setModelStatus("idle");
                     setStatusText("no model");
                     setLoadingLabel("");

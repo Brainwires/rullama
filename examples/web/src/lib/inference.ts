@@ -710,6 +710,21 @@ export interface TrainingHyperparams {
      *  devices; manually editable via AdvancedCard's "Trainable
      *  depth" slider. */
     backward_layer_floor?:        number;
+    /** Memory-tight (iPhone-safe) mode. Enables the iOS-Safari-WebGPU
+     *  survival workarounds in the Rust engine: MeBP per-layer
+     *  destroy during forward, tiled head_outproj backward matmul,
+     *  per-step JS event-loop yields at GPU submit boundaries,
+     *  backward-kernel pre-warm at session start, chunked destroy
+     *  IPC. All five are pure overhead on Mac browsers / desktops
+     *  where the GPUProcess doesn't have iPhone's jetsam ceiling —
+     *  they trade ~3-5× extra training wall time for memory pressure
+     *  relief.
+     *
+     *  Set true when the user enables "Memory-tight (iPhone-safe)" in
+     *  the Fine-tune panel (auto-applied on mobile UAs). Defaults
+     *  false. Matches `TrainingHyperparams::memory_tight` on the
+     *  Rust side. */
+    memory_tight?:                boolean;
 }
 export interface TrainingStepReport {
     loss: number;

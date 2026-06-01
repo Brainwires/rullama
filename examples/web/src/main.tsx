@@ -7,6 +7,7 @@ import { ensureFreshServiceWorker } from "@/lib/pwa";
 import { installGlobalRestartListeners } from "@/lib/restart";
 import { ToastProvider } from "@/lib/toast";
 import { Toaster } from "@/components/Toaster";
+import { ConfirmProvider } from "@/lib/confirm";
 
 // Automation hook for safaridriver-driven debugging on iPhone.
 // Gated by `?automation=1` URL param so the surface is invisible in
@@ -214,8 +215,10 @@ try {
 ReactDOM.createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
         <ToastProvider>
-            <App />
-            <Toaster />
+            <ConfirmProvider>
+                <App />
+                <Toaster />
+            </ConfirmProvider>
         </ToastProvider>
     </React.StrictMode>,
 );

@@ -111,6 +111,11 @@ pub struct TrainingSession {
     /// triggering Metal's first-use state setup BEFORE the 1.4 GiB
     /// weight set tips iOS jetsam.
     warmed_up: bool,
+    /// Mirror of `hp.memory_tight` saved at session construction.
+    /// Used to gate the backward-kernel warmup call (warmup itself is
+    /// an iOS-specific Metal-state setup; on desktops the pipelines
+    /// are compiled at Pipelines::new and the warmup is pure overhead).
+    memory_tight: bool,
 }
 
 /// Names of the two "global" LoRA targets — i.e. targets whose state is
@@ -358,7 +363,21 @@ impl TrainingSession {
         // Per-layer destroy holds the cache at ~40 MiB throughout
         // (one layer at a time during prefill, one at a time during
         // backward recompute). iOS can't jetsam at 40 MiB.
-        model.forward_mut().set_forward_destroy_per_layer(true);
+        // **Gated on `hp.memory_tight`.** All the iOS-Safari-WebGPU
+        // survival workarounds (MeBP per-layer destroy, tiled
+        // outproj, per-step yields, chunked destroy, kernel warmup)
+        // are pure overhead on Mac browsers / native — they trade
+        // ~3-5× extra compute time for the iPhone GPUProcess memory
+        // pressure relief that desktops simply don't need. When the
+        // user's "Memory-tight" toggle in the PWA's Fine-tune panel
+        // is off (auto-applied based on UA — defaults true on mobile,
+        // false on desktop), this gate disables all of them and
+        // restores the fast-path. See the equivalent flag on
+        // `Forward::mobile_mode`.
+        model
+            .forward_mut()
+            .set_forward_destroy_per_layer(hp.memory_tight);
+        model.forward_mut().set_mobile_mode(hp.memory_tight);
         // Critical: tell Forward NOT to destroy blk.{floor..N-1} during
         // the per-layer forward destroy. Those layers are walked by
         // backward — their recompute does buffer_async fetches that
@@ -416,6 +435,7 @@ impl TrainingSession {
             scratch,
             adam_cfg,
             warmed_up: false,
+            memory_tight: hp.memory_tight,
             loss_mode: hp.loss_mode,
             lr_schedule: None,
             base_lr: hp.learning_rate,
@@ -987,9 +1007,14 @@ impl TrainingSession {
         target_id: u32,
         progress_cb: Option<&'cb TrainingProgressCb<'cb>>,
     ) -> Result<f32, TrainingError> {
-        // Patch 7: pre-warm backward kernels on first step. See the
-        // `warmed_up` field doc and Forward::warmup_backward_pipelines.
-        if !self.warmed_up {
+        // Patch 7: pre-warm backward kernels on first step — but only
+        // in memory-tight mode. The warmup runs ~15 throwaway dispatches
+        // to trigger iOS Metal's per-pipeline first-use state setup
+        // (argument buffer staging, threadgroup memory reservation)
+        // before the 1.4 GiB weight set is built. Desktop browsers /
+        // native already have those costs paid at Pipelines::new and
+        // the warmup is pure overhead.
+        if self.memory_tight && !self.warmed_up {
             if let Some(cb) = progress_cb {
                 cb("warmup.bwd.start", 0, 1);
             }
@@ -1336,8 +1361,9 @@ impl TrainingSession {
         targets: &[u32],
         progress_cb: Option<&'cb TrainingProgressCb<'cb>>,
     ) -> Result<f32, TrainingError> {
-        // Patch 7: pre-warm backward kernels on first step.
-        if !self.warmed_up {
+        // Patch 7: pre-warm backward kernels on first step — gated on
+        // memory_tight (see step_with_progress for rationale).
+        if self.memory_tight && !self.warmed_up {
             if let Some(cb) = progress_cb {
                 cb("warmup.bwd.start", 0, 1);
             }

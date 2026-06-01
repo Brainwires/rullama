@@ -72,6 +72,26 @@ pub struct TrainingHyperparams {
     /// Default `0` keeps the production training path unchanged.
     #[serde(default)]
     pub backward_layer_floor: u32,
+
+    /// **Memory-tight mode** — enables the iOS-Safari-WebGPU survival
+    /// stack: per-layer weight destroy during forward (MeBP), tiled
+    /// head_outproj matmul (8 vocab-tiles), per-step JS event-loop
+    /// yields at GPU submit boundaries, backward-kernel pre-warm at
+    /// session start, chunked destroy IPC. Each of these trades
+    /// compute time for memory pressure relief on iPhone Safari, where
+    /// the WebContent process is killed at ~1.4 GiB GPU RSS.
+    ///
+    /// On Mac browsers / desktop, none of this is needed — turning it
+    /// off restores the native-fast path. The total compute cost of
+    /// the iOS workarounds is ~3-5× extra training time (MeBP destroy
+    /// alone is +30-40% per the MeBP paper §4.2).
+    ///
+    /// Default `false` keeps the fast desktop path. The JS-side
+    /// "Memory-tight" toggle in the PWA's Fine-tune panel sets this
+    /// to true when the user opts into the iPhone-safe preset (auto-
+    /// applied on mobile UAs).
+    #[serde(default)]
+    pub memory_tight: bool,
 }
 
 impl Default for TrainingHyperparams {
@@ -91,6 +111,7 @@ impl Default for TrainingHyperparams {
             gradient_checkpointing: false,
             mixed_precision: false,
             backward_layer_floor: 0,
+            memory_tight: false,
         }
     }
 }

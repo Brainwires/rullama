@@ -278,6 +278,17 @@ pub struct Forward {
     /// `TrainingHyperparams::backward_layer_floor`.
     forward_destroy_layer_floor: u32,
 
+    /// **Mobile mode switch** — when true, all the iOS Safari WebGPU
+    /// survival workarounds are active: 0 ms event-loop yields at
+    /// recompute→backward_layer + backward_layer→epilogue boundaries,
+    /// vocab-axis tiling of head_outproj backward matmul, chunked
+    /// destroy with yields between chunks, backward-kernel pre-warm
+    /// at session start. When false, all of those are no-ops and
+    /// training runs the native-fast path (3-5× faster wall time).
+    /// Set by `TrainingSession::new` from
+    /// `TrainingHyperparams::memory_tight`.
+    mobile_mode: bool,
+
     // Cached scale factor for the final logits softcap dispatch.
     pos: u32,
 }
@@ -479,6 +490,7 @@ impl Forward {
             // when forward_destroy_per_layer is on). TrainingSession::new
             // overrides this to the actual backward_layer_floor.
             forward_destroy_layer_floor: u32::MAX,
+            mobile_mode: false,
             pos: 0,
         })
     }
@@ -527,6 +539,14 @@ impl Forward {
         self.forward_destroy_layer_floor = floor;
     }
 
+    /// Toggle the mobile-mode workaround stack. See the field doc on
+    /// `mobile_mode` for what this gates. Off by default; the
+    /// `TrainingSession` flips it on when
+    /// `TrainingHyperparams::memory_tight` is true.
+    pub fn set_mobile_mode(&mut self, on: bool) {
+        self.mobile_mode = on;
+    }
+
     /// Drop every cached `(uniform, bind_group)` entry in the shared
     /// `BindGroupCache`. Called at end-of-step in training to prevent
     /// cross-step accumulation: `invalidate_buffers` eagerly evicts
@@ -547,11 +567,14 @@ impl Forward {
         self.ctx.bind_cache.clear();
     }
 
-    /// **0 ms JS event-loop yield (wasm32 only).** Used by training
-    /// callers between bursts of GPU submits (per-prefill-token,
-    /// fwd→bwd, recompute→backward_layer) to let iOS Safari's
-    /// GPUProcess message pipe drain a tick of pending IPCs before
-    /// the next burst lands. On native this is a no-op `await`.
+    /// **0 ms JS event-loop yield (mobile-mode + wasm32 only).** Used
+    /// by training callers between bursts of GPU submits
+    /// (recompute→backward_layer, backward_layer→epilogue) to let iOS
+    /// Safari's GPUProcess message pipe drain a tick of pending IPCs
+    /// before the next burst lands. On native this is a no-op `await`;
+    /// on Mac browsers (wasm32 but `mobile_mode` off) it's also a
+    /// no-op — the GPUProcess can keep up without the assistance and
+    /// the yields cost ~5-10 ms each.
     ///
     /// 0 ms specifically (not >0): real-device data showed
     /// `setTimeout(500)` at the head→backward boundary was killing
@@ -561,6 +584,9 @@ impl Forward {
     pub async fn wasm_yield_zero(&self) {
         #[cfg(target_arch = "wasm32")]
         {
+            if !self.mobile_mode {
+                return;
+            }
             use wasm_bindgen::JsCast;
             let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global()
                 .dyn_into()
@@ -3596,17 +3622,23 @@ impl Forward {
         // chunk fires ~CHUNK_LAYERS × ~7 = ~35 destroys; iOS Metal can
         // process each batch's IPCs before the next batch lands.
         // No-op on native (the yield is wasm32-only).
-        const CHUNK_LAYERS: u32 = 5;
+        // Chunk size is 1 (= a single all-at-once destroy) when mobile
+        // mode is off — the chunked-with-yields pattern only buys
+        // anything when iOS Metal needs the IPC backlog to drain. On
+        // Mac browsers / native the GPUProcess keeps up fine, so the
+        // yields are pure latency.
+        let chunk_layers: u32 = if self.mobile_mode { 5 } else { floor_u32.max(1) };
         let mut dropped: usize = 0;
         let mut chunk_start = 0u32;
         while chunk_start < floor_u32 {
-            let chunk_end = (chunk_start + CHUNK_LAYERS).min(floor_u32);
+            let chunk_end = (chunk_start + chunk_layers).min(floor_u32);
             dropped += wc.drop_blk_layer_range_destroy(chunk_start, chunk_end);
             chunk_start = chunk_end;
-            // Yield to JS event loop so iOS Metal can drain the
-            // destroy IPCs from this chunk before the next batch.
+            // Mobile-mode-only: yield to JS event loop so iOS Metal can
+            // drain the destroy IPCs from this chunk before the next
+            // batch. On desktop browsers this would just be wasted ms.
             #[cfg(target_arch = "wasm32")]
-            if chunk_start < floor_u32 {
+            if self.mobile_mode && chunk_start < floor_u32 {
                 use wasm_bindgen::JsCast;
                 let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global()
                     .dyn_into()
@@ -3713,10 +3745,14 @@ impl Forward {
         // Math is identical: `Σ_{j=0..n} dy[j] · W[j,i] = Σ_t Σ ...`.
         // Tile 0 writes (accumulate=false); tiles 1..N add into
         // scratch.d_hidden_final.
-        const VOCAB_TILES: u32 = 8;
+        // Tile count: 8 in mobile mode (the iOS Metal heap working-set
+        // win), 1 on desktop browsers / native (one big command buffer
+        // is faster — fewer queue.submit IPCs and the GPU runs at
+        // its natural throughput).
+        let vocab_tiles: u32 = if self.mobile_mode { 8 } else { 1 };
         let vocab_u32 = vocab as u32;
-        let tile_size = vocab_u32.div_ceil(VOCAB_TILES);
-        for t in 0..VOCAB_TILES {
+        let tile_size = vocab_u32.div_ceil(vocab_tiles);
+        for t in 0..vocab_tiles {
             let j_start = t * tile_size;
             let j_end = (j_start + tile_size).min(vocab_u32);
             if j_start >= j_end {
@@ -4038,8 +4074,9 @@ impl Forward {
             // much time to reclaim a "suspended" process. The 0 ms
             // tick gives the GPUProcess message-pipe one drain pass
             // without exposing us to suspended-process reaper.
+            // Mobile-mode-gated: see Forward::wasm_yield_zero for rationale.
             #[cfg(target_arch = "wasm32")]
-            {
+            if self.mobile_mode {
                 use wasm_bindgen::JsCast;
                 let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global()
                     .dyn_into()

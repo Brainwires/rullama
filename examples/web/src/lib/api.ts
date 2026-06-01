@@ -96,10 +96,54 @@ export async function listModels(signal?: AbortSignal): Promise<ModelEntry[]> {
 }
 
 /** Where to fetch the GGUF bytes from. The baked entries all carry a
- *  url; this only falls back to /api/blob for local-Ollama dev mode. */
+ *  url; this only falls back to /api/blob for local-Ollama dev mode.
+ *
+ *  **Local-blob override** (debug/automation): when the page URL has
+ *  `?localBlob=PORT` (or localStorage.localBlobPort is set), GGUF
+ *  fetches go to `http://localhost:PORT/api/blob/...` instead of the
+ *  same-origin /api/blob. Lets the Cloudflare-served PWA shell stay
+ *  on the public URL (small files, edge-cached) while the 7 GB GGUF
+ *  goes direct to the local server, sidestepping the user's home
+ *  upload speed.
+ *
+ *  Server (`serve-tunnel.sh`) must send the matching CORS + CORP
+ *  headers — the PWA loads inside a cross-origin-isolated context
+ *  (require-corp), so the cross-origin blob fetch needs
+ *  `Access-Control-Allow-Origin` AND `Cross-Origin-Resource-Policy:
+ *  cross-origin` to satisfy the isolation policy.
+ */
 export function blobUrl(m: ModelEntry): string {
     if (m.url) return m.url;
+    const port = localBlobPort();
+    if (port != null) {
+        return `http://localhost:${port}/api/blob/${encodeURIComponent(m.name)}`;
+    }
     return "/api/blob/" + encodeURIComponent(m.name);
+}
+
+/** Returns the local-blob port from `?localBlob=PORT` URL param or
+ *  `localStorage.localBlobPort`. URL param also writes to localStorage
+ *  so it persists across reloads. Returns null when neither is set. */
+function localBlobPort(): number | null {
+    if (typeof window === "undefined") return null;
+    try {
+        const fromUrl = new URLSearchParams(window.location.search).get("localBlob");
+        if (fromUrl) {
+            const n = parseInt(fromUrl, 10);
+            if (Number.isFinite(n) && n > 0 && n < 65536) {
+                window.localStorage.setItem("localBlobPort", String(n));
+                return n;
+            }
+        }
+        const stored = window.localStorage.getItem("localBlobPort");
+        if (stored) {
+            const n = parseInt(stored, 10);
+            if (Number.isFinite(n) && n > 0 && n < 65536) return n;
+        }
+    } catch {
+        // localStorage unavailable (Worker scope, privacy mode).
+    }
+    return null;
 }
 
 /**

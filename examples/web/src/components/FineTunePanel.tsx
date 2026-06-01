@@ -251,10 +251,7 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged, se
     const initialDefaults = useMemo(deviceDefaults, []);
     const [lora, setLora] = useState<TrainingLoraConfig>(initialDefaults.lora);
     const [hp, setHp] = useState<TrainingHyperparams>(initialDefaults.hp);
-    // Canonical recipe defaults steps to 80 — what the verified native
-    // garlic-acceptance script uses. Beginner pressing "Start" with
-    // unchanged knobs gets a known-working training duration.
-    const [stepsBudget, setStepsBudget] = useState<number>(80);
+    const [stepsBudget, setStepsBudget] = useState<number>(32);
     const [adapterName, setAdapterName] = useState<string>("");
 
     // **B2 — Memory-tight preset.** When on, force-applies the
@@ -309,8 +306,29 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged, se
             client.subscribe("trainingProgress", (p) => {
                 const phase = String(p.phase ?? "");
                 // Once any progress beacon lands, the cold-start window
-                // is over — clear the hint.
+                // is over — clear the hint regardless of phase.
                 setColdHint(null);
+                // **Filter sub-phase breadcrumbs out of the React render.**
+                // Training emits ~20 sub-phase beacons per backward layer
+                // (bwd.layer.entry, bwd.ple, bwd.ffn.down, bwd.ffn.gateup,
+                // bwd.attn.proj, bwd.attn.qkv, bwd.layer.end, bwd.loop.enter,
+                // bwd.post_yield, warmup.bwd.*, etc.). The TrainingProgress
+                // label switch only recognises the six major phases; for
+                // the rest it falls through with no label, so updating
+                // React state with them caused the display to "flash"
+                // between "Backward N/35" and a blank state every few ms.
+                // The sub-phases still hit the page log via the beacon
+                // forwarder, so they remain available for post-crash
+                // diagnosis.
+                const MAJOR_PHASES = new Set([
+                    "starting",
+                    "prefill",
+                    "forward",
+                    "backward",
+                    "clip",
+                    "optimizer",
+                ]);
+                if (!MAJOR_PHASES.has(phase)) return;
                 setProgress({
                     phase: phase as TrainingProgressState["phase"],
                     current: Number(p.current ?? 0),
@@ -623,9 +641,14 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged, se
             // throws with a "Training would need ~X MB…" message and the
             // Model stays alive in chat.
             console.log(`[fine-tune] calling trainingStart (rank=${lora.rank}, alpha=${lora.alpha}, targets=${lora.target_modules.join("+")}, seq=${hp.max_seq_len}, steps=${stepsBudget})…`);
+            // Inject `memory_tight` into hp at the boundary so the Rust
+            // engine knows whether to enable the iOS-Safari survival
+            // workarounds. The hp slice in React state doesn't carry
+            // this — it's a UI-level preset switch — so we apply it
+            // here right before serialising to the worker.
             await client.trainingStart({
                 loraConfig: lora,
-                hparams: hp,
+                hparams: { ...hp, memory_tight: memoryTight },
                 totalSteps: stepsBudget,
             });
             sessionStarted = true;
@@ -960,14 +983,14 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged, se
                             gradient_accumulation_steps: 1,
                             gradient_checkpointing: true,
                         }));
-                        setStepsBudget(80);
+                        setStepsBudget(32);
                         if (memoryTight) {
                             setMemoryTight(false);
                         }
                         toast.info("Reset to canonical recipe");
                     }}
                     className="gap-1 text-[11px]"
-                    title="Reset all hyperparameters to the verified recipe (rank=16, α=32, all 9 targets, lr=2e-4, PerPosition, 80 steps)."
+                    title="Reset all hyperparameters to the verified recipe (rank=16, α=32, all 9 targets, lr=2e-4, PerPosition, 32 steps)."
                 >
                     <RefreshCw className="size-3" /> Reset to canonical
                 </Button>
