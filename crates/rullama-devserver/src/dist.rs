@@ -20,7 +20,15 @@ use crate::state::AppState;
 const CHUNK: usize = 64 * 1024;
 
 pub async fn fallback_handler(State(state): State<Arc<AppState>>, req: Request) -> Response {
-    let path = req.uri().path().trim_start_matches('/');
+    let raw = req.uri().path().trim_start_matches('/');
+    // Browsers percent-encode spaces and other reserved chars; the
+    // on-disk filename has the raw byte. Decode before joining or any
+    // `icons/icon-192 - back.png`-style filename 404s with a literal
+    // `%20` lookup. Decoding also normalises `+`-as-space (some legacy
+    // clients), but here we keep the raw `+` since path segments don't
+    // canonically use it as a space.
+    let decoded = percent_decode(raw);
+    let path: &str = &decoded;
     let dist_dir = state.paths.repo_root.join("examples/web/dist");
     // Canonicalize the base ONCE and reject any path that escapes it.
     let base = match tokio::fs::canonicalize(&dist_dir).await {
@@ -119,6 +127,40 @@ async fn serve_file(path: PathBuf) -> Response {
         );
     }
     resp
+}
+
+/// Minimal percent-decode for URL path segments. Returns the original
+/// string borrow when there's nothing to decode (no `%`).
+fn percent_decode(input: &str) -> String {
+    if !input.contains('%') {
+        return input.to_string();
+    }
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = hex_nibble(bytes[i + 1]);
+            let lo = hex_nibble(bytes[i + 2]);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn mime_for(path: &std::path::Path) -> &'static str {

@@ -1,5 +1,5 @@
-import { Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
+import iconUrl from "../assets/icon-192.png";
 
 interface Props {
     modelName: string;
@@ -35,9 +35,12 @@ export function WelcomeScreen({ modelName, onSuggest, className }: Props) {
             "animate-fade-in",
             className,
         )}>
-            <div className="flex size-20 items-center justify-center rounded-full bg-primary/15 ring-1 ring-primary/30 sm:size-24">
-                <Sparkles className="size-9 text-primary sm:size-11" strokeWidth={1.5} />
-            </div>
+            <img
+                src={iconUrl}
+                alt="rullama"
+                className="size-20 rounded-full sm:size-24"
+                draggable={false}
+            />
 
             <h1 className="mt-5 text-2xl font-semibold tracking-tight sm:text-3xl">
                 rullama
