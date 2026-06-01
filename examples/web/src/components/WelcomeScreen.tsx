@@ -38,11 +38,11 @@ export function WelcomeScreen({ modelName, onSuggest, className }: Props) {
             <img
                 src={iconUrl}
                 alt="rullama"
-                className="size-20 rounded-full sm:size-24"
+                className="size-20 sm:size-24"
                 draggable={false}
             />
 
-            <h1 className="mt-5 text-2xl font-semibold tracking-tight sm:text-3xl">
+            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
                 rullama
             </h1>
             <p className="mt-1 max-w-sm text-xs text-muted-foreground sm:text-sm">
