@@ -3993,6 +3993,38 @@ impl Forward {
                 }
             }
 
+            // **wasm32: 0 ms yield between recompute submit and
+            // backward_layer encoding.** The recompute submit just
+            // landed on Metal's command queue — its 10-12 forward
+            // dispatches are processing asynchronously. backward_layer
+            // is about to encode 16 copy_buffer_to_buffer ops + ~7
+            // phases of dispatches on top. Without a yield iOS
+            // Safari's GPUProcess is hit with the second-burst
+            // immediately, and the cumulative pressure tripped jetsam
+            // (last seen beacon was bwd.layer.recompute 1/35, never
+            // bwd.layer.entry). A setTimeout(0) releases the event
+            // loop for one tick — Metal absorbs the recompute submit
+            // before backward_layer floods it.
+            //
+            // 0 ms (not 500): the 500 ms variant at the head→backward
+            // boundary killed the Worker by giving iOS jetsam too
+            // much time to reclaim a "suspended" process. The 0 ms
+            // tick gives the GPUProcess message-pipe one drain pass
+            // without exposing us to suspended-process reaper.
+            #[cfg(target_arch = "wasm32")]
+            {
+                use wasm_bindgen::JsCast;
+                let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global()
+                    .dyn_into()
+                    .expect("training session runs inside a DedicatedWorkerGlobalScope");
+                let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+                    let resolve_fn: js_sys::Function = resolve.into();
+                    let _ = scope
+                        .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve_fn, 0);
+                });
+                let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+            }
+
             let mut lenc =
                 self.ctx
                     .device
