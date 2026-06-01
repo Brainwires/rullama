@@ -3522,16 +3522,52 @@ impl Forward {
         // class of use-after-destroy that an earlier wasm32 drain was
         // guarding against. WebGPU spec §3.4.3.1: commands already
         // encoded using a destroyed buffer continue to execute normally.
-        let dropped = wc.drop_blk_layer_range_destroy(0, floor_u32);
+        // **Chunked destroy with JS yields between (Patch 8).** The
+        // single `drop_blk_layer_range_destroy(0, floor_u32)` call was
+        // firing ~floor × ~7 = ~168 `Buffer::destroy()` IPCs in one
+        // synchronous burst, right at the moment GPUProcess RSS is at
+        // its peak from the just-finished forward. iOS jetsam was
+        // killing the WebContent process inside this burst — observed:
+        // `forward 35/35 gpuMiB=1417` was the last beacon, with
+        // `head_ce` never firing.
+        //
+        // Split the destroy into chunks of CHUNK_LAYERS layers, with a
+        // JS event-loop yield (setTimeout 0) between each chunk. Each
+        // chunk fires ~CHUNK_LAYERS × ~7 = ~35 destroys; iOS Metal can
+        // process each batch's IPCs before the next batch lands.
+        // No-op on native (the yield is wasm32-only).
+        const CHUNK_LAYERS: u32 = 5;
+        let mut dropped: usize = 0;
+        let mut chunk_start = 0u32;
+        while chunk_start < floor_u32 {
+            let chunk_end = (chunk_start + CHUNK_LAYERS).min(floor_u32);
+            dropped += wc.drop_blk_layer_range_destroy(chunk_start, chunk_end);
+            chunk_start = chunk_end;
+            // Yield to JS event loop so iOS Metal can drain the
+            // destroy IPCs from this chunk before the next batch.
+            #[cfg(target_arch = "wasm32")]
+            if chunk_start < floor_u32 {
+                use wasm_bindgen::JsCast;
+                let scope: web_sys::DedicatedWorkerGlobalScope = js_sys::global()
+                    .dyn_into()
+                    .expect("training session runs inside a DedicatedWorkerGlobalScope");
+                let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+                    let resolve_fn: js_sys::Function = resolve.into();
+                    let _ = scope
+                        .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve_fn, 0);
+                });
+                let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+            }
+        }
         #[cfg(target_arch = "wasm32")]
         if dropped > 0 {
             web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
-                "[bwd] evicted {dropped} layer weight tiles before backward (iOS peak-memory cut)"
+                "[bwd] evicted {dropped} layer weight tiles before backward (chunked, iOS peak-memory cut)"
             )));
         }
         #[cfg(not(target_arch = "wasm32"))]
         if dropped > 0 && std::env::var("RULLAMA_TRACE_EVICT").is_ok() {
-            eprintln!("[bwd] evicted {dropped} layer weight tiles before backward");
+            eprintln!("[bwd] evicted {dropped} layer weight tiles before backward (chunked)");
         }
 
         let final_norm = wc.buffer_async("output_norm.weight").await?;
