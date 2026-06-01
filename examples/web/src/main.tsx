@@ -188,6 +188,13 @@ if (typeof window !== "undefined" && new URLSearchParams(window.location.search)
 // restart overlay rather than landing as a silent console error.
 installGlobalRestartListeners();
 
+// Dev-only: connect to the rullama-devserver's WS broadcast for
+// wasm-rebuild notifications. Tree-shaken out of production builds
+// because `import.meta.env.DEV` folds at build time.
+if (import.meta.env.DEV) {
+    void import("@/lib/dev-hmr").then((m) => m.installDevHmr());
+}
+
 // Gate React render on service-worker freshness. Returning visitors with
 // a pending update wait (≤1.5 s) for the new SW to claim the page so the
 // first render is already against the fresh asset set. First-ever loads

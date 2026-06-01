@@ -199,11 +199,14 @@ export default defineConfig({
             // Allow serving files from project root (so /pkg/ works).
             allow: [repoRoot],
         },
+        // Direct Vite users (`pnpm dev:web`) get /api/* + /pkg/* + dev-WS
+        // proxied to the native devserver on :25321 (started via
+        // `cargo dev`). Pages loaded from :25321 don't need this since
+        // the devserver serves /api + /pkg natively.
         proxy: {
-            "/api": {
-                target: "http://localhost:8088",
-                changeOrigin: true,
-            },
+            "/api":                { target: "http://localhost:25321", changeOrigin: true },
+            "/pkg":                { target: "http://localhost:25321", changeOrigin: true },
+            "/__rullama-dev-ws":   { target: "ws://localhost:25321",   ws: true,           changeOrigin: true },
         },
     },
     // Vite handles workers when imported via `?worker` or `new URL(...)`.

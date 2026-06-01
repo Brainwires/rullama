@@ -1,4 +1,8 @@
 /target
+# rullama-devserver is excluded from the workspace (see top-level Cargo.toml)
+# so it builds into its own target/ + Cargo.lock under its crate dir.
+/crates/rullama-devserver/target
+/crates/rullama-devserver/Cargo.lock
 **/*.rs.bk
 Cargo.lock.bak
 
@@ -30,3 +34,6 @@ Cargo.lock.bak
 /*.mp3
 /*.wav
 /*.m4a
+
+# PM2-managed devserver log files
+/ops/pm2/*.log
