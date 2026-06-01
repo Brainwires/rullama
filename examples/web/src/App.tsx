@@ -417,12 +417,24 @@ export function App() {
         })();
     }, [showToast]);
 
-    // Crash-detect on mount: if the previous session never wrote
-    // EXIT clean (worker terminated via iOS jetsam or a crash), flag
-    // it with a persistent warn toast that deep-links into Settings →
-    // Logs. The worker writes the clean marker in its shutdown
-    // handler (workers/inference-core-worker.ts), so any past
-    // session in the manifest without `cleanExit: true` was killed.
+    // Crash-detect on mount. A "crash" is: the previous session
+    // exists AND neither end-of-life signal fired for it. There are
+    // two signals; either is sufficient evidence of a clean exit.
+    //
+    //   1. The worker's shutdown handler wrote `cleanExit: true` into
+    //      the session manifest. Reliable on a graceful close where
+    //      the worker actually runs its shutdown. UNRELIABLE on a
+    //      hard reload (Cmd+R), where the worker is terminated by
+    //      the browser before postMessage round-trips complete.
+    //
+    //   2. The page's `pagehide` listener wrote the session id into
+    //      `localStorage["rullama:session:clean"]`. Reliable on any
+    //      page navigation/reload (pagehide is synchronous, runs
+    //      before the page is torn down) — this is the path that was
+    //      previously written but never read, which is why every
+    //      reload looked like a crash.
+    //
+    // Either signal == clean. Only when BOTH are absent do we toast.
     useEffect(() => {
         const client = getClient();
         (async () => {
@@ -431,14 +443,21 @@ export function App() {
                     client.logs.list(),
                     client.logs.currentId().catch(() => "" as string),
                 ]);
-                // Newest-first; find the most recent session that's NOT
-                // this page-load's own session.
                 const previous = list.find((s) => s.id !== currentId);
-                if (!previous || previous.cleanExit) return;
+                if (!previous) return;
+                if (previous.cleanExit) return;
+                let pagehideMarker = "";
+                try { pagehideMarker = localStorage.getItem("rullama:session:clean") || ""; } catch { /* */ }
+                if (pagehideMarker && pagehideMarker === previous.id) {
+                    // Clean exit per pagehide; clear the marker so the
+                    // next reload's check starts from a clean slate.
+                    try { localStorage.removeItem("rullama:session:clean"); } catch { /* */ }
+                    return;
+                }
                 showToast({
                     level: "warn",
                     title: "Last session ended unexpectedly",
-                    message: "iOS may have terminated the tab. Open the logs to see what fired right before the kill.",
+                    message: "The tab may have been terminated (iOS jetsam, OOM, or a hard kill). Open the logs to see what fired right before the kill.",
                     persist: true,
                     action: {
                         label: "Open Logs",
@@ -452,26 +471,46 @@ export function App() {
         })();
     }, [showToast, setView]);
 
-    // pagehide is the iOS-reliable "tab is going away" signal — fires
-    // before iOS suspends, before unload would on desktop, and most
-    // importantly: iOS Safari does NOT fire `beforeunload`. We post
-    // a synthetic shutdown to the worker so it can run
-    // markCleanExit() before self.close(). Fallback: localStorage
-    // marker keyed by the current session id in case the worker
-    // never gets to write the manifest. The next mount's crash-
-    // detect reads BOTH the manifest's `cleanExit` flag and this
-    // localStorage marker.
+    // pagehide is the reliable "tab is going away" signal across
+    // browsers — fires before iOS suspends, before unload would on
+    // desktop, and iOS Safari does NOT fire `beforeunload`. We write
+    // a localStorage marker with the current session id; the next
+    // mount's crash-detect treats a matching marker as proof of a
+    // clean exit even if the worker's manifest shutdown didn't
+    // complete.
+    //
+    // Critical: `client.logs.currentId()` is an async RPC over
+    // postMessage, and pagehide CANNOT await. By the time the worker
+    // responds, the tab is gone and `localStorage.setItem` never
+    // runs. Cache the id synchronously on mount, then read the cached
+    // value inside the listener so the marker is written without an
+    // RPC round-trip.
+    const currentSessionIdRef = useRef<string>("");
+    useEffect(() => {
+        let cancelled = false;
+        const client = getClient();
+        // Cache the worker's session id once on mount. Re-cache when
+        // visibility flips back to "visible" — the SharedWorker may
+        // have rotated session ids while the tab was hidden.
+        const refresh = async () => {
+            try {
+                const id = await client.logs.currentId().catch(() => "");
+                if (!cancelled && id) currentSessionIdRef.current = id;
+            } catch { /* */ }
+        };
+        void refresh();
+        const onVis = () => { if (document.visibilityState === "visible") void refresh(); };
+        document.addEventListener("visibilitychange", onVis);
+        return () => {
+            cancelled = true;
+            document.removeEventListener("visibilitychange", onVis);
+        };
+    }, []);
     useEffect(() => {
         const onHide = () => {
-            try {
-                const client = getClient();
-                // Read-only — we just want the worker's session id to
-                // mirror it into localStorage. The Promise dangles on
-                // purpose; pagehide can't await.
-                void client.logs.currentId().then((id) => {
-                    try { localStorage.setItem("rullama:session:clean", id); } catch { /* */ }
-                }).catch(() => { /* */ });
-            } catch { /* */ }
+            const id = currentSessionIdRef.current;
+            if (!id) return;
+            try { localStorage.setItem("rullama:session:clean", id); } catch { /* */ }
         };
         window.addEventListener("pagehide", onHide);
         return () => window.removeEventListener("pagehide", onHide);
