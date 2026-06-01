@@ -98,7 +98,9 @@ export default defineConfig({
                             request.mode === "navigate",
                         handler: "NetworkFirst",
                         options: {
-                            cacheName: "rullama-pages",
+                            // **Per-build cacheName** — see the `/pkg/`
+                            // handler below for the full rationale.
+                            cacheName: `rullama-pages-${BUILD_VERSION}-${Date.now()}`,
                             networkTimeoutSeconds: 3,
                             expiration: { maxEntries: 5 },
                             cacheableResponse: { statuses: [0, 200] },
@@ -129,7 +131,19 @@ export default defineConfig({
                         urlPattern: /\/pkg\/.*\.(js|wasm)$/,
                         handler:    "NetworkFirst",
                         options: {
-                            cacheName: "rullama-wasm-v2",
+                            // **Per-build cacheName** — the prior hardcoded
+                            // `rullama-wasm-v2` persisted across builds.
+                            // Combined with the 5 s NetworkFirst fallback,
+                            // a slow network response on one file could
+                            // mix a NEW `rullama.js` with a CACHED
+                            // `rullama_bg.wasm` from a previous build,
+                            // producing silently non-deterministic
+                            // behavior. Bumping the cache name on every
+                            // build means each build has its own isolated
+                            // runtime cache bucket — even if a fallback
+                            // hits, it's a fallback within THIS build's
+                            // bundle, not the prior one.
+                            cacheName: `rullama-wasm-${BUILD_VERSION}-${Date.now()}`,
                             networkTimeoutSeconds: 5,
                             expiration: { maxEntries: 4, maxAgeSeconds: 60 * 60 * 24 * 30 },
                             cacheableResponse: { statuses: [0, 200] },

@@ -816,9 +816,10 @@ impl TrainingSession {
             if let Some(cb) = progress_cb {
                 cb("prefill", (i + 1) as u32, prefill_total);
             }
-            // 0 ms yield between prefill tokens (see same call in the
-            // per_position path for the rationale).
-            self.model.forward().wasm_yield_zero().await;
+            // (Intra-prefill yields were tested on iPhone, didn't move
+            // the wall, and the run with them died earlier than without
+            // — possibly each yield exposes the Worker to iOS's
+            // suspended-process reaper. Removed.)
         }
         // Final position — capture activations + compute logits.
         let final_tok = *input_ids.last().unwrap();
@@ -1176,13 +1177,12 @@ impl TrainingSession {
             if let Some(cb) = progress_cb {
                 cb("prefill", (idx + 1) as u32, prefill_total);
             }
-            // 0 ms yield between prefill tokens. Each token's prefill
-            // bursts 35 layer-submits; on iPhone real-device tests
-            // the cumulative IPC pressure across 20 tokens was tipping
-            // us over the GPUProcess wall right at forward 35/35. A
-            // 1-tick event-loop release between tokens lets Metal's
-            // message pipe drain before the next token's burst lands.
-            self.model.forward().wasm_yield_zero().await;
+            // (Intra-prefill yields were tested on iPhone, didn't move
+            // the wall, and may have made it worse by exposing the
+            // Worker to iOS's suspended-process reaper at each yield.
+            // Removed. Forward::wasm_yield_zero is kept for the
+            // recompute→backward_layer yield where it demonstrably
+            // helped.)
         }
 
         // 2. Build grad views + scratch view (mirrors `forward_backward`).
