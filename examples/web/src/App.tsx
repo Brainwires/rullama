@@ -286,6 +286,31 @@ export function App() {
     // mode). See `lib/wakeLock.ts` for the iOS hide-release dance.
     useWakeLock(modelStatus === "loading" || busy);
 
+    // **Boot-splash driver.** The static HTML splash auto-holds itself
+    // when `rullama:lastLoadedDigest` is in localStorage (see index.html)
+    // so it stays visible past React-mount. While loading, push the
+    // current percent + label so the user sees a real progress bar
+    // instead of a generic spinner. Release as soon as the model is
+    // ready (or errored — in which case the welcome screen + Load button
+    // is the right thing to show).
+    useEffect(() => {
+        type BootApi = {
+            __rullamaBootProgress?: (percent: number, detail?: string) => void;
+            __rullamaBootRelease?: () => void;
+        };
+        const w = window as unknown as BootApi;
+        if (modelStatus === "loading") {
+            const detail = waitInfo?.message ?? loadingLabel;
+            w.__rullamaBootProgress?.(loadingPercent, detail || undefined);
+        } else if (modelStatus === "ready" || modelStatus === "error") {
+            w.__rullamaBootRelease?.();
+        }
+        // `idle` is racy with the auto-load effect (auto-load may flip
+        // us to "loading" in the next tick). Leave the held splash up;
+        // the watchdog in index.html releases after 5 s of no progress
+        // if auto-load decided not to fire (saved digest but no OPFS).
+    }, [modelStatus, loadingPercent, loadingLabel, waitInfo]);
+
     // One-time sanitization of persisted values. Catches localStorage
     // entries from older versions (or hand-edited values) that fall
     // outside current bounds — the slider clamps cover fresh edits.

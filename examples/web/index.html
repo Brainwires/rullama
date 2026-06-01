@@ -52,8 +52,42 @@
             0%, 100% { opacity: 0.85; transform: scale(1.00); }
             50%      { opacity: 1.00; transform: scale(1.03); }
         }
-        #boot-splash h1 { font-size: 0.95rem; margin: 0 0 0.25rem; font-weight: 600; }
-        #boot-splash p { font-size: 0.8rem; color: #9ca3af; margin: 0; max-width: 22rem; line-height: 1.4; }
+        #boot-splash h1 { font-size: 1.05rem; margin: 0 0 0.25rem; font-weight: 600; }
+        #boot-splash p { font-size: 0.85rem; color: #9ca3af; margin: 0; max-width: 24rem; line-height: 1.4; }
+        /* Progress bar — hidden until window.__rullamaBootProgress is called.
+         * Sits below the detail text. */
+        #boot-splash-progress {
+            display: none;
+            margin-top: 1.4rem;
+            width: 320px; max-width: 80vw;
+            height: 6px;
+            background: rgba(255,255,255,0.08);
+            border-radius: 3px;
+            overflow: hidden;
+            position: relative;
+        }
+        #boot-splash-progress-bar {
+            position: absolute; inset: 0 auto 0 0;
+            width: 0;
+            background: linear-gradient(90deg, #3b82f6, #6366f1);
+            transition: width 200ms ease-out;
+        }
+        #boot-splash-progress[data-indeterminate="1"] #boot-splash-progress-bar {
+            width: 40%;
+            animation: bslide 1.6s ease-in-out infinite;
+        }
+        @keyframes bslide {
+            0%   { transform: translateX(-100%); }
+            100% { transform: translateX(250%); }
+        }
+        #boot-splash-progress-detail {
+            display: none;
+            margin-top: 0.55rem;
+            font-size: 0.72rem;
+            color: #6b7280;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-variant-numeric: tabular-nums;
+        }
 
         #boot-recovery {
             position: fixed; inset: 0;
@@ -80,12 +114,19 @@
 
     <!-- Boot splash: visible on first paint so the user never sees a black
          screen during bundle download / SW boot. main.tsx can update the
-         status text via window.__rullamaBootStatus(msg), and it self-hides
-         as soon as React mounts (MutationObserver below). -->
+         status text via window.__rullamaBootStatus(title, detail), and
+         the App can push model-load progress via
+         window.__rullamaBootProgress(percent, detail). It self-hides as
+         soon as React mounts UNLESS we know a saved model is about to
+         auto-load — in which case it stays visible through the load. -->
     <div id="boot-splash" role="status" aria-live="polite">
         <img class="icon" src="/icons/icon-512.png" alt="rullama" aria-hidden="true" />
         <h1 id="boot-splash-title">Loading rullama…</h1>
         <p id="boot-splash-detail">Starting up.</p>
+        <div id="boot-splash-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+            <div id="boot-splash-progress-bar"></div>
+        </div>
+        <p id="boot-splash-progress-detail"></p>
     </div>
 
     <!-- Boot-recovery UI: hidden until the watchdog gives up on mount.
@@ -114,9 +155,37 @@
             var splash = document.getElementById('boot-splash');
             var splashTitle  = document.getElementById('boot-splash-title');
             var splashDetail = document.getElementById('boot-splash-detail');
+            var splashProgress       = document.getElementById('boot-splash-progress');
+            var splashProgressBar    = document.getElementById('boot-splash-progress-bar');
+            var splashProgressDetail = document.getElementById('boot-splash-progress-detail');
             var rec = document.getElementById('boot-recovery');
             var btn = document.getElementById('boot-recovery-btn');
             if (!splash || !rec || !btn) return;
+
+            // **Auto-hold** the splash if localStorage says a model was
+            // loaded last session — we want to keep the splash visible
+            // through the auto-load progress instead of flashing the
+            // welcome screen for a second and then the chat shell. The
+            // ?_reset=… sentinel skips this (the user is recovering).
+            try {
+                var sp = new URLSearchParams(location.search);
+                var resetMode = sp.has('_reset');
+                if (!resetMode) {
+                    var pending = window.localStorage.getItem('rullama:pendingLoadDigest');
+                    var last    = window.localStorage.getItem('rullama:lastLoadedDigest');
+                    var has = (pending && pending !== '""' && pending !== '') ||
+                              (last && last !== '""' && last !== '');
+                    if (has) {
+                        splash.dataset.held = '1';
+                        if (splashTitle)  splashTitle.textContent  = 'Loading model…';
+                        if (splashDetail) splashDetail.textContent = 'Preparing weights from local cache.';
+                        if (splashProgress) {
+                            splashProgress.style.display = 'block';
+                            splashProgress.setAttribute('data-indeterminate', '1');
+                        }
+                    }
+                }
+            } catch (e) { /* localStorage unavailable */ }
 
             // Expose a tiny API so the JS bundle (pwa.ts) can update the
             // splash text during SW boot/swap, instead of users staring
@@ -126,6 +195,58 @@
                     if (title  !== undefined && splashTitle)  splashTitle.textContent  = String(title);
                     if (detail !== undefined && splashDetail) splashDetail.textContent = String(detail);
                 } catch (e) { /* */ }
+            };
+
+            // Model-load progress. App.tsx pumps this with the
+            // loadingPercent / loadingLabel pair while
+            // `modelStatus === "loading"`. Passing percent < 0
+            // (or null) renders an indeterminate stripe.
+            window.__rullamaBootProgress = function (percent, detail) {
+                if (!splash || splash.dataset.hidden === '1') return;
+                splash.dataset.held = '1';
+                if (splashProgress) splashProgress.style.display = 'block';
+                if (typeof percent === 'number' && percent >= 0 && percent <= 100) {
+                    if (splashProgress) splashProgress.removeAttribute('data-indeterminate');
+                    if (splashProgressBar) splashProgressBar.style.width = percent.toFixed(1) + '%';
+                    if (splashProgress) splashProgress.setAttribute('aria-valuenow', String(Math.round(percent)));
+                } else {
+                    if (splashProgress) splashProgress.setAttribute('data-indeterminate', '1');
+                }
+                if (detail !== undefined && splashProgressDetail) {
+                    splashProgressDetail.style.display = 'block';
+                    splashProgressDetail.textContent = String(detail);
+                }
+            };
+
+            // Released by App.tsx when the model is ready (or errored).
+            window.__rullamaBootRelease = function () {
+                if (!splash) return;
+                delete splash.dataset.held;
+                hideSplash();
+            };
+
+            // Safety release: if we held the splash because of a saved
+            // digest but no progress arrives within 5 seconds of React
+            // mounting, the auto-load probably bailed (saved digest but
+            // model not in OPFS). Release so the user sees the model
+            // picker. Cancelled by the first __rullamaBootProgress call.
+            var progressReceived = false;
+            var heldSafetyTimer = null;
+            function armHeldSafetyTimer() {
+                if (splash.dataset.held !== '1') return;
+                if (heldSafetyTimer) return;
+                heldSafetyTimer = setTimeout(function () {
+                    if (splash.dataset.held === '1' && !progressReceived) {
+                        delete splash.dataset.held;
+                        hideSplash();
+                    }
+                }, 5000);
+            }
+            var _origBootProgress = window.__rullamaBootProgress;
+            window.__rullamaBootProgress = function (percent, detail) {
+                progressReceived = true;
+                if (heldSafetyTimer) { clearTimeout(heldSafetyTimer); heldSafetyTimer = null; }
+                return _origBootProgress(percent, detail);
             };
 
             // Hide the splash. Fade out so the React tree doesn't pop in.
@@ -214,13 +335,20 @@
                 }
             }, BOOT_TIMEOUT_MS);
 
-            // Disarm + hide splash as soon as the React tree appears.
+            // Disarm + hide splash as soon as the React tree appears —
+            // UNLESS we're holding for a model auto-load. In that case
+            // React will call __rullamaBootRelease() once the model is
+            // ready (or errored).
             var mo = new MutationObserver(function () {
                 var root = document.getElementById('root');
                 if (root && root.children.length > 0) {
                     armed = false;
                     clearTimeout(watchdog);
                     mo.disconnect();
+                    if (splash.dataset.held === '1') {
+                        armHeldSafetyTimer();
+                        return;
+                    }
                     hideSplash();
                 }
             });
