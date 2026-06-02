@@ -59,3 +59,26 @@ export class TtsClient {
         this.pending.clear();
     }
 }
+
+// Shared singleton so the Voice tab and the chat "speak" button reuse one loaded
+// model + Worker (the 164 MB GGUF downloads once).
+let shared: TtsClient | null = null;
+let loadPromise: Promise<TtsClient> | null = null;
+let loaded = false;
+
+/** Returns the shared client, loading the model on first call. */
+export function getSharedTts(url: string, onProgress?: (frac: number) => void): Promise<TtsClient> {
+    if (loaded && shared) return Promise.resolve(shared);
+    if (loadPromise) return loadPromise;
+    const c = shared ?? (shared = new TtsClient());
+    loadPromise = c.load(url, onProgress).then(() => {
+        loaded = true;
+        return c;
+    });
+    return loadPromise;
+}
+
+/** Whether the shared client is loaded and ready. */
+export function ttsReady(): boolean {
+    return loaded;
+}

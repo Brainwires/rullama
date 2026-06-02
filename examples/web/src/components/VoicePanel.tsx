@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
 import { KOKORO_MODEL } from "@/lib/api";
-import { TtsClient, type TtsClip } from "@/lib/tts-client";
+import { getSharedTts, type TtsClient, type TtsClip } from "@/lib/tts-client";
 import { cn } from "@/lib/utils";
 import { downloadWav, playPcm } from "@/lib/wav";
 
@@ -30,8 +30,7 @@ export function VoicePanel() {
         setLoad("loading");
         setErr(null);
         try {
-            const c = new TtsClient();
-            await c.load(KOKORO_MODEL.url, (f) => setLoadPct(Math.round(f * 100)));
+            const c = await getSharedTts(KOKORO_MODEL.url, (f) => setLoadPct(Math.round(f * 100)));
             client.current = c;
             setLoad("ready");
         } catch (e) {

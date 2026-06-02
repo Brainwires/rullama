@@ -6,7 +6,10 @@ import { type ChatMessage, type ImageAttachment } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
 import { parseModelContent } from "@/lib/parseModel";
 import { cn } from "@/lib/utils";
-import { Mic, Send, Square, Paperclip, X } from "lucide-react";
+import { Mic, Send, Square, Paperclip, X, Volume2 } from "lucide-react";
+import { getSharedTts } from "@/lib/tts-client";
+import { playPcm } from "@/lib/wav";
+import { KOKORO_MODEL } from "@/lib/api";
 import { MicButton } from "@/components/MicButton";
 import { PipelineProgress, type PipelineProgressState } from "@/components/PipelineProgress";
 import type { VoiceOptions } from "@/lib/voice";
@@ -93,6 +96,36 @@ function UserBubble({ content, images }: { content: string; images?: ImageAttach
     );
 }
 
+/** Speak an assistant reply via the shared Kokoro TTS (loads the model on first use). */
+function SpeakButton({ text }: { text: string }) {
+    const [busy, setBusy] = useState(false);
+    const speak = async () => {
+        if (busy || !text.trim()) return;
+        setBusy(true);
+        try {
+            const c = await getSharedTts(KOKORO_MODEL.url);
+            const pcm = await c.synthesize(text, "af_heart");
+            playPcm(pcm, c.sampleRate);
+        } catch {
+            /* ignore — TTS load/synth failure shouldn't break chat */
+        } finally {
+            setBusy(false);
+        }
+    };
+    return (
+        <button
+            type="button"
+            onClick={speak}
+            disabled={busy}
+            title="Speak this reply"
+            className="mt-2 inline-flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+        >
+            <Volume2 className={cn("size-3.5", busy && "animate-pulse")} />
+            {busy ? "speaking…" : "speak"}
+        </button>
+    );
+}
+
 function ModelBubble({ content }: { content: string }) {
     const parsed = useMemo(() => parseModelContent(content), [content]);
     const html   = useMemo(
@@ -114,6 +147,7 @@ function ModelBubble({ content }: { content: string }) {
             ) : parsed.thinking === null ? (
                 <span className="inline-block animate-pulse text-muted-foreground">▍</span>
             ) : null}
+            {parsed.response && parsed.isComplete !== false && <SpeakButton text={parsed.response} />}
         </div>
     );
 }
