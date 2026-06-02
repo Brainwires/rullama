@@ -4,11 +4,52 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Browser-resident Gemma 4 inference in pure Rust → WebAssembly + WebGPU. Loads
-Ollama's on-disk GGUF blobs (no server) and runs the forward pass on the local
-GPU through hand-written WGSL. **Scope is intentionally narrow**: Gemma 4 only
-(`gemma4:e2b`, `gemma4:e4b`), `Q4_K_M` mix only (`Q4_K` / `Q6_K` / `F16` / `F32`).
-Other architectures and MoE variants are out of scope.
+Browser-resident AI runtime in pure Rust → WebAssembly + WebGPU. Loads
+Ollama's on-disk GGUF blobs (no server) and runs the forward pass on the
+local GPU through hand-written WGSL. The scope expands as Ollama's does.
+
+**Currently in scope:**
+
+- **Text / vision / audio-input chat** — Gemma 4 only (`gemma4:e2b`,
+  `gemma4:e4b`). `Q4_K_M` mix only (`Q4_K` / `Q6_K` / `F16` / `F32`).
+  This is the most mature surface and the parity oracle for everything
+  else.
+- **In-browser LoRA fine-tuning** — over the same Gemma 4 forward path.
+  Production-shaped (no Python toolchain, no server upload) and so far
+  has no peer in any other browser-LLM project (see
+  [[project-competitive-landscape]] memory).
+- **Speech synthesis (TTS)** — Kokoro-82M (StyleTTS2 + iSTFTNet) port to
+  Rust/WGSL, in-flight. See `project_tts_kokoro` memory; reference impl
+  is hexgrad/kokoro PyTorch.
+
+**Planned for future versions (roughly in order):**
+
+- **Image generation** — Ollama added experimental support for FLUX.2
+  [klein] and Z-Image-Turbo on 2026-01-20. Pulling those through the
+  same `/api/blob/<key>` plumbing is straightforward; the engine work
+  (UNet cross-attention, VAE conv kernels, CLIP text encoder) is a
+  second engine living alongside Gemma's. Browser prior art exists
+  (MLC web-stable-diffusion, MDST Engine, SDTurbo-WebGPU) so this is
+  catch-up parity not a moat — but it's table-stakes for the
+  "Ollama in your browser" pitch.
+- **Image editing** — Ollama-driven, once they ship it natively.
+- **Agents** — local multi-step planning + tool use against the
+  in-browser model. Roadmapped after image gen lands.
+
+**Explicitly out of scope:**
+
+- Other transformer architectures and MoE variants — porting a second
+  text LLM family for its own sake doesn't pay off; the Gemma 4 focus
+  is doing real work for the test surface and parity claims.
+- Server-side anything. The whole pitch is "your data never leaves
+  the device."
+- Python in the runtime loop. Native Rust + browser only.
+
+When adding a new model family, follow Kokoro's pattern: a sibling
+module under `crates/rullama/src/` (or its own crate if substantial),
+sharing the `wgpu`/`bytemuck`/`half` foundation and the
+`backend::WgpuCtx` + bind-cache infra, but with its own forward path
+and its own WGSL kernels. The Gemma 4 path stays untouched.
 
 The reference Go impl lives in Ollama's tree at `model/models/gemma4/`. Ops in
 `crates/rullama/src/reference/forward.rs` (CPU oracle) and `forward_chained.rs`
