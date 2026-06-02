@@ -6,6 +6,7 @@ import { ChatPanel } from "@/components/ChatPanel";
 import type { PipelineProgressState } from "@/components/PipelineProgress";
 import { RestartOverlay } from "@/components/RestartOverlay";
 import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
+import { VoicePanel } from "@/components/VoicePanel";
 import { ConversationList } from "@/components/ConversationList";
 import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
 import { Button } from "@/components/ui/button";
@@ -40,7 +41,7 @@ import {
     isDismissed,
     setDismissedVersion,
 } from "@/lib/version";
-import { Settings, History, MessageSquare, Sparkles } from "lucide-react";
+import { Settings, History, MessageSquare, Sparkles, AudioLines } from "lucide-react";
 
 const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
@@ -181,7 +182,7 @@ export function App() {
 
     // View routing — Chat tab vs Fine-tune tab. Persisted so a reload
     // doesn't bounce the user out of the tab they were in.
-    const [view, setView] = usePersistedState<"chat" | "finetune" | "settings">("rullama:view", "chat");
+    const [view, setView] = usePersistedState<"chat" | "voice" | "finetune" | "settings">("rullama:view", "chat");
     // **D3 — chat-during-training gate.** When a Fine-tune run is
     // active in this (or any other) tab, the Model is owned by the
     // training session and chat-side step RPCs would fail with
@@ -2250,6 +2251,21 @@ export function App() {
                         </button>
                         <button
                             type="button"
+                            onClick={() => setView("voice")}
+                            aria-pressed={view === "voice"}
+                            className={cn(
+                                "flex h-7 items-center gap-1 rounded px-2 text-xs transition-colors",
+                                view === "voice"
+                                    ? "bg-background text-foreground shadow-sm"
+                                    : "text-muted-foreground hover:bg-background/50",
+                            )}
+                            title="Voice"
+                        >
+                            <AudioLines className="size-3.5" />
+                            <span className="hidden sm:inline">Voice</span>
+                        </button>
+                        <button
+                            type="button"
                             onClick={() => setView("finetune")}
                             aria-pressed={view === "finetune"}
                             className={cn(
@@ -2336,6 +2352,8 @@ export function App() {
                             settingsHostEl={fineTuneSettingsEl}
                         />
                     )
+                ) : view === "voice" ? (
+                    <VoicePanel />
                 ) : view === "settings" ? (
                     // Centered max-width wrapper so the form controls
                     // don't stretch across the full main-content width
