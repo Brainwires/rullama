@@ -57,6 +57,21 @@ export const BAKED_IN_MODELS: readonly ModelEntry[] = [
     },
 ];
 
+/**
+ * Kokoro-82M TTS model — a SEPARATE model from the chat catalog above (it is
+ * not a Gemma chat model, so it must NOT appear in the model picker). The Voice
+ * tab loads this on its own handle. f16 GGUF on R2 (~164 MB), same Range +
+ * OPFS-cache loader path as the chat models. digest is the OPFS cache key.
+ */
+export const KOKORO_MODEL = {
+    name:   "kokoro:82m",
+    family: "kokoro",
+    tag:    "82m",
+    size:   163763104,
+    digest: "b17cbd233537648079f9b8008d60e45860375f8f0a4fefac8982e9c48335e55c",
+    url:    `https://${R2_HOST}/kokoro-82m.gguf`,
+} as const;
+
 /** Whether this entry is something we'll actually run. */
 export function isSupported(m: ModelEntry): boolean {
     return m.family === "gemma4";
