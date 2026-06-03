@@ -43,7 +43,7 @@ self.onmessage = async (e: MessageEvent<Req>) => {
                 bytes.set(c, off);
                 off += c.length;
             }
-            clone = StyleTtsClone.load(bytes);
+            clone = await StyleTtsClone.load(bytes); // load is async now (inits the GPU)
             const [gold, silver] = await Promise.all([
                 fetch("/tts/us_gold.json").then((r) => r.arrayBuffer()),
                 fetch("/tts/us_silver.json").then((r) => r.arrayBuffer()),
