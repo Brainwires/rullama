@@ -11,6 +11,64 @@ and may move in any patch release.
 
 ## [Unreleased]
 
+Voice cloning + a real TTS preset catalog. The Voice tab gains a second
+engine — **StyleTTS2-LibriTTS** zero-shot cloning (desktop-only) alongside
+the existing Kokoro preset voices — with GPU voice-creation, GPU
+style-diffusion prosody, and the full English Kokoro voicepack set.
+
+### Public API (semver-covered modules)
+
+No changes to `api`, `error`, `sampling`, `lora`. Everything below is
+internal engine work, the desktop-only cloning surface, or PWA assets.
+
+### Engine (rullama)
+
+- **GPU style encoder** — voice *creation* (reference clip → 256-d style)
+  now runs on the GPU, not just synthesis. New channel-first kernels
+  `conv2d_chf` / `avg_pool2d_half_chf`; bit-exact vs PyTorch (max-abs 5.5e-7).
+- **Style-diffusion prosody (α=0.3/β=0.7)** — restores natural,
+  text-appropriate prosody (the prior α=β=0 path was flat / "accented").
+  StyleTransformer1d denoiser + KDiffusion `denoise_fn` (σ_data=0.2) +
+  ADPM2 sampler + Karras schedule. CPU oracle bit-exact (5e-6); GPU
+  denoiser (f16 matmul + flash attention + AdaLayerNorm + new exact-GELU
+  kernel) is **7–17× faster** than CPU (0.7–1.2 s), corr 0.97 vs PyTorch.
+  Cloned synthesis uses it by default.
+- **Bind-cache leak fixed** — `StyleTtsGpu` now evicts its per-call scratch
+  buffers from the shared bind-group cache on `Drop`. Previously every
+  synth/encode leaked descriptor-table entries, so a long clone session
+  grew unbounded until the GPU exhausted (a tight-loop bench hard-locked a
+  weak integrated GPU after ~3–5 min). Real production fix.
+- Mel frontend (`compute_style` filterbank + window) baked into the GGUF
+  so the Rust encoder reads it directly. New `gpu_yield` dev hook
+  (`ST2_GPU_THROTTLE_MS`, native-only, no-op in prod) lets a weak GPU
+  yield between stages for batch dev/bench runs.
+
+### Cloning surface (desktop-only)
+
+- `StyleTtsClone` wasm-bindgen API: async `load` / `encodeVoice` /
+  `synthesize`, all GPU. Loads off the iPhone text-only path (never on
+  mobile). Model is f32-with-diffusion, **543 MB**, on R2.
+
+### Models / distribution
+
+- **Kokoro: all 28 English voicepacks** (af/am American, bf/bm British,
+  ♀/♂) shipped as Voice-tab presets — the GGUF previously bundled only
+  `af_heart`. New f16 GGUF (170.8 MB) on R2; catalog `digest`/`size` bumped
+  (one-time OPFS re-download). StyleTTS2-LibriTTS cloning GGUF added to the
+  catalog.
+
+### Tooling
+
+- `clone_fidelity_harness` example — A0 calibration that isolates
+  reference-quality from speaker by cloning Kokoro `af_heart`'s own clean
+  output and measuring speaker-similarity. Finding: clean clone 0.96
+  (ceiling 0.97) vs a noisy clip 0.46 (below the 0.70 different-speaker
+  floor) — clone quality is dominated by reference cleanliness, and
+  quantity saturates by ~15 s.
+- `convert-styletts2-gguf.py` (+ diffusion weights, mel bake) and
+  `styletts2_dump_diffusion_fixtures.py`; Kokoro converter now bundles all
+  downloaded voicepacks.
+
 ## [0.4.0] — 2026-06-01
 
 Mac fast path + dev-server overhaul.
