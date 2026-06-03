@@ -52,11 +52,21 @@ self.onmessage = async (e: MessageEvent<Req>) => {
             post({ id, ok: true, sampleRate: clone.sampleRate });
         } else if (type === "encodeVoice") {
             if (!clone) throw new Error("clone engine not loaded");
-            const voice = clone.encodeVoice(e.data.pcm!);
+            // The progress callback fires synchronously mid-computation; postMessage from
+            // within the blocking wasm call still reaches the main thread for a live bar/log.
+            const onProg = (frac: number, stage: string) => {
+                console.log(`[clone] encode ${(frac * 100) | 0}% — ${stage}`);
+                post({ id, progress: frac, stage });
+            };
+            const voice = clone.encodeVoice(e.data.pcm!, onProg);
             post({ id, ok: true, voice }, [voice.buffer]);
         } else if (type === "synthesize") {
             if (!clone) throw new Error("clone engine not loaded");
-            const pcm = clone.synthesize(e.data.text!, e.data.voice!);
+            const onProg = (frac: number, stage: string) => {
+                console.log(`[clone] synth ${(frac * 100) | 0}% — ${stage}`);
+                post({ id, progress: frac, stage });
+            };
+            const pcm = clone.synthesize(e.data.text!, e.data.voice!, onProg);
             post({ id, ok: true, pcm }, [pcm.buffer]);
         }
     } catch (err) {

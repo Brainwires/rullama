@@ -11,6 +11,7 @@ import { decodeToPcm24k, playPcm } from "@/lib/wav";
 
 const MIN_CLIPS = 1;
 const SR = 24000;
+const MAX_REF_SEC = 12; // cap reference audio fed to the encoder (it pools over time)
 
 /** Phonetically varied prompts — good phoneme coverage for a timbre signature. */
 const DEFAULT_SCRIPT = [
@@ -63,6 +64,9 @@ export function VoiceTrainPanel() {
     const [recSecs, setRecSecs] = useState(0);
     const [phase, setPhase] = useState<"idle" | "loading" | "encoding" | "synth" | "done" | "error">("idle");
     const [dlPct, setDlPct] = useState(0);
+    const [procPct, setProcPct] = useState(0);
+    const [procStage, setProcStage] = useState("");
+    const [logLines, setLogLines] = useState<string[]>([]);
     const [err, setErr] = useState<string | null>(null);
     const [testText, setTestText] = useState("This is my cloned voice, generated entirely on my own device.");
 
@@ -164,44 +168,59 @@ export function VoiceTrainPanel() {
     const recorded = clips.filter((c) => c.pcm);
     const totalSecs = recorded.reduce((n, c) => n + c.durationSec, 0);
 
+    // Live stage progress → progress bar + a small running log (deduped by stage).
+    const onProg = useCallback((frac: number, stage: string) => {
+        setProcPct(Math.round(frac * 100));
+        setProcStage(stage);
+        setLogLines((l) => (l.length && l[l.length - 1].endsWith(stage) ? l : [...l, `${(frac * 100) | 0}% · ${stage}`].slice(-8)));
+    }, []);
+
     const createVoice = useCallback(async () => {
         if (recorded.length < MIN_CLIPS || phase === "encoding" || phase === "loading") return;
         setErr(null);
         setPhase("loading");
         setDlPct(0);
+        setProcPct(0);
+        setProcStage("");
+        setLogLines([]);
         try {
-            // Concatenate every recorded clip — the StyleTTS2 style encoder pools over all
-            // frames, so more varied reference audio ⇒ a more robust voice vector.
-            const total = recorded.reduce((n, c) => n + c.pcm!.length, 0);
+            // The style encoder pools over time, so capping the reference to MAX_REF_SEC
+            // bounds CPU cost without hurting timbre — take a per-clip budget for variety.
+            const budget = Math.floor((MAX_REF_SEC * SR) / recorded.length);
+            const parts = recorded.map((c) => c.pcm!.subarray(0, Math.min(c.pcm!.length, budget)));
+            const total = parts.reduce((n, p) => n + p.length, 0);
             const concat = new Float32Array(total);
             let o = 0;
-            for (const c of recorded) {
-                concat.set(c.pcm!, o);
-                o += c.pcm!.length;
+            for (const p of parts) {
+                concat.set(p, o);
+                o += p.length;
             }
             const client = await getSharedClone(styletts2BlobUrl(), (f) => setDlPct(Math.round(f * 100)));
             setPhase("encoding");
-            voiceRef.current = await client.encodeVoice(concat); // zero-shot — no training loop
+            voiceRef.current = await client.encodeVoice(concat, onProg); // zero-shot — no training loop
             setPhase("done");
         } catch (e) {
             setErr(String(e));
             setPhase("error");
         }
-    }, [recorded, phase]);
+    }, [recorded, phase, onProg]);
 
     const testVoice = useCallback(async () => {
         if (!voiceRef.current || phase === "synth") return;
         setErr(null);
+        setProcPct(0);
+        setProcStage("");
+        setLogLines([]);
         setPhase("synth");
         try {
             const client = await getSharedClone(styletts2BlobUrl());
-            playPcm(await client.synthesize(testText, voiceRef.current), client.sampleRate);
+            playPcm(await client.synthesize(testText, voiceRef.current, onProg), client.sampleRate);
         } catch (e) {
             setErr(String(e));
         } finally {
             setPhase("done");
         }
-    }, [testText, phase]);
+    }, [testText, phase, onProg]);
 
     const saveVoice = useCallback(() => {
         if (!voiceRef.current) return;
@@ -352,6 +371,26 @@ export function VoiceTrainPanel() {
             {phase === "loading" && (
                 <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
                     <div className="h-full bg-primary transition-all" style={{ width: `${dlPct}%` }} />
+                </div>
+            )}
+
+            {/* live stage progress + log for encode / synth (CPU is slow — show everything) */}
+            {(phase === "encoding" || phase === "synth" || (logLines.length > 0 && phase === "done")) && (
+                <div className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/20 p-2">
+                    <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                        <span className="truncate">{procStage || (phase === "synth" ? "synthesizing" : "encoding")}…</span>
+                        <span className="tabular-nums">{procPct}%</span>
+                    </div>
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                        <div className="h-full bg-primary transition-all" style={{ width: `${procPct}%` }} />
+                    </div>
+                    {logLines.length > 0 && (
+                        <div className="mt-1 max-h-24 overflow-y-auto font-mono text-[10px] leading-tight text-muted-foreground">
+                            {logLines.map((l, i) => (
+                                <div key={i}>{l}</div>
+                            ))}
+                        </div>
+                    )}
                 </div>
             )}
 

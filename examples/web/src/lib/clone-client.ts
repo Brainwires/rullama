@@ -1,7 +1,9 @@
 /// Promise-based client for the voice-cloning worker (clone-worker.ts → StyleTtsClone).
 /// Zero-shot: encode a reference clip → 256-d voice vector, then synthesize text in it.
 
-type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void };
+export type StageProgress = (fraction: number, stage: string) => void;
+
+type Pending = { resolve: (v: unknown) => void; reject: (e: unknown) => void; onProgress?: StageProgress };
 
 export class CloneClient {
     private worker: Worker;
@@ -13,9 +15,11 @@ export class CloneClient {
     constructor() {
         this.worker = new Worker(new URL("../workers/clone-worker.ts", import.meta.url), { type: "module" });
         this.worker.onmessage = (e: MessageEvent) => {
-            const m = e.data as { id: number; ok?: boolean; error?: string; progress?: number };
+            const m = e.data as { id: number; ok?: boolean; error?: string; progress?: number; stage?: string };
             if (m.progress !== undefined) {
-                this.onProgress?.(m.progress);
+                // per-call stage progress (encode/synth) routes to that call's handler;
+                // load progress (no pending handler) falls back to the client-level one.
+                (this.pending.get(m.id)?.onProgress ?? ((f: number) => this.onProgress?.(f)))(m.progress, m.stage ?? "");
                 return;
             }
             const p = this.pending.get(m.id);
@@ -26,10 +30,10 @@ export class CloneClient {
         };
     }
 
-    private rpc<T>(type: string, args: Record<string, unknown>, transfer?: Transferable[]): Promise<T> {
+    private rpc<T>(type: string, args: Record<string, unknown>, transfer?: Transferable[], onProgress?: StageProgress): Promise<T> {
         const id = this.nextId++;
         return new Promise<T>((resolve, reject) => {
-            this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+            this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, onProgress });
             this.worker.postMessage({ id, type, ...args }, transfer ?? []);
         });
     }
@@ -41,15 +45,15 @@ export class CloneClient {
         this.onProgress = undefined;
     }
 
-    /** Reference clip (24 kHz mono PCM) → 256-d voice vector. */
-    async encodeVoice(pcm24k: Float32Array): Promise<Float32Array> {
-        const r = await this.rpc<{ voice: Float32Array }>("encodeVoice", { pcm: pcm24k });
+    /** Reference clip (24 kHz mono PCM) → 256-d voice vector, with live stage progress. */
+    async encodeVoice(pcm24k: Float32Array, onProgress?: StageProgress): Promise<Float32Array> {
+        const r = await this.rpc<{ voice: Float32Array }>("encodeVoice", { pcm: pcm24k }, undefined, onProgress);
         return r.voice;
     }
 
-    /** Synthesize text in a voice → 24 kHz PCM. */
-    async synthesize(text: string, voice: Float32Array): Promise<Float32Array> {
-        const r = await this.rpc<{ pcm: Float32Array }>("synthesize", { text, voice });
+    /** Synthesize text in a voice → 24 kHz PCM, with live stage progress. */
+    async synthesize(text: string, voice: Float32Array, onProgress?: StageProgress): Promise<Float32Array> {
+        const r = await this.rpc<{ pcm: Float32Array }>("synthesize", { text, voice }, undefined, onProgress);
         return r.pcm;
     }
 
