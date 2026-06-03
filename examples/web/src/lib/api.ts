@@ -72,6 +72,14 @@ export const KOKORO_MODEL = {
     url:    `https://${R2_HOST}/kokoro-82m.gguf`,
 } as const;
 
+/** Where to fetch the Kokoro TTS GGUF from. Honors `?localBlob=PORT` (serves from the
+ *  local devserver's /api/blob/kokoro:82m, bypassing R2) just like the chat models. */
+export function kokoroBlobUrl(): string {
+    const port = localBlobPort();
+    if (port != null) return `http://localhost:${port}/api/blob/${encodeURIComponent("kokoro:82m")}`;
+    return KOKORO_MODEL.url;
+}
+
 /** Whether this entry is something we'll actually run. */
 export function isSupported(m: ModelEntry): boolean {
     return m.family === "gemma4";

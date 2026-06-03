@@ -4,7 +4,7 @@ import { AudioLines, Download, Loader2, Play, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
-import { KOKORO_MODEL } from "@/lib/api";
+import { KOKORO_MODEL, kokoroBlobUrl } from "@/lib/api";
 import { getSharedTts, type TtsClient, type TtsClip } from "@/lib/tts-client";
 import { cn } from "@/lib/utils";
 import { downloadWav, playPcm } from "@/lib/wav";
@@ -30,7 +30,7 @@ export function VoicePanel() {
         setLoad("loading");
         setErr(null);
         try {
-            const c = await getSharedTts(KOKORO_MODEL.url, (f) => setLoadPct(Math.round(f * 100)));
+            const c = await getSharedTts(kokoroBlobUrl(), (f) => setLoadPct(Math.round(f * 100)));
             client.current = c;
             setLoad("ready");
         } catch (e) {

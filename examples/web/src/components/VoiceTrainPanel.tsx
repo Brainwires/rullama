@@ -3,7 +3,7 @@ import { AudioLines, Play, Square, Upload } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { KOKORO_MODEL } from "@/lib/api";
+import { kokoroBlobUrl } from "@/lib/api";
 import { getSharedTts } from "@/lib/tts-client";
 import { decodeToPcm24k, playPcm } from "@/lib/wav";
 
@@ -43,7 +43,7 @@ export function VoiceTrainPanel() {
         setStep(0);
         stopRef.current = false;
         try {
-            const c = await getSharedTts(KOKORO_MODEL.url);
+            const c = await getSharedTts(kokoroBlobUrl());
             await c.trainBegin(targetPcm, refText.trim() || DEFAULT_REF);
             setPhase("training");
             for (let i = 0; i < MAX_STEPS; i++) {
@@ -63,7 +63,7 @@ export function VoiceTrainPanel() {
     const testVoice = useCallback(async () => {
         if (!voiceRef.current) return;
         try {
-            const c = await getSharedTts(KOKORO_MODEL.url);
+            const c = await getSharedTts(kokoroBlobUrl());
             const pcm = await c.synthesizeWithVoice(testText, voiceRef.current);
             playPcm(pcm, c.sampleRate);
         } catch (e) {

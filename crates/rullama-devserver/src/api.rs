@@ -309,6 +309,14 @@ fn parse_range(headers: &HeaderMap, size: u64) -> Option<(u64, u64, bool)> {
 }
 
 async fn find_blob_path(state: &AppState, name_tag: &str) -> Option<PathBuf> {
+    // Kokoro TTS GGUF is not an Ollama model — serve the local file so the PWA can
+    // pull it via ?localBlob (bypassing the R2 CDN). Override path via KOKORO_GGUF.
+    if name_tag == "kokoro:82m" {
+        let p = std::env::var("KOKORO_GGUF").map(PathBuf::from).unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/kokoro/kokoro-82m-f16.gguf")
+        });
+        return p.is_file().then_some(p);
+    }
     let models = discover_models(state).await;
     let m = models.into_iter().find(|m| m.name == name_tag)?;
     Some(state.paths.blobs_dir().join(format!("sha256-{}", m.digest)))

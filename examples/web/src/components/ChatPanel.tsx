@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils";
 import { Mic, Send, Square, Paperclip, X, Volume2 } from "lucide-react";
 import { getSharedTts } from "@/lib/tts-client";
 import { playPcm } from "@/lib/wav";
-import { KOKORO_MODEL } from "@/lib/api";
+import { kokoroBlobUrl } from "@/lib/api";
 import { MicButton } from "@/components/MicButton";
 import { PipelineProgress, type PipelineProgressState } from "@/components/PipelineProgress";
 import type { VoiceOptions } from "@/lib/voice";
@@ -103,7 +103,7 @@ function SpeakButton({ text }: { text: string }) {
         if (busy || !text.trim()) return;
         setBusy(true);
         try {
-            const c = await getSharedTts(KOKORO_MODEL.url);
+            const c = await getSharedTts(kokoroBlobUrl());
             const pcm = await c.synthesize(text, "af_heart");
             playPcm(pcm, c.sampleRate);
         } catch {
