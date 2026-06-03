@@ -80,6 +80,24 @@ export function kokoroBlobUrl(): string {
     return KOKORO_MODEL.url;
 }
 
+/** StyleTTS2-LibriTTS — the zero-shot VOICE-CLONING engine (desktop only). Shipped f32
+ *  (442 MB) because f16 degrades this deep model. Loaded by the Voice training tab. */
+export const STYLETTS2_MODEL = {
+    name:   "styletts2:libritts",
+    family: "styletts2",
+    tag:    "libritts",
+    size:   442128512,
+    digest: "8b8cedc6b2c66a1bcb2ba8dafaa3473cafd355c2b819a903eb09b0d17397959f",
+    url:    `https://${R2_HOST}/styletts2-libritts.gguf`,
+} as const;
+
+/** Where to fetch the StyleTTS2 cloning GGUF from. Honors `?localBlob=PORT`. */
+export function styletts2BlobUrl(): string {
+    const port = localBlobPort();
+    if (port != null) return `http://localhost:${port}/api/blob/${encodeURIComponent("styletts2:libritts")}`;
+    return STYLETTS2_MODEL.url;
+}
+
 /** Whether this entry is something we'll actually run. */
 export function isSupported(m: ModelEntry): boolean {
     return m.family === "gemma4";

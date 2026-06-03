@@ -317,6 +317,13 @@ async fn find_blob_path(state: &AppState, name_tag: &str) -> Option<PathBuf> {
         });
         return p.is_file().then_some(p);
     }
+    // StyleTTS2-LibriTTS voice-cloning GGUF (f32). Override path via STYLETTS2_GGUF.
+    if name_tag == "styletts2:libritts" {
+        let p = std::env::var("STYLETTS2_GGUF").map(PathBuf::from).unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/styletts2/styletts2-libritts-f32.gguf")
+        });
+        return p.is_file().then_some(p);
+    }
     let models = discover_models(state).await;
     let m = models.into_iter().find(|m| m.name == name_tag)?;
     Some(state.paths.blobs_dir().join(format!("sha256-{}", m.digest)))

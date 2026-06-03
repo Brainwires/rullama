@@ -3,13 +3,12 @@ import { AudioLines, Loader2, Mic, Play, Plus, Square, Trash2, Upload } from "lu
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { kokoroBlobUrl } from "@/lib/api";
-import { getSharedTts } from "@/lib/tts-client";
+import { styletts2BlobUrl } from "@/lib/api";
+import { getSharedClone } from "@/lib/clone-client";
 import { cn } from "@/lib/utils";
 import { decodeToPcm24k, playPcm } from "@/lib/wav";
 
-const MAX_STEPS = 60;
-const MIN_CLIPS = 2;
+const MIN_CLIPS = 1;
 const SR = 24000;
 
 /** Phonetically varied prompts — good phoneme coverage for a timbre signature. */
@@ -62,17 +61,15 @@ export function VoiceTrainPanel() {
     );
     const [recordingId, setRecordingId] = useState<string | null>(null);
     const [recSecs, setRecSecs] = useState(0);
-    const [phase, setPhase] = useState<"idle" | "loading" | "training" | "done" | "error">("idle");
-    const [step, setStep] = useState(0);
-    const [loss, setLoss] = useState<number[]>([]);
+    const [phase, setPhase] = useState<"idle" | "loading" | "encoding" | "synth" | "done" | "error">("idle");
+    const [dlPct, setDlPct] = useState(0);
     const [err, setErr] = useState<string | null>(null);
-    const [testText, setTestText] = useState("This is my trained voice.");
+    const [testText, setTestText] = useState("This is my cloned voice, generated entirely on my own device.");
 
     const mrRef = useRef<MediaRecorder | null>(null);
     const chunksRef = useRef<Blob[]>([]);
     const streamRef = useRef<MediaStream | null>(null);
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-    const stopRef = useRef(false);
     const voiceRef = useRef<Float32Array | null>(null);
 
     // Cleanup any live mic stream / timer on unmount.
@@ -98,7 +95,7 @@ export function VoiceTrainPanel() {
 
     const startRecording = useCallback(
         async (id: string) => {
-            if (recordingId || phase === "training") return;
+            if (recordingId || phase === "loading" || phase === "encoding") return;
             setErr(null);
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -145,16 +142,14 @@ export function VoiceTrainPanel() {
     const recorded = clips.filter((c) => c.pcm);
     const totalSecs = recorded.reduce((n, c) => n + c.durationSec, 0);
 
-    const train = useCallback(async () => {
-        if (recorded.length < MIN_CLIPS || phase === "training") return;
+    const createVoice = useCallback(async () => {
+        if (recorded.length < MIN_CLIPS || phase === "encoding" || phase === "loading") return;
         setErr(null);
         setPhase("loading");
-        setLoss([]);
-        setStep(0);
-        stopRef.current = false;
+        setDlPct(0);
         try {
-            // Concatenate every recorded clip — voice_signature() is mean-log-mel over all
-            // frames, so this is the aggregate timbre across the whole session.
+            // Concatenate every recorded clip — the StyleTTS2 style encoder pools over all
+            // frames, so more varied reference audio ⇒ a more robust voice vector.
             const total = recorded.reduce((n, c) => n + c.pcm!.length, 0);
             const concat = new Float32Array(total);
             let o = 0;
@@ -162,17 +157,9 @@ export function VoiceTrainPanel() {
                 concat.set(c.pcm!, o);
                 o += c.pcm!.length;
             }
-            const refText = recorded[0].text.trim() || DEFAULT_SCRIPT[0];
-            const client = await getSharedTts(kokoroBlobUrl());
-            await client.trainBegin(concat, refText);
-            setPhase("training");
-            for (let i = 0; i < MAX_STEPS; i++) {
-                if (stopRef.current) break;
-                const l = await client.trainStep();
-                setStep(i + 1);
-                setLoss((cur) => [...cur, l]);
-            }
-            voiceRef.current = await client.trainedVoice();
+            const client = await getSharedClone(styletts2BlobUrl(), (f) => setDlPct(Math.round(f * 100)));
+            setPhase("encoding");
+            voiceRef.current = await client.encodeVoice(concat); // zero-shot — no training loop
             setPhase("done");
         } catch (e) {
             setErr(String(e));
@@ -181,14 +168,18 @@ export function VoiceTrainPanel() {
     }, [recorded, phase]);
 
     const testVoice = useCallback(async () => {
-        if (!voiceRef.current) return;
+        if (!voiceRef.current || phase === "synth") return;
+        setErr(null);
+        setPhase("synth");
         try {
-            const client = await getSharedTts(kokoroBlobUrl());
-            playPcm(await client.synthesizeWithVoice(testText, voiceRef.current), client.sampleRate);
+            const client = await getSharedClone(styletts2BlobUrl());
+            playPcm(await client.synthesize(testText, voiceRef.current), client.sampleRate);
         } catch (e) {
             setErr(String(e));
+        } finally {
+            setPhase("done");
         }
-    }, [testText]);
+    }, [testText, phase]);
 
     const saveVoice = useCallback(() => {
         if (!voiceRef.current) return;
@@ -199,26 +190,28 @@ export function VoiceTrainPanel() {
         const url = URL.createObjectURL(new Blob([ab], { type: "application/octet-stream" }));
         const a = document.createElement("a");
         a.href = url;
-        a.download = `kokoro-voice-${Date.now()}.f32`;
+        a.download = `my-voice-${Date.now()}.f32`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     }, []);
 
-    const busy = phase === "training" || phase === "loading";
-    const first = loss[0];
-    const last = loss[loss.length - 1];
-    const reduction = first && last ? Math.round((1 - last / first) * 100) : 0;
+    const busy = phase === "encoding" || phase === "loading";
 
     return (
         <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-4">
             <div className="flex items-center gap-2 text-sm font-medium">
-                <AudioLines className="size-4" /> Train your voice
+                <AudioLines className="size-4" /> Clone your voice
             </div>
             <p className="text-[11px] text-muted-foreground">
-                Read each line aloud into your mic. The clips below are your session — re-record, play, or
-                delete any of them, add your own prompts, or upload existing audio. Record at least{" "}
-                {MIN_CLIPS} clips, then train to clone your timbre into a Kokoro voicepack. More varied
-                clips ⇒ a closer match. (Timbre clone, not studio quality.)
+                Read each line aloud into your mic. The clips below are your session — re-record, play,
+                delete, add prompts, or upload audio. Record at least {MIN_CLIPS}, then create your voice:
+                StyleTTS2 encodes your clips into a voice you can speak any text in. More varied clips ⇒ a
+                closer match. Everything runs on your device — desktop only.
+            </p>
+            {/* Consent / disclosure (required by the StyleTTS2-LibriTTS weight license). */}
+            <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300">
+                Only clone a voice you have permission to use, and disclose that audio is AI-synthesized
+                when you share it.
             </p>
 
             {/* Progress */}
@@ -316,51 +309,38 @@ export function VoiceTrainPanel() {
                 </label>
             </div>
 
-            {/* Train */}
+            {/* Create voice */}
             <div className="mt-1 flex items-center gap-2 border-t border-border pt-3">
-                {busy ? (
-                    <Button size="sm" variant="destructive" onClick={() => (stopRef.current = true)}>
-                        <Square className="size-3.5" /> Stop training
-                    </Button>
-                ) : (
-                    <Button size="sm" onClick={train} disabled={recorded.length < MIN_CLIPS}>
-                        {phase === "done" ? "Re-train voice" : "Train voice"}
-                    </Button>
-                )}
+                <Button size="sm" onClick={createVoice} disabled={recorded.length < MIN_CLIPS || busy}>
+                    {phase === "done" ? "Re-create voice" : "Create my voice"}
+                </Button>
                 {recorded.length < MIN_CLIPS && !busy && (
-                    <span className="text-[11px] text-muted-foreground">record at least {MIN_CLIPS} clips</span>
+                    <span className="text-[11px] text-muted-foreground">record at least {MIN_CLIPS} clip</span>
                 )}
                 {busy && (
                     <span className="flex items-center gap-1 text-xs text-muted-foreground">
                         <Loader2 className="size-3 animate-spin" />
-                        {phase === "loading" ? "loading model…" : `step ${step}/${MAX_STEPS}`}
-                        {last != null && ` · loss ${last.toExponential(2)}`}
+                        {phase === "loading" ? `downloading cloning model… ${dlPct}%` : "encoding your voice…"}
                     </span>
                 )}
             </div>
-
-            {loss.length > 0 && (
-                <div className="rounded-md border border-border bg-muted/20 p-2 text-xs">
-                    loss {first?.toExponential(2)} → {last?.toExponential(2)}{" "}
-                    <span className={reduction > 0 ? "text-emerald-500" : "text-muted-foreground"}>({reduction}% reduction)</span>
-                    <div className="mt-1 flex h-8 items-end gap-px">
-                        {loss.map((l, i) => (
-                            <div key={i} className="flex-1 bg-primary/60" style={{ height: `${first ? Math.max(2, (l / first) * 100) : 2}%` }} />
-                        ))}
-                    </div>
+            {phase === "loading" && (
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                    <div className="h-full bg-primary transition-all" style={{ width: `${dlPct}%` }} />
                 </div>
             )}
 
-            {phase === "done" && voiceRef.current && (
+            {phase !== "idle" && phase !== "loading" && phase !== "encoding" && voiceRef.current && (
                 <div className="flex flex-col gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3">
-                    <div className="text-xs font-medium">Your trained voice is ready</div>
+                    <div className="text-xs font-medium">Your cloned voice is ready — type anything and hear it</div>
                     <Input value={testText} onChange={(e) => setTestText(e.target.value)} className="text-xs" />
                     <div className="flex gap-2">
-                        <Button size="sm" variant="outline" onClick={testVoice}>
-                            <Play className="size-3.5" /> Test
+                        <Button size="sm" variant="outline" onClick={testVoice} disabled={phase === "synth"}>
+                            {phase === "synth" ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />}
+                            {phase === "synth" ? "synthesizing…" : "Speak it"}
                         </Button>
                         <Button size="sm" variant="outline" onClick={saveVoice}>
-                            Save voicepack (.f32)
+                            Save voice (.f32)
                         </Button>
                     </div>
                 </div>
