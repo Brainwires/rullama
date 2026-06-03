@@ -185,6 +185,17 @@ export function App() {
     // doesn't bounce the user out of the tab they were in.
     const [view, setView] = usePersistedState<"chat" | "voice" | "finetune" | "settings">("rullama:view", "chat");
     const [ftSub, setFtSub] = usePersistedState<"inference" | "voice">("rullama:ft:sub", "inference");
+    // Voice training loads Kokoro itself — it does NOT need the Gemma chat model.
+    // So when no chat model is loaded, land Fine-tune on "Voice training" instead of
+    // the inference panel's "load a model first" dead-end. Deliberately keyed only on
+    // (view, modelStatus) — NOT ftSub — so an explicit click on "Inference fine-tuning"
+    // still sticks (the redirect only fires on entry / model-state change).
+    useEffect(() => {
+        if (view === "finetune" && modelStatus !== "ready" && ftSub === "inference") {
+            setFtSub("voice");
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [view, modelStatus]);
     // **D3 — chat-during-training gate.** When a Fine-tune run is
     // active in this (or any other) tab, the Model is owned by the
     // training session and chat-side step RPCs would fail with
