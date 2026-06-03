@@ -1,60 +1,87 @@
-import { useCallback, useRef, useState } from "react";
-import { AudioLines, Download, Loader2, Play, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AudioLines, Download, Loader2, Play, Trash2, Upload } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
-import { KOKORO_MODEL, kokoroBlobUrl } from "@/lib/api";
+import { kokoroBlobUrl, styletts2BlobUrl } from "@/lib/api";
+import { getSharedClone } from "@/lib/clone-client";
 import { getSharedTts, type TtsClient, type TtsClip } from "@/lib/tts-client";
 import { cn } from "@/lib/utils";
+import { addVoice, importVoiceFile, listVoices, onVoicesChanged, removeVoice, voiceVec, type SavedVoice } from "@/lib/voice-library";
 import { downloadWav, playPcm } from "@/lib/wav";
 
 // Only af_heart is bundled in the current Kokoro GGUF; add more voicepacks to grow this.
-const VOICES = ["af_heart"];
-
-type LoadState = "idle" | "loading" | "ready" | "error";
+const PRESETS = ["af_heart"];
 
 export function VoicePanel() {
-    const client = useRef<TtsClient | null>(null);
-    const [load, setLoad] = useState<LoadState>("idle");
-    const [loadPct, setLoadPct] = useState(0);
+    const tts = useRef<TtsClient | null>(null);
     const [err, setErr] = useState<string | null>(null);
     const [text, setText] = useState("Hello, this is text to speech running entirely in your browser.");
-    const [voice, setVoice] = useState(VOICES[0]);
+    const [sel, setSel] = useState("k:af_heart"); // "k:<preset>" (Kokoro) or "c:<id>" (cloned)
+    const [voices, setVoices] = useState<SavedVoice[]>(() => listVoices());
     const [busy, setBusy] = useState(false);
+    const [dlPct, setDlPct] = useState(0);
+    const [procPct, setProcPct] = useState(0);
+    const [procStage, setProcStage] = useState("");
     const [clips, setClips] = useState<TtsClip[]>([]);
     const [active, setActive] = useState<number>(-1);
 
-    const ensureLoaded = useCallback(async () => {
-        if (client.current) return;
-        setLoad("loading");
-        setErr(null);
-        try {
-            const c = await getSharedTts(kokoroBlobUrl(), (f) => setLoadPct(Math.round(f * 100)));
-            client.current = c;
-            setLoad("ready");
-        } catch (e) {
-            setErr(String(e));
-            setLoad("error");
-        }
-    }, []);
+    useEffect(() => onVoicesChanged(() => setVoices(listVoices())), []);
+
+    const isClone = sel.startsWith("c:");
+    const cloneVoice = isClone ? voices.find((v) => v.id === sel.slice(2)) : undefined;
 
     const generate = useCallback(async () => {
-        if (!client.current || busy || !text.trim()) return;
+        if (busy || !text.trim()) return;
         setBusy(true);
         setErr(null);
+        setDlPct(0);
+        setProcPct(0);
+        setProcStage("");
         try {
-            const pcm = await client.current.synthesize(text.trim(), voice);
-            const clip: TtsClip = { pcm, sampleRate: client.current.sampleRate, text: text.trim(), voice, ts: Date.now() };
+            let pcm: Float32Array;
+            let sr: number;
+            let label: string;
+            if (isClone) {
+                if (!cloneVoice) throw new Error("voice not found");
+                const cc = await getSharedClone(styletts2BlobUrl(), (f) => setDlPct(Math.round(f * 100)));
+                pcm = await cc.synthesize(text.trim(), voiceVec(cloneVoice), (f, s) => {
+                    setProcPct(Math.round(f * 100));
+                    setProcStage(s);
+                });
+                sr = cc.sampleRate;
+                label = cloneVoice.name;
+            } else {
+                if (!tts.current) tts.current = await getSharedTts(kokoroBlobUrl(), (f) => setDlPct(Math.round(f * 100)));
+                const preset = sel.slice(2);
+                pcm = await tts.current.synthesize(text.trim(), preset);
+                sr = tts.current.sampleRate;
+                label = preset;
+            }
+            const clip: TtsClip = { pcm, sampleRate: sr, text: text.trim(), voice: label, ts: Date.now() };
             setClips((cs) => [clip, ...cs]);
             setActive(0);
-            playPcm(pcm, clip.sampleRate);
+            playPcm(pcm, sr);
         } catch (e) {
             setErr(String(e));
         } finally {
             setBusy(false);
         }
-    }, [busy, text, voice]);
+    }, [busy, text, isClone, cloneVoice, sel]);
+
+    const onImport = useCallback(async (f: File | undefined) => {
+        if (!f) return;
+        setErr(null);
+        try {
+            const vec = await importVoiceFile(f);
+            const name = prompt("Name this imported voice:", f.name.replace(/\.[^.]+$/, "")) ?? f.name;
+            const v = addVoice(name, vec);
+            setSel(`c:${v.id}`);
+        } catch (e) {
+            setErr(String(e));
+        }
+    }, []);
 
     return (
         <div className="flex h-full min-h-0">
@@ -97,7 +124,7 @@ export function VoicePanel() {
             {/* main */}
             <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
                 <div className="flex items-center gap-2 text-sm font-medium">
-                    <AudioLines className="size-4" /> Voice — Kokoro TTS
+                    <AudioLines className="size-4" /> Voice
                 </div>
 
                 <Textarea
@@ -109,22 +136,36 @@ export function VoicePanel() {
 
                 <div className="flex flex-wrap items-center gap-2">
                     <select
-                        value={voice}
-                        onChange={(e) => setVoice(e.target.value)}
+                        value={sel}
+                        onChange={(e) => setSel(e.target.value)}
                         className="h-8 rounded-md border border-border bg-background px-2 text-xs"
                     >
-                        {VOICES.map((v) => (
-                            <option key={v} value={v}>{v}</option>
-                        ))}
+                        <optgroup label="Preset (Kokoro)">
+                            {PRESETS.map((v) => (
+                                <option key={v} value={`k:${v}`}>{v}</option>
+                            ))}
+                        </optgroup>
+                        {voices.length > 0 && (
+                            <optgroup label="My cloned voices">
+                                {voices.map((v) => (
+                                    <option key={v.id} value={`c:${v.id}`}>{v.name}</option>
+                                ))}
+                            </optgroup>
+                        )}
                     </select>
 
-                    {load !== "ready" ? (
-                        <Button size="sm" onClick={ensureLoaded} disabled={load === "loading"}>
-                            {load === "loading" ? <><Loader2 className="size-3.5 animate-spin" /> Loading… {loadPct}%</> : "Load voice model"}
-                        </Button>
-                    ) : (
-                        <Button size="sm" onClick={generate} disabled={busy || !text.trim()}>
-                            {busy ? <><Loader2 className="size-3.5 animate-spin" /> Generating…</> : "Generate speech"}
+                    <Button size="sm" onClick={generate} disabled={busy || !text.trim()}>
+                        {busy ? <><Loader2 className="size-3.5 animate-spin" /> {dlPct > 0 && dlPct < 100 ? `Loading… ${dlPct}%` : "Generating…"}</> : "Generate speech"}
+                    </Button>
+
+                    <label className={cn("inline-flex h-8 cursor-pointer items-center gap-1 rounded-md border border-border px-2 text-xs hover:bg-muted/50", busy && "pointer-events-none opacity-50")} title="Import a .f32 voice exported from Voice training">
+                        <Upload className="size-3.5" /> Import
+                        <input type="file" accept=".f32,application/octet-stream" className="hidden" disabled={busy} onChange={(e) => onImport(e.target.files?.[0])} />
+                    </label>
+
+                    {isClone && cloneVoice && (
+                        <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-destructive" title="Delete this cloned voice" onClick={() => { removeVoice(cloneVoice.id); setSel("k:af_heart"); }}>
+                            <Trash2 className="size-3.5" />
                         </Button>
                     )}
 
@@ -140,10 +181,18 @@ export function VoicePanel() {
                     )}
                 </div>
 
-                {load === "loading" && <Progress value={loadPct} className="h-1" />}
+                {busy && dlPct > 0 && dlPct < 100 && <Progress value={dlPct} className="h-1" />}
+                {busy && isClone && procPct > 0 && (
+                    <div className="flex items-center justify-between rounded-md border border-border bg-muted/20 px-2 py-1.5 text-[11px] text-muted-foreground">
+                        <span className="truncate">{procStage || "synthesizing"}…</span>
+                        <span className="tabular-nums">{procPct}%</span>
+                    </div>
+                )}
                 {err && <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">{err}</div>}
                 <p className="text-[11px] text-muted-foreground">
-                    First load downloads the {Math.round(KOKORO_MODEL.size / 1e6)} MB voice model. Synthesis runs on your GPU via WebGPU.
+                    {isClone
+                        ? "Cloned voices run the StyleTTS2 engine on CPU (desktop) — first use downloads a 442 MB model; synthesis takes a few seconds."
+                        : "Preset voices run Kokoro on your GPU via WebGPU. Clone your own voice in Fine-tune → Voice training."}
                 </p>
             </div>
         </div>

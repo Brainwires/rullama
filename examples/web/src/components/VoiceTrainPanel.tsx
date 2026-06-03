@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AudioLines, Loader2, Mic, Play, Plus, RotateCcw, Square, Trash2, Upload } from "lucide-react";
+import { AudioLines, Loader2, Mic, Play, Plus, RotateCcw, Save, Square, Trash2, Upload } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { styletts2BlobUrl } from "@/lib/api";
 import { getSharedClone } from "@/lib/clone-client";
 import { cn } from "@/lib/utils";
+import { addVoice } from "@/lib/voice-library";
 import { clearSession, loadSession, saveSession } from "@/lib/voice-session";
 import { decodeToPcm24k, playPcm } from "@/lib/wav";
 
@@ -69,6 +70,8 @@ export function VoiceTrainPanel() {
     const [logLines, setLogLines] = useState<string[]>([]);
     const [err, setErr] = useState<string | null>(null);
     const [testText, setTestText] = useState("This is my cloned voice, generated entirely on my own device.");
+    const [voiceName, setVoiceName] = useState("My voice");
+    const [savedMsg, setSavedMsg] = useState<string | null>(null);
 
     const mrRef = useRef<MediaRecorder | null>(null);
     const chunksRef = useRef<Blob[]>([]);
@@ -403,10 +406,25 @@ export function VoiceTrainPanel() {
                             {phase === "synth" ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />}
                             {phase === "synth" ? "synthesizing…" : "Speak it"}
                         </Button>
-                        <Button size="sm" variant="outline" onClick={saveVoice}>
-                            Save voice (.f32)
+                        <Button size="sm" variant="outline" onClick={saveVoice} title="Download a portable .f32 file">
+                            Export (.f32)
                         </Button>
                     </div>
+                    {/* Save into the in-app library so it appears in the Voice tab. */}
+                    <div className="mt-1 flex items-center gap-2 border-t border-emerald-500/30 pt-2">
+                        <Input value={voiceName} onChange={(e) => setVoiceName(e.target.value)} placeholder="Name this voice" className="h-7 flex-1 text-xs" />
+                        <Button
+                            size="sm"
+                            onClick={() => {
+                                if (!voiceRef.current) return;
+                                const v = addVoice(voiceName, voiceRef.current);
+                                setSavedMsg(`Saved “${v.name}” — pick it in the Voice tab`);
+                            }}
+                        >
+                            <Save className="size-3.5" /> Save to my voices
+                        </Button>
+                    </div>
+                    {savedMsg && <div className="text-[11px] text-emerald-600 dark:text-emerald-400">{savedMsg}</div>}
                 </div>
             )}
 
