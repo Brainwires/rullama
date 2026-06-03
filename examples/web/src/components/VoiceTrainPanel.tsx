@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AudioLines, Loader2, Mic, Play, Plus, Square, Trash2, Upload } from "lucide-react";
+import { AudioLines, Loader2, Mic, Play, Plus, RotateCcw, Square, Trash2, Upload } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { styletts2BlobUrl } from "@/lib/api";
 import { getSharedClone } from "@/lib/clone-client";
 import { cn } from "@/lib/utils";
+import { clearSession, loadSession, saveSession } from "@/lib/voice-session";
 import { decodeToPcm24k, playPcm } from "@/lib/wav";
 
 const MIN_CLIPS = 1;
@@ -30,8 +31,7 @@ interface SessionClip {
     durationSec: number;
 }
 
-let _cid = 0;
-const newId = () => `c${++_cid}`;
+const newId = () => crypto.randomUUID();
 
 /** Trim leading/trailing dead air so silence doesn't drag the mean-mel timbre signature. */
 function trimSilence(pcm: Float32Array, thresh = 0.012): Float32Array {
@@ -78,6 +78,28 @@ export function VoiceTrainPanel() {
             if (timerRef.current) clearInterval(timerRef.current);
             streamRef.current?.getTracks().forEach((t) => t.stop());
         };
+    }, []);
+
+    // Restore a saved session on mount, then persist (debounced) on every change — so
+    // recorded clips survive a reload while testing.
+    const hydratedRef = useRef(false);
+    useEffect(() => {
+        loadSession().then((s) => {
+            if (s && s.length) setClips(s);
+            hydratedRef.current = true;
+        });
+    }, []);
+    useEffect(() => {
+        if (!hydratedRef.current) return;
+        const h = setTimeout(() => void saveSession(clips), 400);
+        return () => clearTimeout(h);
+    }, [clips]);
+
+    const resetSession = useCallback(() => {
+        void clearSession();
+        voiceRef.current = null;
+        setPhase("idle");
+        setClips(DEFAULT_SCRIPT.map((text) => ({ id: newId(), text, pcm: null, durationSec: 0 })));
     }, []);
 
     const setClipPcm = useCallback((id: string, pcm: Float32Array) => {
@@ -307,6 +329,9 @@ export function VoiceTrainPanel() {
                     <Upload className="size-3.5" /> Upload clip
                     <input type="file" accept="audio/*" className="hidden" disabled={busy} onChange={(e) => onUpload(e.target.files?.[0])} />
                 </label>
+                <Button size="sm" variant="ghost" className="ml-auto h-7 text-muted-foreground" disabled={busy} onClick={resetSession} title="Clear the saved session and start over">
+                    <RotateCcw className="size-3.5" /> Reset
+                </Button>
             </div>
 
             {/* Create voice */}
