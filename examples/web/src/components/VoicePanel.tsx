@@ -191,7 +191,7 @@ export function VoicePanel() {
                 {err && <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">{err}</div>}
                 <p className="text-[11px] text-muted-foreground">
                     {isClone
-                        ? "Cloned voices run the StyleTTS2 engine on CPU (desktop) — first use downloads a 442 MB model; synthesis takes a few seconds."
+                        ? "Cloned voices run the StyleTTS2 engine on your GPU (desktop) — first use downloads a 442 MB model (then OPFS-cached)."
                         : "Preset voices run Kokoro on your GPU via WebGPU. Clone your own voice in Fine-tune → Voice training."}
                 </p>
             </div>

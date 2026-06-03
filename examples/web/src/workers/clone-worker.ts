@@ -97,7 +97,7 @@ self.onmessage = async (e: MessageEvent<Req>) => {
                 console.log(`[clone] encode ${(frac * 100) | 0}% — ${stage}`);
                 post({ id, progress: frac, stage });
             };
-            const voice = clone.encodeVoice(e.data.pcm!, onProg);
+            const voice = await clone.encodeVoice(e.data.pcm!, onProg);
             post({ id, ok: true, voice }, [voice.buffer]);
         } else if (type === "synthesize") {
             if (!clone) throw new Error("clone engine not loaded");
