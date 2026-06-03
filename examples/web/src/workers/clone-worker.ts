@@ -66,7 +66,7 @@ self.onmessage = async (e: MessageEvent<Req>) => {
                 console.log(`[clone] synth ${(frac * 100) | 0}% — ${stage}`);
                 post({ id, progress: frac, stage });
             };
-            const pcm = clone.synthesize(e.data.text!, e.data.voice!, onProg);
+            const pcm = await clone.synthesize(e.data.text!, e.data.voice!, onProg);
             post({ id, ok: true, pcm }, [pcm.buffer]);
         }
     } catch (err) {
