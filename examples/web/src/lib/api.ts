@@ -67,8 +67,8 @@ export const KOKORO_MODEL = {
     name:   "kokoro:82m",
     family: "kokoro",
     tag:    "82m",
-    size:   163763104,
-    digest: "b17cbd233537648079f9b8008d60e45860375f8f0a4fefac8982e9c48335e55c",
+    size:   170815072,
+    digest: "69587a29cde2c1880aa517026a390afda40eabb874bba4b8dd4c31b9f313c496",
     url:    `https://${R2_HOST}/kokoro-82m.gguf`,
 } as const;
 

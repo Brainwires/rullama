@@ -11,8 +11,21 @@ import { cn } from "@/lib/utils";
 import { addVoice, importVoiceFile, listVoices, onVoicesChanged, removeVoice, voiceVec, type SavedVoice } from "@/lib/voice-library";
 import { downloadWav, playPcm } from "@/lib/wav";
 
-// Only af_heart is bundled in the current Kokoro GGUF; add more voicepacks to grow this.
-const PRESETS = ["af_heart"];
+// The 28 English Kokoro voicepacks baked into the GGUF (af/am = American F/M, bf/bm = British F/M).
+const PRESETS = [
+    "af_heart", "af_bella", "af_nicole", "af_aoede", "af_kore", "af_sarah", "af_sky", "af_nova",
+    "af_alloy", "af_jessica", "af_river",
+    "am_michael", "am_fenrir", "am_puck", "am_adam", "am_echo", "am_eric", "am_liam", "am_onyx", "am_santa",
+    "bf_emma", "bf_isabella", "bf_alice", "bf_lily",
+    "bm_george", "bm_lewis", "bm_daniel", "bm_fable",
+];
+// "af_heart" → "Heart · US ♀". af/am = American, bf/bm = British; f = ♀, m = ♂.
+function presetLabel(id: string): string {
+    const name = id.slice(3).replace(/^\w/, (c) => c.toUpperCase());
+    const region = id[0] === "b" ? "UK" : "US";
+    const sex = id[1] === "f" ? "♀" : "♂";
+    return `${name} · ${region} ${sex}`;
+}
 
 export function VoicePanel() {
     const tts = useRef<TtsClient | null>(null);
@@ -142,7 +155,7 @@ export function VoicePanel() {
                     >
                         <optgroup label="Preset (Kokoro)">
                             {PRESETS.map((v) => (
-                                <option key={v} value={`k:${v}`}>{v}</option>
+                                <option key={v} value={`k:${v}`}>{presetLabel(v)}</option>
                             ))}
                         </optgroup>
                         {voices.length > 0 && (
