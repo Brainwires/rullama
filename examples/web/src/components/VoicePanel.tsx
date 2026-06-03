@@ -4,7 +4,7 @@ import { AudioLines, Download, Loader2, Play, Trash2, Upload } from "lucide-reac
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
-import { kokoroBlobUrl, styletts2BlobUrl } from "@/lib/api";
+import { kokoroBlobUrl, STYLETTS2_MODEL, styletts2BlobUrl } from "@/lib/api";
 import { getSharedClone } from "@/lib/clone-client";
 import { getSharedTts, type TtsClient, type TtsClip } from "@/lib/tts-client";
 import { cn } from "@/lib/utils";
@@ -45,7 +45,7 @@ export function VoicePanel() {
             let label: string;
             if (isClone) {
                 if (!cloneVoice) throw new Error("voice not found");
-                const cc = await getSharedClone(styletts2BlobUrl(), (f) => setDlPct(Math.round(f * 100)));
+                const cc = await getSharedClone(styletts2BlobUrl(), STYLETTS2_MODEL.size, (f) => setDlPct(Math.round(f * 100)));
                 pcm = await cc.synthesize(text.trim(), voiceVec(cloneVoice), (f, s) => {
                     setProcPct(Math.round(f * 100));
                     setProcStage(s);

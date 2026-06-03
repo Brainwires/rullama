@@ -38,9 +38,9 @@ export class CloneClient {
         });
     }
 
-    async load(url: string, onProgress?: (frac: number) => void): Promise<void> {
+    async load(url: string, size: number, onProgress?: (frac: number) => void): Promise<void> {
         this.onProgress = onProgress;
-        const r = await this.rpc<{ sampleRate: number }>("load", { url });
+        const r = await this.rpc<{ sampleRate: number }>("load", { url, size });
         this.sampleRate = r.sampleRate;
         this.onProgress = undefined;
     }
@@ -67,12 +67,12 @@ let shared: CloneClient | null = null;
 let loadPromise: Promise<CloneClient> | null = null;
 let loaded = false;
 
-/** Shared singleton cloning client (the 442 MB GGUF downloads once). */
-export function getSharedClone(url: string, onProgress?: (frac: number) => void): Promise<CloneClient> {
+/** Shared singleton cloning client (the 442 MB GGUF downloads once, then OPFS-cached). */
+export function getSharedClone(url: string, size: number, onProgress?: (frac: number) => void): Promise<CloneClient> {
     if (loaded && shared) return Promise.resolve(shared);
     if (loadPromise) return loadPromise;
     const c = shared ?? (shared = new CloneClient());
-    loadPromise = c.load(url, onProgress).then(() => {
+    loadPromise = c.load(url, size, onProgress).then(() => {
         loaded = true;
         return c;
     });

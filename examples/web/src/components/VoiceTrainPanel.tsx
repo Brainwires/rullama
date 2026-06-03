@@ -3,7 +3,7 @@ import { AudioLines, Loader2, Mic, Play, Plus, RotateCcw, Save, Square, Trash2, 
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { styletts2BlobUrl } from "@/lib/api";
+import { STYLETTS2_MODEL, styletts2BlobUrl } from "@/lib/api";
 import { getSharedClone } from "@/lib/clone-client";
 import { cn } from "@/lib/utils";
 import { addVoice } from "@/lib/voice-library";
@@ -198,7 +198,7 @@ export function VoiceTrainPanel() {
                 concat.set(p, o);
                 o += p.length;
             }
-            const client = await getSharedClone(styletts2BlobUrl(), (f) => setDlPct(Math.round(f * 100)));
+            const client = await getSharedClone(styletts2BlobUrl(), STYLETTS2_MODEL.size, (f) => setDlPct(Math.round(f * 100)));
             setPhase("encoding");
             voiceRef.current = await client.encodeVoice(concat, onProg); // zero-shot — no training loop
             setPhase("done");
@@ -216,7 +216,7 @@ export function VoiceTrainPanel() {
         setLogLines([]);
         setPhase("synth");
         try {
-            const client = await getSharedClone(styletts2BlobUrl());
+            const client = await getSharedClone(styletts2BlobUrl(), STYLETTS2_MODEL.size);
             playPcm(await client.synthesize(testText, voiceRef.current, onProg), client.sampleRate);
         } catch (e) {
             setErr(String(e));
