@@ -43,6 +43,22 @@ export function downloadWav(pcm: Float32Array, sampleRate: number, filename: str
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/** Decode an audio File and resample to 24 kHz mono Float32 PCM (for voice training). */
+export async function decodeToPcm24k(file: File): Promise<Float32Array> {
+    const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const tmp = new AC();
+    const decoded = await tmp.decodeAudioData(await file.arrayBuffer());
+    tmp.close();
+    const len = Math.max(1, Math.ceil(decoded.duration * 24000));
+    const off = new OfflineAudioContext(1, len, 24000);
+    const src = off.createBufferSource();
+    src.buffer = decoded;
+    src.connect(off.destination);
+    src.start();
+    const rendered = await off.startRendering();
+    return rendered.getChannelData(0).slice();
+}
+
 /** Play mono float32 PCM through Web Audio. Returns the AudioBufferSourceNode. */
 export function playPcm(pcm: Float32Array, sampleRate: number): AudioBufferSourceNode {
     const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;

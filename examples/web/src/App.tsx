@@ -7,6 +7,7 @@ import type { PipelineProgressState } from "@/components/PipelineProgress";
 import { RestartOverlay } from "@/components/RestartOverlay";
 import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
 import { VoicePanel } from "@/components/VoicePanel";
+import { VoiceTrainPanel } from "@/components/VoiceTrainPanel";
 import { ConversationList } from "@/components/ConversationList";
 import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
 import { Button } from "@/components/ui/button";
@@ -183,6 +184,7 @@ export function App() {
     // View routing — Chat tab vs Fine-tune tab. Persisted so a reload
     // doesn't bounce the user out of the tab they were in.
     const [view, setView] = usePersistedState<"chat" | "voice" | "finetune" | "settings">("rullama:view", "chat");
+    const [ftSub, setFtSub] = usePersistedState<"inference" | "voice">("rullama:ft:sub", "inference");
     // **D3 — chat-during-training gate.** When a Fine-tune run is
     // active in this (or any other) tab, the Model is owned by the
     // training session and chat-side step RPCs would fail with
@@ -2335,23 +2337,42 @@ export function App() {
                 }
             >
                 {view === "finetune" ? (
-                    trainingCap.status === "blocked" ? (
-                        <TrainingBlockedScreen
-                            title={trainingCap.title}
-                            reason={trainingCap.reason}
-                        />
-                    ) : trainingCap.status === "checking" ? (
-                        <div className="flex h-full min-h-0 items-center justify-center p-8 text-sm text-muted-foreground">
-                            Checking device capability…
+                    <div className="flex h-full min-h-0 flex-col">
+                        <div className="flex shrink-0 gap-0.5 border-b border-border px-3 py-1.5">
+                            <button
+                                type="button"
+                                onClick={() => setFtSub("inference")}
+                                className={cn("rounded px-2 py-1 text-xs transition-colors", ftSub === "inference" ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:bg-muted/50")}
+                            >
+                                Inference fine-tuning
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setFtSub("voice")}
+                                className={cn("rounded px-2 py-1 text-xs transition-colors", ftSub === "voice" ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:bg-muted/50")}
+                            >
+                                Voice training
+                            </button>
                         </div>
-                    ) : (
-                        <FineTunePanel
-                            modelStatus={modelStatus}
-                            activeAdapter={activeAdapter}
-                            onAdapterChanged={setActiveAdapter}
-                            settingsHostEl={fineTuneSettingsEl}
-                        />
-                    )
+                        <div className="min-h-0 flex-1">
+                            {ftSub === "voice" ? (
+                                <VoiceTrainPanel />
+                            ) : trainingCap.status === "blocked" ? (
+                                <TrainingBlockedScreen title={trainingCap.title} reason={trainingCap.reason} />
+                            ) : trainingCap.status === "checking" ? (
+                                <div className="flex h-full min-h-0 items-center justify-center p-8 text-sm text-muted-foreground">
+                                    Checking device capability…
+                                </div>
+                            ) : (
+                                <FineTunePanel
+                                    modelStatus={modelStatus}
+                                    activeAdapter={activeAdapter}
+                                    onAdapterChanged={setActiveAdapter}
+                                    settingsHostEl={fineTuneSettingsEl}
+                                />
+                            )}
+                        </div>
+                    </div>
                 ) : view === "voice" ? (
                     <VoicePanel />
                 ) : view === "settings" ? (

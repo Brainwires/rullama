@@ -54,6 +54,23 @@ export class TtsClient {
         return r.pcm;
     }
 
+    // ---- gradient-free voice training ----
+    async trainBegin(targetPcm: Float32Array, refText: string, initVoice = "af_heart"): Promise<void> {
+        await this.rpc("trainBegin", { targetPcm, refText, initVoice });
+    }
+    async trainStep(): Promise<number> {
+        const r = await this.rpc<{ loss: number }>("trainStep", {});
+        return r.loss;
+    }
+    async trainedVoice(): Promise<Float32Array> {
+        const r = await this.rpc<{ voice: Float32Array }>("trainedVoice", {});
+        return r.voice;
+    }
+    async synthesizeWithVoice(text: string, voiceVec: Float32Array): Promise<Float32Array> {
+        const r = await this.rpc<{ pcm: Float32Array }>("synthesizeWithVoice", { text, voiceVec });
+        return r.pcm;
+    }
+
     dispose(): void {
         this.worker.terminate();
         this.pending.clear();

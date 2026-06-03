@@ -113,11 +113,11 @@ export function SettingsDialog(props: Props) {
                     onClick={() => setTab("sampling")}
                 />
                 <TabButton
-                    label="Voice"
+                    label="Speech input"
                     active={activeTab === "voice"}
                     onClick={() => setTab("voice")}
                     disabled={!props.canRecord}
-                    title={props.canRecord ? undefined : "Load a model with an audio tower to enable voice settings"}
+                    title={props.canRecord ? undefined : "Load a model with an audio tower to enable mic / speech-to-text settings"}
                 />
                 <TabButton
                     label="Logs"

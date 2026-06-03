@@ -9,10 +9,14 @@ let tts: KokoroTts | null = null;
 
 interface Req {
     id: number;
-    type: "load" | "synthesize" | "synthesizePhonemes";
+    type: "load" | "synthesize" | "synthesizePhonemes" | "trainBegin" | "trainStep" | "trainedVoice" | "synthesizeWithVoice";
     url?: string;
     text?: string;
     voice?: string;
+    targetPcm?: Float32Array;
+    refText?: string;
+    initVoice?: string;
+    voiceVec?: Float32Array;
 }
 
 function post(msg: Record<string, unknown>, transfer?: Transferable[]) {
@@ -56,6 +60,19 @@ self.onmessage = async (e: MessageEvent<Req>) => {
                 type === "synthesize"
                     ? await tts.synthesize(e.data.text!, e.data.voice!)
                     : await tts.synthesizePhonemes(e.data.text!, e.data.voice!);
+            post({ id, ok: true, pcm }, [pcm.buffer]);
+        } else if (type === "trainBegin") {
+            if (!tts) throw new Error("TTS not loaded");
+            await tts.trainBegin(e.data.targetPcm!, e.data.refText!, e.data.initVoice ?? "af_heart");
+            post({ id, ok: true });
+        } else if (type === "trainStep") {
+            const loss = await tts!.trainStep();
+            post({ id, ok: true, loss });
+        } else if (type === "trainedVoice") {
+            const voice = tts!.trainedVoice();
+            post({ id, ok: true, voice }, [voice.buffer]);
+        } else if (type === "synthesizeWithVoice") {
+            const pcm = await tts!.synthesizeWithVoice(e.data.text!, e.data.voiceVec!);
             post({ id, ok: true, pcm }, [pcm.buffer]);
         }
     } catch (err) {
