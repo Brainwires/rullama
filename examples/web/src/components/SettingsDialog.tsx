@@ -7,7 +7,7 @@ import { type SamplingOptions } from "@/lib/types";
 import { type ModelEntry } from "@/lib/api";
 import { clampInt, clampNum, cn } from "@/lib/utils";
 import { usePersistedState } from "@/lib/persisted";
-import { VOICE_BOUNDS, type VoiceOptions } from "@/lib/voice";
+import { type VoiceOptions } from "@/lib/voice";
 import { hardResetAndReload } from "@/lib/restart";
 import { Undo2, RefreshCw } from "lucide-react";
 
@@ -53,16 +53,13 @@ interface Props {
     onResetDefaults: () => void;
 }
 
-type TabKey = "general" | "sampling" | "voice" | "logs";
+type TabKey = "general" | "sampling" | "logs";
 
 /** Full-height sidebar: Model + Generation settings, sections scroll. */
 export function SettingsDialog(props: Props) {
     const B = SETTINGS_BOUNDS;
-    const V = VOICE_BOUNDS;
     const setS = (patch: Partial<SamplingOptions>) =>
         props.onSamplingChange({ ...props.sampling, ...patch });
-    const setV = (patch: Partial<VoiceOptions>) =>
-        props.onVoiceChange({ ...props.voice, ...patch });
 
     // Persisted so the App-level "crashed last session" toast can
     // deep-link into the Logs tab: setting localStorage to "logs"
@@ -70,10 +67,9 @@ export function SettingsDialog(props: Props) {
     // on the right tab.
     const [tab, setTab] = usePersistedState<TabKey>("rullama:settings:tab", "general");
 
-    // If the audio tower disappears (e.g. user ejects a multimodal model while
-    // on the Voice tab), snap back to General so the user isn't stuck on an
-    // empty pane.
-    const activeTab: TabKey = !props.canRecord && tab === "voice" ? "general" : tab;
+    // A previously-persisted "voice" tab (now moved to the Voice-training sidebar)
+    // falls back to General.
+    const activeTab: TabKey = (tab as string) === "voice" ? "general" : tab;
 
     return (
         <div className="flex h-full min-h-0 flex-col">
@@ -112,16 +108,8 @@ export function SettingsDialog(props: Props) {
                     active={activeTab === "sampling"}
                     onClick={() => setTab("sampling")}
                 />
-                {/* Mic / speech-to-text input settings — only relevant when an
-                    audio-tower model is loaded. Hidden (not greyed) otherwise so it
-                    isn't a confusing dead tab. NOT TTS — TTS controls live in the Voice tab. */}
-                {props.canRecord && (
-                    <TabButton
-                        label="Speech input"
-                        active={activeTab === "voice"}
-                        onClick={() => setTab("voice")}
-                    />
-                )}
+                {/* "Speech input" (VAD) settings now live in the Voice-training right
+                    sidebar (see SpeechInputSettings), not here. */}
                 <TabButton
                     label="Logs"
                     active={activeTab === "logs"}
@@ -257,51 +245,6 @@ export function SettingsDialog(props: Props) {
                             onChange={(v) => props.onMaxTokensChange(
                                 clampInt(v, B.maxTokens.min, B.maxTokens.max, B.maxTokens.fallback),
                             )}
-                        />
-                    </section>
-                )}
-
-                {activeTab === "voice" && props.canRecord && (
-                    <section className="flex flex-col gap-3">
-                        <Slider
-                            label="silence cutoff (ms)"
-                            value={props.voice.silenceMs}
-                            min={V.silenceMs.min} max={V.silenceMs.max} step={V.silenceMs.step}
-                            onChange={(v) => setV({
-                                silenceMs: clampInt(v, V.silenceMs.min, V.silenceMs.max, V.silenceMs.fallback),
-                            })}
-                        />
-                        <Slider
-                            label="speech threshold (dBFS)"
-                            value={props.voice.rmsDbThreshold}
-                            min={V.rmsDbThreshold.min} max={V.rmsDbThreshold.max} step={V.rmsDbThreshold.step}
-                            onChange={(v) => setV({
-                                rmsDbThreshold: clampInt(v, V.rmsDbThreshold.min, V.rmsDbThreshold.max, V.rmsDbThreshold.fallback),
-                            })}
-                        />
-                        <Slider
-                            label="pre-roll (ms)"
-                            value={props.voice.prerollMs}
-                            min={V.prerollMs.min} max={V.prerollMs.max} step={V.prerollMs.step}
-                            onChange={(v) => setV({
-                                prerollMs: clampInt(v, V.prerollMs.min, V.prerollMs.max, V.prerollMs.fallback),
-                            })}
-                        />
-                        <Slider
-                            label="min speech frames"
-                            value={props.voice.minSpeechFrames}
-                            min={V.minSpeechFrames.min} max={V.minSpeechFrames.max} step={V.minSpeechFrames.step}
-                            onChange={(v) => setV({
-                                minSpeechFrames: clampInt(v, V.minSpeechFrames.min, V.minSpeechFrames.max, V.minSpeechFrames.fallback),
-                            })}
-                        />
-                        <Slider
-                            label="max recording (ms)"
-                            value={props.voice.maxRecordMs}
-                            min={V.maxRecordMs.min} max={V.maxRecordMs.max} step={V.maxRecordMs.step}
-                            onChange={(v) => setV({
-                                maxRecordMs: clampInt(v, V.maxRecordMs.min, V.maxRecordMs.max, V.maxRecordMs.fallback),
-                            })}
                         />
                     </section>
                 )}

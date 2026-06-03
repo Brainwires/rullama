@@ -8,6 +8,7 @@ import { RestartOverlay } from "@/components/RestartOverlay";
 import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
 import { VoicePanel } from "@/components/VoicePanel";
 import { VoiceTrainPanel } from "@/components/VoiceTrainPanel";
+import { SpeechInputSettings } from "@/components/SpeechInputSettings";
 import { ConversationList } from "@/components/ConversationList";
 import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
 import { Button } from "@/components/ui/button";
@@ -249,6 +250,8 @@ export function App() {
     // Defaults open the first time — discoverability — and persists
     // the user's last choice across reloads.
     const [fineTuneSettingsOpen, setFineTuneSettingsOpen] = usePersistedState<boolean>("ui.fineTuneSettingsOpen", true);
+    // Voice-training right sidebar (the relocated "Speech input" VAD settings).
+    const [voiceSettingsOpen, setVoiceSettingsOpen] = usePersistedState<boolean>("ui.voiceSettingsOpen", true);
     // DOM mount point for FineTunePanel's portal-rendered settings
     // column. useState (not useRef) so the ref-callback re-renders
     // FineTunePanel with the now-non-null host on mount.
@@ -2334,16 +2337,22 @@ export function App() {
                         />
                     ) : undefined
                 }
-                rightOpen={view === "finetune" && fineTuneSettingsOpen}
-                onToggleRight={setFineTuneSettingsOpen}
+                rightOpen={view === "finetune" && (ftSub === "voice" ? voiceSettingsOpen : fineTuneSettingsOpen)}
+                onToggleRight={ftSub === "voice" ? setVoiceSettingsOpen : setFineTuneSettingsOpen}
                 rightWidth={340}
                 rightSidebar={
                     view === "finetune" ? (
-                        // The ref-callback runs on mount and pushes the
-                        // DOM element up into App state — that triggers
-                        // a FineTunePanel re-render which then portals
-                        // its settings column into this div.
-                        <div ref={setFineTuneSettingsEl} className="h-full" />
+                        ftSub === "voice" ? (
+                            // Voice training shows the (relocated) Speech-input VAD settings —
+                            // mirrors how inference fine-tuning surfaces its settings here.
+                            <SpeechInputSettings voice={voice} onVoiceChange={setVoice} canRecord={modelStatus === "ready" && hasAudio} />
+                        ) : (
+                            // The ref-callback runs on mount and pushes the
+                            // DOM element up into App state — that triggers
+                            // a FineTunePanel re-render which then portals
+                            // its settings column into this div.
+                            <div ref={setFineTuneSettingsEl} className="h-full" />
+                        )
                     ) : undefined
                 }
             >
