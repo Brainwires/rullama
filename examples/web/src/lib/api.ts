@@ -86,8 +86,8 @@ export const STYLETTS2_MODEL = {
     name:   "styletts2:libritts",
     family: "styletts2",
     tag:    "libritts",
-    size:   442128512,
-    digest: "8b8cedc6b2c66a1bcb2ba8dafaa3473cafd355c2b819a903eb09b0d17397959f",
+    size:   543440288,
+    digest: "1b174e1411e1632037a441502578f78b40d75341ac7c0cfa3ea4cf7c07c847b5",
     url:    `https://${R2_HOST}/styletts2-libritts.gguf`,
 } as const;
 
