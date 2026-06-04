@@ -176,7 +176,19 @@ export function VoiceTrainPanel() {
             if (recordingId || phase === "loading" || phase === "encoding") return;
             setErr(null);
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                // Request the browser's built-in WebRTC cleanup. A0 showed clone quality is
+                // dominated by reference cleanliness, so noiseSuppression (background hiss/hum) +
+                // echoCancellation are clear wins; autoGainControl keeps a consistent level
+                // (helps the "too quiet" case). 24 kHz mono matches what the encoder consumes.
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 24_000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true,
+                    },
+                });
                 streamRef.current = stream;
                 const mr = new MediaRecorder(stream);
                 chunksRef.current = [];
