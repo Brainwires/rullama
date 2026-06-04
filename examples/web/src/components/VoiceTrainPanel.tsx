@@ -12,7 +12,9 @@ import { decodeToPcm24k, playPcm } from "@/lib/wav";
 
 const MIN_CLIPS = 1;
 const SR = 24000;
-const MAX_REF_SEC = 12; // cap reference audio fed to the encoder (it pools over time)
+// A0 calibration: a single clean clip saturates identity by ~15 s; quantity past that barely helps
+// ONE vector — but averaging MANY clips (rejecting noisy outliers) is what makes the voice robust.
+const CLIP_CAP_SEC = 15; // each clip encoded up to this; then trimmed-mean across clips
 
 /** Phonetically varied prompts — good phoneme coverage for a timbre signature. */
 const DEFAULT_SCRIPT = [
@@ -31,6 +33,17 @@ interface SessionClip {
     text: string;
     pcm: Float32Array | null;
     durationSec: number;
+    peak?: number; // max abs sample — flags clipping (≈1.0) or too-quiet (low) takes
+}
+
+/** Peak |sample| of a clip (loop, not spread — clips are large). */
+function peakOf(pcm: Float32Array): number {
+    let p = 0;
+    for (let i = 0; i < pcm.length; i++) {
+        const a = Math.abs(pcm[i]);
+        if (a > p) p = a;
+    }
+    return p;
 }
 
 const newId = () => crypto.randomUUID();
@@ -48,14 +61,50 @@ function trimSilence(pcm: Float32Array, thresh = 0.012): Float32Array {
     return pcm.slice(start, end);
 }
 
+/** Cosine over the acoustic (timbre) half — the first 128 dims of the 256-d style vector. */
+function timbreCos(a: Float32Array, b: Float32Array): number {
+    let dot = 0;
+    let na = 0;
+    let nb = 0;
+    for (let i = 0; i < 128; i++) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-9);
+}
+
+function meanVec(vs: Float32Array[]): Float32Array {
+    const m = new Float32Array(256);
+    for (const v of vs) for (let i = 0; i < 256; i++) m[i] += v[i];
+    for (let i = 0; i < 256; i++) m[i] /= vs.length;
+    return m;
+}
+
+/**
+ * Robust voice = trimmed mean of per-clip style vectors, dropping the clips whose timbre sits
+ * farthest from the centroid (noisy / clipped takes). A0 showed one noisy clip alone scores 0.46
+ * vs af_heart (below the 0.70 different-speaker floor), so rejecting outliers is the core lever.
+ * Returns the aggregated vector + how many clips were dropped.
+ */
+function robustVoice(styles: Float32Array[]): { vec: Float32Array; dropped: number } {
+    if (styles.length <= 2) return { vec: meanVec(styles), dropped: 0 };
+    const c = meanVec(styles);
+    const ranked = styles
+        .map((v) => ({ v, d: 1 - timbreCos(v, c) }))
+        .sort((a, b) => a.d - b.d);
+    const keep = Math.max(2, Math.ceil(styles.length * 0.8)); // drop the worst ~20%
+    return { vec: meanVec(ranked.slice(0, keep).map((r) => r.v)), dropped: styles.length - keep };
+}
+
 const fmtDur = (s: number) => `${s.toFixed(1)}s`;
 const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
 /**
- * Guided voice training: record your own voice over a short script, edit the clip
- * list (re-record / play / delete / add / upload), then clone your timbre into a
- * Kokoro voicepack. Clips concatenate into the gradient-free optimizer — the timbre
- * signature is timing-invariant, so more clips ⇒ a better target.
+ * Guided voice cloning: record your own voice over a short script, edit the clip list
+ * (re-record / play / delete / add / upload), then clone your timbre with StyleTTS2. Each clip
+ * is encoded to its own style vector and robustly averaged (noisy takes dropped) — so more
+ * CLEAN clips ⇒ a more faithful voice, and one bad take can't poison it.
  */
 export function VoiceTrainPanel() {
     const [clips, setClips] = useState<SessionClip[]>(() =>
@@ -110,7 +159,7 @@ export function VoiceTrainPanel() {
     }, []);
 
     const setClipPcm = useCallback((id: string, pcm: Float32Array) => {
-        setClips((cs) => cs.map((c) => (c.id === id ? { ...c, pcm, durationSec: pcm.length / SR } : c)));
+        setClips((cs) => cs.map((c) => (c.id === id ? { ...c, pcm, durationSec: pcm.length / SR, peak: peakOf(pcm) } : c)));
     }, []);
 
     const stopRecording = useCallback(() => {
@@ -187,20 +236,25 @@ export function VoiceTrainPanel() {
         setProcStage("");
         setLogLines([]);
         try {
-            // The style encoder pools over time, so capping the reference to MAX_REF_SEC
-            // bounds CPU cost without hurting timbre — take a per-clip budget for variety.
-            const budget = Math.floor((MAX_REF_SEC * SR) / recorded.length);
-            const parts = recorded.map((c) => c.pcm!.subarray(0, Math.min(c.pcm!.length, budget)));
-            const total = parts.reduce((n, p) => n + p.length, 0);
-            const concat = new Float32Array(total);
-            let o = 0;
-            for (const p of parts) {
-                concat.set(p, o);
-                o += p.length;
-            }
             const client = await getSharedClone(styletts2BlobUrl(), STYLETTS2_MODEL.size, (f) => setDlPct(Math.round(f * 100)));
             setPhase("encoding");
-            voiceRef.current = await client.encodeVoice(concat, onProg); // zero-shot — no training loop
+            // Encode EACH clip to its own style vector (capped to CLIP_CAP_SEC), then take the
+            // robust trimmed mean — dropping noisy/clipped outliers — instead of concatenating
+            // every clip into one blob where a single bad take poisons the whole voice.
+            const cap = CLIP_CAP_SEC * SR;
+            const n = recorded.length;
+            const styles: Float32Array[] = [];
+            for (let i = 0; i < n; i++) {
+                const pcm = recorded[i].pcm!;
+                const clip = pcm.length > cap ? pcm.subarray(0, cap) : pcm;
+                const v = await client.encodeVoice(clip, (f, s) => onProg((i + f) / n, `clip ${i + 1}/${n} · ${s}`));
+                styles.push(v);
+            }
+            const { vec, dropped } = robustVoice(styles);
+            voiceRef.current = vec;
+            if (dropped > 0) {
+                setLogLines((l) => [...l, `robust average · dropped ${dropped} noisy clip${dropped > 1 ? "s" : ""}`].slice(-8));
+            }
             setPhase("done");
         } catch (e) {
             setErr(String(e));
@@ -295,6 +349,14 @@ export function VoiceTrainPanel() {
                             <span className="w-14 shrink-0 text-right text-[10px] text-muted-foreground">
                                 {isRec ? `● ${mmss(recSecs)}` : c.pcm ? fmtDur(c.durationSec) : "—"}
                             </span>
+                            {!isRec && c.pcm && c.peak !== undefined && (c.peak >= 0.99 || c.peak < 0.05) && (
+                                <span
+                                    className="shrink-0 text-[10px] text-amber-500"
+                                    title={c.peak >= 0.99 ? "Clipping — record a bit quieter for a cleaner clone" : "Very quiet — move closer to the mic"}
+                                >
+                                    {c.peak >= 0.99 ? "⚠ clip" : "⚠ quiet"}
+                                </span>
+                            )}
                             {isRec ? (
                                 <Button size="sm" variant="destructive" className="h-7 px-2" onClick={stopRecording}>
                                     <Square className="size-3" /> Stop
