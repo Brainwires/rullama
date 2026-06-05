@@ -103,11 +103,17 @@ export function useTrainingCapability(): TrainingCapability {
         let cancelled = false;
         const check = async () => {
             const ua = navigator.userAgent;
-            // iPhone / iPod always blocked. iPadOS reports a Mac UA but
+            // iPhone / iPod blocked by default. iPadOS reports a Mac UA but
             // exposes touch — treat as iOS.
             const isIPhone = /iPhone|iPod/i.test(ua);
             const isIPad = /iPad/i.test(ua) || (ua.includes("Mac") && "ontouchend" in document);
-            if (isIPhone || isIPad) {
+            // Opt-in bypass for on-device iPhone testing of the memory-tight path:
+            //   add `?mobileTraining=1` to the URL, or set localStorage `rullama.mobileTraining=1`.
+            // The block stays the default for normal users (it's still under development).
+            const allowMobileTraining =
+                new URLSearchParams(location.search).get("mobileTraining") === "1" ||
+                localStorage.getItem("rullama.mobileTraining") === "1";
+            if ((isIPhone || isIPad) && !allowMobileTraining) {
                 if (!cancelled) setCap({
                     status: "blocked",
                     title: "iOS training isn't supported yet",
