@@ -1369,9 +1369,13 @@ const RPC: Record<string, Handler> = {
             // trajectory and the exact MiB at the moment iOS jetsam'd.
             // gpuMemTotalFn is a free wasm fn reading a static counter —
             // safe to call re-entrantly here mid-step.
-            let mem = -1;
-            try { mem = Math.round(gpuMemTotalFn()); } catch { /* */ }
-            logBeacon("info", "trn", `step ${stepBefore + 1} ${phase} ${current}/${total} gpuMiB=${mem}`);
+            // Log the full GPU-memory breakdown (tot/w/s/kv/lora/o MiB), not just the total —
+            // so a per-phase climb points at the exact category (e.g. is the per-prefill-token
+            // growth `w` weights re-uploaded-not-freed, or `s` scratch/captures?). Both fns read
+            // static counters; safe to call re-entrantly mid-step.
+            let mem = "gpuMiB=-1";
+            try { mem = gpuMemBreakdownFn(); } catch { try { mem = `gpuMiB=${Math.round(gpuMemTotalFn())}`; } catch { /* */ } }
+            logBeacon("info", "trn", `step ${stepBefore + 1} ${phase} ${current}/${total} ${mem}`);
         };
         try {
             const result = lossMode === "per_position"
