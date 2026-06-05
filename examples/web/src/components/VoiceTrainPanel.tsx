@@ -101,6 +101,31 @@ const fmtDur = (s: number) => `${s.toFixed(1)}s`;
 const mmss = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
 /**
+ * Auto-growing, wrapping prompt field — the line you read aloud must be fully visible while
+ * recording, so it wraps to as many lines as needed instead of truncating in a single-line input.
+ */
+function PromptField({ value, onChange, disabled }: { value: string; onChange: (v: string) => void; disabled?: boolean }) {
+    const ref = useRef<HTMLTextAreaElement>(null);
+    useEffect(() => {
+        const el = ref.current;
+        if (!el) return;
+        el.style.height = "auto";
+        el.style.height = `${el.scrollHeight}px`;
+    }, [value]);
+    return (
+        <textarea
+            ref={ref}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder="Type a line to read…"
+            disabled={disabled}
+            rows={1}
+            className="flex-1 resize-none bg-transparent py-1 text-xs leading-snug outline-none placeholder:text-muted-foreground/60 disabled:opacity-50"
+        />
+    );
+}
+
+/**
  * Guided voice cloning: record your own voice over a short script, edit the clip list
  * (re-record / play / delete / add / upload), then clone your timbre with StyleTTS2. Each clip
  * is encoded to its own style vector and robustly averaged (noisy takes dropped) — so more
@@ -346,19 +371,17 @@ export function VoiceTrainPanel() {
                         <div
                             key={c.id}
                             className={cn(
-                                "flex items-center gap-2 rounded-md border px-2 py-1.5",
+                                "flex items-start gap-2 rounded-md border px-2 py-1.5",
                                 isRec ? "border-red-500/60 bg-red-500/10" : c.pcm ? "border-emerald-500/40 bg-emerald-500/5" : "border-border",
                             )}
                         >
-                            <span className="w-5 shrink-0 text-center text-[11px] text-muted-foreground">{i + 1}</span>
-                            <Input
+                            <span className="mt-1 w-5 shrink-0 text-center text-[11px] text-muted-foreground">{i + 1}</span>
+                            <PromptField
                                 value={c.text}
-                                onChange={(e) => setClips((cs) => cs.map((x) => (x.id === c.id ? { ...x, text: e.target.value } : x)))}
-                                placeholder="Type a line to read…"
+                                onChange={(v) => setClips((cs) => cs.map((x) => (x.id === c.id ? { ...x, text: v } : x)))}
                                 disabled={busy}
-                                className="h-7 flex-1 text-xs"
                             />
-                            <span className="w-14 shrink-0 text-right text-[10px] text-muted-foreground">
+                            <span className="mt-1.5 w-14 shrink-0 text-right text-[10px] text-muted-foreground">
                                 {isRec ? `● ${mmss(recSecs)}` : c.pcm ? fmtDur(c.durationSec) : "—"}
                             </span>
                             {!isRec && c.pcm && c.peak !== undefined && (c.peak >= 0.99 || c.peak < 0.05) && (
