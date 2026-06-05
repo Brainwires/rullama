@@ -81,11 +81,6 @@ interface ModelHandle {
      *  fit under the WebContent jetsam cap. */
     releaseVisionWeights(): number;
     releaseAudioWeights(): number;
-    /** Explicitly GPUBuffer.destroy() ALL of the model's GPU memory (weights, KV, scratch,
-     *  towers). Required before discarding the handle: Rust Drop / model.free() leave the
-     *  buffers pinned on the WebGPU backend until lazy GC, which on iOS Safari keeps ~1.4 GiB
-     *  resident and blocks the TTS/clone engine from loading. */
-    releaseGpu(): void;
     /** Re-allocate the per-layer KV cache at a new token capacity.
      *  Returns the previous max_context so JS can restore later.
      *  Discards cached KV content. Used by `trainingStart` /
@@ -468,9 +463,6 @@ async function handleLoad(args: LoadArgs): Promise<LoadedModelInfo> {
         return loadedInfo;
     }
     if (model) {
-        // Destroy GPU buffers before dropping the handle (Rust Drop leaves them pinned until lazy
-        // GC — see the free RPC). Matters when switching models without a page reload.
-        try { model.releaseGpu?.(); } catch { /* */ }
         try { model.free?.(); } catch { /* */ }
         model = null;
         loadedInfo = null;
@@ -810,15 +802,7 @@ const RPC: Record<string, Handler> = {
     // ── Model lifecycle ────────────────────────────────────────────────
     load: (a) => handleLoad(a as unknown as LoadArgs),
     free: () => {
-        if (model) {
-            // Destroy every GPU buffer BEFORE dropping the handle. model.free() (Rust Drop) only
-            // releases handles; on the WebGPU backend the buffers stay pinned until the browser GCs
-            // them, and iOS Safari does that lazily enough that ~1.4 GiB of weights stays resident —
-            // so an "unloaded" model still blocks the TTS/clone engine from loading. releaseGpu()
-            // reclaims it immediately. (See SitePoint WebGPU-memory teardown writeup.)
-            try { model.releaseGpu?.(); } catch { /* */ }
-            try { model.free?.(); } catch { /* */ } model = null;
-        }
+        if (model) { try { model.free?.(); } catch { /* */ } model = null; }
         if (syncHandle) { try { syncHandle.close(); } catch { /* */ } syncHandle = null; }
         if (loadedInfo) { loadedInfo = null; notify("modelFreed", {}); }
     },
@@ -1753,7 +1737,6 @@ function releaseAllHandles() {
                     log(`shutdown: released ${(freedV / (1024 * 1024)).toFixed(0)}MB vision + ${(freedA / (1024 * 1024)).toFixed(0)}MB audio GPU weights before free()`);
                 }
             } catch { /* */ }
-            try { model.releaseGpu?.(); } catch { /* */ }
             try { model.free?.(); } catch { /* */ }
             model = null;
         }
