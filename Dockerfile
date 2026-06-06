@@ -30,7 +30,6 @@ RUN rustup target add wasm32-unknown-unknown
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-COPY examples ./examples
 # xtask is a workspace member (drives the `cargo docker:*` aliases on the
 # host); cargo metadata refuses to parse the workspace without its manifest
 # present, even though wasm-pack won't compile it for wasm32.
