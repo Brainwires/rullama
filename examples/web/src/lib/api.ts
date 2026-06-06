@@ -97,8 +97,11 @@ export function kokoroBlobUrl(): string {
     return KOKORO_MODEL.url;
 }
 
-/** StyleTTS2-LibriTTS — the zero-shot VOICE-CLONING engine (desktop only). Shipped f32
- *  (442 MB) because f16 degrades this deep model. Loaded by the Voice training tab. */
+/** StyleTTS2-LibriTTS — the zero-shot VOICE-CLONING engine. Two precision variants:
+ *  - **f32** (518 MB): full quality, the desktop default.
+ *  - **f16** (259 MB): conv weights kept f16 on host + GPU — ~half the resident
+ *    footprint for memory-tight devices, at a real precision cost (this deep
+ *    vocoder degrades under f16). */
 export const STYLETTS2_MODEL = {
     name:   "styletts2:libritts",
     family: "styletts2",
@@ -108,11 +111,29 @@ export const STYLETTS2_MODEL = {
     url:    `https://${R2_HOST}/styletts2-libritts.gguf`,
 } as const;
 
-/** Where to fetch the StyleTTS2 cloning GGUF from. Honors `?localBlob=PORT`. */
-export function styletts2BlobUrl(): string {
+export const STYLETTS2_MODEL_F16 = {
+    name:   "styletts2:libritts:f16",
+    family: "styletts2",
+    tag:    "libritts-f16",
+    size:   271920480,
+    digest: "5535159c0f0f7f141e07d2a8713c84f7a1a8ae31ef9e6f272babe06a68a9354e",
+    url:    `https://${R2_HOST}/styletts2-libritts-f16.gguf`,
+} as const;
+
+export type CloneVariant = "f32" | "f16";
+
+/** Catalog entry for a clone-engine precision variant. */
+export function styletts2Model(variant: CloneVariant) {
+    return variant === "f16" ? STYLETTS2_MODEL_F16 : STYLETTS2_MODEL;
+}
+
+/** Where to fetch the StyleTTS2 cloning GGUF from (per precision variant).
+ *  Honors `?localBlob=PORT`. */
+export function styletts2BlobUrl(variant: CloneVariant = "f32"): string {
+    const m = styletts2Model(variant);
     const port = localBlobPort();
-    if (port != null) return `http://localhost:${port}/api/blob/${encodeURIComponent("styletts2:libritts")}`;
-    return STYLETTS2_MODEL.url;
+    if (port != null) return `http://localhost:${port}/api/blob/${encodeURIComponent(m.name)}`;
+    return m.url;
 }
 
 /** Whether this entry is something we'll actually run. */

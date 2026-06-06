@@ -7,7 +7,7 @@ import iconUrl from "../assets/icon-512.png";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
-import { kokoroBlobUrl, STYLETTS2_MODEL, styletts2BlobUrl } from "@/lib/api";
+import { kokoroBlobUrl, styletts2BlobUrl, styletts2Model } from "@/lib/api";
 import { getSharedClone } from "@/lib/clone-client";
 import { getSharedTts, type TtsClient, type TtsClip } from "@/lib/tts-client";
 import { usePersistedState } from "@/lib/persisted";
@@ -73,7 +73,7 @@ export function VoicePanel(
             let label: string;
             if (isClone) {
                 if (!cloneVoice) throw new Error("voice not found");
-                const cc = await getSharedClone(styletts2BlobUrl(), STYLETTS2_MODEL.size, (f) => setDlPct(Math.round(f * 100)));
+                const cc = await getSharedClone(styletts2BlobUrl(cloneVariant), styletts2Model(cloneVariant).size, cloneVariant, (f) => setDlPct(Math.round(f * 100)));
                 pcm = await cc.synthesize(text.trim(), voiceVec(cloneVoice), (f, s) => {
                     setProcPct(Math.round(f * 100));
                     setProcStage(s);
@@ -96,7 +96,7 @@ export function VoicePanel(
         } finally {
             setBusy(false);
         }
-    }, [busy, text, isClone, cloneVoice, sel]);
+    }, [busy, text, isClone, cloneVoice, sel, cloneVariant]);
 
     const onImport = useCallback(async (f: File | undefined) => {
         if (!f) return;
@@ -159,10 +159,10 @@ export function VoicePanel(
                         value={cloneVariant}
                         onChange={(e) => setCloneVariant(e.target.value as "f32" | "f16")}
                         className="h-7 rounded-md border border-border bg-background px-2 text-xs"
-                        title="f32 = best quality (desktop). f16 = half the GPU memory for mobile — coming in a later update."
+                        title="f32 = full quality (518MB). f16 = ~half the memory (259MB) for memory-tight devices, but a real quality drop — this deep vocoder degrades under f16."
                     >
-                        <option value="f32">f32 — best quality</option>
-                        <option value="f16" disabled>f16 — memory-tight (coming soon)</option>
+                        <option value="f32">f32 — full quality</option>
+                        <option value="f16">f16 — ½ memory, lower quality</option>
                     </select>
                 </label>
                 <Button

@@ -273,7 +273,7 @@ export function VoiceTrainPanel() {
         setProcStage("");
         setLogLines([]);
         try {
-            const client = await getSharedClone(styletts2BlobUrl(), STYLETTS2_MODEL.size, (f) => setDlPct(Math.round(f * 100)));
+            const client = await getSharedClone(styletts2BlobUrl("f32"), STYLETTS2_MODEL.size, "f32", (f) => setDlPct(Math.round(f * 100)));
             setPhase("encoding");
             // Encode EACH clip to its own style vector (capped to CLIP_CAP_SEC), then take the
             // robust trimmed mean — dropping noisy/clipped outliers — instead of concatenating
@@ -307,7 +307,7 @@ export function VoiceTrainPanel() {
         setLogLines([]);
         setPhase("synth");
         try {
-            const client = await getSharedClone(styletts2BlobUrl(), STYLETTS2_MODEL.size);
+            const client = await getSharedClone(styletts2BlobUrl("f32"), STYLETTS2_MODEL.size, "f32");
             playPcm(await client.synthesize(testText, voiceRef.current, onProg), client.sampleRate);
         } catch (e) {
             setErr(String(e));

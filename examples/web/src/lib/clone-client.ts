@@ -38,9 +38,9 @@ export class CloneClient {
         });
     }
 
-    async load(url: string, size: number, onProgress?: (frac: number) => void): Promise<void> {
+    async load(url: string, size: number, variant: "f32" | "f16" = "f32", onProgress?: (frac: number) => void): Promise<void> {
         this.onProgress = onProgress;
-        const r = await this.rpc<{ sampleRate: number }>("load", { url, size });
+        const r = await this.rpc<{ sampleRate: number }>("load", { url, size, variant });
         this.sampleRate = r.sampleRate;
         this.onProgress = undefined;
     }
@@ -66,13 +66,20 @@ export class CloneClient {
 let shared: CloneClient | null = null;
 let loadPromise: Promise<CloneClient> | null = null;
 let loaded = false;
+let loadedVariant: "f32" | "f16" | null = null;
 
-/** Shared singleton cloning client (the 442 MB GGUF downloads once, then OPFS-cached). */
-export function getSharedClone(url: string, size: number, onProgress?: (frac: number) => void): Promise<CloneClient> {
+/** Shared singleton cloning client. The chosen GGUF (f32 or f16) downloads once, then
+ *  OPFS-cached. Switching variant tears down the worker and reloads the other GGUF. */
+export function getSharedClone(url: string, size: number, variant: "f32" | "f16" = "f32", onProgress?: (frac: number) => void): Promise<CloneClient> {
+    // A variant switch needs a fresh worker (the wasm clone holds one model).
+    if ((loaded || loadPromise) && loadedVariant !== null && loadedVariant !== variant) {
+        disposeSharedClone();
+    }
     if (loaded && shared) return Promise.resolve(shared);
     if (loadPromise) return loadPromise;
     const c = shared ?? (shared = new CloneClient());
-    loadPromise = c.load(url, size, onProgress).then(() => {
+    loadedVariant = variant;
+    loadPromise = c.load(url, size, variant, onProgress).then(() => {
         loaded = true;
         return c;
     });
@@ -91,4 +98,5 @@ export function disposeSharedClone(): void {
     shared = null;
     loadPromise = null;
     loaded = false;
+    loadedVariant = null;
 }
