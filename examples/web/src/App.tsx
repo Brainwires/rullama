@@ -17,7 +17,9 @@ import { type ModelEntry, blobUrl, beacon, listModels } from "@/lib/api";
 import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel, readInflightState, writeInflightState, clearInflightState } from "@/lib/opfs";
 import { saveInflightImage, saveInflightAudio, readInflightImages, readInflightAudio, clearInflightMedia } from "@/lib/inflight_media";
 import { getNetworkHint } from "@/lib/network";
-import { getClient, type ConversationRow } from "@/lib/inference";
+import { getClient, teardownInferenceCore, type ConversationRow } from "@/lib/inference";
+import { disposeSharedClone } from "@/lib/clone-client";
+import { disposeSharedTts } from "@/lib/tts-client";
 import { useToast } from "@/lib/toast";
 import { useConfirm } from "@/lib/confirm";
 import { usePersistedState } from "@/lib/persisted";
@@ -880,6 +882,43 @@ export function App() {
         })();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [metaInit, modelStatus]);
+
+    // Re-load the inference model (used when returning to a chat/fine-tune tab after the core was
+    // torn down to give the GPU to TTS). Mirrors the auto-load model pick.
+    const reloadInferenceModel = useCallback(async () => {
+        const target = pendingLoadDigest || lastLoadedDigest;
+        if (!target) return;
+        try {
+            const models = await listModels();
+            const m = models.find((x) => x.digest === target);
+            if (m && onLoadRef.current) void onLoadRef.current(m);
+        } catch { /* ModelLoader UI will let the user tap Load */ }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [pendingLoadDigest, lastLoadedDigest]);
+
+    // **One model resident per tab.** Inference (Gemma) and the TTS/clone engines can't share a
+    // phone GPU, and on iOS WebKit only a worker's DEATH reclaims its GPU memory (model.free() and
+    // GPUBuffer.destroy() don't, observably — bug 302711 family). So on every tab change, tear down
+    // the engine we're NOT using and (re)load the one we are. Replicates the user's working
+    // "fresh reload" automatically. Skips the reload on first mount — the auto-load effect owns that.
+    const engineSwapMounted = useRef(false);
+    useEffect(() => {
+        const needsInference = view === "chat" || (view === "finetune" && ftSub === "inference");
+        const needsVoice = view === "voice" || (view === "finetune" && ftSub === "voice");
+        const firstRun = !engineSwapMounted.current;
+        engineSwapMounted.current = true;
+        if (needsVoice && !needsInference) {
+            teardownInferenceCore();
+            setModelStatus("idle"); // returning to chat re-triggers the load below
+        } else if (needsInference && !needsVoice) {
+            disposeSharedClone();
+            disposeSharedTts();
+            if (!firstRun && modelStatus !== "ready" && modelStatus !== "loading") {
+                void reloadInferenceModel();
+            }
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [view, ftSub]);
 
     const refreshConversations = useCallback(async () => {
         try {

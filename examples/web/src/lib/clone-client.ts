@@ -82,3 +82,13 @@ export function getSharedClone(url: string, size: number, onProgress?: (frac: nu
 export function cloneReady(): boolean {
     return loaded;
 }
+
+/** Terminate the shared cloning worker and reset state, freeing its GPU device. Called when the
+ *  UI leaves the voice/clone engine so the inference (Gemma) model can have the GPU. Re-created
+ *  lazily on the next getSharedClone(). */
+export function disposeSharedClone(): void {
+    if (shared) { try { shared.dispose(); } catch { /* */ } }
+    shared = null;
+    loadPromise = null;
+    loaded = false;
+}

@@ -99,3 +99,13 @@ export function getSharedTts(url: string, onProgress?: (frac: number) => void): 
 export function ttsReady(): boolean {
     return loaded;
 }
+
+/** Terminate the shared Kokoro TTS worker and reset state, freeing its GPU device. Called when the
+ *  UI leaves the voice engine so the inference (Gemma) model can have the GPU. Re-created lazily on
+ *  the next getSharedTts(). */
+export function disposeSharedTts(): void {
+    if (shared) { try { shared.dispose(); } catch { /* */ } }
+    shared = null;
+    loadPromise = null;
+    loaded = false;
+}

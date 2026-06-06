@@ -362,6 +362,24 @@ export class WorkerClient {
         return this.rpc("free", { sid: this.session });
     }
 
+    /** **Gracefully tear down the core Dedicated Worker** so its GPU device (~1.4 GiB of weights +
+     *  KV) is actually reclaimed. `free()`/`model.free()` only drop handles — on iOS Safari WebKit
+     *  the GPU memory is NOT released while the worker is alive (WebGPU `destroy()` is non-compliant
+     *  there). Only the worker being GONE frees it. We post `{type:"shutdown"}` so the worker
+     *  `releaseAllHandles()`s (OPFS) and `self.close()`s; the router then emits `modelFreed`
+     *  (resetting `coreReady`), and the next inference RPC re-elects this tab → `pleaseSpawnCore` →
+     *  a fresh core respawns and reloads from the OPFS cache. Used to free the GPU when the UI
+     *  switches to the TTS/voice engine (they can't coexist on a phone GPU). */
+    teardownCore(): void {
+        const w = this.coreWorker;
+        this.coreWorker = null;
+        if (w) {
+            try { w.postMessage({ type: "shutdown" }); } catch { /* */ }
+            // Intentionally no terminate() — the worker self.close()s AFTER releasing its OPFS
+            // sync handle, so the next core can reopen the GGUF without racing a stale lock.
+        }
+    }
+
     // ── Stateless meta accessors (cached from notify: meta or load) ────
     get vocabSize() { return this.lastMeta?.loaded?.vocabSize; }
     get hasVision() { return !!this.lastMeta?.loaded?.hasVision; }
@@ -783,4 +801,10 @@ let _client: WorkerClient | null = null;
 export function getClient(): WorkerClient {
     if (!_client) _client = new WorkerClient();
     return _client;
+}
+
+/** Tear down the inference core worker to free its GPU device — see {@link WorkerClient.teardownCore}.
+ *  No-op if the client was never created. The core respawns + reloads on the next inference RPC. */
+export function teardownInferenceCore(): void {
+    _client?.teardownCore();
 }
