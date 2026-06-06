@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
 import { kokoroBlobUrl, styletts2BlobUrl, styletts2Model } from "@/lib/api";
+import { useDeviceTier } from "@/lib/capability";
 import { getSharedClone } from "@/lib/clone-client";
 import { getSharedTts, type TtsClient, type TtsClip } from "@/lib/tts-client";
 import { usePersistedState } from "@/lib/persisted";
@@ -39,10 +40,13 @@ export function VoicePanel(
     { settingsHostEl, clipsHostEl, onOpenVoiceLearn }:
     { settingsHostEl?: HTMLElement | null; clipsHostEl?: HTMLElement | null; onOpenVoiceLearn?: () => void } = {},
 ) {
-    // Clone-engine precision. Phase 1 ships f32 only; the f16 (memory-tight,
-    // mobile-default) variant is wired in Phase 2 — the option is present but
-    // disabled so the control + persisted choice exist for forward-compat.
-    const [cloneVariant, setCloneVariant] = usePersistedState<"f32" | "f16">("voice:cloneVariant", "f32");
+    // Clone-engine precision. The persisted *preference* is null until the user
+    // explicitly picks one — until then the variant follows the device tier
+    // (mobile → f16 to halve the memory; desktop/premium → f32 for full quality).
+    // f16 is perceptually close on this vocoder despite the ~0.79 waveform corr.
+    const [cloneVariantPref, setCloneVariant] = usePersistedState<"f32" | "f16" | null>("voice:cloneVariant", null);
+    const { tier } = useDeviceTier();
+    const cloneVariant: "f32" | "f16" = cloneVariantPref ?? (tier === "mobile" ? "f16" : "f32");
     const tts = useRef<TtsClient | null>(null);
     const [err, setErr] = useState<string | null>(null);
     const [text, setText] = useState("Hello, this is text to speech running entirely in your browser.");
