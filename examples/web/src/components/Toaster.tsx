@@ -16,14 +16,11 @@ export function Toaster() {
     if (toasts.length === 0) return null;
     return (
         <div
-            className="pointer-events-none fixed inset-x-0 z-50 flex flex-col-reverse items-center gap-1 px-2"
-            // Anchor above the chat input row. env(safe-area-inset-bottom)
-            // covers the iOS home-indicator inset on a PWA-installed
-            // device. flex-col-reverse stacks newer toasts at the top
-            // of the column so the most recent one sits just above the
-            // input — same vertical reading order as the top-anchored
-            // variant, just flipped to the bottom of the screen.
-            style={{ bottom: `calc(env(safe-area-inset-bottom, 0px) + 0.5rem)` }}
+            className="pointer-events-none fixed inset-x-0 z-50 flex flex-col items-center gap-1 px-2"
+            // Top-anchored, with a thick top offset that clears the header
+            // (min-h-12 ≈ 3rem) plus the iOS safe-area inset. flex-col stacks
+            // the newest toast at the top of the column.
+            style={{ top: `calc(env(safe-area-inset-top, 0px) + 4.5rem)` }}
             aria-live="polite"
             aria-atomic="false"
         >
