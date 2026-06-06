@@ -32,9 +32,14 @@ export interface SamplingOptions {
     seed:               number;
 }
 
+// Defaults mirror Ollama's Gemma 4 params{} (temperature 1, top_k 64,
+// top_p 0.95) so out-of-the-box sampling matches the reference engine.
+// repetition_penalty stays 1.3 (Ollama sets none; 1.3 is the tuned value
+// the garlic-LoRA recipe relies on). Keep in sync with SETTINGS_BOUNDS
+// fallbacks in SettingsDialog.tsx.
 export const DEFAULT_SAMPLING: SamplingOptions = {
-    temperature:        0.7,
-    top_k:              40,
+    temperature:        1,
+    top_k:              64,
     top_p:              0.95,
     repetition_penalty: 1.3,
     seed:               0,

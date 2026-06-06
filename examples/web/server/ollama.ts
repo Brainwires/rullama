@@ -25,6 +25,9 @@ export interface ModelEntry {
      *  audio), set this so the loader doesn't force the text-only path.
      *  Default for HF-style text-only GGUFs: omit (text-only forced). */
     multimodal?: boolean;
+    /** Advisory "heavy model" flag — the client renders a ⚠ marker; Load
+     *  is not blocked. Mirrors `heavy` in examples/web/src/lib/api.ts. */
+    heavy?: boolean;
 }
 
 /**
@@ -59,6 +62,17 @@ export function huggingfaceModels(): ModelEntry[] {
             digest:     "4c27e0f5b5adf02ac956c7322bd2ee7636fe3f45a8512c9aba5385242cb6e09a",
             url:        "https://models.brainwires.dev/gemma4-e4b.gguf",
             multimodal: true,
+        },
+        {
+            // Google's 12B (2026-06). Same gemma4 arch, Q4_K_M, text-only
+            // (no vision/audio towers). Heavy — advisory ⚠, never blocked.
+            name:       "gemma4:12b",
+            family:     "gemma4",
+            tag:        "12b",
+            size:       7381382048,
+            digest:     "1278394b693672ac2799eadc9a83fd98259a6a88a40acfb1dcaa6c6fc895a606",
+            url:        "https://models.brainwires.dev/gemma4-12b.gguf",
+            heavy:      true,
         },
     ];
 }

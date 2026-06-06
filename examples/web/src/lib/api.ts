@@ -25,6 +25,10 @@ export interface ModelEntry {
      *  vision + audio), set this so the loader doesn't force text-only.
      *  Default for HF-style text-only GGUFs: omit. */
     multimodal?: boolean;
+    /** Advisory "this is a heavy model" flag. ModelLoader renders a ⚠
+     *  caution marker + tooltip; Load is NOT blocked (the user can try it
+     *  on any tier). Set for the large models (e.g. gemma4:12b). */
+    heavy?: boolean;
 }
 
 const R2_HOST = "models.brainwires.dev";
@@ -54,6 +58,19 @@ export const BAKED_IN_MODELS: readonly ModelEntry[] = [
         digest:     "4c27e0f5b5adf02ac956c7322bd2ee7636fe3f45a8512c9aba5385242cb6e09a",
         url:        `https://${R2_HOST}/gemma4-e4b.gguf`,
         multimodal: true,
+    },
+    {
+        // Google's 12B (released 2026-06). Same gemma4 architecture (verified:
+        // general.architecture=gemma4, all dims dynamic), Q4_K_M, text-only (no
+        // vision/audio towers). Very heavy — barely runs on Metal; flagged
+        // `heavy` so the picker shows a ⚠ (advisory, never blocked).
+        name:       "gemma4:12b",
+        family:     "gemma4",
+        tag:        "12b",
+        size:       7381382048,
+        digest:     "1278394b693672ac2799eadc9a83fd98259a6a88a40acfb1dcaa6c6fc895a606",
+        url:        `https://${R2_HOST}/gemma4-12b.gguf`,
+        heavy:      true,
     },
 ];
 

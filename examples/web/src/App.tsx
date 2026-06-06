@@ -8,7 +8,6 @@ import { RestartOverlay } from "@/components/RestartOverlay";
 import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
 import { VoicePanel } from "@/components/VoicePanel";
 import { VoiceTrainPanel } from "@/components/VoiceTrainPanel";
-import { SpeechInputSettings } from "@/components/SpeechInputSettings";
 import { ConversationList } from "@/components/ConversationList";
 import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
 import { Button } from "@/components/ui/button";
@@ -21,6 +20,8 @@ import { getClient, teardownInferenceCore, type ConversationRow } from "@/lib/in
 import { disposeSharedClone } from "@/lib/clone-client";
 import { disposeSharedTts } from "@/lib/tts-client";
 import { ChatSettings } from "@/components/ChatSettings";
+import { UnsupportedScreen } from "@/components/UnsupportedScreen";
+import { useDeviceTier } from "@/lib/capability";
 import { useToast } from "@/lib/toast";
 import { useConfirm } from "@/lib/confirm";
 import { usePersistedState } from "@/lib/persisted";
@@ -46,7 +47,7 @@ import {
     isDismissed,
     setDismissedVersion,
 } from "@/lib/version";
-import { Settings, History, MessageSquare, Sparkles, AudioLines } from "lucide-react";
+import { Settings, History, MessageSquare, Sparkles, AudioLines, X } from "lucide-react";
 
 const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
@@ -185,21 +186,23 @@ export function App() {
         return () => clearTimeout(t);
     }, [waitInfo]);
 
-    // View routing — Chat tab vs Fine-tune tab. Persisted so a reload
-    // doesn't bounce the user out of the tab they were in.
-    const [view, setView] = usePersistedState<"chat" | "voice" | "finetune" | "settings">("rullama:view", "chat");
-    const [ftSub, setFtSub] = usePersistedState<"inference" | "voice">("rullama:ft:sub", "inference");
-    // Voice training loads Kokoro itself — it does NOT need the Gemma chat model.
-    // So when no chat model is loaded, land Fine-tune on "Voice training" instead of
-    // the inference panel's "load a model first" dead-end. Deliberately keyed only on
-    // (view, modelStatus) — NOT ftSub — so an explicit click on "Inference fine-tuning"
-    // still sticks (the redirect only fires on entry / model-state change).
+    // View routing — Chat / Voice / Settings. Persisted so a reload doesn't
+    // bounce the user out of the tab they were in. (Fine-tune is no longer a
+    // tab — it's a full-screen overlay launched from Chat's sidebar; voice
+    // learning likewise from Voice's sidebar. Keeping training in the same
+    // engine context as its tab is what removed the cross-engine reload that
+    // used to fail with "model load failed".)
+    const [view, setView] = usePersistedState<"chat" | "voice" | "settings">("rullama:view", "chat");
+    // Migrate any persisted legacy "finetune" view to "chat".
     useEffect(() => {
-        if (view === "finetune" && modelStatus !== "ready" && ftSub === "inference") {
-            setFtSub("voice");
-        }
+        if ((view as string) === "finetune") setView("chat");
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [view, modelStatus]);
+    }, []);
+    // Full-screen training overlay: which one is open (null = none).
+    const [training, setTraining] = useState<null | "finetune" | "voicelearn">(null);
+    // Device-capability tier (gates the boot, engine co-residency, model markers).
+    const { tier, probe } = useDeviceTier();
+    const premium = tier === "premium";
     // **D3 — chat-during-training gate.** When a Fine-tune run is
     // active in this (or any other) tab, the Model is owned by the
     // training session and chat-side step RPCs would fail with
@@ -249,21 +252,11 @@ export function App() {
     // own tab so it doesn't compete with chat content for screen
     // real-estate on small displays.
     const [historyOpen, setHistoryOpen] = usePersistedState<boolean>("ui.historyOpen", false);
-    // Fine-tune view's right sidebar (hyperparameter settings column).
-    // Defaults open the first time — discoverability — and persists
-    // the user's last choice across reloads.
-    const [fineTuneSettingsOpen, setFineTuneSettingsOpen] = usePersistedState<boolean>("ui.fineTuneSettingsOpen", true);
-    // Voice-training right sidebar (the relocated "Speech input" VAD settings).
-    const [voiceSettingsOpen, setVoiceSettingsOpen] = usePersistedState<boolean>("ui.voiceSettingsOpen", true);
-    // Chat-tab right sidebar (system prompt + sampling + thinking — the per-tab chat settings).
+    // Chat-tab right sidebar (model block + system prompt + sampling + thinking).
     const [chatSettingsOpen, setChatSettingsOpen] = usePersistedState<boolean>("ui.chatSettingsOpen", false);
-    // Voice-tab right sidebar (the voice picker + import/delete, portaled from VoicePanel).
+    // Voice-tab right sidebar (voice picker + clone-model block, portaled from VoicePanel).
     const [voiceTabSettingsOpen, setVoiceTabSettingsOpen] = usePersistedState<boolean>("ui.voiceTabSettingsOpen", true);
     const [voiceTabSettingsEl, setVoiceTabSettingsEl] = useState<HTMLDivElement | null>(null);
-    // DOM mount point for FineTunePanel's portal-rendered settings
-    // column. useState (not useRef) so the ref-callback re-renders
-    // FineTunePanel with the now-non-null host on mount.
-    const [fineTuneSettingsEl, setFineTuneSettingsEl] = useState<HTMLDivElement | null>(null);
 
     // Persisted tunables.
     const [systemPrompt, setSystemPrompt] = usePersistedState<string>("systemPrompt", DEFAULT_SYSTEM_PROMPT);
@@ -848,6 +841,11 @@ export function App() {
     const autoLoadAttempted = useRef(false);
     useEffect(() => {
         if (!metaInit) return;
+        // Don't boot the engine until the capability tier is known and the
+        // device is supported — incapable devices (e.g. iPhone 7, no WebGPU)
+        // must never load a model (that's what boot-loops them). The
+        // UnsupportedScreen early-return handles the UI side.
+        if (tier === null || tier === "unsupported") return;
         if (autoLoadAttempted.current) return;
         autoLoadAttempted.current = true;
         if (modelStatus === "ready") return;
@@ -887,7 +885,7 @@ export function App() {
             }
         })();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [metaInit, modelStatus]);
+    }, [metaInit, modelStatus, tier]);
 
     // Re-load the inference model (used when returning to a chat/fine-tune tab after the core was
     // torn down to give the GPU to TTS). Mirrors the auto-load model pick.
@@ -902,17 +900,22 @@ export function App() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [pendingLoadDigest, lastLoadedDigest]);
 
-    // **One model resident per tab.** Inference (Gemma) and the TTS/clone engines can't share a
-    // phone GPU, and on iOS WebKit only a worker's DEATH reclaims its GPU memory (model.free() and
-    // GPUBuffer.destroy() don't, observably — bug 302711 family). So on every tab change, tear down
-    // the engine we're NOT using and (re)load the one we are. Replicates the user's working
-    // "fresh reload" automatically. Skips the reload on first mount — the auto-load effect owns that.
+    // **One engine resident at a time (except Premium).** Inference (Gemma) and the TTS/clone
+    // engines can't share a phone GPU, and on iOS WebKit only a worker's DEATH reclaims its GPU
+    // memory (model.free() and GPUBuffer.destroy() don't, observably — bug 302711 family). So on a
+    // Chat↔Voice tab change, tear down the engine we're NOT using and (re)load the one we are —
+    // replicating the user's working "fresh reload" automatically. Training overlays don't change
+    // `view`, so launching Fine-tune (over Chat) / Voice-learning (over Voice) performs NO swap;
+    // training shares its tab's engine. **Premium tier short-circuits the teardown** so inference +
+    // TTS stay co-resident (the user has the VRAM; Chat↔Voice is then instant). `settings` needs
+    // neither engine, so it no-ops — switching to Settings never loads or unloads a model.
     const engineSwapMounted = useRef(false);
     useEffect(() => {
-        const needsInference = view === "chat" || (view === "finetune" && ftSub === "inference");
-        const needsVoice = view === "voice" || (view === "finetune" && ftSub === "voice");
         const firstRun = !engineSwapMounted.current;
         engineSwapMounted.current = true;
+        if (premium) return; // keep both engines warm on high-VRAM machines
+        const needsInference = view === "chat";
+        const needsVoice = view === "voice";
         if (needsVoice && !needsInference) {
             teardownInferenceCore();
             setModelStatus("idle"); // returning to chat re-triggers the load below
@@ -924,7 +927,15 @@ export function App() {
             }
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [view, ftSub]);
+    }, [view, premium]);
+
+    // Esc closes the training overlay.
+    useEffect(() => {
+        if (!training) return;
+        const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setTraining(null); };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [training]);
 
     const refreshConversations = useCallback(async () => {
         try {
@@ -2250,6 +2261,14 @@ export function App() {
         ? conversations.find((c) => c.id === activeConvId)?.title
         : undefined;
 
+    // Hard block below the minimum spec — render a clean screen and DON'T
+    // boot the engine (the auto-load effect is gated on tier too). This is
+    // what stops incapable devices (e.g. iPhone 7, no WebGPU) from boot-
+    // looping the heavy app. `tier === null` means the async probe is still
+    // in flight; render the normal shell (the engine stays gated until it
+    // resolves).
+    if (tier === "unsupported") return <UnsupportedScreen probe={probe} />;
+
     return (
         <div className="flex h-[100dvh] flex-col overflow-hidden bg-background text-foreground">
             {/* PWA update banner. Detected via boot-time /version.json
@@ -2327,21 +2346,6 @@ export function App() {
                         </button>
                         <button
                             type="button"
-                            onClick={() => setView("finetune")}
-                            aria-pressed={view === "finetune"}
-                            className={cn(
-                                "flex h-7 items-center gap-1 rounded px-2 text-xs transition-colors",
-                                view === "finetune"
-                                    ? "bg-background text-foreground shadow-sm"
-                                    : "text-muted-foreground hover:bg-background/50",
-                            )}
-                            title="Fine-tune"
-                        >
-                            <Sparkles className="size-3.5" />
-                            <span className="hidden sm:inline">Fine-tune</span>
-                        </button>
-                        <button
-                            type="button"
                             onClick={() => setView("settings")}
                             aria-pressed={view === "settings"}
                             className={cn(
@@ -2385,21 +2389,27 @@ export function App() {
                 rightOpen={
                     view === "chat" ? chatSettingsOpen
                     : view === "voice" ? voiceTabSettingsOpen
-                    : view === "finetune" ? (ftSub === "voice" ? voiceSettingsOpen : fineTuneSettingsOpen)
                     : false
                 }
                 onToggleRight={
                     view === "chat" ? setChatSettingsOpen
-                    : view === "voice" ? setVoiceTabSettingsOpen
-                    : ftSub === "voice" ? setVoiceSettingsOpen
-                    : setFineTuneSettingsOpen
+                    : setVoiceTabSettingsOpen
                 }
                 rightWidth={340}
                 rightSidebar={
                     view === "chat" ? (
-                        // Per-tab chat settings (system prompt + sampling + thinking). Model
-                        // management / logs / app-data stay in the global Settings view.
+                        // Per-tab chat settings: the Gemma model block + Fine-tune launcher,
+                        // plus system prompt / sampling / thinking. Logs / app-data / High-VRAM
+                        // toggle stay in the global Settings view.
                         <ChatSettings
+                            modelStatus={modelStatus}
+                            loadingPercent={loadingPercent}
+                            loadingLabel={waitInfo?.message ?? loadingLabel}
+                            statusText={statusText}
+                            onLoadModel={onLoad}
+                            onDeleteModel={onDeleteModel}
+                            onEjectModel={onEjectModel}
+                            onOpenFineTune={() => setTraining("finetune")}
                             systemPrompt={systemPrompt}
                             onSystemPromptChange={setSystemPrompt}
                             sampling={sampling}
@@ -2409,64 +2419,18 @@ export function App() {
                             thinking={thinking}
                             onThinkingChange={setThinking}
                             onResetDefaults={onResetDefaults}
+                            voice={voice}
+                            onVoiceChange={setVoice}
+                            canRecord={modelStatus === "ready" && hasAudio}
                         />
                     ) : view === "voice" ? (
-                        // VoicePanel portals its voice picker / import / delete into this host.
+                        // VoicePanel portals its voice picker / clone-model block into this host.
                         <div ref={setVoiceTabSettingsEl} className="h-full" />
-                    ) : view === "finetune" ? (
-                        ftSub === "voice" ? (
-                            // Voice training shows the (relocated) Speech-input VAD settings —
-                            // mirrors how inference fine-tuning surfaces its settings here.
-                            <SpeechInputSettings voice={voice} onVoiceChange={setVoice} canRecord={modelStatus === "ready" && hasAudio} />
-                        ) : (
-                            // The ref-callback runs on mount and pushes the
-                            // DOM element up into App state — that triggers
-                            // a FineTunePanel re-render which then portals
-                            // its settings column into this div.
-                            <div ref={setFineTuneSettingsEl} className="h-full" />
-                        )
                     ) : undefined
                 }
             >
-                {view === "finetune" ? (
-                    <div className="flex h-full min-h-0 flex-col">
-                        <div className="flex shrink-0 gap-0.5 border-b border-border px-3 py-1.5">
-                            <button
-                                type="button"
-                                onClick={() => setFtSub("inference")}
-                                className={cn("rounded px-2 py-1 text-xs transition-colors", ftSub === "inference" ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:bg-muted/50")}
-                            >
-                                Inference fine-tuning
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setFtSub("voice")}
-                                className={cn("rounded px-2 py-1 text-xs transition-colors", ftSub === "voice" ? "bg-muted font-medium text-foreground" : "text-muted-foreground hover:bg-muted/50")}
-                            >
-                                Voice training
-                            </button>
-                        </div>
-                        <div className="min-h-0 flex-1">
-                            {ftSub === "voice" ? (
-                                <VoiceTrainPanel />
-                            ) : trainingCap.status === "blocked" ? (
-                                <TrainingBlockedScreen title={trainingCap.title} reason={trainingCap.reason} />
-                            ) : trainingCap.status === "checking" ? (
-                                <div className="flex h-full min-h-0 items-center justify-center p-8 text-sm text-muted-foreground">
-                                    Checking device capability…
-                                </div>
-                            ) : (
-                                <FineTunePanel
-                                    modelStatus={modelStatus}
-                                    activeAdapter={activeAdapter}
-                                    onAdapterChanged={setActiveAdapter}
-                                    settingsHostEl={fineTuneSettingsEl}
-                                />
-                            )}
-                        </div>
-                    </div>
-                ) : view === "voice" ? (
-                    <VoicePanel settingsHostEl={voiceTabSettingsEl} />
+                {view === "voice" ? (
+                    <VoicePanel settingsHostEl={voiceTabSettingsEl} onOpenVoiceLearn={() => setTraining("voicelearn")} />
                 ) : view === "settings" ? (
                     // Centered max-width wrapper so the form controls
                     // don't stretch across the full main-content width
@@ -2474,15 +2438,7 @@ export function App() {
                     // height-fill contract SettingsDialog expects from
                     // its parent (it uses h-full internally).
                     <div className="mx-auto flex h-full w-full max-w-3xl min-h-0 flex-col">
-                        <SettingsDialog
-                            modelStatus={modelStatus}
-                            loadingPercent={loadingPercent}
-                            loadingLabel={waitInfo?.message ?? loadingLabel}
-                            statusText={statusText}
-                            onLoadModel={onLoad}
-                            onDeleteModel={onDeleteModel}
-                            onEjectModel={onEjectModel}
-                        />
+                        <SettingsDialog />
                     </div>
                 ) : (
                 <ChatPanel
@@ -2530,7 +2486,7 @@ export function App() {
                     canAttach={modelStatus === "ready" && (hasVision || hasAudio) && !trainingInProgress}
                     canRecord={modelStatus === "ready" && hasAudio && !busy && !trainingInProgress}
                     statusLine={trainingInProgress
-                        ? "Training session is active — open the Fine-tune tab and Save / Apply / Discard the adapter to return chat."
+                        ? "Training session is active — open Fine-tune and Save / Apply / Discard the adapter to return to chat."
                         : statusLine}
                     pendingImages={pendingImages}
                     pendingAudio={pendingAudio.map((a) => ({ durationMs: a.durationMs }))}
@@ -2555,6 +2511,49 @@ export function App() {
                 />
                 )}
             </DualSidebarLayout>
+
+            {/* Full-screen training overlay. Launched from a tab's sidebar button;
+                Chat/Voice stay mounted underneath so the engine stays GPU-resident
+                (no swap — training shares its tab's engine). */}
+            {training && (
+                <div className="fixed inset-0 z-50 flex flex-col bg-background">
+                    <header className="flex min-h-12 shrink-0 items-center gap-2 border-b border-border bg-card/50 px-3 safe-top">
+                        {training === "finetune"
+                            ? <Sparkles className="size-4 text-muted-foreground" />
+                            : <AudioLines className="size-4 text-muted-foreground" />}
+                        <span className="text-sm font-medium">
+                            {training === "finetune" ? "Fine-tune" : "Voice learning"}
+                        </span>
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            className="ml-auto h-8 gap-1 text-xs"
+                            onClick={() => setTraining(null)}
+                            title="Close (Esc)"
+                        >
+                            <X className="size-4" /> Close
+                        </Button>
+                    </header>
+                    <div className="min-h-0 flex-1 overflow-hidden">
+                        {training === "voicelearn" ? (
+                            <VoiceTrainPanel />
+                        ) : trainingCap.status === "blocked" ? (
+                            <TrainingBlockedScreen title={trainingCap.title} reason={trainingCap.reason} />
+                        ) : trainingCap.status === "checking" ? (
+                            <div className="flex h-full min-h-0 items-center justify-center p-8 text-sm text-muted-foreground">
+                                Checking device capability…
+                            </div>
+                        ) : (
+                            <FineTunePanel
+                                modelStatus={modelStatus}
+                                activeAdapter={activeAdapter}
+                                onAdapterChanged={setActiveAdapter}
+                            />
+                        )}
+                    </div>
+                </div>
+            )}
+
             <RestartOverlay />
             {applyingUpdate && updateVersion && <ApplyingOverlay version={updateVersion} />}
         </div>

@@ -29,6 +29,7 @@ import {
     type SavedDatasetMeta,
 } from "@/lib/datasetStore";
 import { useToast } from "@/lib/toast";
+import { probeGpu } from "@/lib/capability";
 import type { ModelStatus } from "@/components/ModelLoader";
 import { TrainingProgress, type TrainingProgressState } from "@/components/TrainingProgress";
 
@@ -121,8 +122,10 @@ export function useTrainingCapability(): TrainingCapability {
                 });
                 return;
             }
-            const gpu = (navigator as Navigator & { gpu?: GPU }).gpu;
-            if (!gpu) {
+            // Share the same GPU probe the app-boot capability gate uses
+            // (lib/capability.ts) so the two gates can't disagree.
+            const probe = await probeGpu();
+            if (!probe.hasGpu) {
                 if (!cancelled) setCap({
                     status: "blocked",
                     title: "WebGPU not available",
@@ -130,18 +133,15 @@ export function useTrainingCapability(): TrainingCapability {
                 });
                 return;
             }
-            let adapter: GPUAdapter | null = null;
-            try {
-                adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-            } catch (err) {
+            if (probe.error) {
                 if (!cancelled) setCap({
                     status: "blocked",
                     title: "WebGPU init failed",
-                    reason: `requestAdapter() threw: ${String(err)}. This usually means the GPU driver is denying WebGPU access.`,
+                    reason: `requestAdapter() threw: ${probe.error}. This usually means the GPU driver is denying WebGPU access.`,
                 });
                 return;
             }
-            if (!adapter) {
+            if (!probe.adapterOk) {
                 if (!cancelled) setCap({
                     status: "blocked",
                     title: "No WebGPU adapter",
@@ -151,12 +151,11 @@ export function useTrainingCapability(): TrainingCapability {
             }
             // 512 MB single-buffer ceiling means we can't hold a Q4_K
             // weight tile for the largest tensors. Reject below that.
-            const maxBuf = adapter.limits.maxBufferSize ?? 0;
-            if (maxBuf < 512 * 1024 * 1024) {
+            if (probe.maxBufferSize < 512 * 1024 * 1024) {
                 if (!cancelled) setCap({
                     status: "blocked",
                     title: "GPU memory too small",
-                    reason: `Your GPU advertises a max-buffer-size of ${Math.round(maxBuf / 1024 / 1024)} MB. Training needs at least 512 MB to hold the per-layer weight tiles. (Inference can still work on smaller GPUs.)`,
+                    reason: `Your GPU advertises a max-buffer-size of ${Math.round(probe.maxBufferSize / 1024 / 1024)} MB. Training needs at least 512 MB to hold the per-layer weight tiles. (Inference can still work on smaller GPUs.)`,
                 });
                 return;
             }
@@ -164,12 +163,11 @@ export function useTrainingCapability(): TrainingCapability {
             // 0.25/0.5/1/2/4/8 and caps at 8 in most Chromium builds.
             // We want ≥4 GB system RAM so the activation-capture mmap
             // can land somewhere.
-            const memGB = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8;
-            if (memGB < 4) {
+            if (probe.deviceMemoryGB < 4) {
                 if (!cancelled) setCap({
                     status: "blocked",
                     title: "Not enough system RAM",
-                    reason: `Browser reports ${memGB} GB system RAM (rounded). Training needs at least 4 GB so the activation captures + gradient buffers don't get swapped under the GPU.`,
+                    reason: `Browser reports ${probe.deviceMemoryGB} GB system RAM (rounded). Training needs at least 4 GB so the activation captures + gradient buffers don't get swapped under the GPU.`,
                 });
                 return;
             }

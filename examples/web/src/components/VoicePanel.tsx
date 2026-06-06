@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AudioLines, Download, Loader2, Play, Trash2, Upload } from "lucide-react";
+import { Download, Loader2, Mic, Play, Trash2, Upload } from "lucide-react";
+
+import iconUrl from "../assets/icon-512.png";
 
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -8,6 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { kokoroBlobUrl, STYLETTS2_MODEL, styletts2BlobUrl } from "@/lib/api";
 import { getSharedClone } from "@/lib/clone-client";
 import { getSharedTts, type TtsClient, type TtsClip } from "@/lib/tts-client";
+import { usePersistedState } from "@/lib/persisted";
 import { cn } from "@/lib/utils";
 import { addVoice, importVoiceFile, listVoices, onVoicesChanged, removeVoice, voiceVec, type SavedVoice } from "@/lib/voice-library";
 import { downloadWav, playPcm } from "@/lib/wav";
@@ -29,8 +32,16 @@ function presetLabel(id: string): string {
 }
 
 /** `settingsHostEl`: when provided (App's right-sidebar slot), the voice picker + import/delete
- *  render there via portal; otherwise they fall back inline in the main column. */
-export function VoicePanel({ settingsHostEl }: { settingsHostEl?: HTMLElement | null } = {}) {
+ *  render there via portal; otherwise they fall back inline in the main column.
+ *  `onOpenVoiceLearn`: opens the full-screen Voice-learning (clone training) overlay. */
+export function VoicePanel(
+    { settingsHostEl, onOpenVoiceLearn }:
+    { settingsHostEl?: HTMLElement | null; onOpenVoiceLearn?: () => void } = {},
+) {
+    // Clone-engine precision. Phase 1 ships f32 only; the f16 (memory-tight,
+    // mobile-default) variant is wired in Phase 2 — the option is present but
+    // disabled so the control + persisted choice exist for forward-compat.
+    const [cloneVariant, setCloneVariant] = usePersistedState<"f32" | "f16">("voice:cloneVariant", "f32");
     const tts = useRef<TtsClient | null>(null);
     const [err, setErr] = useState<string | null>(null);
     const [text, setText] = useState("Hello, this is text to speech running entirely in your browser.");
@@ -135,8 +146,34 @@ export function VoicePanel({ settingsHostEl }: { settingsHostEl?: HTMLElement | 
             <p className="text-[11px] text-muted-foreground">
                 {isClone
                     ? "Cloned voices run the StyleTTS2 engine on your GPU (desktop), with style diffusion for natural prosody — first use downloads a 543 MB model (then OPFS-cached)."
-                    : "Preset voices run Kokoro on your GPU via WebGPU. Clone your own voice in Fine-tune → Voice training."}
+                    : "Preset voices run Kokoro on your GPU via WebGPU. Clone your own voice with Voice learning below."}
             </p>
+
+            {/* Clone (StyleTTS2) model block — precision selector + the Voice-learning launcher. */}
+            <div className="flex flex-col gap-2 border-t border-border pt-3">
+                <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Clone model</div>
+                <label className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                    <span>Precision</span>
+                    <select
+                        value={cloneVariant}
+                        onChange={(e) => setCloneVariant(e.target.value as "f32" | "f16")}
+                        className="h-7 rounded-md border border-border bg-background px-2 text-xs"
+                        title="f32 = best quality (desktop). f16 = half the GPU memory for mobile — coming in a later update."
+                    >
+                        <option value="f32">f32 — best quality</option>
+                        <option value="f16" disabled>f16 — memory-tight (coming soon)</option>
+                    </select>
+                </label>
+                <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 justify-start gap-2 text-xs"
+                    onClick={() => onOpenVoiceLearn?.()}
+                    title="Record your voice and train a clone (StyleTTS2, desktop)"
+                >
+                    <Mic className="size-3.5" /> Voice learning…
+                </Button>
+            </div>
         </div>
     );
 
@@ -180,8 +217,12 @@ export function VoicePanel({ settingsHostEl }: { settingsHostEl?: HTMLElement | 
 
             {/* main */}
             <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
-                <div className="flex items-center gap-2 text-sm font-medium">
-                    <AudioLines className="size-4" /> Voice
+                <div className="flex items-center gap-2">
+                    <img src={iconUrl} alt="rullama" className="size-8" draggable={false} />
+                    <div className="flex flex-col leading-tight">
+                        <span className="text-sm font-semibold tracking-tight">rullama</span>
+                        <span className="text-[11px] text-muted-foreground">Voice</span>
+                    </div>
                 </div>
 
                 <Textarea

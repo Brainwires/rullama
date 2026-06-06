@@ -4,7 +4,7 @@ import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { fmtBytes } from "@/lib/utils";
 import { type ModelEntry, isSupported, listModels } from "@/lib/api";
-import { Download, Trash2, Unplug } from "lucide-react";
+import { AlertTriangle, Download, Trash2, Unplug } from "lucide-react";
 
 export type ModelStatus = "idle" | "loading" | "ready" | "error";
 
@@ -81,7 +81,7 @@ export function ModelLoader(props: Props) {
                     {models.length === 0 && <option value="">— scanning —</option>}
                     {models.map((m) => (
                         <option key={m.name} value={m.name}>
-                            {isSupported(m) ? "✓ " : "✗ "} {m.name} — {fmtBytes(m.size)}
+                            {isSupported(m) ? "✓ " : "✗ "} {m.name} — {fmtBytes(m.size)}{m.heavy ? " ⚠" : ""}
                         </option>
                     ))}
                 </select>
@@ -107,6 +107,15 @@ export function ModelLoader(props: Props) {
                     </Button>
                 )}
             </div>
+
+            {/* Advisory caution for heavy models (e.g. gemma4:12b). Load stays
+                enabled on every tier — this only warns. */}
+            {selectedModel?.heavy && (
+                <p className="flex items-start gap-1 text-[11px] leading-tight text-amber-600 dark:text-amber-500">
+                    <AlertTriangle className="mt-px size-3 shrink-0" />
+                    <span>Very heavy model — a 24&nbsp;GB+ GPU is recommended. May be slow or unstable on less.</span>
+                </p>
+            )}
 
             {/* Row 2: status — only renders when there's something to say. */}
             {(props.status === "ready" || props.status === "loading" || props.status === "error" || error) && (

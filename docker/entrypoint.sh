@@ -82,6 +82,18 @@ emit_hf_entries() {
         --argjson multimodal true \
         '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, multimodal:$multimodal}' \
         >> "$ITEMS_TMP"
+
+    # gemma4:12b — same gemma4 arch, Q4_K_M, text-only. Heavy → advisory ⚠ (never blocked).
+    jq -nc \
+        --arg name   "gemma4:12b" \
+        --arg family "gemma4" \
+        --arg tag    "12b" \
+        --argjson size 7381382048 \
+        --arg digest "1278394b693672ac2799eadc9a83fd98259a6a88a40acfb1dcaa6c6fc895a606" \
+        --arg url    "https://${R2_HOST}/gemma4-12b.gguf" \
+        --argjson heavy true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, heavy:$heavy}' \
+        >> "$ITEMS_TMP"
 }
 
 # ───── Local Ollama scan (only when RULLAMA_SERVE_LOCAL=1) ────────────
