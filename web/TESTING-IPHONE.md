@@ -41,7 +41,7 @@ read the "Gotchas" section before you start.
   libimobiledevice`. Used to read the UDID and disk space.
 - A self-signed **CA** cert + key at `~/.local/share/rullama/{cert.pem,key.pem}`
   (see §3 for regenerating).
-- Built PWA + wasm bundle: `pnpm -C examples/web build` and
+- Built PWA + wasm bundle: `pnpm -C web build` and
   `wasm-pack build crates/rullama-finetune --target web --release
   --out-dir ../../pkg --out-name rullama`.
 
@@ -134,8 +134,8 @@ Verify it loads (not `about:blank`) before relying on it.
 ## 4. Bring up the servers (Mac)
 
 ```sh
-# HTTPS PWA server on :8088 — serves examples/web/dist + /pkg + /api/*
-REPO_ROOT="$(pwd)" examples/web/serve-iphone.sh >/tmp/serve-iphone.out 2>&1 &
+# HTTPS PWA server on :8088 — serves web/dist + /pkg + /api/*
+REPO_ROOT="$(pwd)" web/serve-iphone.sh >/tmp/serve-iphone.out 2>&1 &
 
 # safaridriver WebDriver on :4444
 safaridriver -p 4444 >/dev/null 2>&1 &
@@ -146,7 +146,7 @@ curl -sS  --max-time 3 http://localhost:4444/status          # {"ready":true}
 ```
 
 `serve-iphone.sh` notes:
-- Serves `examples/web/dist/` at `/`, repo `pkg/` at `/pkg/`, and
+- Serves `web/dist/` at `/`, repo `pkg/` at `/pkg/`, and
   `/api/models` + `/api/blob/<name>` (streams GGUFs from
   `~/.ollama/models/blobs`, Range-supported) + `/api/log` (appends
   beacons to `/tmp/rullama-page.log`) + `/cert`.
@@ -328,13 +328,13 @@ use it to rule a config bug in/out before spending an iPhone download.
 
 ## 10. Helper scripts
 
-- `examples/web/serve-iphone.sh` — the HTTPS PWA + `/api` + `/cert`
+- `web/serve-iphone.sh` — the HTTPS PWA + `/api` + `/cert`
   server (port 8088).
-- `examples/web/train-on-iphone.sh` — older end-to-end driver (creates a
+- `web/train-on-iphone.sh` — older end-to-end driver (creates a
   session, navigates, waits, captures the OPFS log). Useful as a
   reference for the WebDriver call patterns; prefer the
   one-session-reuse discipline above for crash debugging.
-- `examples/pwa/clean-iphone.sh` — wipes the *current* session's OPFS
+- `clean-iphone.sh` — wipes the *current* session's OPFS
   (cannot reach orphaned scopes).
 
 ## 11. Golden rules

@@ -1,4 +1,4 @@
-//! /api/* routes — bit-identical to `examples/web/serve-tunnel.sh`'s wire
+//! /api/* routes — bit-identical to `web/serve-tunnel.sh`'s wire
 //! shape so the PWA and `mac-cdp-test.mjs` don't need any client-side change.
 //!
 //! Endpoints:

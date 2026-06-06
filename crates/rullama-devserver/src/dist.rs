@@ -1,4 +1,4 @@
-//! Public-safe fallback: serve `examples/web/dist/` directly off disk,
+//! Public-safe fallback: serve `web/dist/` directly off disk,
 //! with the same SPA-fallback semantics serve-tunnel.sh has — paths that
 //! don't resolve to an existing file AND don't look like an asset path
 //! (no extension) get the `dist/index.html` shell, so client-side
@@ -29,7 +29,7 @@ pub async fn fallback_handler(State(state): State<Arc<AppState>>, req: Request) 
     // canonically use it as a space.
     let decoded = percent_decode(raw);
     let path: &str = &decoded;
-    let dist_dir = state.paths.repo_root.join("examples/web/dist");
+    let dist_dir = state.paths.repo_root.join("web/dist");
     // Canonicalize the base ONCE and reject any path that escapes it.
     let base = match tokio::fs::canonicalize(&dist_dir).await {
         Ok(b) => b,

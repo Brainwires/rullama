@@ -1,5 +1,5 @@
 // Canvas-based image preprocessor for the Gemma 4 vision tower.
-// Ported from examples/pwa/image_preprocess.js.
+// Ported from image_preprocess.js.
 //
 // Mirrors Ollama's process_image.go::ProcessImage:
 //   * smartResize aligning to (patch_size × n_merge) = 48 px boundaries

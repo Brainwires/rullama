@@ -43,7 +43,7 @@ struct Args {
     #[arg(long)]
     public: bool,
 
-    /// Serve `examples/web/dist/*` as the SPA root instead of reverse-
+    /// Serve `web/dist/*` as the SPA root instead of reverse-
     /// proxying to Vite. Implied by `--public`.
     #[arg(long)]
     serve_dist: bool,

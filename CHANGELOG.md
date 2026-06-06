@@ -111,7 +111,7 @@ tooling.
   native canonical run still exercises the iPhone path. Bit-identical:
   9.0703 / 11.0554 / 9.1028 across 3 epochs.
 
-### PWA (examples/web)
+### PWA (web)
 
 - Fine-tune tab — `Memory-tight` toggle moved to the bottom of the
   settings stack and labelled **Highly experimental** (slower on Mac,
@@ -139,16 +139,16 @@ tooling.
 ### Dev tooling
 
 - New crate `crates/rullama-devserver/` — native Rust dev server.
-  Replaces `examples/web/serve-iphone.sh` (LAN HTTPS) and
-  `examples/web/serve-tunnel.sh` (HTTP behind Cloudflare tunnel).
+  Replaces `web/serve-iphone.sh` (LAN HTTPS) and
+  `web/serve-tunnel.sh` (HTTP behind Cloudflare tunnel).
   - `cargo dev` brings up the full stack: axum on `:25321` +
     Vite child on `:5173` (with HMR WebSocket forwarding so editing
     React works through either port) + fs watcher on
     `crates/{rullama,rullama-finetune}/src/**` that auto-runs
     `wasm-pack build` and broadcasts a `wasm-rebuilt` event over WS,
-    triggering a page reload in `examples/web/src/lib/dev-hmr.ts`.
+    triggering a page reload in `web/src/lib/dev-hmr.ts`.
   - `cargo dev -- --public` composes tunnel-safe defaults: serves
-    `examples/web/dist/` instead of reverse-proxying Vite (Vite's
+    `web/dist/` instead of reverse-proxying Vite (Vite's
     `fs.allow=[repoRoot]` would otherwise leak the entire repo), disables
     `/api/log` writes, disables `/api/models` listing, disables
     `/__rullama-dev-ws`.
@@ -176,7 +176,7 @@ tooling.
   The crate is **excluded** from the workspace so
   `cargo build --workspace --target wasm32-unknown-unknown` doesn't try
   to compile axum / notify / tokio for wasm.
-- Mac CDP automation harness (`examples/web/test/mac-cdp-test.mjs`) —
+- Mac CDP automation harness (`web/test/mac-cdp-test.mjs`) —
   direct Chrome DevTools Protocol harness bypassing the Playwright
   React 18 click bug, with dataset save+reuse, explicit Memory-tight
   uncheck before training, and post-click worker-beacon verification
@@ -468,7 +468,7 @@ Initial public release. Two crates published to crates.io:
 
 ### Example PWAs
 
-- `examples/web/` — React + Vite + Tailwind + Workbox; production-quality chat PWA with OPFS-backed model cache, conversation history in SQLite (via `rsqlite-wasm`), and service-worker-driven update dialog.
+- `web/` — React + Vite + Tailwind + Workbox; production-quality chat PWA with OPFS-backed model cache, conversation history in SQLite (via `rsqlite-wasm`), and service-worker-driven update dialog.
 - `examples/pwa/` — vanilla JS bench harness and `safaridriver`-driven scripted iPhone runs.
 
 ### Known gaps

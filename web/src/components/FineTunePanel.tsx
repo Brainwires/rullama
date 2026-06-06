@@ -1718,7 +1718,7 @@ function DatasetCard(props: {
                          *  single behavior description into a working
                          *  JSONL training set (15 target paraphrases +
                          *  4 anchor categories × 4 examples).
-                         *  See examples/web/src/lib/syntheticDataset.ts
+                         *  See web/src/lib/syntheticDataset.ts
                          *  for the orchestrator + meta-prompts. */}
                         <div>
                             <div className="mb-1 text-xs text-muted-foreground">

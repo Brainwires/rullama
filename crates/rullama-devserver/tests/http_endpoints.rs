@@ -79,7 +79,7 @@ fn build_fixture() -> Fixture {
     // with Cargo.toml + crates/ + examples/.
     let stub = root.join("repo-stub");
     std::fs::create_dir_all(stub.join("crates")).unwrap();
-    std::fs::create_dir_all(stub.join("examples/web/dist")).unwrap();
+    std::fs::create_dir_all(stub.join("web/dist")).unwrap();
     std::fs::create_dir_all(stub.join("pkg")).unwrap();
     std::fs::write(stub.join("Cargo.toml"), "[workspace]\n").unwrap();
     // Drop a tiny fixture file in pkg/ so /pkg/* tests have something to
@@ -497,10 +497,10 @@ async fn cors_default_denies_unknown_origin() {
 async fn pkg_path_traversal_via_dotdot_components_blocked() {
     let fx = build_fixture();
     let app = router_with_fixture(&fx).await;
-    // `../examples/web/serve-tunnel.sh` would, before canonicalisation,
+    // `../web/serve-tunnel.sh` would, before canonicalisation,
     // resolve to a real file. We expect 404.
     let resp = app
-        .oneshot(req_get("/pkg/../examples/web/serve-tunnel.sh"))
+        .oneshot(req_get("/pkg/../web/serve-tunnel.sh"))
         .await
         .unwrap();
     assert!(

@@ -31,8 +31,8 @@ clone). Reconstruction-only — **no GAN, no FFT in the backward graph, no LSTM 
 
 ## Relevant critical files (from the plan)
 
-- `examples/web/src/components/VoiceTrainPanel.tsx` — the "Refine my voice" step UI.
-- `examples/web/src/lib/voice-library.ts` — store reference audio + transcript as the canonical
+- `web/src/components/VoiceTrainPanel.tsx` — the "Refine my voice" step UI.
+- `web/src/lib/voice-library.ts` — store reference audio + transcript as the canonical
   voice; keep raw clips for re-aggregation / the A2 fine-tune; add a per-voice `engine` field.
 - `crates/rullama/src/styletts2_clone.rs`,
   `crates/rullama/src/reference/styletts2/{model.rs,style_encoder.rs}`.

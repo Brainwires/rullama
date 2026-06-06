@@ -1,5 +1,5 @@
 // OPFS-backed model storage. Replaces the IndexedDB Blob cache from the
-// legacy `examples/pwa/cache.js` — the iOS Safari ceilings on JS-heap
+// legacy `cache.js` — the iOS Safari ceilings on JS-heap
 // (~2 GB) and combined Blob size (~5.6 GB) both bite a 7 GB GGUF straight
 // in the face, so the actual streaming write lives inside the inference
 // SharedWorker (M17) — one download per origin, progress broadcast to

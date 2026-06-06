@@ -5,10 +5,11 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 // The wasm bundle (`/pkg/rullama.js` + `rullama_bg.wasm`) is built by
-// `wasm-pack` into the project root's `pkg/` directory. Vite serves it
-// via a static-asset alias so the bundle's `import.meta.url`-based
-// wasm fetch resolves to `/pkg/rullama_bg.wasm` in both dev and prod.
-const repoRoot = path.resolve(__dirname, "..", "..");
+// `wasm-pack` into the repo root's `pkg/` directory. Vite serves it via a
+// static-asset alias so the bundle's `import.meta.url`-based wasm fetch
+// resolves to `/pkg/rullama_bg.wasm` in both dev and prod. `web/` is one level
+// below the repo root.
+const repoRoot = path.resolve(__dirname, "..");
 
 // Read the build version emitted by `scripts/emit-version.mjs`. This
 // runs as part of the `build` npm script *before* Vite, so the file

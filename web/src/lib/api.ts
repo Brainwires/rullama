@@ -8,7 +8,7 @@
 // passthrough). Local-dev users running their own Ollama can rebuild
 // from source after editing this constant.
 //
-// Keep this in sync with `examples/web/server/ollama.ts:huggingfaceModels()`
+// Keep this in sync with `web/server/ollama.ts:huggingfaceModels()`
 // and `docker/entrypoint.sh:emit_hf_entries()`.
 
 export interface ModelEntry {

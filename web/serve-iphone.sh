@@ -2,8 +2,8 @@
 # serve-iphone.sh — HTTPS server for the React PWA + iPhone safaridriver tests.
 #
 # Serves:
-#   /                                 → examples/web/dist/index.html
-#   /assets/*, /icons/*, /sw.js, …    → examples/web/dist/...
+#   /                                 → web/dist/index.html
+#   /assets/*, /icons/*, /sw.js, …    → web/dist/...
 #   /pkg/*                            → <repo>/pkg/...
 #   /api/models                       → list of locally-installed Ollama models
 #   /api/blob/<family>:<tag>          → stream the model's GGUF blob (Range OK)
@@ -13,7 +13,7 @@
 #   CERT_FILE=~/.local/share/rullama/cert.pem \
 #   KEY_FILE=~/.local/share/rullama/key.pem  \
 #   REPO_ROOT="$(pwd)" \
-#   ./examples/web/serve-iphone.sh
+#   ./web/serve-iphone.sh
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -26,7 +26,7 @@ OLLAMA_MODELS="${OLLAMA_MODELS:-$HOME/.ollama/models}"
 
 [[ -f "$CERT_FILE" ]] || { echo "missing cert: $CERT_FILE" >&2; exit 1; }
 [[ -f "$KEY_FILE"  ]] || { echo "missing key:  $KEY_FILE"  >&2; exit 1; }
-[[ -d examples/web/dist ]] || { echo "no examples/web/dist — run 'pnpm build' first" >&2; exit 1; }
+[[ -d web/dist ]] || { echo "no web/dist — run 'pnpm build' first" >&2; exit 1; }
 [[ -d pkg ]] || { echo "no pkg/ — run wasm-pack build first" >&2; exit 1; }
 
 if existing=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null); then

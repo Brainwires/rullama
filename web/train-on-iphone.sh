@@ -23,11 +23,11 @@
 #   - safaridriver allowed on first connection ("Allow Remote Automation")
 #   - HTTPS cert trusted on the iPhone (Settings → General → About →
 #     Certificate Trust Settings → enable for rullama cert)
-#   - examples/web/serve-iphone.sh running on the Mac (port 8088)
+#   - web/serve-iphone.sh running on the Mac (port 8088)
 #   - safaridriver running on the Mac (port 4444)
 #
 # Usage:
-#   ./examples/web/train-on-iphone.sh
+#   ./web/train-on-iphone.sh
 #
 # Env overrides:
 #   PORT       (default 8088) — the HTTPS server port
@@ -52,7 +52,7 @@ err() { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; }
 # ── Preflight ────────────────────────────────────────────────────────
 if ! curl -ksS --max-time 2 "https://localhost:$PORT/" -o /dev/null 2>&1; then
     err "no HTTPS server on :${PORT}."
-    err "  Start with: REPO_ROOT=\"$ROOT\" $ROOT/examples/web/serve-iphone.sh &"
+    err "  Start with: REPO_ROOT=\"$ROOT\" $ROOT/web/serve-iphone.sh &"
     exit 1
 fi
 if ! curl -sS --max-time 2 "http://localhost:${WD_PORT}/status" >/dev/null 2>&1; then

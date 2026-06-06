@@ -19,7 +19,6 @@ LICENSE-*
 
 # Local bench / session logs
 /tmp/
-/examples/pwa/.served
 
 # The container builds its own server.py; don't ship Docker files into themselves
 Dockerfile

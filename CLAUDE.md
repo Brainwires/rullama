@@ -123,15 +123,12 @@ under `crates/rullama/examples/` (parity, smoke, inspectors, microbenches) and
 
 ## PWA dev loops
 
-Two harnesses against the same `pkg/` bundle:
+The user-facing PWA lives in `web/` (React + Vite + Tailwind + Workbox SW),
+built against the shared `pkg/` wasm bundle. `pnpm dev` (or `cargo dev`)
+auto-runs the wasm build.
 
-| Path              | When to use                                                                 |
-|-------------------|------------------------------------------------------------------------------|
-| `examples/web/`   | User-facing chat PWA work — React + Vite + Tailwind + Workbox SW. `pnpm dev` auto-runs the wasm build. |
-| `examples/pwa/`   | Kernel benchmarks and scripted iPhone runs via `safaridriver`. Build the wasm bundle first, then `./examples/pwa/serve.sh` (HTTPS). |
-
-iPhone runs go through `examples/pwa/run-on-iphone.sh` / `iphone-session-keeper.sh`
-/ `clean-iphone.sh`. Logs land at `/tmp/rullama-page.log` (beacons:
+iPhone / safaridriver runs go through `web/serve-iphone.sh` / `web/serve-tunnel.sh`
+and `web/test/iphone-test.sh`. Logs land at `/tmp/rullama-page.log` (beacons:
 `[chat]`, `[pe]`, `[tg]`, `[gen]`, `[wkr]`, `[rs]`). After kernel changes,
 remember the harness ships **bit-identical** parity vs Ollama on desktop —
 verify locally before touching the iPhone path.
@@ -159,7 +156,7 @@ Add a task by appending a match arm in `xtask/src/main.rs` and the alias line in
 | Mode | Command | Vite proxy? | `/api/log` writeable? | `/api/models` listed? | Use when |
 |------|---------|-------------|-----------------------|-----------------------|----------|
 | Local dev (default) | `cargo dev` | yes (HMR works through :25321) | yes | yes | working locally, **tunnel is OFF** |
-| Public / tunnel-safe | `cargo dev -- --public` | no (serves `examples/web/dist/`) | no | no | tunnel is up, public origin is reachable |
+| Public / tunnel-safe | `cargo dev -- --public` | no (serves `web/dist/`) | no | no | tunnel is up, public origin is reachable |
 
 **Important security boundary**: `cargo dev` (no flags) reverse-proxies `*` to Vite. Vite's `fs.allow=[repoRoot]` exposes every file under the repo to whatever can reach :25321 — including, transitively, anyone on the internet via `https://rullama.brainwires.net`. **Run `cargo dev --public` whenever the Cloudflare tunnel is up.**
 
@@ -238,8 +235,7 @@ crates/rullama-finetune/src/
   dataset_loader.rs       # JSONL + Tokenizer trait
   wasm_bindgen_api.rs     # JS-facing TrainingSession (wasm32 only); save/load adapter as safetensors
 
-examples/web/             # React + Vite production PWA
-examples/pwa/             # Vanilla JS bench + safaridriver scripts
+web/                      # React + Vite production PWA (+ safaridriver scripts)
 tools/ios-bench/          # Excluded from workspace; staticlib for Xcode
 ```
 

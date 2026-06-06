@@ -1,6 +1,6 @@
 // rullama-web API server — Hono on Node.
 //
-// Mirrors the four endpoints from the legacy `examples/pwa/serve.sh` Python
+// Mirrors the four endpoints from the legacy `serve.sh` Python
 // dev server, so the React app and the static PWA can both run against this
 // process. Bun is the eventual target runtime; Hono runs unchanged on both.
 //
@@ -116,7 +116,7 @@ app.post("/api/bench-result", async (c) => {
     return c.json({});
 });
 
-// In prod, the built React app at `examples/web/dist/` is also served from
+// In prod, the built React app at `web/dist/` is also served from
 // this process. In dev, Vite serves the SPA and proxies /api/* to us.
 const distDir = path.resolve(import.meta.dirname ?? __dirname, "..", "dist");
 if (fs.existsSync(distDir) && fs.statSync(distDir).isDirectory()) {

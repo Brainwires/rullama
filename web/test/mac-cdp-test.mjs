@@ -19,7 +19,7 @@
 // (the launch line is in mac-chrome-test.mjs).
 //
 // Usage:
-//   node examples/web/test/mac-cdp-test.mjs
+//   node web/test/mac-cdp-test.mjs
 //
 // Env:
 //   URL              default https://rullama.brainwires.net

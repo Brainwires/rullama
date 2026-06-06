@@ -107,7 +107,7 @@ preflight() {
     ok "iPhone reachable"
 
     curl -ksS --max-time 3 "https://localhost:${PORT}/" -o /dev/null \
-        || { fail "HTTPS server :${PORT} not up — start examples/web/serve-iphone.sh"; return 3; }
+        || { fail "HTTPS server :${PORT} not up — start web/serve-iphone.sh"; return 3; }
     ok "HTTPS server up :${PORT}"
 
     : "${UDID:=$(idevice_id -l 2>/dev/null | head -1)}"
@@ -166,7 +166,7 @@ JS
 
 # Nuke Service Worker + Cache Storage + force-reload. Without this, the
 # dev SW (CacheFirst on /pkg/*.wasm with 30-day TTL — see
-# examples/web/dist/sw.js's registerRoute) serves stale wasm for every
+# web/dist/sw.js's registerRoute) serves stale wasm for every
 # test run after a rebuild. We learned this the hard way: every iPhone
 # test from 5487cb8 onward was actually running 5487cb8's wasm because
 # the SW had cached it from the first run. Symptom: the page log shows

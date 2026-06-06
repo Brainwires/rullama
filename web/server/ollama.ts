@@ -1,5 +1,5 @@
 // Resolves the local Ollama install's manifest + blob layout. This mirrors
-// the Python helpers in `examples/pwa/serve.sh` (`discover_models`,
+// the Python helpers in `serve.sh` (`discover_models`,
 // `find_blob`) so the React app and the existing static PWA can both run
 // against this server.
 
@@ -26,7 +26,7 @@ export interface ModelEntry {
      *  Default for HF-style text-only GGUFs: omit (text-only forced). */
     multimodal?: boolean;
     /** Advisory "heavy model" flag — the client renders a ⚠ marker; Load
-     *  is not blocked. Mirrors `heavy` in examples/web/src/lib/api.ts. */
+     *  is not blocked. Mirrors `heavy` in web/src/lib/api.ts. */
     heavy?: boolean;
 }
 

@@ -1,6 +1,6 @@
 //! /__rullama-dev-ws — WebSocket fan-out for `DevEvent`s.
 //!
-//! The browser-side client (`examples/web/src/lib/dev-hmr.ts`) subscribes;
+//! The browser-side client (`web/src/lib/dev-hmr.ts`) subscribes;
 //! the watcher publishes. Each connected tab gets every event from the
 //! moment it connects. No replay of history.
 

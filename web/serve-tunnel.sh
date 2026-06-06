@@ -9,15 +9,15 @@
 # production.
 #
 # Serves (plain HTTP, same routes as serve-iphone.sh):
-#   /                                 → examples/web/dist/index.html
-#   /assets/*, /icons/*, /sw.js, …    → examples/web/dist/...
+#   /                                 → web/dist/index.html
+#   /assets/*, /icons/*, /sw.js, …    → web/dist/...
 #   /pkg/*                            → <repo>/pkg/...
 #   /api/models                       → list of locally-installed Ollama models
 #   /api/blob/<family>:<tag>          → stream the model's GGUF blob (Range OK)
 #   /api/log                          → append to /tmp/rullama-page.log
 #
 # Usage:
-#   ./examples/web/serve-tunnel.sh
+#   ./web/serve-tunnel.sh
 #
 # Then point a Cloudflare tunnel at it:
 #   cloudflared tunnel --url http://localhost:25321
@@ -35,7 +35,7 @@ ROOT="$(pwd)"
 PORT="${PORT:-25321}"
 OLLAMA_MODELS="${OLLAMA_MODELS:-$HOME/.ollama/models}"
 
-[[ -d examples/web/dist ]] || { echo "no examples/web/dist — run 'pnpm build' first" >&2; exit 1; }
+[[ -d web/dist ]] || { echo "no web/dist — run 'pnpm build' first" >&2; exit 1; }
 [[ -d pkg ]] || { echo "no pkg/ — run wasm-pack build first" >&2; exit 1; }
 
 if existing=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null); then
