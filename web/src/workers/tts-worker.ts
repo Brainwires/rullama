@@ -58,7 +58,8 @@ self.onmessage = async (e: MessageEvent<Req>) => {
             if (!tts) throw new Error("TTS not loaded");
             const pcm =
                 type === "synthesize"
-                    ? await tts.synthesize(e.data.text!, e.data.voice!)
+                    ? await tts.synthesize(e.data.text!, e.data.voice!,
+                        (frac: number, stage: string) => post({ id, progress: frac, stage }))
                     : await tts.synthesizePhonemes(e.data.text!, e.data.voice!);
             post({ id, ok: true, pcm }, [pcm.buffer]);
         } else if (type === "trainBegin") {

@@ -14,15 +14,15 @@ export class TtsClient {
     private worker: Worker;
     private pending = new Map<number, Pending>();
     private nextId = 1;
-    private onProgress?: (frac: number) => void;
+    private onProgress?: (frac: number, stage?: string) => void;
     sampleRate = 24000;
 
     constructor() {
         this.worker = new Worker(new URL("../workers/tts-worker.ts", import.meta.url), { type: "module" });
         this.worker.onmessage = (e: MessageEvent) => {
-            const m = e.data as { id: number; ok?: boolean; error?: string; progress?: number; pcm?: Float32Array; sampleRate?: number };
+            const m = e.data as { id: number; ok?: boolean; error?: string; progress?: number; stage?: string; pcm?: Float32Array; sampleRate?: number };
             if (m.progress !== undefined) {
-                this.onProgress?.(m.progress);
+                this.onProgress?.(m.progress, m.stage);
                 return;
             }
             const p = this.pending.get(m.id);
@@ -49,9 +49,18 @@ export class TtsClient {
         this.onProgress = undefined;
     }
 
-    async synthesize(text: string, voice: string): Promise<Float32Array> {
-        const r = await this.rpc<{ pcm: Float32Array }>("synthesize", { text, voice });
-        return r.pcm;
+    async synthesize(
+        text: string,
+        voice: string,
+        onProgress?: (frac: number, stage?: string) => void,
+    ): Promise<Float32Array> {
+        this.onProgress = onProgress;
+        try {
+            const r = await this.rpc<{ pcm: Float32Array }>("synthesize", { text, voice });
+            return r.pcm;
+        } finally {
+            this.onProgress = undefined;
+        }
     }
 
     // ---- gradient-free voice training ----

@@ -87,7 +87,10 @@ export function VoicePanel(
             } else {
                 if (!tts.current) tts.current = await getSharedTts(kokoroBlobUrl(), (f) => setDlPct(Math.round(f * 100)));
                 const preset = sel.slice(2);
-                pcm = await tts.current.synthesize(text.trim(), preset);
+                pcm = await tts.current.synthesize(text.trim(), preset, (f, s) => {
+                    setProcPct(Math.round(f * 100));
+                    setProcStage(s ?? "");
+                });
                 sr = tts.current.sampleRate;
                 label = preset;
             }
@@ -265,10 +268,13 @@ export function VoicePanel(
                 </div>
 
                 {busy && dlPct > 0 && dlPct < 100 && <Progress value={dlPct} className="h-1" />}
-                {busy && isClone && procPct > 0 && (
-                    <div className="flex items-center justify-between rounded-md border border-border bg-muted/20 px-2 py-1.5 text-[11px] text-muted-foreground">
-                        <span className="truncate">{procStage || "synthesizing"}…</span>
-                        <span className="tabular-nums">{procPct}%</span>
+                {busy && procPct > 0 && (
+                    <div className="flex flex-col gap-1">
+                        <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                            <span className="truncate">{procStage || "synthesizing"}…</span>
+                            <span className="tabular-nums">{procPct}%</span>
+                        </div>
+                        <Progress value={procPct} className="h-1" />
                     </div>
                 )}
                 {err && <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">{err}</div>}
