@@ -15,6 +15,8 @@
 
 import { useEffect, useState } from "react";
 import { usePersistedState } from "@/lib/persisted";
+import { getGpuBench, type BenchResult } from "@/lib/gpuBench";
+import { beacon } from "@/lib/api";
 
 /** Persisted manual Premium override (Settings → "High-VRAM GPU (24GB+)"). */
 export const HIGH_VRAM_OVERRIDE_KEY = "highVramOverride"; // usePersistedState prefixes "rullama:"
@@ -114,6 +116,10 @@ export async function detectTier(highVramOverride: boolean): Promise<{ tier: Dev
 export interface DeviceTierState {
     tier:    DeviceTier | null; // null while the async probe is in flight
     probe:   GpuProbe | null;
+    /** Cached GPU performance-burst result (lib/gpuBench.ts) — null until it
+     *  lands, or when no perf signal is available. Run once per device, then
+     *  served from cache forever. */
+    bench:   BenchResult | null;
     loading: boolean;
 }
 
@@ -123,17 +129,33 @@ export interface DeviceTierState {
  * Settings toggle re-renders consumers. `tier` is null until the first
  * probe lands — callers should treat null as "still checking" (don't boot
  * the engine yet, don't render the Unsupported screen yet).
+ *
+ * Once the tier is known and supported, kicks off the cached GPU burst
+ * (lib/gpuBench.ts) for a real throughput signal — measured once, then read
+ * from localStorage on every later boot.
  */
 export function useDeviceTier(): DeviceTierState {
     const [override] = usePersistedState<boolean>(HIGH_VRAM_OVERRIDE_KEY, false);
-    const [state, setState] = useState<DeviceTierState>({ tier: null, probe: null, loading: true });
+    const [state, setState] = useState<DeviceTierState>({ tier: null, probe: null, bench: null, loading: true });
 
     useEffect(() => {
         let cancelled = false;
         setState((s) => ({ ...s, loading: true }));
-        void detectTier(override).then(({ tier, probe }) => {
-            if (!cancelled) setState({ tier, probe, loading: false });
-        });
+        void (async () => {
+            const { tier, probe } = await detectTier(override);
+            if (cancelled) return;
+            // Unsupported → no point benching; surface the tier immediately.
+            if (tier === "unsupported") { setState({ tier, probe, bench: null, loading: false }); return; }
+            setState({ tier, probe, bench: null, loading: true });
+            const bench = await getGpuBench();
+            if (cancelled) return;
+            setState({ tier, probe, bench, loading: false });
+            if (bench?.fresh) {
+                // Log the first-run measurement so the perfClass breakpoints
+                // (gpuBench.ts) can be calibrated against real devices.
+                beacon("[gpu]", `bench ms=${bench.ms.toFixed(1)} class=${bench.perfClass} tier=${tier} maxBuf=${Math.round(probe.maxBufferSize / 1024 / 1024)}MB mem=${probe.deviceMemoryGB}GB`);
+            }
+        })();
         return () => { cancelled = true; };
     }, [override]);
 
