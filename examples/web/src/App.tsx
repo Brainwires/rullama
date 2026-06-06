@@ -267,6 +267,9 @@ export function App() {
     // Voice-tab left sidebar (the generated-clips list, portaled from VoicePanel).
     const [voiceClipsOpen, setVoiceClipsOpen] = usePersistedState<boolean>("ui.voiceClipsOpen", DOCKED_DEFAULT);
     const [voiceClipsEl, setVoiceClipsEl] = useState<HTMLDivElement | null>(null);
+    // Fine-tune overlay right sidebar (hyperparameter settings, portaled from FineTunePanel).
+    const [fineTuneSettingsOpen, setFineTuneSettingsOpen] = usePersistedState<boolean>("ui.fineTuneSettingsOpen", DOCKED_DEFAULT);
+    const [fineTuneSettingsEl, setFineTuneSettingsEl] = useState<HTMLDivElement | null>(null);
 
     // Persisted tunables.
     const [systemPrompt, setSystemPrompt] = usePersistedState<string>("systemPrompt", DEFAULT_SYSTEM_PROMPT);
@@ -2559,23 +2562,36 @@ export function App() {
                             <X className="size-4" /> Close
                         </Button>
                     </header>
-                    <div className="min-h-0 flex-1 overflow-hidden">
-                        {training === "voicelearn" ? (
-                            <VoiceTrainPanel />
-                        ) : trainingCap.status === "blocked" ? (
-                            <TrainingBlockedScreen title={trainingCap.title} reason={trainingCap.reason} />
-                        ) : trainingCap.status === "checking" ? (
-                            <div className="flex h-full min-h-0 items-center justify-center p-8 text-sm text-muted-foreground">
-                                Checking device capability…
-                            </div>
-                        ) : (
+                    {training === "finetune" && trainingCap.status === "ok" ? (
+                        // FineTunePanel's hyperparameter column lives in the right
+                        // sidebar (portaled via settingsHostEl), with its own chevron
+                        // toggle — same pattern as the Chat/Voice tabs.
+                        <DualSidebarLayout
+                            rightOpen={fineTuneSettingsOpen}
+                            onToggleRight={setFineTuneSettingsOpen}
+                            rightWidth={340}
+                            rightSidebar={<div ref={setFineTuneSettingsEl} className="h-full" />}
+                        >
                             <FineTunePanel
                                 modelStatus={modelStatus}
                                 activeAdapter={activeAdapter}
                                 onAdapterChanged={setActiveAdapter}
+                                settingsHostEl={fineTuneSettingsEl}
                             />
-                        )}
-                    </div>
+                        </DualSidebarLayout>
+                    ) : (
+                        <div className="min-h-0 flex-1 overflow-hidden">
+                            {training === "voicelearn" ? (
+                                <VoiceTrainPanel />
+                            ) : trainingCap.status === "blocked" ? (
+                                <TrainingBlockedScreen title={trainingCap.title} reason={trainingCap.reason} />
+                            ) : (
+                                <div className="flex h-full min-h-0 items-center justify-center p-8 text-sm text-muted-foreground">
+                                    Checking device capability…
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
             )}
 
