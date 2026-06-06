@@ -2,11 +2,14 @@ import { useToast, type ToastLevel } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { X, AlertTriangle, CircleAlert, Info, CheckCircle2 } from "lucide-react";
 
-const STYLE: Record<ToastLevel, { border: string; bg: string; icon: typeof Info }> = {
-    error:   { border: "border-l-destructive",   bg: "bg-destructive/10",      icon: CircleAlert },
-    warn:    { border: "border-l-yellow-500",    bg: "bg-yellow-500/10",       icon: AlertTriangle },
-    success: { border: "border-l-emerald-500",   bg: "bg-emerald-500/10",      icon: CheckCircle2 },
-    info:    { border: "border-l-muted-foreground", bg: "bg-muted/40",         icon: Info },
+// Opaque card background (readable over any page content) + a level-colored
+// left border and icon. The old translucent bg-*/10 fills let the page show
+// through and were hard to read.
+const STYLE: Record<ToastLevel, { border: string; iconColor: string; icon: typeof Info }> = {
+    error:   { border: "border-l-destructive",      iconColor: "text-destructive",      icon: CircleAlert },
+    warn:    { border: "border-l-yellow-500",       iconColor: "text-yellow-500",       icon: AlertTriangle },
+    success: { border: "border-l-emerald-500",      iconColor: "text-emerald-500",      icon: CheckCircle2 },
+    info:    { border: "border-l-muted-foreground", iconColor: "text-muted-foreground", icon: Info },
 };
 
 /** Bottom-right toast stack. Persistent (error/warn) toasts stay until
@@ -31,13 +34,12 @@ export function Toaster() {
                     <div
                         key={t.id}
                         className={cn(
-                            "pointer-events-auto flex w-full max-w-sm items-start gap-2 rounded-md border border-border border-l-4 p-2 shadow-md animate-fade-in",
-                            s.bg,
+                            "pointer-events-auto flex w-full max-w-sm items-start gap-2 rounded-md border border-border border-l-4 bg-card p-2 text-card-foreground shadow-lg animate-fade-in",
                             s.border,
                         )}
                         role={t.level === "error" || t.level === "warn" ? "alert" : "status"}
                     >
-                        <Icon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden />
+                        <Icon className={cn("mt-0.5 h-4 w-4 shrink-0", s.iconColor)} aria-hidden />
                         <div className="min-w-0 flex-1 text-xs">
                             <p className="font-medium leading-tight">{t.title}</p>
                             {t.message && (
