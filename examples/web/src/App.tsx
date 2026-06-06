@@ -2425,6 +2425,13 @@ export function App() {
                             onDeleteModel={onDeleteModel}
                             onEjectModel={onEjectModel}
                             onOpenFineTune={() => setTraining("finetune")}
+                            canFineTune={modelStatus === "ready" && trainingCap.status === "ok"}
+                            fineTuneReason={
+                                modelStatus !== "ready" ? "Load a model first"
+                                : trainingCap.status === "checking" ? "Checking device capability…"
+                                : trainingCap.status === "blocked" ? trainingCap.title
+                                : "Fine-tuning unavailable on this device"
+                            }
                             systemPrompt={systemPrompt}
                             onSystemPromptChange={setSystemPrompt}
                             sampling={sampling}

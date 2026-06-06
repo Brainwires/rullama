@@ -24,6 +24,11 @@ interface Props {
     onEjectModel:   () => void;
     /** Opens the full-screen Fine-tune (LoRA training) overlay. */
     onOpenFineTune: () => void;
+    /** Whether fine-tuning can actually run here — model ready AND the device
+     *  passes the training-capability probe (iOS is blocked by default). */
+    canFineTune:    boolean;
+    /** Why fine-tune is unavailable (tooltip), when `canFineTune` is false. */
+    fineTuneReason: string;
     // Generation settings.
     systemPrompt: string;
     onSystemPromptChange: (s: string) => void;
@@ -100,13 +105,13 @@ export function ChatSettings(props: Props) {
                             size="sm"
                             className="h-8 justify-start gap-2 text-xs"
                             onClick={props.onOpenFineTune}
-                            disabled={props.modelStatus !== "ready"}
-                            title={props.modelStatus === "ready"
+                            disabled={!props.canFineTune}
+                            title={props.canFineTune
                                 ? "Fine-tune (LoRA) the loaded model on your own data"
-                                : "Load a model first"}
+                                : props.fineTuneReason}
                         >
                             <Sparkles className="size-3.5" />
-                            {props.modelStatus === "ready" ? "Fine-tune…" : "Fine-tune… (Unavailable)"}
+                            {props.canFineTune ? "Fine-tune…" : "Fine-tune… (Unavailable)"}
                         </Button>
                     </section>
                 )}
