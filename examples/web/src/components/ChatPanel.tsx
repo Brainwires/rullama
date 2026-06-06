@@ -335,10 +335,13 @@ export function ChatPanel(props: Props) {
                  *  presses Esc) — the buttons animate back in. */}
                 <div
                     className={cn(
-                        "flex gap-1.5 overflow-hidden transition-[max-width,opacity] duration-200 ease-out",
+                        "flex shrink-0 gap-1.5 overflow-hidden transition-[max-width,opacity] duration-200 ease-out",
                         inputFocused
                             ? "pointer-events-none max-w-0 opacity-0"
-                            : "max-w-[7rem] opacity-100",
+                            // Wide enough for Attach + the *recording* mic (Square + a level
+                            // number, e.g. "100") — the idle mic is narrower. 7rem clipped the
+                            // recording mic's right edge off-screen.
+                            : "max-w-[10rem] opacity-100",
                     )}
                 >
                     <Button
