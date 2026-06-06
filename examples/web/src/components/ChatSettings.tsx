@@ -106,7 +106,7 @@ export function ChatSettings(props: Props) {
                                 : "Load a model first"}
                         >
                             <Sparkles className="size-3.5" />
-                            Fine-tune…
+                            {props.modelStatus === "ready" ? "Fine-tune…" : "Fine-tune… (Unavailable)"}
                         </Button>
                     </section>
                 )}
