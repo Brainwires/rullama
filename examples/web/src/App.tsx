@@ -20,6 +20,7 @@ import { getNetworkHint } from "@/lib/network";
 import { getClient, teardownInferenceCore, type ConversationRow } from "@/lib/inference";
 import { disposeSharedClone } from "@/lib/clone-client";
 import { disposeSharedTts } from "@/lib/tts-client";
+import { ChatSettings } from "@/components/ChatSettings";
 import { useToast } from "@/lib/toast";
 import { useConfirm } from "@/lib/confirm";
 import { usePersistedState } from "@/lib/persisted";
@@ -254,6 +255,8 @@ export function App() {
     const [fineTuneSettingsOpen, setFineTuneSettingsOpen] = usePersistedState<boolean>("ui.fineTuneSettingsOpen", true);
     // Voice-training right sidebar (the relocated "Speech input" VAD settings).
     const [voiceSettingsOpen, setVoiceSettingsOpen] = usePersistedState<boolean>("ui.voiceSettingsOpen", true);
+    // Chat-tab right sidebar (system prompt + sampling + thinking — the per-tab chat settings).
+    const [chatSettingsOpen, setChatSettingsOpen] = usePersistedState<boolean>("ui.chatSettingsOpen", false);
     // DOM mount point for FineTunePanel's portal-rendered settings
     // column. useState (not useRef) so the ref-callback re-renders
     // FineTunePanel with the now-non-null host on mount.
@@ -2376,11 +2379,33 @@ export function App() {
                         />
                     ) : undefined
                 }
-                rightOpen={view === "finetune" && (ftSub === "voice" ? voiceSettingsOpen : fineTuneSettingsOpen)}
-                onToggleRight={ftSub === "voice" ? setVoiceSettingsOpen : setFineTuneSettingsOpen}
+                rightOpen={
+                    view === "chat" ? chatSettingsOpen
+                    : view === "finetune" ? (ftSub === "voice" ? voiceSettingsOpen : fineTuneSettingsOpen)
+                    : false
+                }
+                onToggleRight={
+                    view === "chat" ? setChatSettingsOpen
+                    : ftSub === "voice" ? setVoiceSettingsOpen
+                    : setFineTuneSettingsOpen
+                }
                 rightWidth={340}
                 rightSidebar={
-                    view === "finetune" ? (
+                    view === "chat" ? (
+                        // Per-tab chat settings (system prompt + sampling + thinking). Model
+                        // management / logs / app-data stay in the global Settings view.
+                        <ChatSettings
+                            systemPrompt={systemPrompt}
+                            onSystemPromptChange={setSystemPrompt}
+                            sampling={sampling}
+                            onSamplingChange={setSampling}
+                            maxTokens={maxTokens}
+                            onMaxTokensChange={setMaxTokens}
+                            thinking={thinking}
+                            onThinkingChange={setThinking}
+                            onResetDefaults={onResetDefaults}
+                        />
+                    ) : view === "finetune" ? (
                         ftSub === "voice" ? (
                             // Voice training shows the (relocated) Speech-input VAD settings —
                             // mirrors how inference fine-tuning surfaces its settings here.
@@ -2449,18 +2474,6 @@ export function App() {
                             onLoadModel={onLoad}
                             onDeleteModel={onDeleteModel}
                             onEjectModel={onEjectModel}
-                            systemPrompt={systemPrompt}
-                            onSystemPromptChange={setSystemPrompt}
-                            sampling={sampling}
-                            onSamplingChange={setSampling}
-                            maxTokens={maxTokens}
-                            onMaxTokensChange={setMaxTokens}
-                            thinking={thinking}
-                            onThinkingChange={setThinking}
-                            voice={voice}
-                            onVoiceChange={setVoice}
-                            canRecord={modelStatus === "ready" && hasAudio}
-                            onResetDefaults={onResetDefaults}
                         />
                     </div>
                 ) : (
