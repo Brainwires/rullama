@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { AudioLines, Download, Loader2, Play, Trash2, Upload } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -27,7 +28,9 @@ function presetLabel(id: string): string {
     return `${name} · ${region} ${sex}`;
 }
 
-export function VoicePanel() {
+/** `settingsHostEl`: when provided (App's right-sidebar slot), the voice picker + import/delete
+ *  render there via portal; otherwise they fall back inline in the main column. */
+export function VoicePanel({ settingsHostEl }: { settingsHostEl?: HTMLElement | null } = {}) {
     const tts = useRef<TtsClient | null>(null);
     const [err, setErr] = useState<string | null>(null);
     const [text, setText] = useState("Hello, this is text to speech running entirely in your browser.");
@@ -96,6 +99,47 @@ export function VoicePanel() {
         }
     }, []);
 
+    // Voice options — rendered in the right sidebar (via portal) or inline as a fallback.
+    const voiceSettings = (
+        <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3">
+            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Voice</div>
+            <select
+                value={sel}
+                onChange={(e) => setSel(e.target.value)}
+                className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs"
+            >
+                <optgroup label="Preset (Kokoro)">
+                    {PRESETS.map((v) => (
+                        <option key={v} value={`k:${v}`}>{presetLabel(v)}</option>
+                    ))}
+                </optgroup>
+                {voices.length > 0 && (
+                    <optgroup label="My cloned voices">
+                        {voices.map((v) => (
+                            <option key={v.id} value={`c:${v.id}`}>{v.name}</option>
+                        ))}
+                    </optgroup>
+                )}
+            </select>
+            <div className="flex flex-wrap items-center gap-2">
+                <label className={cn("inline-flex h-8 cursor-pointer items-center gap-1 rounded-md border border-border px-2 text-xs hover:bg-muted/50", busy && "pointer-events-none opacity-50")} title="Import a .f32 voice exported from Voice training">
+                    <Upload className="size-3.5" /> Import
+                    <input type="file" accept=".f32,application/octet-stream" className="hidden" disabled={busy} onChange={(e) => onImport(e.target.files?.[0])} />
+                </label>
+                {isClone && cloneVoice && (
+                    <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-destructive" title="Delete this cloned voice" onClick={() => { removeVoice(cloneVoice.id); setSel("k:af_heart"); }}>
+                        <Trash2 className="size-3.5" /> Delete voice
+                    </Button>
+                )}
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+                {isClone
+                    ? "Cloned voices run the StyleTTS2 engine on your GPU (desktop), with style diffusion for natural prosody — first use downloads a 543 MB model (then OPFS-cached)."
+                    : "Preset voices run Kokoro on your GPU via WebGPU. Clone your own voice in Fine-tune → Voice training."}
+            </p>
+        </div>
+    );
+
     return (
         <div className="flex h-full min-h-0">
             {/* artifact sidebar */}
@@ -148,39 +192,9 @@ export function VoicePanel() {
                 />
 
                 <div className="flex flex-wrap items-center gap-2">
-                    <select
-                        value={sel}
-                        onChange={(e) => setSel(e.target.value)}
-                        className="h-8 rounded-md border border-border bg-background px-2 text-xs"
-                    >
-                        <optgroup label="Preset (Kokoro)">
-                            {PRESETS.map((v) => (
-                                <option key={v} value={`k:${v}`}>{presetLabel(v)}</option>
-                            ))}
-                        </optgroup>
-                        {voices.length > 0 && (
-                            <optgroup label="My cloned voices">
-                                {voices.map((v) => (
-                                    <option key={v.id} value={`c:${v.id}`}>{v.name}</option>
-                                ))}
-                            </optgroup>
-                        )}
-                    </select>
-
                     <Button size="sm" onClick={generate} disabled={busy || !text.trim()}>
                         {busy ? <><Loader2 className="size-3.5 animate-spin" /> {dlPct > 0 && dlPct < 100 ? `Loading… ${dlPct}%` : "Generating…"}</> : "Generate speech"}
                     </Button>
-
-                    <label className={cn("inline-flex h-8 cursor-pointer items-center gap-1 rounded-md border border-border px-2 text-xs hover:bg-muted/50", busy && "pointer-events-none opacity-50")} title="Import a .f32 voice exported from Voice training">
-                        <Upload className="size-3.5" /> Import
-                        <input type="file" accept=".f32,application/octet-stream" className="hidden" disabled={busy} onChange={(e) => onImport(e.target.files?.[0])} />
-                    </label>
-
-                    {isClone && cloneVoice && (
-                        <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-destructive" title="Delete this cloned voice" onClick={() => { removeVoice(cloneVoice.id); setSel("k:af_heart"); }}>
-                            <Trash2 className="size-3.5" />
-                        </Button>
-                    )}
 
                     {active >= 0 && clips[active] && (
                         <>
@@ -202,12 +216,12 @@ export function VoicePanel() {
                     </div>
                 )}
                 {err && <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">{err}</div>}
-                <p className="text-[11px] text-muted-foreground">
-                    {isClone
-                        ? "Cloned voices run the StyleTTS2 engine on your GPU (desktop), with style diffusion for natural prosody — first use downloads a 543 MB model (then OPFS-cached)."
-                        : "Preset voices run Kokoro on your GPU via WebGPU. Clone your own voice in Fine-tune → Voice training."}
-                </p>
+
+                {/* Inline fallback when there's no sidebar host (narrow viewport / no DualSidebarLayout). */}
+                {!settingsHostEl && <div className="border-t border-border pt-3">{voiceSettings}</div>}
             </div>
+
+            {settingsHostEl && createPortal(voiceSettings, settingsHostEl)}
         </div>
     );
 }

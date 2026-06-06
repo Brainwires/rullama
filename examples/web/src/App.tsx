@@ -257,6 +257,9 @@ export function App() {
     const [voiceSettingsOpen, setVoiceSettingsOpen] = usePersistedState<boolean>("ui.voiceSettingsOpen", true);
     // Chat-tab right sidebar (system prompt + sampling + thinking — the per-tab chat settings).
     const [chatSettingsOpen, setChatSettingsOpen] = usePersistedState<boolean>("ui.chatSettingsOpen", false);
+    // Voice-tab right sidebar (the voice picker + import/delete, portaled from VoicePanel).
+    const [voiceTabSettingsOpen, setVoiceTabSettingsOpen] = usePersistedState<boolean>("ui.voiceTabSettingsOpen", true);
+    const [voiceTabSettingsEl, setVoiceTabSettingsEl] = useState<HTMLDivElement | null>(null);
     // DOM mount point for FineTunePanel's portal-rendered settings
     // column. useState (not useRef) so the ref-callback re-renders
     // FineTunePanel with the now-non-null host on mount.
@@ -2381,11 +2384,13 @@ export function App() {
                 }
                 rightOpen={
                     view === "chat" ? chatSettingsOpen
+                    : view === "voice" ? voiceTabSettingsOpen
                     : view === "finetune" ? (ftSub === "voice" ? voiceSettingsOpen : fineTuneSettingsOpen)
                     : false
                 }
                 onToggleRight={
                     view === "chat" ? setChatSettingsOpen
+                    : view === "voice" ? setVoiceTabSettingsOpen
                     : ftSub === "voice" ? setVoiceSettingsOpen
                     : setFineTuneSettingsOpen
                 }
@@ -2405,6 +2410,9 @@ export function App() {
                             onThinkingChange={setThinking}
                             onResetDefaults={onResetDefaults}
                         />
+                    ) : view === "voice" ? (
+                        // VoicePanel portals its voice picker / import / delete into this host.
+                        <div ref={setVoiceTabSettingsEl} className="h-full" />
                     ) : view === "finetune" ? (
                         ftSub === "voice" ? (
                             // Voice training shows the (relocated) Speech-input VAD settings —
@@ -2458,7 +2466,7 @@ export function App() {
                         </div>
                     </div>
                 ) : view === "voice" ? (
-                    <VoicePanel />
+                    <VoicePanel settingsHostEl={voiceTabSettingsEl} />
                 ) : view === "settings" ? (
                     // Centered max-width wrapper so the form controls
                     // don't stretch across the full main-content width
