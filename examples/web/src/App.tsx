@@ -2485,6 +2485,9 @@ export function App() {
                     canStop={busy}
                     canAttach={modelStatus === "ready" && (hasVision || hasAudio) && !trainingInProgress}
                     canRecord={modelStatus === "ready" && hasAudio && !busy && !trainingInProgress}
+                    // Speak-a-reply runs the Kokoro TTS engine alongside inference — needs at least
+                    // the recommended GPU tier. Hidden on the minimum (mobile) tier.
+                    canSpeak={tier === "desktop" || tier === "premium"}
                     statusLine={trainingInProgress
                         ? "Training session is active — open Fine-tune and Save / Apply / Discard the adapter to return to chat."
                         : statusLine}

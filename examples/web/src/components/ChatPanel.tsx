@@ -30,6 +30,11 @@ interface Props {
     /** Set when the loaded model has the audio tower wired up.
      *  Drives whether the mic button is shown / enabled. */
     canRecord:   boolean;
+    /** Set when the device is at least the *recommended* GPU tier. Drives
+     *  whether each model reply gets a "speak" (TTS) button — speaking runs
+     *  the Kokoro engine alongside inference, too much for a minimum-tier
+     *  (mobile) GPU, so it's hidden there. */
+    canSpeak:    boolean;
     prompt:      string;
     /** Images attached to the next user turn (cleared after send). */
     pendingImages: ImageAttachment[];
@@ -126,7 +131,7 @@ function SpeakButton({ text }: { text: string }) {
     );
 }
 
-function ModelBubble({ content }: { content: string }) {
+function ModelBubble({ content, canSpeak }: { content: string; canSpeak: boolean }) {
     const parsed = useMemo(() => parseModelContent(content), [content]);
     const html   = useMemo(
         () => parsed.response ? renderMarkdown(parsed.response) : "",
@@ -147,7 +152,7 @@ function ModelBubble({ content }: { content: string }) {
             ) : parsed.thinking === null ? (
                 <span className="inline-block animate-pulse text-muted-foreground">▍</span>
             ) : null}
-            {parsed.response && parsed.isComplete !== false && <SpeakButton text={parsed.response} />}
+            {canSpeak && parsed.response && parsed.isComplete !== false && <SpeakButton text={parsed.response} />}
         </div>
     );
 }
@@ -163,9 +168,9 @@ function SystemBubble({ content }: { content: string }) {
     );
 }
 
-function MessageBubble({ msg }: { msg: ChatMessage }) {
+function MessageBubble({ msg, canSpeak }: { msg: ChatMessage; canSpeak: boolean }) {
     if (msg.role === "system") return <SystemBubble content={msg.content} />;
-    if (msg.role === "model")  return <ModelBubble  content={msg.content} />;
+    if (msg.role === "model")  return <ModelBubble  content={msg.content} canSpeak={canSpeak} />;
     return <UserBubble content={msg.content} images={msg.images} />;
 }
 
@@ -246,7 +251,7 @@ export function ChatPanel(props: Props) {
                     )
                 ) : (
                     <div className="mx-auto flex max-w-3xl flex-col gap-2">
-                        {props.messages.map((m, i) => <MessageBubble key={i} msg={m} />)}
+                        {props.messages.map((m, i) => <MessageBubble key={i} msg={m} canSpeak={props.canSpeak} />)}
                     </div>
                 )}
             </div>
