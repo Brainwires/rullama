@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Download, Loader2, Mic, Play, Trash2, Upload } from "lucide-react";
+import { Download, Loader2, Mic, Play, Square, Trash2, Upload } from "lucide-react";
 
 import iconUrl from "../assets/icon-512.png";
 
@@ -58,6 +58,29 @@ export function VoicePanel(
     const [procStage, setProcStage] = useState("");
     const [clips, setClips] = useState<TtsClip[]>([]);
     const [active, setActive] = useState<number>(-1);
+    // Current playback source so the Play button can toggle to Stop.
+    const playingRef = useRef<AudioBufferSourceNode | null>(null);
+    const [playing, setPlaying] = useState(false);
+
+    const stopPlayback = useCallback(() => {
+        const s = playingRef.current;
+        playingRef.current = null;
+        setPlaying(false);
+        if (s) { try { s.stop(); } catch { /* already stopped */ } }
+    }, []);
+
+    /** Play a clip, tracking the source so Stop works; auto-resets when it ends. */
+    const playClip = useCallback((pcm: Float32Array, sampleRate: number) => {
+        stopPlayback();
+        const src = playPcm(pcm, sampleRate);
+        playingRef.current = src;
+        setPlaying(true);
+        const prev = src.onended;
+        src.onended = (ev) => {
+            if (typeof prev === "function") prev.call(src, ev);
+            if (playingRef.current === src) { playingRef.current = null; setPlaying(false); }
+        };
+    }, [stopPlayback]);
 
     useEffect(() => onVoicesChanged(() => setVoices(listVoices())), []);
 
@@ -97,13 +120,13 @@ export function VoicePanel(
             const clip: TtsClip = { pcm, sampleRate: sr, text: text.trim(), voice: label, ts: Date.now() };
             setClips((cs) => [clip, ...cs]);
             setActive(0);
-            playPcm(pcm, sr);
+            playClip(pcm, sr);
         } catch (e) {
             setErr(String(e));
         } finally {
             setBusy(false);
         }
-    }, [busy, text, isClone, cloneVoice, sel, cloneVariant]);
+    }, [busy, text, isClone, cloneVoice, sel, cloneVariant, playClip]);
 
     const onImport = useCallback(async (f: File | undefined) => {
         if (!f) return;
@@ -116,6 +139,20 @@ export function VoicePanel(
         } catch (e) {
             setErr(String(e));
         }
+    }, []);
+
+    /** Export the selected cloned voice as a portable .f32 file (inverse of Import). */
+    const onExport = useCallback((v: SavedVoice) => {
+        const vec = voiceVec(v);
+        // Copy into a plain ArrayBuffer (a subarray view isn't a valid BlobPart).
+        const ab = new ArrayBuffer(vec.byteLength);
+        new Float32Array(ab).set(vec);
+        const url = URL.createObjectURL(new Blob([ab], { type: "application/octet-stream" }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${v.name.replace(/[^\w.-]+/g, "_") || "voice"}.f32`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
     }, []);
 
     // Voice options — rendered in the right sidebar (via portal) or inline as a fallback.
@@ -145,6 +182,11 @@ export function VoicePanel(
                     <Upload className="size-3.5" /> Import
                     <input type="file" accept=".f32,application/octet-stream" className="hidden" disabled={busy} onChange={(e) => onImport(e.target.files?.[0])} />
                 </label>
+                {isClone && cloneVoice && (
+                    <Button size="sm" variant="ghost" className="h-8 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground" title="Export this voice as a portable .f32 file" onClick={() => onExport(cloneVoice)}>
+                        <Download className="size-3.5" /> Export
+                    </Button>
+                )}
                 {isClone && cloneVoice && (
                     <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-destructive" title="Delete this cloned voice" onClick={() => { removeVoice(cloneVoice.id); setSel("k:af_heart"); }}>
                         <Trash2 className="size-3.5" /> Delete voice
@@ -206,7 +248,7 @@ export function VoicePanel(
                         <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
                             <span>{(c.pcm.length / c.sampleRate).toFixed(1)}s · {c.voice}</span>
                             <span className="flex gap-1 opacity-0 group-hover:opacity-100">
-                                <button title="Play" onClick={(e) => { e.stopPropagation(); playPcm(c.pcm, c.sampleRate); }}>
+                                <button title="Play" onClick={(e) => { e.stopPropagation(); playClip(c.pcm, c.sampleRate); }}>
                                     <Play className="size-3" />
                                 </button>
                                 <button title="Save WAV" onClick={(e) => { e.stopPropagation(); downloadWav(c.pcm, c.sampleRate, `tts-${c.ts}`); }}>
@@ -257,9 +299,15 @@ export function VoicePanel(
 
                     {active >= 0 && clips[active] && (
                         <>
-                            <Button size="sm" variant="outline" onClick={() => playPcm(clips[active].pcm, clips[active].sampleRate)}>
-                                <Play className="size-3.5" /> Play
-                            </Button>
+                            {playing ? (
+                                <Button size="sm" variant="outline" onClick={stopPlayback}>
+                                    <Square className="size-3.5" /> Stop
+                                </Button>
+                            ) : (
+                                <Button size="sm" variant="outline" onClick={() => playClip(clips[active].pcm, clips[active].sampleRate)}>
+                                    <Play className="size-3.5" /> Play
+                                </Button>
+                            )}
                             <Button size="sm" variant="outline" onClick={() => downloadWav(clips[active].pcm, clips[active].sampleRate, `tts-${clips[active].ts}`)}>
                                 <Download className="size-3.5" /> Save WAV
                             </Button>
