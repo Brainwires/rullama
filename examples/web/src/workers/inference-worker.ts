@@ -281,7 +281,12 @@ function verifyCoreLive(): Promise<boolean> {
     });
 }
 
-function loseCore(reason: string) {
+// `reelect` defaults to true (the host-tab-died / dead-port cases want a
+// successor spawned immediately). The deliberate-teardown path (engine
+// swap to the TTS/voice engine) passes false: we DROP the core to free
+// its GPU and must NOT respawn it, or we'd re-grab the GPU we just freed
+// for TTS. The next inference RPC lazily re-elects via `forwardToCore`.
+function loseCore(reason: string, reelect = true) {
     if (!corePort && !coreHostPort) return;
     log(`core: lost (${reason})`);
     try { corePort?.close(); } catch { /* */ }
@@ -303,6 +308,7 @@ function loseCore(reason: string) {
         loadedInfo = null;
         notifyAll({ type: "notify", kind: "modelFreed" });
     }
+    if (!reelect) return;
     // Pick a successor.
     const next = nextElectableTab();
     if (next) electHost(next);
@@ -315,8 +321,16 @@ function nextElectableTab(): MessagePort | null {
 
 function forwardToCore(port: MessagePort, originalRequestId: number, type: string, args: Record<string, unknown>) {
     if (!corePort) {
-        // No core attached yet — reply with a transient error. The
-        // client retries on coreReady.
+        // No core attached — e.g. after a deliberate teardown (engine
+        // swap) left us without a host and no re-election. Kick one off
+        // now, preferring the tab that's asking for inference, so a fresh
+        // core spawns + reloads. Then reply with a transient error; the
+        // client retries the RPC once on the resulting coreReady.
+        if (!electionInFlight && PORTS.has(port)) electHost(port);
+        else if (!electionInFlight) {
+            const next = nextElectableTab();
+            if (next) electHost(next);
+        }
         try {
             port.postMessage({
                 requestId: originalRequestId,
@@ -460,6 +474,17 @@ async function handleRequest(
             case "disconnect":
                 reply({ ok: true, result: true });
                 disconnectPort(port, "client disconnect");
+                return;
+            case "teardownCore":
+                // Deliberate core teardown (engine swap → TTS/voice). The
+                // host tab already posted {type:"shutdown"} to its core
+                // Dedicated Worker (frees GPU/OPFS). Drop our stale
+                // corePort so the NEXT inference RPC lazily re-elects +
+                // respawns — but DON'T re-elect now, or we'd immediately
+                // re-grab the GPU we just freed for TTS. Only the host
+                // tab owns a core to tear down.
+                if (port === coreHostPort) loseCore("deliberate teardown", false);
+                reply({ ok: true, result: true });
                 return;
             case "acquireSession": {
                 const sid = await acquireSession(String(raw.abortToken ?? ""), port);

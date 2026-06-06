@@ -378,6 +378,12 @@ export class WorkerClient {
             // Intentionally no terminate() — the worker self.close()s AFTER releasing its OPFS
             // sync handle, so the next core can reopen the GGUF without racing a stale lock.
         }
+        // Tell the router to drop its (now-closing) corePort WITHOUT re-electing, so the next
+        // inference RPC lazily respawns a fresh core. Without this the router keeps forwarding
+        // into the dead port and `load` hangs at "Loading…" forever until a page refresh. The
+        // resulting `modelFreed` notify resets `coreReady` so the reload awaits the new core.
+        // Fire-and-forget (requestId:-1), same pattern as the pagehide `disconnect`/`ping` posts.
+        try { this.port.postMessage({ requestId: -1, type: "teardownCore" }); } catch { /* */ }
     }
 
     // ── Stateless meta accessors (cached from notify: meta or load) ────
