@@ -51,6 +51,12 @@ import { Settings, History, MessageSquare, Sparkles, AudioLines, X } from "lucid
 
 const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
+// Sidebars default OPEN on docked (large) screens and CLOSED on popover
+// (small) ones — matches DualSidebarLayout's 768px breakpoint. Evaluated
+// once at load; it's only the *default* for first-ever visits — once the
+// user toggles a sidebar, the persisted value wins on every later reload.
+const DOCKED_DEFAULT = typeof window !== "undefined" && window.innerWidth >= 768;
+
 const THINK_TOKEN = "<|think|>";
 const TITLE_MAX_LEN = 40;
 
@@ -251,12 +257,16 @@ export function App() {
     // (history) sidebar exists now; Settings has been promoted to its
     // own tab so it doesn't compete with chat content for screen
     // real-estate on small displays.
-    const [historyOpen, setHistoryOpen] = usePersistedState<boolean>("ui.historyOpen", false);
+    // Sidebar open/close — persisted per sidebar, defaulting open when docked.
+    const [historyOpen, setHistoryOpen] = usePersistedState<boolean>("ui.historyOpen", DOCKED_DEFAULT);
     // Chat-tab right sidebar (model block + system prompt + sampling + thinking).
-    const [chatSettingsOpen, setChatSettingsOpen] = usePersistedState<boolean>("ui.chatSettingsOpen", false);
+    const [chatSettingsOpen, setChatSettingsOpen] = usePersistedState<boolean>("ui.chatSettingsOpen", DOCKED_DEFAULT);
     // Voice-tab right sidebar (voice picker + clone-model block, portaled from VoicePanel).
-    const [voiceTabSettingsOpen, setVoiceTabSettingsOpen] = usePersistedState<boolean>("ui.voiceTabSettingsOpen", true);
+    const [voiceTabSettingsOpen, setVoiceTabSettingsOpen] = usePersistedState<boolean>("ui.voiceTabSettingsOpen", DOCKED_DEFAULT);
     const [voiceTabSettingsEl, setVoiceTabSettingsEl] = useState<HTMLDivElement | null>(null);
+    // Voice-tab left sidebar (the generated-clips list, portaled from VoicePanel).
+    const [voiceClipsOpen, setVoiceClipsOpen] = usePersistedState<boolean>("ui.voiceClipsOpen", DOCKED_DEFAULT);
+    const [voiceClipsEl, setVoiceClipsEl] = useState<HTMLDivElement | null>(null);
 
     // Persisted tunables.
     const [systemPrompt, setSystemPrompt] = usePersistedState<string>("systemPrompt", DEFAULT_SYSTEM_PROMPT);
@@ -2368,13 +2378,16 @@ export function App() {
             )}
 
             <DualSidebarLayout
-                leftOpen={view === "chat" && historyOpen}
-                onToggleLeft={setHistoryOpen}
+                leftOpen={
+                    view === "chat" ? historyOpen
+                    : view === "voice" ? voiceClipsOpen
+                    : false
+                }
+                onToggleLeft={view === "chat" ? setHistoryOpen : setVoiceClipsOpen}
                 leftWidth={280}
-                // Left sidebar (conversation list) is chat-specific.
-                // Right sidebar (fine-tune hyperparameter settings) is
-                // fine-tune-specific. Each tab gets the chevron toggle
-                // it needs, hidden on the other tabs.
+                // Left sidebar: chat → conversation list; voice → generated-clips
+                // list (portaled from VoicePanel). Right sidebar is each tab's
+                // settings. Each gets its own chevron toggle.
                 leftSidebar={
                     view === "chat" ? (
                         <ConversationList
@@ -2384,6 +2397,8 @@ export function App() {
                             onCreate={onCreateConversation}
                             onDelete={(id) => void onDeleteConversation(id)}
                         />
+                    ) : view === "voice" ? (
+                        <div ref={setVoiceClipsEl} className="h-full" />
                     ) : undefined
                 }
                 rightOpen={
@@ -2430,7 +2445,7 @@ export function App() {
                 }
             >
                 {view === "voice" ? (
-                    <VoicePanel settingsHostEl={voiceTabSettingsEl} onOpenVoiceLearn={() => setTraining("voicelearn")} />
+                    <VoicePanel settingsHostEl={voiceTabSettingsEl} clipsHostEl={voiceClipsEl} onOpenVoiceLearn={() => setTraining("voicelearn")} />
                 ) : view === "settings" ? (
                     // Centered max-width wrapper so the form controls
                     // don't stretch across the full main-content width

@@ -32,11 +32,12 @@ function presetLabel(id: string): string {
 }
 
 /** `settingsHostEl`: when provided (App's right-sidebar slot), the voice picker + import/delete
- *  render there via portal; otherwise they fall back inline in the main column.
+ *  render there via portal. `clipsHostEl`: App's left-sidebar slot for the generated-clips list.
+ *  Either falls back to an inline column when its host is absent.
  *  `onOpenVoiceLearn`: opens the full-screen Voice-learning (clone training) overlay. */
 export function VoicePanel(
-    { settingsHostEl, onOpenVoiceLearn }:
-    { settingsHostEl?: HTMLElement | null; onOpenVoiceLearn?: () => void } = {},
+    { settingsHostEl, clipsHostEl, onOpenVoiceLearn }:
+    { settingsHostEl?: HTMLElement | null; clipsHostEl?: HTMLElement | null; onOpenVoiceLearn?: () => void } = {},
 ) {
     // Clone-engine precision. Phase 1 ships f32 only; the f16 (memory-tight,
     // mobile-default) variant is wired in Phase 2 — the option is present but
@@ -177,43 +178,53 @@ export function VoicePanel(
         </div>
     );
 
+    // Generated-clips list — rendered in App's left sidebar (via portal) or
+    // inline as a fallback.
+    const clipsList = (
+        <div className="flex h-full min-h-0 flex-col">
+            <div className="border-b border-border px-3 py-2 text-xs font-medium text-muted-foreground">
+                Generated ({clips.length})
+            </div>
+            <ul className="flex-1 overflow-y-auto">
+                {clips.map((c, i) => (
+                    <li
+                        key={c.ts}
+                        onClick={() => setActive(i)}
+                        className={cn(
+                            "group cursor-pointer border-b border-border/50 px-3 py-2 text-xs hover:bg-background/60",
+                            i === active && "bg-background",
+                        )}
+                    >
+                        <div className="line-clamp-2 text-foreground">{c.text}</div>
+                        <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
+                            <span>{(c.pcm.length / c.sampleRate).toFixed(1)}s · {c.voice}</span>
+                            <span className="flex gap-1 opacity-0 group-hover:opacity-100">
+                                <button title="Play" onClick={(e) => { e.stopPropagation(); playPcm(c.pcm, c.sampleRate); }}>
+                                    <Play className="size-3" />
+                                </button>
+                                <button title="Save WAV" onClick={(e) => { e.stopPropagation(); downloadWav(c.pcm, c.sampleRate, `tts-${c.ts}`); }}>
+                                    <Download className="size-3" />
+                                </button>
+                                <button title="Delete" onClick={(e) => { e.stopPropagation(); setClips((cs) => cs.filter((x) => x.ts !== c.ts)); }}>
+                                    <Trash2 className="size-3" />
+                                </button>
+                            </span>
+                        </div>
+                    </li>
+                ))}
+                {clips.length === 0 && <li className="px-3 py-6 text-center text-xs text-muted-foreground">No clips yet</li>}
+            </ul>
+        </div>
+    );
+
     return (
         <div className="flex h-full min-h-0">
-            {/* artifact sidebar */}
-            <aside className="hidden w-64 shrink-0 flex-col border-r border-border bg-muted/20 sm:flex">
-                <div className="border-b border-border px-3 py-2 text-xs font-medium text-muted-foreground">
-                    Generated ({clips.length})
-                </div>
-                <ul className="flex-1 overflow-y-auto">
-                    {clips.map((c, i) => (
-                        <li
-                            key={c.ts}
-                            onClick={() => setActive(i)}
-                            className={cn(
-                                "group cursor-pointer border-b border-border/50 px-3 py-2 text-xs hover:bg-background/60",
-                                i === active && "bg-background",
-                            )}
-                        >
-                            <div className="line-clamp-2 text-foreground">{c.text}</div>
-                            <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
-                                <span>{(c.pcm.length / c.sampleRate).toFixed(1)}s · {c.voice}</span>
-                                <span className="flex gap-1 opacity-0 group-hover:opacity-100">
-                                    <button title="Play" onClick={(e) => { e.stopPropagation(); playPcm(c.pcm, c.sampleRate); }}>
-                                        <Play className="size-3" />
-                                    </button>
-                                    <button title="Save WAV" onClick={(e) => { e.stopPropagation(); downloadWav(c.pcm, c.sampleRate, `tts-${c.ts}`); }}>
-                                        <Download className="size-3" />
-                                    </button>
-                                    <button title="Delete" onClick={(e) => { e.stopPropagation(); setClips((cs) => cs.filter((x) => x.ts !== c.ts)); }}>
-                                        <Trash2 className="size-3" />
-                                    </button>
-                                </span>
-                            </div>
-                        </li>
-                    ))}
-                    {clips.length === 0 && <li className="px-3 py-6 text-center text-xs text-muted-foreground">No clips yet</li>}
-                </ul>
-            </aside>
+            {/* artifact sidebar — inline fallback when there's no left-sidebar host. */}
+            {!clipsHostEl && (
+                <aside className="hidden w-64 shrink-0 flex-col border-r border-border bg-muted/20 sm:flex">
+                    {clipsList}
+                </aside>
+            )}
 
             {/* main */}
             <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
@@ -263,6 +274,7 @@ export function VoicePanel(
             </div>
 
             {settingsHostEl && createPortal(voiceSettings, settingsHostEl)}
+            {clipsHostEl && createPortal(clipsList, clipsHostEl)}
         </div>
     );
 }
