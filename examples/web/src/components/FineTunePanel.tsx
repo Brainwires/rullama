@@ -108,12 +108,15 @@ export function useTrainingCapability(): TrainingCapability {
             // exposes touch — treat as iOS.
             const isIPhone = /iPhone|iPod/i.test(ua);
             const isIPad = /iPad/i.test(ua) || (ua.includes("Mac") && "ontouchend" in document);
-            // Opt-in bypass for on-device iPhone testing of the memory-tight path:
-            //   add `?mobileTraining=1` to the URL, or set localStorage `rullama.mobileTraining=1`.
-            // The block stays the default for normal users (it's still under development).
+            // Opt-in bypass for on-device iPhone testing of the memory-tight
+            // path — EXPLICIT per session via `?mobileTraining=1`. We no longer
+            // honor a *persisted* localStorage flag: a stale one set during the
+            // iOS-training debugging silently left fine-tune enabled on phones
+            // that can't train. Clear any old key so it can't keep bypassing the
+            // block, and require the URL param going forward.
+            try { localStorage.removeItem("rullama.mobileTraining"); } catch { /* */ }
             const allowMobileTraining =
-                new URLSearchParams(location.search).get("mobileTraining") === "1" ||
-                localStorage.getItem("rullama.mobileTraining") === "1";
+                new URLSearchParams(location.search).get("mobileTraining") === "1";
             if ((isIPhone || isIPad) && !allowMobileTraining) {
                 if (!cancelled) setCap({
                     status: "blocked",
