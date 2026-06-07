@@ -406,6 +406,48 @@ export class WorkerClient {
         return this.rpc("imageSoftTokenCount", { h, w });
     }
 
+    // ── Embeddings / RAG (EmbeddingGemma) ──────────────────────────────
+    /** Embedder lifecycle + vector store. The embedder loads concurrently
+     *  with the chat model and lives in the same worker (DB-local). */
+    readonly embeddings = {
+        load: (url: string, name?: string) =>
+            this.rpc<{ name: string; dim: number } | null>("loadEmbedder", { url, name }),
+        status: () =>
+            this.rpc<{ name: string; dim: number } | null>("embedderStatus"),
+        unload: () => this.rpc<boolean>("unloadEmbedder"),
+        embedText: (text: string, targetDim = 0) =>
+            this.rpc<number[]>("embedText", { text, targetDim })
+                .then((a) => new Float32Array(a)),
+        embedDocument: (args: {
+            name: string;
+            sourceKind: string;
+            conversationId?: string | null;
+            byteSize?: number;
+            targetDim?: number;
+            chunks: Array<{ text: string; page?: number }>;
+        }) => this.rpc<{ documentId: number; chunkCount: number; dim: number }>("embedDocument", args as unknown as Record<string, unknown>),
+        search: (args: {
+            query: string;
+            k?: number;
+            conversationId?: string | null;
+            targetDim?: number;
+        }) => this.rpc<Array<{
+            chunk_id: number; text: string; page: number | null;
+            document_id: number; document_name: string; distance: number;
+        }>>("searchEmbeddings", args as unknown as Record<string, unknown>),
+        listDocuments: (conversationId?: string | null) =>
+            this.rpc<Array<{
+                id: number; name: string; source_kind: string; byte_size: number;
+                created_at: number; conversation_id: string | null;
+                embedding_model: string; vector_dim: number; chunk_count: number;
+            }>>("listDocuments", { conversationId: conversationId ?? null }),
+        deleteDocument: (id: number) => this.rpc<boolean>("deleteDocument", { id }),
+        setRag: (conversationId: string, enabled: boolean) =>
+            this.rpc<boolean>("setConversationRag", { conversationId, enabled }),
+        getRag: (conversationId: string) =>
+            this.rpc<{ enabled: boolean }>("getConversationRag", { conversationId }),
+    };
+
     // ── Diagnostic logs (OPFS-backed, see workers/opfs_logger.ts) ──────
     /** Worker-side log file storage. `append` is fire-and-forget so
      *  the main thread never blocks on a beacon; `list/read/delete`

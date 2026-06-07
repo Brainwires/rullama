@@ -89,6 +89,23 @@ export const KOKORO_MODEL = {
     url:    `https://${R2_HOST}/kokoro-82m.gguf`,
 } as const;
 
+/**
+ * EmbeddingGemma-300M — the embedding model for the Knowledge tab + chat RAG.
+ * SEPARATE from the chat catalog (architecture `gemma3`, encoder-only). 621 MB
+ * bf16 GGUF. NOTE: the R2 upload is pending (Phase 0 — needs creds); until then
+ * the dev path resolves it via `?localBlob` → local Ollama `/api/blob`.
+ * digest/size are the local Ollama blob's (the R2 copy will match).
+ */
+export const EMBEDDING_MODEL = {
+    name:   "embeddinggemma",
+    family: "embeddinggemma",
+    tag:    "300m",
+    size:   621867104,
+    digest: "0800cbac9c2064dde519420e75e512a83cb360de3ad5df176185dc69652fc515",
+    url:    `https://${R2_HOST}/embeddinggemma-300m.gguf`,
+    dim:    768,
+} as const;
+
 /** Where to fetch the Kokoro TTS GGUF from. Honors `?localBlob=PORT` (serves from the
  *  local devserver's /api/blob/kokoro:82m, bypassing R2) just like the chat models. */
 export function kokoroBlobUrl(): string {

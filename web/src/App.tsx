@@ -19,6 +19,8 @@ import { disposeSharedClone } from "@/lib/clone-client";
 import { disposeSharedTts } from "@/lib/tts-client";
 import { ChatSettings } from "@/components/ChatSettings";
 import { AppHeader } from "@/components/AppHeader";
+import { KnowledgeTab } from "@/components/KnowledgeTab";
+import { searchKnowledge, buildRagPreamble } from "@/lib/embedding";
 import { TrainingOverlay } from "@/components/TrainingOverlay";
 import { UnsupportedScreen } from "@/components/UnsupportedScreen";
 import { useDeviceTier } from "@/lib/capability";
@@ -97,7 +99,7 @@ export function App() {
     // learning likewise from Voice's sidebar. Keeping training in the same
     // engine context as its tab is what removed the cross-engine reload that
     // used to fail with "model load failed".)
-    const [view, setView] = usePersistedState<"chat" | "voice" | "settings">("rullama:view", "chat");
+    const [view, setView] = usePersistedState<"chat" | "voice" | "knowledge" | "settings">("rullama:view", "chat");
     // Migrate any persisted legacy "finetune" view to "chat".
     useEffect(() => {
         if ((view as string) === "finetune") setView("chat");
@@ -151,6 +153,21 @@ export function App() {
     // Conversation persistence (rsqlite-wasm)
     const [conversations, setConversations] = useState<ConversationRow[]>([]);
     const [activeConvId, setActiveConvId]   = useState<string | null>(null);
+    // Per-conversation RAG toggle (Knowledge-base grounding). Loaded from
+    // the DB when the active conversation changes.
+    const [ragEnabled, setRagEnabled]       = useState<boolean>(false);
+    useEffect(() => {
+        let alive = true;
+        if (!activeConvId) { setRagEnabled(false); return; }
+        getClient().embeddings.getRag(activeConvId)
+            .then((r) => { if (alive) setRagEnabled(!!r.enabled); })
+            .catch(() => { if (alive) setRagEnabled(false); });
+        return () => { alive = false; };
+    }, [activeConvId]);
+    const toggleRag = useCallback((on: boolean) => {
+        setRagEnabled(on);
+        if (activeConvId) void getClient().embeddings.setRag(activeConvId, on).catch(() => {});
+    }, [activeConvId]);
 
     // Sidebar visibility — persisted across reloads. Only the left
     // (history) sidebar exists now; Settings has been promoted to its
@@ -1542,9 +1559,24 @@ export function App() {
         setPendingAudio([]);
         setStatusLine(undefined);
 
+        let baseSystem = systemPrompt.trim();
+
+        // **RAG injection.** If RAG is enabled for this conversation and an
+        // embedder is loaded, retrieve the top-K relevant chunks (this
+        // conversation's docs + global docs) and prepend them to the system
+        // prompt with source attribution. Best-effort: a failure here never
+        // blocks the send.
+        if (ragEnabled && activeConvId) {
+            try {
+                const hits = await searchKnowledge(text, { k: 5, conversationId: activeConvId });
+                const preamble = buildRagPreamble(hits);
+                if (preamble) baseSystem = preamble + baseSystem;
+            } catch { /* embedder not loaded / search failed — proceed without RAG */ }
+        }
+
         const sysContent = thinking
-            ? (systemPrompt.trim() ? `${THINK_TOKEN}${systemPrompt.trim()}` : THINK_TOKEN)
-            : systemPrompt.trim();
+            ? (baseSystem ? `${THINK_TOKEN}${baseSystem}` : THINK_TOKEN)
+            : baseSystem;
 
         // Two parallel histories: `displayHistory` for the chat UI (no
         // system message — it's a control signal, not user content) and
@@ -2010,7 +2042,7 @@ export function App() {
                 setBusy(false);
             }
         }
-    }, [activeConvId, busy, lastLoadedDigest, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, refreshConversations, resumeInflightGeneration, sampling, statusText, systemPrompt, thinking, showToast]);
+    }, [activeConvId, busy, lastLoadedDigest, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, ragEnabled, refreshConversations, resumeInflightGeneration, sampling, statusText, systemPrompt, thinking, showToast]);
 
     // Top-level pipelineProgress subscription. The chat-send flow has
     // its own scoped subscription (around image encode + prefill) but
@@ -2202,6 +2234,8 @@ export function App() {
                 onToggleHistory={() => setHistoryOpen(!historyOpen)}
                 activeTitle={activeTitle}
                 activeAdapter={activeAdapter}
+                ragEnabled={ragEnabled}
+                onToggleRag={toggleRag}
             />
 
             {modelStatus === "loading" && (
@@ -2284,6 +2318,8 @@ export function App() {
             >
                 {view === "voice" ? (
                     <VoicePanel settingsHostEl={voiceTabSettingsEl} clipsHostEl={voiceClipsEl} onOpenVoiceLearn={() => setTraining("voicelearn")} />
+                ) : view === "knowledge" ? (
+                    <KnowledgeTab activeConvId={activeConvId} />
                 ) : view === "settings" ? (
                     // Centered max-width wrapper so the form controls
                     // don't stretch across the full main-content width

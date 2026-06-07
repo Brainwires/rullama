@@ -14,7 +14,7 @@
 // (the router), one request at a time per stateful RPC.
 
 // @ts-expect-error — generated bundle, no .d.ts
-import init, { Model, TrainingSession, probeTrainingFit, WasmDatabase, gpuMemBreakdown, gpuMemTotalMib } from "/pkg/rullama.js";
+import init, { Model, TrainingSession, probeTrainingFit, WasmDatabase, EmbeddingModel, gpuMemBreakdown, gpuMemTotalMib } from "/pkg/rullama.js";
 
 const gpuMemBreakdownFn = gpuMemBreakdown as unknown as () => string;
 const gpuMemTotalFn = gpuMemTotalMib as unknown as () => number;
@@ -173,6 +173,19 @@ let wasmReady: Promise<unknown> | null = null;
 let model: ModelHandle | null = null;
 let syncHandle: FileSystemSyncAccessHandle | null = null;
 let dbReady: Promise<WasmDbHandle> | null = null;
+// Embedding model (EmbeddingGemma) — loaded concurrently with the chat
+// model, owns its own wasm handle. Stateless across embed() calls.
+interface EmbeddingModelHandle {
+    embed(text: string, targetDim: number): Float32Array;
+    embedBatch(texts: string[], targetDim: number): Float32Array;
+    readonly dim: number;
+    free?(): void;
+}
+let embedder: EmbeddingModelHandle | null = null;
+let embedderInfo: { name: string; dim: number } | null = null;
+const EmbeddingModelClass = EmbeddingModel as unknown as {
+    load(bytes: Uint8Array): EmbeddingModelHandle;
+};
 // When non-null, a training session owns the Model. All Model-mutating
 // RPCs (step, encodeImage, reset, etc.) refuse to run; the chat UI
 // gates this at the surface level.
@@ -380,6 +393,40 @@ const SCHEMA = [
      )`,
     `CREATE INDEX IF NOT EXISTS msg_img_conv_idx
         ON message_images(conversation_id, message_id, seq)`,
+    // ---- embeddings / RAG (Knowledge tab) ----
+    // A `document` is an indexed source (uploaded file, pasted text, or a
+    // chat message). `conversation_id` NULL ⇒ global (matches every
+    // conversation's search). Chunks store the f32 vector as a little-endian
+    // BLOB (rsqlite-wasm's vec_distance_cosine consumes that layout).
+    `CREATE TABLE IF NOT EXISTS documents (
+        id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+        name                    TEXT NOT NULL,
+        source_kind             TEXT NOT NULL,
+        byte_size               INTEGER NOT NULL DEFAULT 0,
+        created_at              INTEGER NOT NULL,
+        conversation_id         TEXT,
+        embedding_model         TEXT NOT NULL DEFAULT '',
+        vector_dim              INTEGER NOT NULL DEFAULT 0
+     )`,
+    `CREATE INDEX IF NOT EXISTS doc_conv_idx ON documents(conversation_id)`,
+    `CREATE TABLE IF NOT EXISTS chunks (
+        id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+        document_id             INTEGER NOT NULL,
+        chunk_idx               INTEGER NOT NULL,
+        text                    TEXT NOT NULL,
+        page                    INTEGER,
+        vector                  BLOB NOT NULL,
+        vector_dim              INTEGER NOT NULL,
+        FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+     )`,
+    `CREATE INDEX IF NOT EXISTS chunk_doc_idx ON chunks(document_id)`,
+    // Per-conversation RAG toggle. Stored as its own table so adding it
+    // doesn't require an ALTER on `conversations`.
+    `CREATE TABLE IF NOT EXISTS conversation_rag (
+        conversation_id         TEXT PRIMARY KEY,
+        enabled                 INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+     )`,
 ];
 
 async function ensureDb(): Promise<WasmDbHandle> {
@@ -996,6 +1043,152 @@ const RPC: Record<string, Handler> = {
 
     // ── Worker meta ─────────────────────────────────────────────────────
     currentMeta: () => ({ loaded: loadedInfo }),
+
+    // ── Embeddings / RAG (EmbeddingGemma) ───────────────────────────────
+    // Load the embedder GGUF from a URL (R2 or ?localBlob). Whole-in-memory.
+    loadEmbedder: async (a) => {
+        await ensureWasm();
+        if (embedder) return embedderInfo;
+        const url = String(a.url);
+        const name = String(a.name ?? "embeddinggemma");
+        log(`embed: fetching ${name} from ${url.slice(0, 60)}…`);
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`embedder fetch ${resp.status}`);
+        const total = Number(resp.headers.get("content-length") ?? 0);
+        const reader = resp.body!.getReader();
+        const parts: Uint8Array[] = [];
+        let got = 0;
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            parts.push(value);
+            got += value.length;
+            if (total) notify("embedderLoading", { received: got, total });
+        }
+        const bytes = new Uint8Array(got);
+        let off = 0;
+        for (const p of parts) { bytes.set(p, off); off += p.length; }
+        embedder = EmbeddingModelClass.load(bytes);
+        embedderInfo = { name, dim: embedder.dim };
+        log(`embed: ready dim=${embedder.dim}`);
+        notify("embedderReady", embedderInfo);
+        return embedderInfo;
+    },
+
+    embedderStatus: () => embedderInfo,
+
+    unloadEmbedder: () => {
+        if (embedder) { try { embedder.free?.(); } catch { /* */ } embedder = null; embedderInfo = null; }
+        return true;
+    },
+
+    // Embed a query string → number[] (small payload, JSON-friendly).
+    embedText: (a) => {
+        if (!embedder) throw new Error("no embedder loaded — call loadEmbedder() first");
+        const dim = Number(a.targetDim ?? 0);
+        return Array.from(embedder.embed(String(a.text), dim));
+    },
+
+    // Index a document: embed each chunk + persist documents/chunks rows.
+    // `chunks` = [{ text, page? }]. Returns { documentId, chunkCount }.
+    embedDocument: async (a) => {
+        if (!embedder) throw new Error("no embedder loaded — call loadEmbedder() first");
+        const db = await ensureDb();
+        const name = String(a.name ?? "document");
+        const sourceKind = String(a.sourceKind ?? "txt");
+        const conversationId = (a.conversationId as string | null | undefined) ?? null;
+        const targetDim = Number(a.targetDim ?? 0);
+        const chunks = (a.chunks as Array<{ text: string; page?: number }>) ?? [];
+        const texts = chunks.map((c) => c.text);
+        const flat = embedder.embedBatch(texts, targetDim);
+        const dim = texts.length ? flat.length / texts.length : embedder.dim;
+        const now = Date.now();
+        db.execParams(
+            `INSERT INTO documents (name, source_kind, byte_size, created_at, conversation_id, embedding_model, vector_dim)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [name, sourceKind, Number(a.byteSize ?? 0), now, conversationId, embedderInfo?.name ?? "", dim],
+        );
+        const idRow = db.query(`SELECT last_insert_rowid() AS id`) as Array<{ id: number }>;
+        const documentId = idRow[0].id;
+        for (let i = 0; i < texts.length; i++) {
+            const vec = flat.subarray(i * dim, (i + 1) * dim);
+            const blob = new Uint8Array(vec.buffer.slice(vec.byteOffset, vec.byteOffset + vec.byteLength));
+            db.execParams(
+                `INSERT INTO chunks (document_id, chunk_idx, text, page, vector, vector_dim)
+                 VALUES (?, ?, ?, ?, ?, ?)`,
+                [documentId, i, texts[i], chunks[i].page ?? null, blob, dim],
+            );
+        }
+        db.flush();
+        notify("dbChanged", { kind: "docInsert", documentId });
+        return { documentId, chunkCount: texts.length, dim };
+    },
+
+    // KNN over chunks (brute-force cosine via rsqlite-wasm). Scope: a
+    // conversation's own docs + global docs (conversation_id IS NULL).
+    searchEmbeddings: async (a) => {
+        if (!embedder) throw new Error("no embedder loaded — call loadEmbedder() first");
+        const db = await ensureDb();
+        const targetDim = Number(a.targetDim ?? 0);
+        const k = Number(a.k ?? 5);
+        const conversationId = (a.conversationId as string | null | undefined) ?? null;
+        const qv = embedder.embed(String(a.query), targetDim);
+        const qblob = new Uint8Array(qv.buffer);
+        const dim = qv.length;
+        return db.queryParams(
+            `SELECT chunks.id AS chunk_id, chunks.text AS text, chunks.page AS page,
+                    documents.id AS document_id, documents.name AS document_name,
+                    vec_distance_cosine(chunks.vector, ?) AS distance
+             FROM chunks JOIN documents ON documents.id = chunks.document_id
+             WHERE chunks.vector_dim = ?
+               AND (? IS NULL OR documents.conversation_id = ? OR documents.conversation_id IS NULL)
+             ORDER BY distance ASC
+             LIMIT ?`,
+            [qblob, dim, conversationId, conversationId, k],
+        );
+    },
+
+    listDocuments: async (a) => {
+        const db = await ensureDb();
+        const conversationId = (a.conversationId as string | null | undefined) ?? null;
+        return db.queryParams(
+            `SELECT d.id, d.name, d.source_kind, d.byte_size, d.created_at,
+                    d.conversation_id, d.embedding_model, d.vector_dim,
+                    (SELECT COUNT(*) FROM chunks WHERE document_id = d.id) AS chunk_count
+             FROM documents d
+             WHERE (? IS NULL OR d.conversation_id = ? OR d.conversation_id IS NULL)
+             ORDER BY d.created_at DESC`,
+            [conversationId, conversationId],
+        );
+    },
+
+    deleteDocument: async (a) => {
+        const db = await ensureDb();
+        db.execParams(`DELETE FROM documents WHERE id = ?`, [Number(a.id)]);
+        db.flush();
+        notify("dbChanged", { kind: "docDelete", documentId: Number(a.id) });
+        return true;
+    },
+
+    setConversationRag: async (a) => {
+        const db = await ensureDb();
+        db.execParams(
+            `INSERT INTO conversation_rag (conversation_id, enabled) VALUES (?, ?)
+             ON CONFLICT(conversation_id) DO UPDATE SET enabled = excluded.enabled`,
+            [String(a.conversationId), a.enabled ? 1 : 0],
+        );
+        db.flush();
+        return true;
+    },
+
+    getConversationRag: async (a) => {
+        const db = await ensureDb();
+        const rows = db.queryParams(
+            `SELECT enabled FROM conversation_rag WHERE conversation_id = ?`,
+            [String(a.conversationId)],
+        ) as Array<{ enabled: number }>;
+        return { enabled: rows.length > 0 && rows[0].enabled === 1 };
+    },
 
     // ── Chat persistence (rsqlite-wasm OPFS-backed SQLite) ──────────────
     dbInit:   async () => { await ensureDb(); return true; },

@@ -45,6 +45,7 @@
     "hono": "^4.12.18",
     "lucide-react": "^1.14.0",
     "marked": "^18.0.3",
+    "pdfjs-dist": "^6.0.227",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "tailwind-merge": "^3.6.0"

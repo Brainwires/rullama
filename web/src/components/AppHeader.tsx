@@ -2,12 +2,12 @@
 /// badge, and the Chat · Voice · Settings segmented tab switcher. Purely
 /// presentational — extracted from App.tsx.
 
-import { History, MessageSquare, AudioLines, Settings } from "lucide-react";
+import { History, MessageSquare, AudioLines, Library, Database, Settings } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-type View = "chat" | "voice" | "settings";
+type View = "chat" | "voice" | "knowledge" | "settings";
 
 interface AppHeaderProps {
     view: View;
@@ -16,6 +16,9 @@ interface AppHeaderProps {
     onToggleHistory: () => void;
     activeTitle?: string;
     activeAdapter: string | null;
+    /** RAG (knowledge-base grounding) toggle for the active conversation. */
+    ragEnabled?: boolean;
+    onToggleRag?: (on: boolean) => void;
 }
 
 export function AppHeader({
@@ -25,6 +28,8 @@ export function AppHeader({
     onToggleHistory,
     activeTitle,
     activeAdapter,
+    ragEnabled,
+    onToggleRag,
 }: AppHeaderProps) {
     // `min-h-12` not `h-12` so the safe-area-inset-top padding actually grows
     // the header on iPhones with a notch / Dynamic Island — fixed h-12 was
@@ -55,6 +60,24 @@ export function AppHeader({
                 </Badge>
             )}
             <div className="ml-auto flex items-center gap-1">
+                {/* RAG toggle — only in chat, grounds answers in the knowledge base. */}
+                {view === "chat" && onToggleRag && (
+                    <button
+                        type="button"
+                        onClick={() => onToggleRag(!ragEnabled)}
+                        aria-pressed={!!ragEnabled}
+                        title={ragEnabled ? "RAG on — answers grounded in your knowledge base" : "RAG off"}
+                        className={cn(
+                            "mr-1 flex h-7 items-center gap-1 rounded px-2 text-xs transition-colors",
+                            ragEnabled
+                                ? "bg-primary/15 text-primary ring-1 ring-primary/30"
+                                : "text-muted-foreground hover:bg-background/50",
+                        )}
+                    >
+                        <Database className="size-3.5" />
+                        <span className="hidden sm:inline">RAG</span>
+                    </button>
+                )}
                 {/* Tab switcher — segmented control. */}
                 <div className="flex gap-0.5 rounded-md border border-border bg-muted/30 p-0.5">
                     <button
@@ -86,6 +109,21 @@ export function AppHeader({
                     >
                         <AudioLines className="size-3.5" />
                         <span className="hidden sm:inline">Voice</span>
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => onSelectView("knowledge")}
+                        aria-pressed={view === "knowledge"}
+                        className={cn(
+                            "flex h-7 items-center gap-1 rounded px-2 text-xs transition-colors",
+                            view === "knowledge"
+                                ? "bg-background text-foreground shadow-sm"
+                                : "text-muted-foreground hover:bg-background/50",
+                        )}
+                        title="Knowledge"
+                    >
+                        <Library className="size-3.5" />
+                        <span className="hidden sm:inline">Knowledge</span>
                     </button>
                     <button
                         type="button"
