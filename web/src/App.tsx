@@ -7,10 +7,8 @@ import type { PipelineProgressState } from "@/components/PipelineProgress";
 import { RestartOverlay } from "@/components/RestartOverlay";
 import { SettingsDialog, SETTINGS_BOUNDS } from "@/components/SettingsDialog";
 import { VoicePanel } from "@/components/VoicePanel";
-import { VoiceTrainPanel } from "@/components/VoiceTrainPanel";
 import { ConversationList } from "@/components/ConversationList";
 import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
-import { Button } from "@/components/ui/button";
 import { type ChatMessage, type ImageAttachment, type SamplingOptions, DEFAULT_SAMPLING, DEFAULT_SYSTEM_PROMPT } from "@/lib/types";
 import { type ModelEntry, blobUrl, beacon, listModels } from "@/lib/api";
 import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel, readInflightState, writeInflightState, clearInflightState } from "@/lib/opfs";
@@ -20,6 +18,8 @@ import { getClient, teardownInferenceCore, type ConversationRow } from "@/lib/in
 import { disposeSharedClone } from "@/lib/clone-client";
 import { disposeSharedTts } from "@/lib/tts-client";
 import { ChatSettings } from "@/components/ChatSettings";
+import { AppHeader } from "@/components/AppHeader";
+import { TrainingOverlay } from "@/components/TrainingOverlay";
 import { UnsupportedScreen } from "@/components/UnsupportedScreen";
 import { useDeviceTier } from "@/lib/capability";
 import { useToast } from "@/lib/toast";
@@ -27,17 +27,12 @@ import { useConfirm } from "@/lib/confirm";
 import { usePersistedState } from "@/lib/persisted";
 import { useIOSKeyboard } from "@/lib/useIOSKeyboard";
 import { useWakeLock } from "@/lib/wakeLock";
-import { fmtBytes, fmtEta, clampInt, clampNum, cn } from "@/lib/utils";
+import { fmtBytes, fmtEta, clampInt, clampNum } from "@/lib/utils";
 import { preprocessImage } from "@/lib/image_preprocess";
 import { decodeAudioFile } from "@/lib/audio_decode";
 import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
 import { DEFAULT_VOICE_OPTIONS, VOICE_BOUNDS, type VoiceOptions } from "@/lib/voice";
-import {
-    FineTunePanel,
-    TrainingBlockedScreen,
-    useTrainingCapability,
-} from "@/components/FineTunePanel";
-import { Badge } from "@/components/ui/badge";
+import { useTrainingCapability } from "@/components/FineTunePanel";
 import { UpdateBanner } from "@/components/UpdateBanner";
 import { ApplyingOverlay } from "@/components/ApplyingOverlay";
 import {
@@ -47,7 +42,6 @@ import {
     isDismissed,
     setDismissedVersion,
 } from "@/lib/version";
-import { Settings, History, MessageSquare, Sparkles, AudioLines, X } from "lucide-react";
 import {
     DOCKED_DEFAULT, THINK_TOKEN, INFLIGHT_KEY,
     type InflightGen, stepWithTimeout, suggestTitle, isMobileUA,
@@ -2201,85 +2195,14 @@ export function App() {
                 />
             )}
             {/* ─── top header (3rem / 48px tall — matches DualSidebarLayout offset) ─── */}
-            {/* `min-h-12` not `h-12` so the safe-area-inset-top padding
-                actually grows the header on iPhones with a notch /
-                Dynamic Island — fixed h-12 was stuffing all content
-                under the status bar in standalone PWA mode. */}
-            <header className="flex min-h-12 shrink-0 items-center gap-2 border-b border-border bg-card/50 px-3 safe-top">
-                {view === "chat" && (
-                    <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
-                        onClick={() => setHistoryOpen(!historyOpen)}
-                        title="Toggle conversation history"
-                        aria-pressed={historyOpen}
-                    >
-                        <History />
-                    </Button>
-                )}
-                <span className="font-semibold tracking-tight">rullama</span>
-                {view === "chat" && activeTitle && (
-                    <span className="hidden truncate text-xs text-muted-foreground sm:inline">
-                        / {activeTitle}
-                    </span>
-                )}
-                {activeAdapter && (
-                    <Badge tone="info" className="hidden text-[10px] sm:inline-flex">
-                        adapter: {activeAdapter}
-                    </Badge>
-                )}
-                <div className="ml-auto flex items-center gap-1">
-                    {/* Tab switcher — segmented control. */}
-                    <div className="flex gap-0.5 rounded-md border border-border bg-muted/30 p-0.5">
-                        <button
-                            type="button"
-                            onClick={() => setView("chat")}
-                            aria-pressed={view === "chat"}
-                            className={cn(
-                                "flex h-7 items-center gap-1 rounded px-2 text-xs transition-colors",
-                                view === "chat"
-                                    ? "bg-background text-foreground shadow-sm"
-                                    : "text-muted-foreground hover:bg-background/50",
-                            )}
-                            title="Chat"
-                        >
-                            <MessageSquare className="size-3.5" />
-                            <span className="hidden sm:inline">Chat</span>
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => setView("voice")}
-                            aria-pressed={view === "voice"}
-                            className={cn(
-                                "flex h-7 items-center gap-1 rounded px-2 text-xs transition-colors",
-                                view === "voice"
-                                    ? "bg-background text-foreground shadow-sm"
-                                    : "text-muted-foreground hover:bg-background/50",
-                            )}
-                            title="Voice"
-                        >
-                            <AudioLines className="size-3.5" />
-                            <span className="hidden sm:inline">Voice</span>
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => setView("settings")}
-                            aria-pressed={view === "settings"}
-                            className={cn(
-                                "flex h-7 items-center gap-1 rounded px-2 text-xs transition-colors",
-                                view === "settings"
-                                    ? "bg-background text-foreground shadow-sm"
-                                    : "text-muted-foreground hover:bg-background/50",
-                            )}
-                            title="Settings"
-                        >
-                            <Settings className="size-3.5" />
-                            <span className="hidden sm:inline">Settings</span>
-                        </button>
-                    </div>
-                </div>
-            </header>
+            <AppHeader
+                view={view}
+                onSelectView={setView}
+                historyOpen={historyOpen}
+                onToggleHistory={() => setHistoryOpen(!historyOpen)}
+                activeTitle={activeTitle}
+                activeAdapter={activeAdapter}
+            />
 
             {modelStatus === "loading" && (
                 <ModelLoadProgress percent={loadingPercent} label={waitInfo?.message ?? loadingLabel} />
@@ -2449,55 +2372,18 @@ export function App() {
                 Chat/Voice stay mounted underneath so the engine stays GPU-resident
                 (no swap — training shares its tab's engine). */}
             {training && (
-                <div className="fixed inset-0 z-50 flex flex-col bg-background">
-                    <header className="flex min-h-12 shrink-0 items-center gap-2 border-b border-border bg-card/50 px-3 safe-top">
-                        {training === "finetune"
-                            ? <Sparkles className="size-4 text-muted-foreground" />
-                            : <AudioLines className="size-4 text-muted-foreground" />}
-                        <span className="text-sm font-medium">
-                            {training === "finetune" ? "Fine-tune" : "Voice learning"}
-                        </span>
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            className="ml-auto h-8 gap-1 text-xs"
-                            onClick={() => setTraining(null)}
-                            title="Close (Esc)"
-                        >
-                            <X className="size-4" /> Close
-                        </Button>
-                    </header>
-                    {training === "finetune" && trainingCap.status === "ok" ? (
-                        // FineTunePanel's hyperparameter column lives in the right
-                        // sidebar (portaled via settingsHostEl), with its own chevron
-                        // toggle — same pattern as the Chat/Voice tabs.
-                        <DualSidebarLayout
-                            rightOpen={fineTuneSettingsOpen}
-                            onToggleRight={setFineTuneSettingsOpen}
-                            rightWidth={340}
-                            rightSidebar={<div ref={setFineTuneSettingsEl} className="h-full" />}
-                        >
-                            <FineTunePanel
-                                modelStatus={modelStatus}
-                                activeAdapter={activeAdapter}
-                                onAdapterChanged={setActiveAdapter}
-                                settingsHostEl={fineTuneSettingsEl}
-                            />
-                        </DualSidebarLayout>
-                    ) : (
-                        <div className="min-h-0 flex-1 overflow-hidden">
-                            {training === "voicelearn" ? (
-                                <VoiceTrainPanel />
-                            ) : trainingCap.status === "blocked" ? (
-                                <TrainingBlockedScreen title={trainingCap.title} reason={trainingCap.reason} />
-                            ) : (
-                                <div className="flex h-full min-h-0 items-center justify-center p-8 text-sm text-muted-foreground">
-                                    Checking device capability…
-                                </div>
-                            )}
-                        </div>
-                    )}
-                </div>
+                <TrainingOverlay
+                    training={training}
+                    onClose={() => setTraining(null)}
+                    trainingCap={trainingCap}
+                    fineTuneSettingsOpen={fineTuneSettingsOpen}
+                    onToggleFineTuneSettings={setFineTuneSettingsOpen}
+                    fineTuneSettingsEl={fineTuneSettingsEl}
+                    setFineTuneSettingsEl={setFineTuneSettingsEl}
+                    modelStatus={modelStatus}
+                    activeAdapter={activeAdapter}
+                    onAdapterChanged={setActiveAdapter}
+                />
             )}
 
             <RestartOverlay />
