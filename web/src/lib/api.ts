@@ -97,7 +97,10 @@ export const KOKORO_MODEL = {
  * digest/size are the local Ollama blob's (the R2 copy will match).
  */
 export const EMBEDDING_MODEL = {
-    name:   "embeddinggemma",
+    // `name` doubles as the dev `/api/blob/<name>` key, so it must match the
+    // local Ollama model name (`embeddinggemma:latest`). Production fetches
+    // the R2 `url` instead (blobUrl prefers ?localBlob, then m.url).
+    name:   "embeddinggemma:latest",
     family: "embeddinggemma",
     tag:    "300m",
     size:   621867104,
