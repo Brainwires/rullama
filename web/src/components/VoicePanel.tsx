@@ -14,7 +14,7 @@ import { getSharedTts, type TtsClient, type TtsClip } from "@/lib/tts-client";
 import { usePersistedState } from "@/lib/persisted";
 import { cn } from "@/lib/utils";
 import { addVoice, importVoiceFile, listVoices, onVoicesChanged, removeVoice, voiceVec, type SavedVoice } from "@/lib/voice-library";
-import { downloadWav, playPcm } from "@/lib/wav";
+import { downloadWav, playPcm, unlockAudio } from "@/lib/wav";
 
 // The 28 English Kokoro voicepacks baked into the GGUF (af/am = American F/M, bf/bm = British F/M).
 const PRESETS = [
@@ -89,6 +89,9 @@ export function VoicePanel(
 
     const generate = useCallback(async () => {
         if (busy || !text.trim()) return;
+        // Unlock audio inside the click gesture so the clip can auto-play once
+        // the (async) synthesis finishes — otherwise the context is suspended.
+        unlockAudio();
         setBusy(true);
         setErr(null);
         setDlPct(0);
