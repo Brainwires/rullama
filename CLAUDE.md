@@ -21,6 +21,14 @@ local GPU through hand-written WGSL. The scope expands as Ollama's does.
 - **Speech synthesis (TTS)** — Kokoro-82M (StyleTTS2 + iSTFTNet) port to
   Rust/WGSL, in-flight. See `project_tts_kokoro` memory; reference impl
   is hexgrad/kokoro PyTorch.
+- **Text embeddings + RAG** — EmbeddingGemma-300M (architecture `gemma3`,
+  encoder-only) → `EmbeddingModel` in `embed.rs` over a bidirectional
+  CPU oracle (`reference/embed/`), validated at cosine 0.9997 vs Ollama.
+  Its GGUF is SentencePiece-unigram (scores, not BPE merges) so it needs
+  the `tokenizer::spm` SPM tokenizer. Powers the PWA's Knowledge tab
+  (drop/paste docs → chunk → embed → rsqlite-wasm vector store) and
+  per/cross-conversation chat RAG. CPU forward ships first; a GPU
+  forward + memory-streaming the 621 MB GGUF are the open perf items.
 
 **Planned for future versions (roughly in order):**
 
