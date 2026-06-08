@@ -176,15 +176,15 @@ let dbReady: Promise<WasmDbHandle> | null = null;
 // Embedding model (EmbeddingGemma) — loaded concurrently with the chat
 // model, owns its own wasm handle. Stateless across embed() calls.
 interface EmbeddingModelHandle {
-    embed(text: string, targetDim: number): Float32Array;
-    embedBatch(texts: string[], targetDim: number): Float32Array;
+    embed(text: string, targetDim: number): Promise<Float32Array>;
+    embedBatch(texts: string[], targetDim: number): Promise<Float32Array>;
     readonly dim: number;
     free?(): void;
 }
 let embedder: EmbeddingModelHandle | null = null;
 let embedderInfo: { name: string; dim: number } | null = null;
 const EmbeddingModelClass = EmbeddingModel as unknown as {
-    load(bytes: Uint8Array): EmbeddingModelHandle;
+    load(bytes: Uint8Array): Promise<EmbeddingModelHandle>;
 };
 // When non-null, a training session owns the Model. All Model-mutating
 // RPCs (step, encodeImage, reset, etc.) refuse to run; the chat UI
@@ -1068,7 +1068,7 @@ const RPC: Record<string, Handler> = {
         const bytes = new Uint8Array(got);
         let off = 0;
         for (const p of parts) { bytes.set(p, off); off += p.length; }
-        embedder = EmbeddingModelClass.load(bytes);
+        embedder = await EmbeddingModelClass.load(bytes);
         embedderInfo = { name, dim: embedder.dim };
         log(`embed: ready dim=${embedder.dim}`);
         notify("embedderReady", embedderInfo);
@@ -1083,10 +1083,10 @@ const RPC: Record<string, Handler> = {
     },
 
     // Embed a query string → number[] (small payload, JSON-friendly).
-    embedText: (a) => {
+    embedText: async (a) => {
         if (!embedder) throw new Error("no embedder loaded — call loadEmbedder() first");
         const dim = Number(a.targetDim ?? 0);
-        return Array.from(embedder.embed(String(a.text), dim));
+        return Array.from(await embedder.embed(String(a.text), dim));
     },
 
     // Index a document: embed each chunk + persist documents/chunks rows.
@@ -1100,7 +1100,7 @@ const RPC: Record<string, Handler> = {
         const targetDim = Number(a.targetDim ?? 0);
         const chunks = (a.chunks as Array<{ text: string; page?: number }>) ?? [];
         const texts = chunks.map((c) => c.text);
-        const flat = embedder.embedBatch(texts, targetDim);
+        const flat = await embedder.embedBatch(texts, targetDim);
         const dim = texts.length ? flat.length / texts.length : embedder.dim;
         const now = Date.now();
         db.execParams(
@@ -1132,7 +1132,7 @@ const RPC: Record<string, Handler> = {
         const targetDim = Number(a.targetDim ?? 0);
         const k = Number(a.k ?? 5);
         const conversationId = (a.conversationId as string | null | undefined) ?? null;
-        const qv = embedder.embed(String(a.query), targetDim);
+        const qv = await embedder.embed(String(a.query), targetDim);
         const qblob = new Uint8Array(qv.buffer);
         const dim = qv.length;
         return db.queryParams(
