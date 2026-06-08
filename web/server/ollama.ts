@@ -85,6 +85,17 @@ export function huggingfaceModels(): ModelEntry[] {
             digest:     "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
             url:        "https://models.brainwires.dev/gemma4-e2b-it-qat.gguf",
         },
+        {
+            // QAT e4b — Q4_0 text weights, 5.15 GB (vs 9.6 GB std). Text-only.
+            name:       "gemma4:e4b-it-qat",
+            family:     "gemma4",
+            tag:        "e4b-it-qat",
+            size:       5154939136,
+            digest:     "e8b6a059ba86947a44ace84d6e5679795bc41862c25c30513142588f0e9dba1d",
+            url:        "https://models.brainwires.dev/gemma4-e4b-it-qat.gguf",
+        },
+        // gemma4:12b-it-qat omitted — 12b uses per-layer KV-head counts
+        // (head_count_kv array), unsupported by the attention path yet.
     ];
 }
 

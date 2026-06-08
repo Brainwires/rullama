@@ -106,6 +106,20 @@ emit_hf_entries() {
         --arg url    "https://${R2_HOST}/gemma4-e2b-it-qat.gguf" \
         '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url}' \
         >> "$ITEMS_TMP"
+
+    # gemma4:e4b-it-qat — QAT Q4_0 text weights, 5.15 GB (vs 9.6 GB std), text-only.
+    jq -nc \
+        --arg name   "gemma4:e4b-it-qat" \
+        --arg family "gemma4" \
+        --arg tag    "e4b-it-qat" \
+        --argjson size 5154939136 \
+        --arg digest "e8b6a059ba86947a44ace84d6e5679795bc41862c25c30513142588f0e9dba1d" \
+        --arg url    "https://${R2_HOST}/gemma4-e4b-it-qat.gguf" \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url}' \
+        >> "$ITEMS_TMP"
+
+    # gemma4:12b-it-qat omitted — 12b uses per-layer KV-head counts
+    # (head_count_kv array), unsupported by the attention path yet.
 }
 
 # ───── Local Ollama scan (only when RULLAMA_SERVE_LOCAL=1) ────────────
