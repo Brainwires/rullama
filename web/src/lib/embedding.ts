@@ -31,6 +31,16 @@ export interface SearchHit {
  *  lean for big knowledge bases on phones. Full for now. */
 export const DEFAULT_TARGET_DIM = 0;
 
+export type IndexPhase = "extracting" | "chunking" | "embedding" | "storing" | "done";
+export interface IndexProgress {
+    phase: IndexPhase;
+    /** Units completed in the current phase (chunks for "embedding"). */
+    done: number;
+    /** Total units in the current phase (0 if indeterminate). */
+    total: number;
+    name: string;
+}
+
 /** Embed + persist a dropped/pasted document. `scopeConvId` = null ⇒ a
  *  global doc that every conversation's RAG can see; a conversation id
  *  scopes it to that chat. */
@@ -40,9 +50,11 @@ export async function indexDocument(opts: {
     text?: string;
     scopeConvId?: string | null;
     targetDim?: number;
+    onProgress?: (p: IndexProgress) => void;
 }): Promise<{ documentId: number; chunkCount: number }> {
     const client = getClient();
     const targetDim = opts.targetDim ?? DEFAULT_TARGET_DIM;
+    const report = opts.onProgress ?? (() => {});
 
     let chunks: Array<{ text: string; page?: number }>;
     let sourceKind = "txt";
@@ -51,7 +63,9 @@ export async function indexDocument(opts: {
     if (opts.file && opts.file.name.toLowerCase().endsWith(".pdf")) {
         sourceKind = "pdf";
         byteSize = opts.file.size;
+        report({ phase: "extracting", done: 0, total: 0, name: opts.name });
         const pages = await extractPdfText(opts.file);
+        report({ phase: "chunking", done: 0, total: 0, name: opts.name });
         chunks = splitPages(pages);
     } else {
         const text = opts.text ?? (opts.file ? await opts.file.text() : "");
@@ -59,6 +73,7 @@ export async function indexDocument(opts: {
         sourceKind = opts.file
             ? opts.file.name.toLowerCase().endsWith(".md") ? "md" : "txt"
             : "paste";
+        report({ phase: "chunking", done: 0, total: 0, name: opts.name });
         chunks = splitText(text);
     }
 
@@ -66,14 +81,27 @@ export async function indexDocument(opts: {
         throw new Error("no extractable text in this document");
     }
 
-    return client.embeddings.embedDocument({
-        name: opts.name,
-        sourceKind,
-        conversationId: opts.scopeConvId ?? null,
-        byteSize,
-        targetDim,
-        chunks,
+    // Per-chunk embed progress streams back from the worker as `embedProgress`
+    // notifies tagged with this docId.
+    const docId = `${opts.name}#${Date.now()}`;
+    const unsub = client.subscribe("embedProgress", (p) => {
+        const ev = p as unknown as IndexProgress & { docId: string };
+        if (ev.docId !== docId) return;
+        report({ phase: ev.phase, done: ev.done, total: ev.total, name: opts.name });
     });
+    try {
+        return await client.embeddings.embedDocument({
+            name: opts.name,
+            sourceKind,
+            conversationId: opts.scopeConvId ?? null,
+            byteSize,
+            targetDim,
+            chunks,
+            docId,
+        });
+    } finally {
+        unsub();
+    }
 }
 
 /** Semantic search over the indexed corpus, scoped to a conversation (its

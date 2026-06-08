@@ -1126,29 +1126,39 @@ const RPC: Record<string, Handler> = {
         const conversationId = (a.conversationId as string | null | undefined) ?? null;
         const targetDim = Number(a.targetDim ?? 0);
         const chunks = (a.chunks as Array<{ text: string; page?: number }>) ?? [];
-        const texts = chunks.map((c) => c.text);
-        const flat = await embedder.embedBatch(texts, targetDim);
-        const dim = texts.length ? flat.length / texts.length : embedder.dim;
+        const total = chunks.length;
+        const docId = String(a.docId ?? name);
+
+        // Insert the document row up-front, then embed + store each chunk one
+        // at a time, emitting per-chunk progress (embedding is the slow part —
+        // one GPU forward per chunk — so granularity matters here).
         const now = Date.now();
         db.execParams(
             `INSERT INTO documents (name, source_kind, byte_size, created_at, conversation_id, embedding_model, vector_dim)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [name, sourceKind, Number(a.byteSize ?? 0), now, conversationId, embedderInfo?.name ?? "", dim],
+            [name, sourceKind, Number(a.byteSize ?? 0), now, conversationId, embedderInfo?.name ?? "", embedder.dim],
         );
         const idRow = db.query(`SELECT last_insert_rowid() AS id`) as Array<{ id: number }>;
         const documentId = idRow[0].id;
-        for (let i = 0; i < texts.length; i++) {
-            const vec = flat.subarray(i * dim, (i + 1) * dim);
-            const blob = new Uint8Array(vec.buffer.slice(vec.byteOffset, vec.byteOffset + vec.byteLength));
+
+        let dim = embedder.dim;
+        notify("embedProgress", { docId, phase: "embedding", done: 0, total, name });
+        for (let i = 0; i < total; i++) {
+            const vec = await embedder.embed(chunks[i].text, targetDim);
+            dim = vec.length;
+            const blob = new Uint8Array(vec.buffer);
             db.execParams(
                 `INSERT INTO chunks (document_id, chunk_idx, text, page, vector, vector_dim)
                  VALUES (?, ?, ?, ?, ?, ?)`,
-                [documentId, i, texts[i], chunks[i].page ?? null, blob, dim],
+                [documentId, i, chunks[i].text, chunks[i].page ?? null, blob, dim],
             );
+            notify("embedProgress", { docId, phase: "embedding", done: i + 1, total, name });
         }
+        notify("embedProgress", { docId, phase: "storing", done: total, total, name });
         db.flush();
+        notify("embedProgress", { docId, phase: "done", done: total, total, name });
         notify("dbChanged", { kind: "docInsert", documentId });
-        return { documentId, chunkCount: texts.length, dim };
+        return { documentId, chunkCount: total, dim };
     },
 
     // KNN over chunks (brute-force cosine via rsqlite-wasm). Scope: a

@@ -427,6 +427,7 @@ export class WorkerClient {
             byteSize?: number;
             targetDim?: number;
             chunks: Array<{ text: string; page?: number }>;
+            docId?: string;
         }) => this.rpc<{ documentId: number; chunkCount: number; dim: number }>("embedDocument", args as unknown as Record<string, unknown>),
         search: (args: {
             query: string;

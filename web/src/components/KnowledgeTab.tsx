@@ -19,6 +19,7 @@ import {
     searchKnowledge,
     type IndexedDocument,
     type SearchHit,
+    type IndexProgress,
 } from "@/lib/embedding";
 
 type EmbedderStatus = "idle" | "loading" | "ready" | "error";
@@ -34,6 +35,7 @@ export function KnowledgeTab({ activeConvId }: Props) {
     const [err, setErr] = useState<string | null>(null);
     const [docs, setDocs] = useState<IndexedDocument[]>([]);
     const [busy, setBusy] = useState<string | null>(null);
+    const [indexing, setIndexing] = useState<IndexProgress | null>(null);
     const [query, setQuery] = useState("");
     const [hits, setHits] = useState<SearchHit[] | null>(null);
     const [paste, setPaste] = useState("");
@@ -81,28 +83,26 @@ export function KnowledgeTab({ activeConvId }: Props) {
     const onFiles = useCallback(async (files: FileList | null) => {
         if (!files || files.length === 0) return;
         for (const file of Array.from(files)) {
-            setBusy(`Indexing ${file.name}…`);
             try {
-                await indexDocument({ file, name: file.name, scopeConvId: null });
+                await indexDocument({ file, name: file.name, scopeConvId: null, onProgress: setIndexing });
             } catch (e) {
                 setErr(`${file.name}: ${(e as Error).message}`);
             }
         }
-        setBusy(null);
+        setIndexing(null);
         void refreshDocs();
     }, [refreshDocs]);
 
     const onPaste = useCallback(async () => {
         if (!paste.trim()) return;
-        setBusy("Indexing pasted text…");
         try {
             const name = `Pasted ${new Date().toLocaleString()}`;
-            await indexDocument({ text: paste, name, scopeConvId: null });
+            await indexDocument({ text: paste, name, scopeConvId: null, onProgress: setIndexing });
             setPaste("");
         } catch (e) {
             setErr((e as Error).message);
         }
-        setBusy(null);
+        setIndexing(null);
         void refreshDocs();
     }, [paste, refreshDocs]);
 
@@ -219,10 +219,14 @@ export function KnowledgeTab({ activeConvId }: Props) {
                         rows={3}
                         className="w-full rounded-md border border-input bg-background p-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     />
-                    <div className="flex items-center justify-between">
-                        <span className="text-xs text-muted-foreground">{busy ?? `${docs.length} document${docs.length === 1 ? "" : "s"} indexed`}</span>
-                        <Button size="sm" variant="secondary" onClick={() => void onPaste()} disabled={!paste.trim()}>Index text</Button>
-                    </div>
+                    {indexing ? (
+                        <IndexingBar p={indexing} />
+                    ) : (
+                        <div className="flex items-center justify-between">
+                            <span className="text-xs text-muted-foreground">{busy ?? `${docs.length} document${docs.length === 1 ? "" : "s"} indexed`}</span>
+                            <Button size="sm" variant="secondary" onClick={() => void onPaste()} disabled={!paste.trim()}>Index text</Button>
+                        </div>
+                    )}
                 </CardContent>
             </Card>
 
@@ -243,6 +247,43 @@ export function KnowledgeTab({ activeConvId }: Props) {
             </div>
 
             {err && <p className="text-xs text-destructive">{err}</p>}
+        </div>
+    );
+}
+
+const PHASE_LABEL: Record<IndexProgress["phase"], string> = {
+    extracting: "Extracting text",
+    chunking:   "Chunking",
+    embedding:  "Embedding",
+    storing:    "Storing",
+    done:       "Done",
+};
+
+/** Stage-annotated indexing progress bar — matches the app's other progress
+ *  surfaces (model load, TTS synth). Determinate during the embedding phase
+ *  (done/total chunks); indeterminate pulse for the instant phases. */
+function IndexingBar({ p }: { p: IndexProgress }) {
+    const determinate = p.phase === "embedding" && p.total > 0;
+    const pct = determinate ? (p.done / p.total) * 100 : 0;
+    return (
+        <div className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between text-xs">
+                <span className="flex items-center gap-1.5 text-foreground/80">
+                    <Loader2 className="size-3.5 animate-spin text-primary" />
+                    {PHASE_LABEL[p.phase]}
+                    <span className="truncate text-muted-foreground">· {p.name}</span>
+                </span>
+                {determinate && (
+                    <span className="tabular-nums text-muted-foreground">{p.done} / {p.total} chunks</span>
+                )}
+            </div>
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                {determinate ? (
+                    <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+                ) : (
+                    <div className="h-full w-full animate-pulse bg-primary/60" />
+                )}
+            </div>
         </div>
     );
 }
