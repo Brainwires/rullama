@@ -92,9 +92,8 @@ export const KOKORO_MODEL = {
 /**
  * EmbeddingGemma-300M — the embedding model for the Knowledge tab + chat RAG.
  * SEPARATE from the chat catalog (architecture `gemma3`, encoder-only). 621 MB
- * bf16 GGUF. NOTE: the R2 upload is pending (Phase 0 — needs creds); until then
- * the dev path resolves it via `?localBlob` → local Ollama `/api/blob`.
- * digest/size are the local Ollama blob's (the R2 copy will match).
+ * bf16 GGUF, live on R2 at the `url` below (Range + CORS verified). Dev can
+ * still fetch from local Ollama via `?localBlob` → `/api/blob`.
  */
 export const EMBEDDING_MODEL = {
     // `name` doubles as the dev `/api/blob/<name>` key, so it must match the
