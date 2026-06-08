@@ -97,12 +97,19 @@ export const BAKED_IN_MODELS: readonly ModelEntry[] = [
         digest:     "e8b6a059ba86947a44ace84d6e5679795bc41862c25c30513142588f0e9dba1d",
         url:        `https://${R2_HOST}/gemma4-e4b-it-qat.gguf`,
     },
-    // NOTE: gemma4:12b-it-qat is intentionally NOT listed — the 12b architecture
-    // uses per-layer KV-head counts (gemma4.attention.head_count_kv is an array
-    // [8,8,8,8,8,1,…], 8 for SWA layers / 1 for global), which Gemma4Config +
-    // the attention path don't support yet (they assume a scalar). The standard
-    // gemma4:12b above is affected by the same gap. Re-add once variable
-    // per-layer KV heads land.
+    {
+        // QAT 12b — Q4_0 text weights, 6.98 GB (vs 7.38 GB standard 12b). Text-only.
+        // The 12b architecture needs per-layer KV heads + no-V global attention
+        // (global layers reuse raw K as V) — supported as of the gemma4 12b commit.
+        // Heavy → advisory ⚠.
+        name:       "gemma4:12b-it-qat",
+        family:     "gemma4",
+        tag:        "12b-it-qat",
+        size:       6975877728,
+        digest:     "faff1a63667fac17ac5e777f47114688fcefea96e220e211aaa8d62c2c4561f1",
+        url:        `https://${R2_HOST}/gemma4-12b-it-qat.gguf`,
+        heavy:      true,
+    },
 ];
 
 /**

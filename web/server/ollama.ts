@@ -94,8 +94,17 @@ export function huggingfaceModels(): ModelEntry[] {
             digest:     "e8b6a059ba86947a44ace84d6e5679795bc41862c25c30513142588f0e9dba1d",
             url:        "https://models.brainwires.dev/gemma4-e4b-it-qat.gguf",
         },
-        // gemma4:12b-it-qat omitted — 12b uses per-layer KV-head counts
-        // (head_count_kv array), unsupported by the attention path yet.
+        {
+            // QAT 12b — Q4_0 text weights, 6.98 GB (vs 7.38 GB std). Text-only,
+            // heavy → advisory ⚠. Needs 12b per-layer KV heads + no-V global attn.
+            name:       "gemma4:12b-it-qat",
+            family:     "gemma4",
+            tag:        "12b-it-qat",
+            size:       6975877728,
+            digest:     "faff1a63667fac17ac5e777f47114688fcefea96e220e211aaa8d62c2c4561f1",
+            url:        "https://models.brainwires.dev/gemma4-12b-it-qat.gguf",
+            heavy:      true,
+        },
     ];
 }
 
