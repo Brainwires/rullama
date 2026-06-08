@@ -1146,7 +1146,10 @@ const RPC: Record<string, Handler> = {
         for (let i = 0; i < total; i++) {
             const vec = await embedder.embed(chunks[i].text, targetDim);
             dim = vec.length;
-            const blob = new Uint8Array(vec.buffer);
+            // `vec` may be a VIEW into wasm linear memory — `.buffer` is then
+            // the whole (multi-GB) wasm memory, not the 3072-byte vector.
+            // Copy exactly byteLength bytes into a fresh buffer.
+            const blob = new Uint8Array(vec.buffer.slice(vec.byteOffset, vec.byteOffset + vec.byteLength));
             db.execParams(
                 `INSERT INTO chunks (document_id, chunk_idx, text, page, vector, vector_dim)
                  VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1170,7 +1173,8 @@ const RPC: Record<string, Handler> = {
         const k = Number(a.k ?? 5);
         const conversationId = (a.conversationId as string | null | undefined) ?? null;
         const qv = await embedder.embed(String(a.query), targetDim);
-        const qblob = new Uint8Array(qv.buffer);
+        // Copy exactly byteLength bytes — `qv` may be a wasm-memory view.
+        const qblob = new Uint8Array(qv.buffer.slice(qv.byteOffset, qv.byteOffset + qv.byteLength));
         const dim = qv.length;
         return db.queryParams(
             `SELECT chunks.id AS chunk_id, chunks.text AS text, chunks.page AS page,
