@@ -183,9 +183,47 @@ interface EmbeddingModelHandle {
 }
 let embedder: EmbeddingModelHandle | null = null;
 let embedderInfo: { name: string; dim: number } | null = null;
+// Dedicated OPFS sync handle for the embedder GGUF (kept open for the
+// model's lifetime — the streaming TensorFetcher reads tensors through
+// it on every embed). Separate from the chat model's `syncHandle`.
+let embedderSyncHandle: FileSystemSyncAccessHandle | null = null;
 const EmbeddingModelClass = EmbeddingModel as unknown as {
     load(bytes: Uint8Array): Promise<EmbeddingModelHandle>;
+    loadFromOpfs(
+        readFn: (offset: number, length: number) => Uint8Array,
+        totalBytes: number,
+    ): Promise<EmbeddingModelHandle>;
 };
+
+/** Open a sync read handle over an OPFS-cached embedder GGUF + a readFn for
+ *  the streaming TensorFetcher. Mirrors `openSyncReadFn` but uses the
+ *  embedder's own handle so it doesn't evict the chat model's. */
+async function openEmbedderSyncReadFn(modelKey: string, filename: string) {
+    if (embedderSyncHandle) {
+        try { embedderSyncHandle.close(); } catch { /* */ }
+        embedderSyncHandle = null;
+    }
+    const root     = await navigator.storage.getDirectory();
+    const dlDir    = await root.getDirectoryHandle(OPFS_DIR, { create: false });
+    const modelDir = await dlDir.getDirectoryHandle(modelKey, { create: false });
+    const fh       = await modelDir.getFileHandle(filename, { create: false });
+    embedderSyncHandle = await createSyncAccessHandleWithRetry(
+        fh, `${modelKey}/${filename} (embed read)`, { notifyKind: "embedderLoadWaiting" },
+    );
+    const size = embedderSyncHandle.getSize();
+    if (size === 0) {
+        try { embedderSyncHandle.close(); } catch { /* */ }
+        embedderSyncHandle = null;
+        throw new Error(`OPFS embedder file ${modelKey}/${filename} is empty`);
+    }
+    const handle = embedderSyncHandle;
+    const readFn = (offset: number, length: number): Uint8Array => {
+        const buf = new Uint8Array(length);
+        handle.read(buf, { at: offset });
+        return buf;
+    };
+    return { readFn, totalBytes: size };
+}
 // When non-null, a training session owns the Model. All Model-mutating
 // RPCs (step, encodeImage, reset, etc.) refuse to run; the chat UI
 // gates this at the surface level.
@@ -1045,32 +1083,20 @@ const RPC: Record<string, Handler> = {
     currentMeta: () => ({ loaded: loadedInfo }),
 
     // ── Embeddings / RAG (EmbeddingGemma) ───────────────────────────────
-    // Load the embedder GGUF from a URL (R2 or ?localBlob). Whole-in-memory.
+    // Streaming load from an OPFS-cached GGUF (the main thread downloads it
+    // first via ensureModel, same as the chat model). Weights are fetched on
+    // demand; the 621 MB file never fully enters wasm memory — iPhone-safe.
     loadEmbedder: async (a) => {
         await ensureWasm();
         if (embedder) return embedderInfo;
-        const url = String(a.url);
+        const modelKey = String(a.modelKey);
+        const filename = String(a.filename);
         const name = String(a.name ?? "embeddinggemma");
-        log(`embed: fetching ${name} from ${url.slice(0, 60)}…`);
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`embedder fetch ${resp.status}`);
-        const total = Number(resp.headers.get("content-length") ?? 0);
-        const reader = resp.body!.getReader();
-        const parts: Uint8Array[] = [];
-        let got = 0;
-        for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            parts.push(value);
-            got += value.length;
-            if (total) notify("embedderLoading", { received: got, total });
-        }
-        const bytes = new Uint8Array(got);
-        let off = 0;
-        for (const p of parts) { bytes.set(p, off); off += p.length; }
-        embedder = await EmbeddingModelClass.load(bytes);
+        log(`embed: streaming ${name} from OPFS ${modelKey}/${filename}`);
+        const { readFn, totalBytes } = await openEmbedderSyncReadFn(modelKey, filename);
+        embedder = await EmbeddingModelClass.loadFromOpfs(readFn, totalBytes);
         embedderInfo = { name, dim: embedder.dim };
-        log(`embed: ready dim=${embedder.dim}`);
+        log(`embed: ready dim=${embedder.dim} (streaming, ${totalBytes} B in OPFS)`);
         notify("embedderReady", embedderInfo);
         return embedderInfo;
     },
@@ -1079,6 +1105,7 @@ const RPC: Record<string, Handler> = {
 
     unloadEmbedder: () => {
         if (embedder) { try { embedder.free?.(); } catch { /* */ } embedder = null; embedderInfo = null; }
+        if (embedderSyncHandle) { try { embedderSyncHandle.close(); } catch { /* */ } embedderSyncHandle = null; }
         return true;
     },
 

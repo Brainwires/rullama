@@ -410,8 +410,10 @@ export class WorkerClient {
     /** Embedder lifecycle + vector store. The embedder loads concurrently
      *  with the chat model and lives in the same worker (DB-local). */
     readonly embeddings = {
-        load: (url: string, name?: string) =>
-            this.rpc<{ name: string; dim: number } | null>("loadEmbedder", { url, name }),
+        /** Load the embedder by streaming from its OPFS-cached GGUF. The
+         *  caller must `ensureModel(...)`-download it to OPFS first. */
+        load: (modelKey: string, filename: string, name?: string) =>
+            this.rpc<{ name: string; dim: number } | null>("loadEmbedder", { modelKey, filename, name }),
         status: () =>
             this.rpc<{ name: string; dim: number } | null>("embedderStatus"),
         unload: () => this.rpc<boolean>("unloadEmbedder"),

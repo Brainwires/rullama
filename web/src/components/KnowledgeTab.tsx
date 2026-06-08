@@ -11,6 +11,7 @@ import { cn, fmtBytes } from "@/lib/utils";
 import { getClient } from "@/lib/inference";
 import { blobUrl } from "@/lib/api";
 import { EMBEDDING_MODEL } from "@/lib/api";
+import { ensureModel } from "@/lib/opfs";
 import {
     indexDocument,
     listDocuments,
@@ -60,8 +61,15 @@ export function KnowledgeTab({ activeConvId }: Props) {
     const loadEmbedder = useCallback(async () => {
         setStatus("loading"); setErr(null); setLoadPct(0);
         try {
+            // Download (or resume) the GGUF to OPFS, then stream-load it in the
+            // worker — the file never fully enters wasm memory (iPhone-safe).
             const url = blobUrl(EMBEDDING_MODEL as unknown as Parameters<typeof blobUrl>[0]);
-            await client.embeddings.load(url, EMBEDDING_MODEL.name);
+            const modelKey = EMBEDDING_MODEL.digest.replace(/[^A-Za-z0-9_.-]/g, "_");
+            const filename = EMBEDDING_MODEL.name.replace(/[^A-Za-z0-9_.-]/g, "_") + ".gguf";
+            await ensureModel(url, modelKey, filename, EMBEDDING_MODEL.size, ({ bytesWritten, totalBytes }) => {
+                if (totalBytes) setLoadPct((bytesWritten / totalBytes) * 100);
+            });
+            await client.embeddings.load(modelKey, filename, EMBEDDING_MODEL.name);
             setStatus("ready");
             void refreshDocs();
         } catch (e) {
