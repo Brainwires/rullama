@@ -94,6 +94,18 @@ emit_hf_entries() {
         --argjson heavy true \
         '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, heavy:$heavy}' \
         >> "$ITEMS_TMP"
+
+    # gemma4:e2b-it-qat — QAT Q4_0 text weights, ~3.3 GB (< half the std e2b),
+    # text-only (QAT towers ship as a separate projector blob, not merged).
+    jq -nc \
+        --arg name   "gemma4:e2b-it-qat" \
+        --arg family "gemma4" \
+        --arg tag    "e2b-it-qat" \
+        --argjson size 3349514112 \
+        --arg digest "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd" \
+        --arg url    "https://${R2_HOST}/gemma4-e2b-it-qat.gguf" \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url}' \
+        >> "$ITEMS_TMP"
 }
 
 # ───── Local Ollama scan (only when RULLAMA_SERVE_LOCAL=1) ────────────

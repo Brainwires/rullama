@@ -74,6 +74,17 @@ export function huggingfaceModels(): ModelEntry[] {
             url:        "https://models.brainwires.dev/gemma4-12b.gguf",
             heavy:      true,
         },
+        {
+            // QAT (quantization-aware-trained) e2b — Q4_0 text weights, ~3.3 GB
+            // (< half the standard e2b). Text-only (QAT towers ship as a separate
+            // projector blob, not merged). Same gemma4 forward path.
+            name:       "gemma4:e2b-it-qat",
+            family:     "gemma4",
+            tag:        "e2b-it-qat",
+            size:       3349514112,
+            digest:     "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
+            url:        "https://models.brainwires.dev/gemma4-e2b-it-qat.gguf",
+        },
     ];
 }
 

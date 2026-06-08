@@ -72,6 +72,21 @@ export const BAKED_IN_MODELS: readonly ModelEntry[] = [
         url:        `https://${R2_HOST}/gemma4-12b.gguf`,
         heavy:      true,
     },
+    {
+        // Google's QAT (quantization-aware-trained) e2b — legacy ggml Q4_0 text
+        // weights. ~3.3 GB vs the 7.16 GB standard e2b: less than half the
+        // download, quality preserved by the QAT. TEXT-ONLY here — Ollama ships
+        // the QAT vision/audio towers as a separate projector blob, not merged
+        // into this GGUF (a merged multimodal QAT build is a follow-up), so
+        // `multimodal` is omitted. Runs through the same gemma4 forward path
+        // (Q4_0 dequant-matmul; see backend/dispatch/matmul.rs).
+        name:       "gemma4:e2b-it-qat",
+        family:     "gemma4",
+        tag:        "e2b-it-qat",
+        size:       3349514112,
+        digest:     "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
+        url:        `https://${R2_HOST}/gemma4-e2b-it-qat.gguf`,
+    },
 ];
 
 /**
