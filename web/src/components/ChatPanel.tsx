@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ThinkingBlock } from "@/components/ThinkingBlock";
+import { ToolCallBlock } from "@/components/ToolCallBlock";
 import { type ChatMessage, type ImageAttachment } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
 import { parseModelContent } from "@/lib/parseModel";
+import { parseToolCalls } from "@/lib/parseToolCalls";
 import { cn } from "@/lib/utils";
 import { Mic, Send, Square, Paperclip, X, Volume2 } from "lucide-react";
 import { getSharedTts } from "@/lib/tts-client";
@@ -133,10 +135,16 @@ function SpeakButton({ text }: { text: string }) {
 
 function ModelBubble({ content, canSpeak }: { content: string; canSpeak: boolean }) {
     const parsed = useMemo(() => parseModelContent(content), [content]);
+    // Split tool-call blocks out of the response so they render as structured
+    // blocks; the leftover prose goes through markdown as before.
+    const tools = useMemo(() => parseToolCalls(parsed.response), [parsed.response]);
     const html   = useMemo(
-        () => parsed.response ? renderMarkdown(parsed.response) : "",
-        [parsed.response],
+        () => tools.prose ? renderMarkdown(tools.prose) : "",
+        [tools.prose],
     );
+    // Truly-empty (just-started streaming) only when there's no thinking,
+    // no tool call, and no prose yet — that's when the caret shows.
+    const isEmpty = parsed.thinking === null && tools.calls.length === 0 && !tools.prose;
     return (
         <div className="rounded-md border-l-2 border-muted-foreground bg-muted/50 p-3 text-sm break-words animate-fade-in">
             <RoleLabel role="model" />
@@ -147,12 +155,13 @@ function ModelBubble({ content, canSpeak }: { content: string; canSpeak: boolean
                     isComplete={parsed.isComplete}
                 />
             )}
-            {parsed.response ? (
+            {tools.calls.map((c, i) => <ToolCallBlock key={i} call={c} />)}
+            {tools.prose ? (
                 <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />
-            ) : parsed.thinking === null ? (
+            ) : isEmpty ? (
                 <span className="inline-block animate-pulse text-muted-foreground">▍</span>
             ) : null}
-            {canSpeak && parsed.response && parsed.isComplete !== false && <SpeakButton text={parsed.response} />}
+            {canSpeak && tools.prose && parsed.isComplete !== false && <SpeakButton text={tools.prose} />}
         </div>
     );
 }
