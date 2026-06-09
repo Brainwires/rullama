@@ -24,6 +24,35 @@ function sniffName(inner: string): string {
     return m ? m[1] : "";
 }
 
+/** Find the index just past the first balanced `{…}` at/after `from`,
+ *  respecting strings + escapes. Returns -1 if there's no balanced object
+ *  (still streaming mid-object, or no object at all). Lets us recover a
+ *  complete call even when the model omits the `</tool_call>` closer (it
+ *  often emits the JSON then stops or trails extra braces). */
+function matchJsonEnd(s: string, from: number): number {
+    let i = from;
+    while (i < s.length && s[i] !== "{") {
+        if (!/\s/.test(s[i])) return -1; // non-whitespace before `{` → not an object
+        i++;
+    }
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    for (; i < s.length; i++) {
+        const c = s[i];
+        if (inStr) {
+            if (esc) esc = false;
+            else if (c === "\\") esc = true;
+            else if (c === '"') inStr = false;
+            continue;
+        }
+        if (c === '"') inStr = true;
+        else if (c === "{") depth++;
+        else if (c === "}" && --depth === 0) return i + 1;
+    }
+    return -1; // never balanced
+}
+
 /** Turn the inner JSON text of one call into a ToolCall. Tolerant: malformed
  *  JSON keeps the raw text and never throws. */
 function toCall(inner: string, pending: boolean): ToolCall {
@@ -81,10 +110,24 @@ export function parseToolCalls(response: string): ParsedToolCalls {
         const innerStart = open + TOOL_CALL_OPEN.length;
         const close = response.indexOf(TOOL_CALL_CLOSE, innerStart);
         if (close < 0) {
-            // Open marker with no close yet — still streaming this call in.
+            // No explicit </tool_call>. Models frequently omit it — they emit
+            // the JSON object then stop (or trail extra braces). Brace-match a
+            // complete object so it still renders as a finished call instead of
+            // pulsing forever.
+            const end = matchJsonEnd(response, innerStart);
+            if (end >= 0) {
+                calls.push(toCall(response.slice(innerStart, end), false));
+                cursor = end;
+                // Swallow stray closing braces / whitespace the model tacked on.
+                while (cursor < response.length && (response[cursor] === "}" || /\s/.test(response[cursor]))) {
+                    cursor++;
+                }
+                continue;
+            }
+            // Genuinely mid-JSON — still streaming this call in.
             calls.push(toCall(response.slice(innerStart), true));
             pending = true;
-            break; // nothing after an unterminated call
+            break; // nothing usable after an unterminated call
         }
 
         calls.push(toCall(response.slice(innerStart, close), false));

@@ -133,7 +133,7 @@ function SpeakButton({ text }: { text: string }) {
     );
 }
 
-function ModelBubble({ content, canSpeak }: { content: string; canSpeak: boolean }) {
+function ModelBubble({ content, canSpeak, streaming }: { content: string; canSpeak: boolean; streaming: boolean }) {
     const parsed = useMemo(() => parseModelContent(content), [content]);
     // Split tool-call blocks out of the response so they render as structured
     // blocks; the leftover prose goes through markdown as before.
@@ -155,7 +155,7 @@ function ModelBubble({ content, canSpeak }: { content: string; canSpeak: boolean
                     isComplete={parsed.isComplete}
                 />
             )}
-            {tools.calls.map((c, i) => <ToolCallBlock key={i} call={c} />)}
+            {tools.calls.map((c, i) => <ToolCallBlock key={i} call={c} streaming={streaming} />)}
             {tools.prose ? (
                 <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />
             ) : isEmpty ? (
@@ -177,9 +177,9 @@ function SystemBubble({ content }: { content: string }) {
     );
 }
 
-function MessageBubble({ msg, canSpeak }: { msg: ChatMessage; canSpeak: boolean }) {
+function MessageBubble({ msg, canSpeak, streaming }: { msg: ChatMessage; canSpeak: boolean; streaming: boolean }) {
     if (msg.role === "system") return <SystemBubble content={msg.content} />;
-    if (msg.role === "model")  return <ModelBubble  content={msg.content} canSpeak={canSpeak} />;
+    if (msg.role === "model")  return <ModelBubble  content={msg.content} canSpeak={canSpeak} streaming={streaming} />;
     return <UserBubble content={msg.content} images={msg.images} />;
 }
 
@@ -260,7 +260,15 @@ export function ChatPanel(props: Props) {
                     )
                 ) : (
                     <div className="mx-auto flex max-w-3xl flex-col gap-2">
-                        {props.messages.map((m, i) => <MessageBubble key={i} msg={m} canSpeak={props.canSpeak} />)}
+                        {props.messages.map((m, i) => (
+                            <MessageBubble
+                                key={i}
+                                msg={m}
+                                canSpeak={props.canSpeak}
+                                // Only the last message streams, and only while generation is active.
+                                streaming={props.canStop && i === props.messages.length - 1}
+                            />
+                        ))}
                     </div>
                 )}
             </div>

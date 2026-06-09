@@ -4,6 +4,10 @@ import type { ToolCall } from "@/lib/toolFormat";
 
 interface Props {
     call: ToolCall;
+    /** True while the message is still streaming in. A call that's `pending`
+     *  (no balanced JSON yet) only pulses while this is true — once generation
+     *  stops, an unterminated fragment finalizes instead of pulsing forever. */
+    streaming?: boolean;
 }
 
 /** One argument row: `key  value`. Objects/arrays are JSON-stringified. */
@@ -25,13 +29,17 @@ function ArgRow({ name, value }: { name: string; value: unknown }) {
  * ThinkingBlock; intentionally stays expanded (the call is the artifact we
  * want to show), pulsing while the call is still streaming in.
  */
-export function ToolCallBlock({ call }: Props) {
+export function ToolCallBlock({ call, streaming = false }: Props) {
     const argEntries =
         call.arguments && typeof call.arguments === "object"
             ? Object.entries(call.arguments as Record<string, unknown>)
             : null;
 
-    const label = call.pending
+    // Only treat a pending call as "in flight" while the message is actually
+    // streaming. A pending fragment left over after generation stopped (model
+    // never closed its JSON) finalizes to a static block.
+    const inFlight = call.pending && streaming;
+    const label = inFlight
         ? call.name
             ? `Calling ${call.name}…`
             : "Tool call…"
@@ -41,7 +49,7 @@ export function ToolCallBlock({ call }: Props) {
         <div
             className={cn(
                 "mb-2 overflow-hidden rounded-md border border-dashed border-primary/40 bg-primary/5 text-xs",
-                call.pending && "animate-pulse",
+                inFlight && "animate-pulse",
             )}
         >
             <div className="flex items-center gap-1.5 border-b border-dashed border-primary/30 px-2.5 py-1.5 text-muted-foreground">
