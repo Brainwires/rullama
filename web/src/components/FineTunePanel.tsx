@@ -1040,7 +1040,10 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged, se
                         </CardTitle>
                         <CardDescription>
                             Load a model from the Chat tab first. Fine-tuning runs against
-                            the same Model handle — no second load needed.
+                            the same Model handle — no second load needed. Pick a Q4_K_M
+                            model (e.g. <code className="font-mono">gemma4:e2b</code>); the
+                            Q4_0 QAT builds (<code className="font-mono">…-it-qat</code>) are
+                            inference-only — training (backward) for Q4_0 isn't supported yet.
                         </CardDescription>
                     </CardHeader>
                 </Card>
@@ -1143,6 +1146,18 @@ export function FineTunePanel({ modelStatus, activeAdapter, onAdapterChanged, se
                     <Badge tone="muted" className="text-[10px]">{activeAdapter}</Badge>
                 </div>
             )}
+
+            {/* Quant requirement: backward (training) is implemented for the
+             *  Q4_K_M weights only. The Q4_0 QAT builds (gemma4:*-it-qat) run
+             *  inference fine but their backward path isn't supported yet, so
+             *  training against a QAT model would fail mid-step. Make that
+             *  explicit so nobody loads a QAT model and then can't train. */}
+            <div className="border-b border-yellow-500/40 bg-yellow-500/10 px-4 py-2 text-xs text-yellow-700 dark:text-yellow-300">
+                <span className="font-medium">Training requires a Q4_K_M model</span>{" "}
+                (e.g. <code className="font-mono">gemma4:e2b</code>). The Q4_0 QAT
+                builds (<code className="font-mono">…-it-qat</code>) are
+                inference-only for now — backward isn't supported for Q4_0 yet.
+            </div>
 
             {/* Layout note: the right (settings) column ALWAYS renders
              *  via the `settingsColumn` JSX below — either inline as
