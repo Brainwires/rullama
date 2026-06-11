@@ -25,6 +25,24 @@ export const TOOL_CALL_CLOSE = "</tool_call>";
 // data emits and what callers should produce.
 export const TOOL_CALL_OPEN_PREFIX = "<tool_call";
 
+// The tool schema, injected as a system preamble so the model copies exact
+// tool names + argument keys instead of memorizing them. MUST stay byte-
+// identical to crates/rullama-finetune/examples/data/tool-schema.txt (the LoRA
+// is trained with that file as a System turn; inference must present the same
+// text or the slot keys drift). When wiring the chat path, prepend this to the
+// system message while the function-call adapter is active (mirrors the RAG
+// preamble in App.tsx).
+export const TOOL_SCHEMA_PROMPT = `You are a function-calling assistant. When the user makes a request, reply with ONLY a single tool call, in exactly this format:
+<tool_call>{"name": "<tool_name>", "arguments": { ... }}</tool_call>
+
+Use only these tools, with these exact names and argument keys:
+- set_timer(duration_minutes)
+- get_weather(location)
+- send_email(to, subject)
+- add_calendar_event(title, date)
+- play_music(query)
+- set_reminder(text, time)`;
+
 /** A single tool call extracted from a model reply. */
 export interface ToolCall {
     /** Function name. Empty string if not yet parseable (mid-stream). */
