@@ -7,7 +7,7 @@
 //
 // A reply with no `<tool_call>` marker passes straight through (calls === []).
 
-import { TOOL_CALL_OPEN, TOOL_CALL_CLOSE, type ToolCall } from "@/lib/toolFormat";
+import { TOOL_CALL_OPEN_PREFIX, TOOL_CALL_CLOSE, type ToolCall } from "@/lib/toolFormat";
 
 export interface ParsedToolCalls {
     calls: ToolCall[];
@@ -87,7 +87,7 @@ function stripName(obj: Record<string, unknown>): Record<string, unknown> {
 }
 
 export function parseToolCalls(response: string): ParsedToolCalls {
-    if (!response || !response.includes(TOOL_CALL_OPEN)) {
+    if (!response || !response.includes(TOOL_CALL_OPEN_PREFIX)) {
         return { calls: [], prose: response ?? "", pending: false };
     }
 
@@ -97,7 +97,7 @@ export function parseToolCalls(response: string): ParsedToolCalls {
     let cursor = 0;
 
     for (;;) {
-        const open = response.indexOf(TOOL_CALL_OPEN, cursor);
+        const open = response.indexOf(TOOL_CALL_OPEN_PREFIX, cursor);
         if (open < 0) {
             // No more calls — everything left is prose.
             prose += response.slice(cursor);
@@ -107,7 +107,9 @@ export function parseToolCalls(response: string): ParsedToolCalls {
         // Text before this call is prose.
         prose += response.slice(cursor, open);
 
-        const innerStart = open + TOOL_CALL_OPEN.length;
+        // Skip the opening tag, tolerating a missing `>` (e.g. `<tool_call\n{…`).
+        let innerStart = open + TOOL_CALL_OPEN_PREFIX.length;
+        if (response[innerStart] === ">") innerStart++;
         const close = response.indexOf(TOOL_CALL_CLOSE, innerStart);
         if (close < 0) {
             // No explicit </tool_call>. Models frequently omit it — they emit

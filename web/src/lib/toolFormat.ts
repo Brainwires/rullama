@@ -17,6 +17,14 @@
 export const TOOL_CALL_OPEN = "<tool_call>";
 export const TOOL_CALL_CLOSE = "</tool_call>";
 
+// The parser matches the opening tag LENIENTLY by this prefix: small models
+// sometimes drop the closing `>` of `<tool_call>` (a tokenization quirk —
+// observed emitting `<tool_call\n{…`), so we key on `<tool_call` and skip an
+// optional `>`. This never collides with the `</tool_call>` closer (that
+// starts `</`, not `<t`). The canonical OPEN above is still what training
+// data emits and what callers should produce.
+export const TOOL_CALL_OPEN_PREFIX = "<tool_call";
+
 /** A single tool call extracted from a model reply. */
 export interface ToolCall {
     /** Function name. Empty string if not yet parseable (mid-stream). */
