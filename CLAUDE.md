@@ -10,10 +10,19 @@ local GPU through hand-written WGSL. The scope expands as Ollama's does.
 
 **Currently in scope:**
 
-- **Text / vision / audio-input chat** — Gemma 4 only (`gemma4:e2b`,
-  `gemma4:e4b`). `Q4_K_M` mix only (`Q4_K` / `Q6_K` / `F16` / `F32`).
-  This is the most mature surface and the parity oracle for everything
-  else.
+- **Text / vision / audio-input chat** — Gemma 4 only, all dense GGUF
+  variants: `e2b` / `e4b` / `12b` plus the `-it-qat` (Q4_0) and
+  `-it-q8_0` builds. Supported weight quants: `Q4_K` / `Q6_K` / `Q4_0` /
+  `Q8_0` / `F16` / `F32` (+ BF16 towers). The dtype-routed dispatch is
+  `matmul_quant_chained` in `backend/dispatch/matmul.rs`. This is the
+  most mature surface and the parity oracle for everything else.
+- **Gemma 4 MoE (`gemma4:26b-a4b`) + DiffusionGemma** — in-flight (the
+  one sanctioned MoE: it's the backbone DiffusionGemma sits on). MoE is
+  a per-layer FFN branch inside the gemma4 path (parallel dense MLP +
+  routed experts — see `reference/moe.rs`); DiffusionGemma will be a
+  sibling engine à la `EmbeddingModel`. Oracle for MoE-AR is Ollama's
+  `26b-a4b`; for DiffusionGemma it's Unsloth's GGUF + llama-diffusion-cli
+  (Ollama can't run it).
 - **In-browser LoRA fine-tuning** — over the same Gemma 4 forward path.
   Production-shaped (no Python toolchain, no server upload) and so far
   has no peer in any other browser-LLM project (see
@@ -46,9 +55,14 @@ local GPU through hand-written WGSL. The scope expands as Ollama's does.
 
 **Explicitly out of scope:**
 
-- Other transformer architectures and MoE variants — porting a second
-  text LLM family for its own sake doesn't pay off; the Gemma 4 focus
-  is doing real work for the test surface and parity claims.
+- Other transformer architectures and non-Gemma MoE families — porting a
+  second text LLM family for its own sake doesn't pay off; the Gemma 4
+  focus is doing real work for the test surface and parity claims.
+  (The Gemma 4 `26b-a4b` MoE is the sanctioned exception, in service of
+  DiffusionGemma.)
+- Non-GGUF model formats — the `-mlx` / `-mxfp8` / `-nvfp4` Ollama tags
+  are Apple-MLX weights rullama cannot parse; `-cloud` tags are
+  server-side. Neither will ever appear in the catalog.
 - Server-side anything. The whole pitch is "your data never leaves
   the device."
 - Python in the runtime loop. Native Rust + browser only.
