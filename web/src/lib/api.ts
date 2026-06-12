@@ -110,6 +110,20 @@ export const BAKED_IN_MODELS: readonly ModelEntry[] = [
         url:        `https://${R2_HOST}/gemma4-12b-it-qat.gguf`,
         heavy:      true,
     },
+    {
+        // e2b @ Q8_0 — 8-bit weights, the highest-quality quant we run. 8.14 GB
+        // (vs 7.16 GB Q4_K_M). FULL multimodal blob (text Q8_0 + the same
+        // BF16/F16 vision+audio towers as the standard e2b — verified by tensor
+        // census), unlike the text-only QAT builds. Q8_0 dequant-matmul in
+        // backend/dispatch/matmul.rs.
+        name:       "gemma4:e2b-it-q8_0",
+        family:     "gemma4",
+        tag:        "e2b-it-q8_0",
+        size:       8140140960,
+        digest:     "6aade8551d1aecae00d6520d5db327efbef4b96ff92abef353ef6cd8e4e6d589",
+        url:        `https://${R2_HOST}/gemma4-e2b-it-q8_0.gguf`,
+        multimodal: true,
+    },
 ];
 
 /**

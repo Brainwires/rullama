@@ -105,6 +105,17 @@ export function huggingfaceModels(): ModelEntry[] {
             url:        "https://models.brainwires.dev/gemma4-12b-it-qat.gguf",
             heavy:      true,
         },
+        {
+            // e2b @ Q8_0 — 8-bit weights, highest-quality quant. 8.14 GB. Full
+            // multimodal blob (text Q8_0 + BF16/F16 towers, census-verified).
+            name:       "gemma4:e2b-it-q8_0",
+            family:     "gemma4",
+            tag:        "e2b-it-q8_0",
+            size:       8140140960,
+            digest:     "6aade8551d1aecae00d6520d5db327efbef4b96ff92abef353ef6cd8e4e6d589",
+            url:        "https://models.brainwires.dev/gemma4-e2b-it-q8_0.gguf",
+            multimodal: true,
+        },
     ];
 }
 

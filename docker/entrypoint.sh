@@ -129,6 +129,19 @@ emit_hf_entries() {
         --argjson heavy true \
         '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, heavy:$heavy}' \
         >> "$ITEMS_TMP"
+
+    # gemma4:e2b-it-q8_0 — 8-bit weights (highest-quality quant), 8.14 GB,
+    # full multimodal blob (text Q8_0 + BF16/F16 towers).
+    jq -nc \
+        --arg name   "gemma4:e2b-it-q8_0" \
+        --arg family "gemma4" \
+        --arg tag    "e2b-it-q8_0" \
+        --argjson size 8140140960 \
+        --arg digest "6aade8551d1aecae00d6520d5db327efbef4b96ff92abef353ef6cd8e4e6d589" \
+        --arg url    "https://${R2_HOST}/gemma4-e2b-it-q8_0.gguf" \
+        --argjson multimodal true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, multimodal:$multimodal}' \
+        >> "$ITEMS_TMP"
 }
 
 # ───── Local Ollama scan (only when RULLAMA_SERVE_LOCAL=1) ────────────
