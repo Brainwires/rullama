@@ -116,6 +116,26 @@ export function huggingfaceModels(): ModelEntry[] {
             url:        "https://models.brainwires.dev/gemma4-e2b-it-q8_0.gguf",
             multimodal: true,
         },
+        {
+            // e4b @ Q8_0 — 11.6 GB, full multimodal blob.
+            name:       "gemma4:e4b-it-q8_0",
+            family:     "gemma4",
+            tag:        "e4b-it-q8_0",
+            size:       11636104608,
+            digest:     "62d767a4c82f7acba2e1da74df317f01ce34b92830712c536260f82acfb63ac9",
+            url:        "https://models.brainwires.dev/gemma4-e4b-it-q8_0.gguf",
+            multimodal: true,
+        },
+        {
+            // 12b @ Q8_0 — 12.7 GB, text-only (12b builds ship no towers), heavy ⚠.
+            name:       "gemma4:12b-it-q8_0",
+            family:     "gemma4",
+            tag:        "12b-it-q8_0",
+            size:       12669645728,
+            digest:     "047dae1d7894b9de8f08141e841544e007243290c02df8b39872991d1940c795",
+            url:        "https://models.brainwires.dev/gemma4-12b-it-q8_0.gguf",
+            heavy:      true,
+        },
     ];
 }
 

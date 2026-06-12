@@ -142,6 +142,30 @@ emit_hf_entries() {
         --argjson multimodal true \
         '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, multimodal:$multimodal}' \
         >> "$ITEMS_TMP"
+
+    # gemma4:e4b-it-q8_0 — 11.6 GB, full multimodal blob.
+    jq -nc \
+        --arg name   "gemma4:e4b-it-q8_0" \
+        --arg family "gemma4" \
+        --arg tag    "e4b-it-q8_0" \
+        --argjson size 11636104608 \
+        --arg digest "62d767a4c82f7acba2e1da74df317f01ce34b92830712c536260f82acfb63ac9" \
+        --arg url    "https://${R2_HOST}/gemma4-e4b-it-q8_0.gguf" \
+        --argjson multimodal true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, multimodal:$multimodal}' \
+        >> "$ITEMS_TMP"
+
+    # gemma4:12b-it-q8_0 — 12.7 GB, text-only (12b ships no towers), heavy ⚠.
+    jq -nc \
+        --arg name   "gemma4:12b-it-q8_0" \
+        --arg family "gemma4" \
+        --arg tag    "12b-it-q8_0" \
+        --argjson size 12669645728 \
+        --arg digest "047dae1d7894b9de8f08141e841544e007243290c02df8b39872991d1940c795" \
+        --arg url    "https://${R2_HOST}/gemma4-12b-it-q8_0.gguf" \
+        --argjson heavy true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, heavy:$heavy}' \
+        >> "$ITEMS_TMP"
 }
 
 # ───── Local Ollama scan (only when RULLAMA_SERVE_LOCAL=1) ────────────
