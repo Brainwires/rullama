@@ -108,12 +108,16 @@ export function ModelLoader(props: Props) {
                 )}
             </div>
 
-            {/* Advisory caution for heavy models (e.g. gemma4:12b). Load stays
-                enabled on every tier — this only warns. */}
+            {/* Advisory caution for heavy models (gemma4:12b dense, gemma4:26b
+                MoE). Load stays enabled on every tier — this only warns. */}
             {selectedModel?.heavy && (
                 <p className="flex items-start gap-1 text-[11px] leading-tight text-amber-600 dark:text-amber-500">
                     <AlertTriangle className="mt-px size-3 shrink-0" />
-                    <span>Very heavy model — a 24&nbsp;GB+ GPU is recommended. May be slow or unstable on less.</span>
+                    <span>
+                        Very heavy model — a large download, slow on modest hardware. The 26B
+                        sparse-MoE streams its experts to fit low-VRAM GPUs (a few seconds per
+                        token); dense models like 12B want more VRAM.
+                    </span>
                 </p>
             )}
 
