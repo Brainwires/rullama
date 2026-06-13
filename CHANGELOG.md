@@ -11,17 +11,111 @@ and may move in any patch release.
 
 ## [Unreleased]
 
-Voice cloning + a real TTS preset catalog. The Voice tab gains a second
-engine — **StyleTTS2-LibriTTS** zero-shot cloning (desktop-only) alongside
-the existing Kokoro preset voices — with GPU voice-creation, GPU
-style-diffusion prosody, and the full English Kokoro voicepack set.
+A broad surface expansion since 0.4.0. The Gemma 4 family grows from two
+dense models to the full runnable GGUF lineup — three new weight quants
+(Q4_0 QAT, Q8_0, Q5_0), the 12B architecture, and the **26B-A4B sparse
+MoE** with per-expert weight streaming that fits it on a low-VRAM GPU. A
+validated **DiffusionGemma** (block-diffusion text) CPU forward + GPU
+kernel set lands as a preview. Beyond text generation: an **embeddings +
+RAG** stack (EmbeddingGemma), function-call **tool rendering + LoRA**, and
+a second TTS engine — **StyleTTS2-LibriTTS** zero-shot voice cloning
+alongside the Kokoro presets.
 
 ### Public API (semver-covered modules)
 
-No changes to `api`, `error`, `sampling`, `lora`. Everything below is
-internal engine work, the desktop-only cloning surface, or PWA assets.
+No changes to `api`, `error`, `sampling`, `lora`. New sibling classes
+(`EmbeddingModel`, `StyleTtsClone`, and an in-flight DiffusionGemma
+surface) are their own entry points, not part of the four covered
+modules. Everything below is internal engine work, the new model
+surfaces, or PWA / tooling assets.
 
-### Engine (rullama)
+### Gemma 4 — weight quants & model coverage
+
+- **Q4_0** — runs Google's QAT (quantization-aware-trained) builds:
+  `gemma4:{e2b,e4b,12b}-it-qat`. The forward was un-hardcoded from Q4_K to
+  a dtype-routed `matmul_quant_chained` (Q4_K / Q6_K / Q4_0 / F16). QAT is
+  ~half the download at preserved quality. Inference-only — fine-tuning on
+  a QAT base fails early with an actionable error (train Q4_K_M, deploy QAT).
+- **Q8_0** — 8-bit (`-it-q8_0` tags), the highest-quality runnable quant;
+  byte-exact vs ggml `dequantize_row_q8_0`, byte-addressed fused
+  dequant-matmul + GPU-vs-CPU parity.
+- **Q5_0** — 5-bit, required for the 26B / DiffusionGemma Q4_K_M mix (Q5_0
+  on ~half the `ffn_down_exps`). Caught by the real 26B GPU run, not the
+  synthetic tests.
+- **12B architecture** — per-layer KV-head arrays (8 SWA / 1 global),
+  no-V global attention (V := the raw K projection), and 4-byte GPU-upload
+  alignment for odd-multiple Q6_K rows. Un-breaks `gemma4:12b` and enables
+  the 12B QAT build.
+
+### Sparse MoE — `gemma4:26b-a4b` (128 experts, top-8)
+
+- The MoE FFN runs IN PARALLEL with the dense MLP per layer, mirroring
+  Ollama's `model_text.go` 1:1: router (unweighted rmsnorm → ×1/√d →
+  ×scale → softmax → top-k → renorm) → fused `ffn_gate_up_exps` → GeGLU →
+  `ffn_down_exps` → weighted combine, under `post_ffw_norm_1/2`. A
+  per-layer branch, not a new model family (it's still `general.architecture
+  = gemma4`); the standing "MoE out of scope" line is retired.
+- CPU oracle + GPU kernels — `moe_router`, MulmatID `moe_expert_matmul`
+  (Q4_K / Q5_0 / Q8_0), `moe_geglu_halves`, `moe_combine`, plus batched
+  variants for the diffusion canvas — each GPU-vs-CPU parity-tested
+  (≤1.1e-4 on real blk.0/5/29 weights). New 3-D expert-slice dequant +
+  native `FileFetcher` (stream blobs bigger than RAM). `TrainingSession`
+  rejects MoE bases (inference-only).
+- Load-bearing GPU fix surfaced here: **Iris/Metal silently runs only 64
+  of a 128-thread workgroup** — WG=64 is now a hard rule, and parity tests
+  exercise the full index range.
+
+### Low-VRAM weight streaming
+
+- The MeBP per-layer weight-destroy pattern extended to **inference + MoE**:
+  the 26B GPU forward runs on a 16 GB Mac at **~0.6 GB peak** (27× under
+  its 16.7 GB resident set), output byte-identical to the CPU oracle — the
+  model didn't fit at all before.
+- **Per-expert streaming** — fetch only the routed top-8 of 128 experts
+  per layer (`buffer_expert_async` range-fetch), ~16× less bandwidth; with
+  the non-expert weights kept resident, the 26B runs at ~4 s/tok (down from
+  ~8) at ~1.6 GB peak, output unchanged. (`moe_stream_smoke` example;
+  `DG_LAYER_TIME` phase timing.)
+
+### DiffusionGemma — block-diffusion text (preview)
+
+- Validated CPU canvas-forward for the `diffusion-gemma` architecture (the
+  26B-A4B MoE backbone run non-autoregressively over a 256-token "canvas"):
+  the entropy-bound sampler, region-aware unified mask (bidirectional
+  canvas / causal-windowed prompt), full-sequence masked attention, and
+  the self-conditioning gated MLP — all mirroring llama.cpp PR 24423 and
+  diffed against its `llama-diffusion-gemma-eval` oracle (98.4% argmax;
+  99.6% with self-conditioning; a per-layer bisection confirms layer-0
+  correlation 0.9998, i.e. the math is correct and the residual drift is
+  inherent MoE routing-boundary accumulation). GPU kernel set built +
+  per-kernel parity'd (region attention, batched router / expert-matmul /
+  GeGLU / combine). The browser surface + the full GPU forward are
+  follow-ups (the model is high-VRAM-desktop class).
+
+### Embeddings + RAG
+
+- **EmbeddingGemma-300M** (`gemma3` arch, encoder-only) → the
+  `EmbeddingModel` sibling class over a bidirectional GPU forward,
+  bit-identical to the CPU oracle (cosine 0.9997 vs Ollama).
+  SentencePiece-unigram tokenizer (`tokenizer::spm`). Powers the PWA
+  Knowledge tab (drop/paste docs → chunk → embed → rsqlite-wasm vector
+  store) and per/cross-conversation chat RAG. Streaming loader keeps the
+  621 MB GGUF from ever being fully resident (iPhone-safe).
+
+### Chat — tool calling
+
+- `<tool_call>{json}</tool_call>` renderer rendered as a structured block,
+  with a tolerant parser hardened for real-model output (e.g. a missing
+  `>` on the open tag). Function-call LoRA recipe + a canonical
+  dataset/generator. Training made interruptible + resumable
+  (checkpoint/restore) for slow GPUs.
+
+### Speech engine (TTS + voice cloning)
+
+The Voice tab gains a second engine — **StyleTTS2-LibriTTS** zero-shot
+cloning (desktop-only) alongside the existing Kokoro preset voices — with
+GPU voice-creation, GPU style-diffusion prosody, and the full English
+Kokoro voicepack set.
 
 - **GPU style encoder** — voice *creation* (reference clip → 256-d style)
   now runs on the GPU, not just synthesis. New channel-first kernels
@@ -51,6 +145,15 @@ internal engine work, the desktop-only cloning surface, or PWA assets.
 
 ### Models / distribution
 
+- **Gemma 4 catalog** — published to R2 (`models.brainwires.dev`) and
+  added across the three catalog mirrors (`web/src/lib/api.ts`,
+  `web/server/ollama.ts`, `docker/entrypoint.sh`): the QAT trio
+  `gemma4:{e2b,e4b,12b}-it-qat` (Q4_0), the Q8_0 trio
+  `gemma4:{e2b,e4b,12b}-it-q8_0` (e2b/e4b full multimodal, 12b text-only),
+  the standard `gemma4:12b`, and the `gemma4:26b` MoE (heavy ⚠). MLX
+  (`-mlx`/`-mxfp8`/`-nvfp4`) and `-cloud` tags are explicitly out — not
+  GGUF / server-side.
+- **EmbeddingGemma-300M** — 621 MB GGUF on R2, in the Knowledge-tab catalog.
 - **Kokoro: all 28 English voicepacks** (af/am American, bf/bm British,
   ♀/♂) shipped as Voice-tab presets — the GGUF previously bundled only
   `af_heart`. New f16 GGUF (170.8 MB) on R2; catalog `digest`/`size` bumped
@@ -59,6 +162,11 @@ internal engine work, the desktop-only cloning surface, or PWA assets.
 
 ### Tooling
 
+- New examples: `moe_parity` / `moe_layer_parity` / `moe_chained_smoke`
+  (26B MoE oracle + GPU layer parity), `moe_stream_smoke` (low-VRAM
+  streaming), `diffusion_parity` / `diffusion_config_probe` (DiffusionGemma
+  vs the llama.cpp oracle), `embed_parity`. Test fixtures now read GGUF
+  **headers only** (no whole-blob `fs::read`) — fixed a lib-suite OOM.
 - `clone_fidelity_harness` example — A0 calibration that isolates
   reference-quality from speaker by cloning Kokoro `af_heart`'s own clean
   output and measuring speaker-similarity. Finding: clean clone 0.96
