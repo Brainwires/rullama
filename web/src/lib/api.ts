@@ -146,6 +146,19 @@ export const BAKED_IN_MODELS: readonly ModelEntry[] = [
         url:        `https://${R2_HOST}/gemma4-12b-it-q8_0.gguf`,
         heavy:      true,
     },
+    {
+        // Google's 26B-A4B sparse MoE (128 experts, top-8, ~4B active). 18 GB
+        // Q4_K_M; runs through the gemma4 forward's parallel dense+expert FFN
+        // branch (reference/moe.rs + dispatch/moe.rs). Expert weights alone are
+        // ~12 GB GPU-resident — needs a high-VRAM desktop; heavy → advisory ⚠.
+        name:       "gemma4:26b",
+        family:     "gemma4",
+        tag:        "26b",
+        size:       17987569344,
+        digest:     "7121486771cbfe218851513210c40b35dbdee93ab1ef43fe36283c883980f0df",
+        url:        `https://${R2_HOST}/gemma4-26b.gguf`,
+        heavy:      true,
+    },
 ];
 
 /**

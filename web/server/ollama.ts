@@ -136,6 +136,16 @@ export function huggingfaceModels(): ModelEntry[] {
             url:        "https://models.brainwires.dev/gemma4-12b-it-q8_0.gguf",
             heavy:      true,
         },
+        {
+            // 26B-A4B sparse MoE (128 experts top-8), 18 GB Q4_K_M, heavy ⚠.
+            name:       "gemma4:26b",
+            family:     "gemma4",
+            tag:        "26b",
+            size:       17987569344,
+            digest:     "7121486771cbfe218851513210c40b35dbdee93ab1ef43fe36283c883980f0df",
+            url:        "https://models.brainwires.dev/gemma4-26b.gguf",
+            heavy:      true,
+        },
     ];
 }
 

@@ -166,6 +166,18 @@ emit_hf_entries() {
         --argjson heavy true \
         '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, heavy:$heavy}' \
         >> "$ITEMS_TMP"
+
+    # gemma4:26b — 26B-A4B sparse MoE (128 experts top-8), 18 GB Q4_K_M, heavy ⚠.
+    jq -nc \
+        --arg name   "gemma4:26b" \
+        --arg family "gemma4" \
+        --arg tag    "26b" \
+        --argjson size 17987569344 \
+        --arg digest "7121486771cbfe218851513210c40b35dbdee93ab1ef43fe36283c883980f0df" \
+        --arg url    "https://${R2_HOST}/gemma4-26b.gguf" \
+        --argjson heavy true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, heavy:$heavy}' \
+        >> "$ITEMS_TMP"
 }
 
 # ───── Local Ollama scan (only when RULLAMA_SERVE_LOCAL=1) ────────────
