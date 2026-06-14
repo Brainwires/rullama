@@ -87,10 +87,25 @@ surfaces, or PWA / tooling assets.
   diffed against its `llama-diffusion-gemma-eval` oracle (98.4% argmax;
   99.6% with self-conditioning; a per-layer bisection confirms layer-0
   correlation 0.9998, i.e. the math is correct and the residual drift is
-  inherent MoE routing-boundary accumulation). GPU kernel set built +
-  per-kernel parity'd (region attention, batched router / expert-matmul /
-  GeGLU / combine). The browser surface + the full GPU forward are
-  follow-ups (the model is high-VRAM-desktop class).
+  inherent MoE routing-boundary accumulation).
+- **Full GPU canvas forward** (`reference/diffusion/gpu.rs`): the entire
+  forward — dense projections AND the 128-expert MoE FFN — now runs on the
+  GPU, batched over all canvas positions. Dense Q4_K/Q5_0/Q8_0 matmuls reuse
+  the batched MoE-expert kernel with `top_k = 1` (a batched dense quant
+  matmul for free); Q6_K (`attn_v`, the tied lm_head) falls back to a
+  single-row loop; the MoE runs the batched router / expert-matmul / GeGLU /
+  combine path with per-LAYER expert streaming (each layer's ~0.5 GB of
+  stacked experts is made resident then destroyed). Validated GPU-vs-CPU on
+  the real 16.8 GB streamed model: argmax-exact, max-abs ≤ 0.0004.
+- **`DiffusionGemma` engine + browser surface**: a sibling wasm class
+  (`src/diffusion.rs`) like `EmbeddingModel` — streaming loader + the
+  entropy-bound denoise loop over the GPU forward. Native generation
+  validated end-to-end ("The capital of France is" → " Paris."). The wasm
+  `denoiseStep` surface (JS drives the loop, rendering the canvas condensing
+  out of noise) is wired into the PWA: `diffusiongemma:26b-a4b` is now
+  selectable, streams from OPFS, and generates via a denoise-loop chat path.
+  Published to R2 (16.8 GB Q4_K_M). Desktop-class; tens of seconds per
+  denoise step on weak GPUs.
 
 ### Embeddings + RAG
 
