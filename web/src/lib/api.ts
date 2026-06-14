@@ -159,6 +159,22 @@ export const BAKED_IN_MODELS: readonly ModelEntry[] = [
         url:        `https://${R2_HOST}/gemma4-26b.gguf`,
         heavy:      true,
     },
+    {
+        // DiffusionGemma 26B-A4B — Google's block-diffusion model on the same
+        // 26B-A4B sparse-MoE backbone (Ollama can't run it; Unsloth GGUF). NOT
+        // autoregressive: a 256-token canvas is denoised over up to 48 steps,
+        // the whole canvas forwarded each step. Own engine (DiffusionGemma wasm
+        // class), own family string → its own generation path in the worker.
+        // 16.8 GB Q4_K_M; per-layer expert streaming keeps it off-RAM. Heavy →
+        // advisory ⚠ (desktop; tens of seconds per denoise step on weak GPUs).
+        name:       "diffusiongemma:26b-a4b",
+        family:     "diffusion-gemma",
+        tag:        "26b-a4b",
+        size:       16806810336,
+        digest:     "d2ca2c032ebfb23cf2d1794a3465e615c7545634d46b3c30652a26d8b07c4ad3",
+        url:        `https://${R2_HOST}/diffusiongemma-26b-a4b.gguf`,
+        heavy:      true,
+    },
 ];
 
 /**
@@ -244,7 +260,14 @@ export function styletts2BlobUrl(variant: CloneVariant = "f32"): string {
 
 /** Whether this entry is something we'll actually run. */
 export function isSupported(m: ModelEntry): boolean {
-    return m.family === "gemma4";
+    return m.family === "gemma4" || m.family === "diffusion-gemma";
+}
+
+/** Whether this entry is the (non-autoregressive) DiffusionGemma engine, which
+ *  the worker drives through `diffuserGenerate` (a denoise loop) rather than
+ *  the standard token-streaming `generate`. */
+export function isDiffusion(m: ModelEntry): boolean {
+    return m.family === "diffusion-gemma";
 }
 
 /**

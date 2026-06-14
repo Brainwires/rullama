@@ -10,7 +10,7 @@ import { VoicePanel } from "@/components/VoicePanel";
 import { ConversationList } from "@/components/ConversationList";
 import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
 import { type ChatMessage, type ImageAttachment, type SamplingOptions, DEFAULT_SAMPLING, DEFAULT_SYSTEM_PROMPT } from "@/lib/types";
-import { type ModelEntry, blobUrl, beacon, listModels } from "@/lib/api";
+import { type ModelEntry, blobUrl, beacon, listModels, isDiffusion } from "@/lib/api";
 import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel, readInflightState, writeInflightState, clearInflightState } from "@/lib/opfs";
 import { saveInflightImage, saveInflightAudio, readInflightImages, readInflightAudio, clearInflightMedia } from "@/lib/inflight_media";
 import { getNetworkHint } from "@/lib/network";
@@ -59,6 +59,9 @@ export function App() {
 
     // Model load state
     const [modelStatus, setModelStatus] = useState<ModelStatus>("idle");
+    // True when the loaded model is the DiffusionGemma engine (block-diffusion
+    // denoise loop in onSend instead of the AR token stream).
+    const [loadedIsDiffusion, setLoadedIsDiffusion] = useState(false);
     const [loadingPercent, setLoadingPercent] = useState(0);
     const [loadingLabel, setLoadingLabel]     = useState("");
     const [statusText, setStatusText]         = useState("no model");
@@ -1160,19 +1163,30 @@ export function App() {
             //   iPhone can hold the text tower + the multimodal
             //   constants without jetsam.
             const textOnly = !m.multimodal;
-            // `load` is session-scoped (it mutates the shared Model). Acquire
-            // for the duration of the wasm load + meta read. Other tabs'
-            // inference will wait until this resolves; the queue advances
-            // naturally on releaseSession (in the finally block).
-            await client.withSession(async () => {
-                await client.load(modelKey, filename, {
-                    maxContext: mobile ? mobileMaxCtx : 0,
-                    textOnly,
-                    name: m.name,
+            // DiffusionGemma is a SEPARATE wasm engine (own handle), not the
+            // shared AR Model — load it through its own streaming loader. No
+            // vision/audio towers; the denoise loop runs in onSend.
+            if (isDiffusion(m)) {
+                await client.diffusion.load(modelKey, filename, m.name);
+                setHasVision(false);
+                setHasAudio(false);
+                setLoadedIsDiffusion(true);
+            } else {
+                // `load` is session-scoped (it mutates the shared Model). Acquire
+                // for the duration of the wasm load + meta read. Other tabs'
+                // inference will wait until this resolves; the queue advances
+                // naturally on releaseSession (in the finally block).
+                await client.withSession(async () => {
+                    await client.load(modelKey, filename, {
+                        maxContext: mobile ? mobileMaxCtx : 0,
+                        textOnly,
+                        name: m.name,
+                    });
                 });
-            });
-            setHasVision(client.hasVision);
-            setHasAudio(client.hasAudio);
+                setHasVision(client.hasVision);
+                setHasAudio(client.hasAudio);
+                setLoadedIsDiffusion(false);
+            }
             setModelStatus("ready");
             setStatusText(`${m.name}${fromCache ? " ⚡" : ""}`);
             setLoadingLabel("");
@@ -1548,6 +1562,9 @@ export function App() {
         const turnAudio  = pendingAudio;
         if (!text && turnImages.length === 0 && turnAudio.length === 0) return;
         const client = getClient();
+        // Block-diffusion models (DiffusionGemma) generate via a denoise loop,
+        // not the AR token stream — flagged at load time.
+        const diffusionTurn = loadedIsDiffusion;
         cancelRef.current = false;
         // Flagged by the catch when a recoverable hang is detected so
         // the finally block can hand off to resumeInflightGeneration
@@ -1665,6 +1682,42 @@ export function App() {
         // session. Cooperative cancel via cancelRef takes over per-step
         // inside the session (queued-acquire abort is a follow-up).
         try {
+            // ── DiffusionGemma: block-diffusion denoise loop ───────────────
+            // Not autoregressive — no session/Model, no prefill, no token
+            // stream. Each step is a full canvas forward; we replace the model
+            // bubble's content with the evolving canvas in place, then persist
+            // the final text. Returns early; the outer finally clears busy.
+            if (diffusionTurn) {
+                const replaceModelBubble = (canvas: string) =>
+                    setMessages((prev) => {
+                        const next = [...prev];
+                        for (let i = next.length - 1; i >= 0; i--) {
+                            if (next[i].role === "model") {
+                                next[i] = { ...next[i], content: canvas };
+                                break;
+                            }
+                        }
+                        return next;
+                    });
+                const unsub = client.diffusion.onStep((p) => {
+                    replaceModelBubble(p.text);
+                    setStatusLine(
+                        `denoise ${p.stepIndex + 1}/${p.totalSteps} · ${p.accepted} accepted · H ${p.meanEntropy.toFixed(3)}`,
+                    );
+                });
+                try {
+                    const { text: canvas } = await client.diffusion.generate({ prompt: text });
+                    replaceModelBubble(canvas);
+                    if (convId && modelMsgId) {
+                        try { await client.msgAppend(convId, modelMsgId, canvas); } catch { /* */ }
+                    }
+                } finally {
+                    unsub();
+                    setStatusLine(undefined);
+                }
+                return;
+            }
+
             setStatusLine("waiting for another tab to finish…");
             await client.acquireSession();
             setStatusLine(undefined);
@@ -2042,7 +2095,7 @@ export function App() {
                 setBusy(false);
             }
         }
-    }, [activeConvId, busy, lastLoadedDigest, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, ragEnabled, refreshConversations, resumeInflightGeneration, sampling, statusText, systemPrompt, thinking, showToast]);
+    }, [activeConvId, busy, lastLoadedDigest, loadedIsDiffusion, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, ragEnabled, refreshConversations, resumeInflightGeneration, sampling, statusText, systemPrompt, thinking, showToast]);
 
     // Top-level pipelineProgress subscription. The chat-send flow has
     // its own scoped subscription (around image encode + prefill) but
@@ -2183,7 +2236,13 @@ export function App() {
     const onEjectModel = useCallback(async () => {
         if (busy) return;
         if (modelStatus !== "ready") return;
-        try { await getClient().free(); } catch { /* */ }
+        // DiffusionGemma lives on its own handle (no AR Model session); unload
+        // it directly. Otherwise free the shared Model.
+        if (loadedIsDiffusion) {
+            try { await getClient().diffusion.unload(); } catch { /* */ }
+        } else {
+            try { await getClient().free(); } catch { /* */ }
+        }
         const name = statusText.split(" ")[0] || "model";
         setModelStatus("idle");
         setStatusText("no model");
@@ -2191,6 +2250,7 @@ export function App() {
         setStatusLine(undefined);
         setHasVision(false);
         setHasAudio(false);
+        setLoadedIsDiffusion(false);
         setPendingImages([]);
         setPendingAudio([]);
         setLastLoadedDigest("");
@@ -2198,7 +2258,7 @@ export function App() {
         // boot-time auto-resume to refire either.
         setPendingLoadDigest("");
         showToast({ level: "info", title: `Ejected ${name}` });
-    }, [busy, modelStatus, setLastLoadedDigest, setPendingLoadDigest, statusText, showToast]);
+    }, [busy, modelStatus, loadedIsDiffusion, setLastLoadedDigest, setPendingLoadDigest, statusText, showToast]);
 
     // Active conversation title for the header.
     const activeTitle = activeConvId

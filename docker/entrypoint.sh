@@ -178,6 +178,19 @@ emit_hf_entries() {
         --argjson heavy true \
         '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, heavy:$heavy}' \
         >> "$ITEMS_TMP"
+
+    # diffusiongemma:26b-a4b — block-diffusion on the 26B-A4B MoE backbone
+    # (own engine + family string). 16.8 GB Q4_K_M, heavy ⚠.
+    jq -nc \
+        --arg name   "diffusiongemma:26b-a4b" \
+        --arg family "diffusion-gemma" \
+        --arg tag    "26b-a4b" \
+        --argjson size 16806810336 \
+        --arg digest "d2ca2c032ebfb23cf2d1794a3465e615c7545634d46b3c30652a26d8b07c4ad3" \
+        --arg url    "https://${R2_HOST}/diffusiongemma-26b-a4b.gguf" \
+        --argjson heavy true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, heavy:$heavy}' \
+        >> "$ITEMS_TMP"
 }
 
 # ───── Local Ollama scan (only when RULLAMA_SERVE_LOCAL=1) ────────────

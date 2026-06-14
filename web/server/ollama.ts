@@ -146,6 +146,17 @@ export function huggingfaceModels(): ModelEntry[] {
             url:        "https://models.brainwires.dev/gemma4-26b.gguf",
             heavy:      true,
         },
+        {
+            // DiffusionGemma 26B-A4B — block-diffusion on the 26B-A4B MoE
+            // backbone (own engine + family string). 16.8 GB Q4_K_M, heavy ⚠.
+            name:       "diffusiongemma:26b-a4b",
+            family:     "diffusion-gemma",
+            tag:        "26b-a4b",
+            size:       16806810336,
+            digest:     "d2ca2c032ebfb23cf2d1794a3465e615c7545634d46b3c30652a26d8b07c4ad3",
+            url:        "https://models.brainwires.dev/diffusiongemma-26b-a4b.gguf",
+            heavy:      true,
+        },
     ];
 }
 

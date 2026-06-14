@@ -14,7 +14,7 @@
 // (the router), one request at a time per stateful RPC.
 
 // @ts-expect-error — generated bundle, no .d.ts
-import init, { Model, TrainingSession, probeTrainingFit, WasmDatabase, EmbeddingModel, gpuMemBreakdown, gpuMemTotalMib } from "/pkg/rullama.js";
+import init, { Model, TrainingSession, probeTrainingFit, WasmDatabase, EmbeddingModel, DiffusionGemma, gpuMemBreakdown, gpuMemTotalMib } from "/pkg/rullama.js";
 
 const gpuMemBreakdownFn = gpuMemBreakdown as unknown as () => string;
 const gpuMemTotalFn = gpuMemTotalMib as unknown as () => number;
@@ -194,6 +194,62 @@ const EmbeddingModelClass = EmbeddingModel as unknown as {
         totalBytes: number,
     ): Promise<EmbeddingModelHandle>;
 };
+
+// ── DiffusionGemma (block-diffusion engine, `diffusion-gemma` family) ──────
+// A SECOND non-Model wasm class, like the embedder: it owns its own handle +
+// OPFS sync reader. The JS worker drives the denoise loop one step at a time
+// (`denoiseStep`) so the UI can render the canvas condensing out of noise.
+interface DiffusionGemmaHandle {
+    startGenerate(prompt: string, canvasLen: number, maxSteps: number, seed: number): void;
+    denoiseStep(): Promise<string>;
+    readonly done: boolean;
+    readonly stepIndex: number;
+    readonly totalSteps: number;
+    readonly accepted: number;
+    readonly meanEntropy: number;
+    readonly canvasLen: number;
+    free?(): void;
+}
+let diffuser: DiffusionGemmaHandle | null = null;
+let diffuserInfo: { name: string; canvasLen: number } | null = null;
+// Dedicated OPFS sync handle for the diffusion GGUF (separate from the chat
+// model's `syncHandle` and the embedder's).
+let diffuserSyncHandle: FileSystemSyncAccessHandle | null = null;
+const DiffusionGemmaClass = DiffusionGemma as unknown as {
+    loadFromOpfs(
+        readFn: (offset: number, length: number) => Uint8Array,
+        totalBytes: number,
+    ): Promise<DiffusionGemmaHandle>;
+};
+
+/** Open a sync read handle over an OPFS-cached diffusion GGUF + a readFn for
+ *  the streaming TensorFetcher. Mirrors `openEmbedderSyncReadFn`. */
+async function openDiffuserSyncReadFn(modelKey: string, filename: string) {
+    if (diffuserSyncHandle) {
+        try { diffuserSyncHandle.close(); } catch { /* */ }
+        diffuserSyncHandle = null;
+    }
+    const root     = await navigator.storage.getDirectory();
+    const dlDir    = await root.getDirectoryHandle(OPFS_DIR, { create: false });
+    const modelDir = await dlDir.getDirectoryHandle(modelKey, { create: false });
+    const fh       = await modelDir.getFileHandle(filename, { create: false });
+    diffuserSyncHandle = await createSyncAccessHandleWithRetry(
+        fh, `${modelKey}/${filename} (diffusion read)`, { notifyKind: "diffuserLoadWaiting" },
+    );
+    const size = diffuserSyncHandle.getSize();
+    if (size === 0) {
+        try { diffuserSyncHandle.close(); } catch { /* */ }
+        diffuserSyncHandle = null;
+        throw new Error(`OPFS diffusion file ${modelKey}/${filename} is empty`);
+    }
+    const handle = diffuserSyncHandle;
+    const readFn = (offset: number, length: number): Uint8Array => {
+        const buf = new Uint8Array(length);
+        handle.read(buf, { at: offset });
+        return buf;
+    };
+    return { readFn, totalBytes: size };
+}
 
 /** Open a sync read handle over an OPFS-cached embedder GGUF + a readFn for
  *  the streaming TensorFetcher. Mirrors `openSyncReadFn` but uses the
@@ -1107,6 +1163,60 @@ const RPC: Record<string, Handler> = {
         if (embedder) { try { embedder.free?.(); } catch { /* */ } embedder = null; embedderInfo = null; }
         if (embedderSyncHandle) { try { embedderSyncHandle.close(); } catch { /* */ } embedderSyncHandle = null; }
         return true;
+    },
+
+    // ── DiffusionGemma (block-diffusion chat) ───────────────────────────────
+    // Streaming load from an OPFS-cached GGUF (main thread downloads it first,
+    // same as the chat model). Per-layer MoE experts stream in + are destroyed
+    // each layer, so the 16.8 GB file never fully enters wasm memory.
+    loadDiffuser: async (a) => {
+        await ensureWasm();
+        if (diffuser) return diffuserInfo;
+        const modelKey = String(a.modelKey);
+        const filename = String(a.filename);
+        const name = String(a.name ?? "diffusiongemma");
+        log(`diffusion: streaming ${name} from OPFS ${modelKey}/${filename}`);
+        const { readFn, totalBytes } = await openDiffuserSyncReadFn(modelKey, filename);
+        diffuser = await DiffusionGemmaClass.loadFromOpfs(readFn, totalBytes);
+        diffuserInfo = { name, canvasLen: diffuser.canvasLen };
+        log(`diffusion: ready canvasLen=${diffuser.canvasLen} (streaming, ${totalBytes} B in OPFS)`);
+        notify("diffuserReady", diffuserInfo);
+        return diffuserInfo;
+    },
+
+    diffuserStatus: () => diffuserInfo,
+
+    unloadDiffuser: () => {
+        if (diffuser) { try { diffuser.free?.(); } catch { /* */ } diffuser = null; diffuserInfo = null; }
+        if (diffuserSyncHandle) { try { diffuserSyncHandle.close(); } catch { /* */ } diffuserSyncHandle = null; }
+        return true;
+    },
+
+    // Arm + run a full block-diffusion generation, streaming the canvas in
+    // place. Each denoise step is a full canvas forward (tens of seconds on a
+    // weak GPU), so we emit a `diffuserStep` notification per step with the
+    // current decoded canvas + stats, and the main thread re-renders it. The
+    // OUTPUT canvas replaces (never appends) the assistant message each step.
+    diffuserGenerate: async (a) => {
+        if (!diffuser) throw new Error("no diffusion model loaded — call loadDiffuser() first");
+        const prompt = String(a.prompt ?? "");
+        const canvasLen = Number(a.canvasLen ?? 0);   // 0 ⇒ model default
+        const maxSteps = Number(a.maxSteps ?? 0);     // 0 ⇒ default 48
+        const seed = Number(a.seed ?? 0xD1FF);
+        diffuser.startGenerate(prompt, canvasLen, maxSteps, seed);
+        let text = "";
+        while (!diffuser.done && !shuttingDown) {
+            text = await diffuser.denoiseStep();
+            notify("diffuserStep", {
+                text,
+                stepIndex: diffuser.stepIndex,
+                totalSteps: diffuser.totalSteps,
+                accepted: diffuser.accepted,
+                meanEntropy: diffuser.meanEntropy,
+                done: diffuser.done,
+            });
+        }
+        return { text, done: true };
     },
 
     // Embed a query string → number[] (small payload, JSON-friendly).

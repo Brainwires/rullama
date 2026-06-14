@@ -451,6 +451,29 @@ export class WorkerClient {
             this.rpc<{ enabled: boolean }>("getConversationRag", { conversationId }),
     };
 
+    // ── DiffusionGemma (block-diffusion chat) ──────────────────────────
+    /** Lifecycle + generation for the DiffusionGemma engine — a separate
+     *  wasm handle in the worker. Unlike the AR chat model, generation is a
+     *  denoise loop: `generate` resolves with the final canvas, and a
+     *  `diffuserStep` notify fires per step with the evolving canvas + stats
+     *  (subscribe to render the canvas condensing out of noise in place). */
+    readonly diffusion = {
+        /** Stream-load from the OPFS-cached GGUF (download to OPFS first). */
+        load: (modelKey: string, filename: string, name?: string) =>
+            this.rpc<{ name: string; canvasLen: number } | null>("loadDiffuser", { modelKey, filename, name }),
+        status: () =>
+            this.rpc<{ name: string; canvasLen: number } | null>("diffuserStatus"),
+        unload: () => this.rpc<boolean>("unloadDiffuser"),
+        /** Run a full denoise generation. The promise resolves with the final
+         *  canvas text; subscribe to `diffuserStep` for per-step updates. */
+        generate: (args: { prompt: string; canvasLen?: number; maxSteps?: number; seed?: number }) =>
+            this.rpc<{ text: string; done: boolean }>("diffuserGenerate", args as unknown as Record<string, unknown>),
+        /** Subscribe to per-step canvas snapshots. Returns an unsubscribe fn. */
+        onStep: (
+            handler: (p: { text: string; stepIndex: number; totalSteps: number; accepted: number; meanEntropy: number; done: boolean }) => void,
+        ) => this.subscribe("diffuserStep", handler as unknown as NotifyHandler),
+    };
+
     // ── Diagnostic logs (OPFS-backed, see workers/opfs_logger.ts) ──────
     /** Worker-side log file storage. `append` is fire-and-forget so
      *  the main thread never blocks on a beacon; `list/read/delete`
