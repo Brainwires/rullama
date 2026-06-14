@@ -142,7 +142,7 @@ export function ModelLoader(props: Props) {
                 fixed widths on narrow sidebars instead of wrapping. */}
             <div className="flex flex-nowrap items-center gap-1">
                 <Select
-                    value={selected || undefined}
+                    value={selected}
                     onValueChange={setSelected}
                     disabled={refreshing || models.length === 0 || props.status === "loading"}
                 >
