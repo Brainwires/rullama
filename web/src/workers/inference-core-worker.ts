@@ -757,7 +757,16 @@ interface EnsureArgs {
 async function doDownload(args: EnsureArgs): Promise<{ totalBytes: number; fromCache: boolean }> {
     const { url, modelKey, filename, expectedSize } = args;
 
-    const have = await existingOpfsSize(modelKey, filename);
+    let have = await existingOpfsSize(modelKey, filename);
+    // A partial LARGER than the known full size is impossible — it means a
+    // prior resume corrupted the file (e.g. a write at a runaway/sparse
+    // offset, which then surfaces as a 48 TB progress counter). Discard it and
+    // start clean rather than "resuming" from a bogus offset that can never
+    // converge. (`>=` complete is handled below; this is strictly `>`.)
+    if (expectedSize > 0 && have > expectedSize) {
+        log(`opfs: ${modelKey}/${filename} partial ${have} > expected ${expectedSize} — corrupt, restarting from 0`);
+        have = 0;
+    }
     if (have > 0 && expectedSize > 0 && have >= expectedSize) {
         notify("downloadDone", { modelKey, filename, totalBytes: have, fromCache: true });
         return { totalBytes: have, fromCache: true };
@@ -836,6 +845,17 @@ async function doDownload(args: EnsureArgs): Promise<{ totalBytes: number; fromC
                     const written = writeHandle.write(value, { at: currentOffset });
                     currentOffset   += written;
                     bytesSinceFlush += written;
+
+                    // Defensive: a 206 range stream delivers exactly the
+                    // remaining bytes, so currentOffset should never pass the
+                    // declared total. If it does, the stream/write is
+                    // misbehaving — flush + stop rather than let a runaway
+                    // (sparse) offset balloon the file + the progress counter.
+                    if (totalBytes > 0 && currentOffset > totalBytes) {
+                        log(`download: ${modelKey}/${filename} overran ${currentOffset} > ${totalBytes} — stopping write loop`);
+                        try { writeHandle.flush(); } catch { /* */ }
+                        break;
+                    }
 
                     if (bytesSinceFlush >= FLUSH_INTERVAL) {
                         writeHandle.flush();

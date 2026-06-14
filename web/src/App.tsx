@@ -1110,23 +1110,28 @@ export function App() {
             let baselineAt     = 0;
             const { totalBytes, fromCache } = await ensureModel(url, modelKey, filename, m.size, ({ bytesWritten, totalBytes }) => {
                 if (totalBytes > 0) {
-                    setLoadingPercent((bytesWritten / totalBytes) * 100);
+                    // Clamp the reported offset to [0, totalBytes]. A corrupt or
+                    // sparse-file resume can report an absurd bytesWritten (a
+                    // runaway offset surfaced as "48744 GB / 16.81 GB —
+                    // 948 GB/s") — it must never reach the bar, rate, or ETA.
+                    const shown = Math.min(Math.max(0, bytesWritten), totalBytes);
+                    setLoadingPercent((shown / totalBytes) * 100);
                     const now  = performance.now();
-                    const done = bytesWritten >= totalBytes;
+                    const done = shown >= totalBytes;
                     if (baselineBytes < 0) {
-                        baselineBytes = bytesWritten;
+                        baselineBytes = shown;
                         baselineAt    = now;
                     }
                     if (done || now - lastLabelAt > 250) {
                         lastLabelAt = now;
                         const elapsed   = (now - baselineAt) / 1000;
-                        const delta     = Math.max(0, bytesWritten - baselineBytes);
+                        const delta     = Math.max(0, shown - baselineBytes);
                         const rate      = elapsed > 0.25 ? delta / elapsed : 0;
-                        const remaining = Math.max(0, totalBytes - bytesWritten);
+                        const remaining = Math.max(0, totalBytes - shown);
                         const eta       = rate > 0 ? remaining / rate : Number.POSITIVE_INFINITY;
                         const rateLabel = rate > 0 ? `${fmtBytes(rate)}/s` : "—";
                         const etaLabel  = (rate > 0 && !done) ? ` · ETA ${fmtEta(eta)}` : "";
-                        setLoadingLabel(`${fmtBytes(bytesWritten)} / ${fmtBytes(totalBytes)} — ${rateLabel}${etaLabel}`);
+                        setLoadingLabel(`${fmtBytes(shown)} / ${fmtBytes(totalBytes)} — ${rateLabel}${etaLabel}`);
                     }
                 } else {
                     const now = performance.now();
