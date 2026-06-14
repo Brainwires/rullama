@@ -321,6 +321,13 @@ export async function listModels(signal?: AbortSignal): Promise<ModelEntry[]> {
  *  cross-origin` to satisfy the isolation policy.
  */
 export function blobUrl(m: ModelEntry): string {
+    // CDN-only models (DiffusionGemma) have no local-Ollama equivalent, so the
+    // localBlob devserver can't serve them. Routing through localhost would
+    // either 404 or — worse, in the split-origin tunnel setup — 302 to R2 and
+    // then fail CORS (a cross-origin redirect taints Origin → null, so R2
+    // returns no Access-Control-Allow-Origin). A DIRECT R2 fetch carries the
+    // real Origin and is CORS-allowed, so always go straight to the CDN.
+    if (m.url && isDiffusion(m)) return m.url;
     // **`?localBlob` wins over the baked-in CDN URL.** Otherwise the
     // baked-in entries (which always carry `m.url` pointing at the R2
     // CDN) silently ignore the override — the very case the override
