@@ -4,6 +4,11 @@ import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { fmtBytes } from "@/lib/utils";
 import { type ModelEntry, isSupported, listModels } from "@/lib/api";
+import {
+    AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+    AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+    AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { AlertTriangle, Download, Square, Trash2, Unplug } from "lucide-react";
 
 export type ModelStatus = "idle" | "loading" | "ready" | "error";
@@ -18,7 +23,10 @@ interface Props {
     /** Unload the active model. Persisted "last loaded" gets cleared,
      *  so a page reload won't auto-resume. */
     onEject?: () => void;
+    /** Stop the download, KEEPING the partial in OPFS (resume on next Load). */
     onCancel?: () => void;
+    /** Stop the download AND delete the partial from OPFS. */
+    onCancelDelete?: () => void;
     /** Controlled selection (model name) lifted to the parent so every
      *  ModelLoader instance (main panel + sidebar) shares ONE selection.
      *  Omit for standalone/uncontrolled use. */
@@ -107,16 +115,43 @@ export function ModelLoader(props: Props) {
                     ))}
                 </select>
                 {props.status === "loading" && props.onCancel ? (
-                    <Button
-                        variant="destructive"
-                        size="sm"
-                        className="h-7 shrink-0 px-2 text-xs"
-                        onClick={() => props.onCancel?.()}
-                        title="Stop the download (the partial is kept — Load again to resume)"
-                    >
-                        <Square />
-                        Stop
-                    </Button>
+                    <AlertDialog>
+                        <AlertDialogTrigger asChild>
+                            <Button
+                                variant="destructive"
+                                size="sm"
+                                className="h-7 shrink-0 px-2 text-xs"
+                                title="Stop the download"
+                            >
+                                <Square />
+                                Stop
+                            </Button>
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                            <AlertDialogHeader>
+                                <AlertDialogTitle>Stop download?</AlertDialogTitle>
+                                <AlertDialogDescription>
+                                    {loadingCompact ? `${loadingCompact} downloaded. ` : ""}
+                                    Keep the partial in this browser's storage to resume
+                                    later, or delete it to free the space now.
+                                </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                                <AlertDialogCancel>Continue downloading</AlertDialogCancel>
+                                {props.onCancelDelete && (
+                                    <AlertDialogAction
+                                        onClick={() => props.onCancelDelete?.()}
+                                        className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                    >
+                                        Delete partial
+                                    </AlertDialogAction>
+                                )}
+                                <AlertDialogAction onClick={() => props.onCancel?.()}>
+                                    Keep partial
+                                </AlertDialogAction>
+                            </AlertDialogFooter>
+                        </AlertDialogContent>
+                    </AlertDialog>
                 ) : (
                     <Button
                         size="sm"

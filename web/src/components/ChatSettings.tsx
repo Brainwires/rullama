@@ -26,8 +26,10 @@ interface Props {
     selectedModelName?: string;
     onSelectModel?:     (name: string) => void;
     preferredDigest?:   string;
-    /** Abort an in-progress model download. */
+    /** Abort an in-progress model download (keep the partial). */
     onCancelDownload?:  () => void;
+    /** Abort an in-progress download AND delete the partial. */
+    onCancelAndDeleteDownload?: () => void;
     /** Opens the full-screen Fine-tune (LoRA training) overlay. */
     onOpenFineTune: () => void;
     /** Whether fine-tuning can actually run here — model ready AND the device
@@ -109,6 +111,7 @@ export function ChatSettings(props: Props) {
                             onSelect={props.onSelectModel}
                             preferredDigest={props.preferredDigest}
                             onCancel={props.onCancelDownload}
+                            onCancelDelete={props.onCancelAndDeleteDownload}
                         />
                         <Button
                             variant="outline"

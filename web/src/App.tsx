@@ -217,6 +217,9 @@ export function App() {
         usePersistedState<string>("pendingLoadDigest", "");
 
     const cancelRef = useRef(false);
+    // Set by the Stop modal's "Delete partial" choice; read in onLoad's
+    // download-cancelled handler to wipe the partial after the stream aborts.
+    const deleteOnCancelRef = useRef(false);
     // Tracks the currently-running generation for suspend/resume. Mutated
     // per-token in the gen loop; serialized to localStorage on
     // visibilitychange→hidden so a kill-and-resume can pick up where we
@@ -1223,7 +1226,19 @@ export function App() {
                 setStatusText("download stopped");
                 setLoadingLabel("");
                 setPendingLoadDigest("");
-                showToast({ level: "info", title: "Download stopped", message: "Resume any time by loading again." });
+                if (deleteOnCancelRef.current) {
+                    deleteOnCancelRef.current = false;
+                    // The worker flushed + closed the write handle before
+                    // rejecting, so the OPFS file is free to remove now.
+                    // (Recompute the OPFS keys from `m` — the try-scoped
+                    // modelKey/filename aren't visible here.)
+                    const mk = m.digest.replace(/[^A-Za-z0-9_.-]/g, "_");
+                    const fn = m.name.replace(/[^A-Za-z0-9_.-]/g, "_") + ".gguf";
+                    try { await wipeModel(mk, fn); } catch { /* */ }
+                    showToast({ level: "info", title: "Download stopped", message: "Partial deleted." });
+                } else {
+                    showToast({ level: "info", title: "Download stopped", message: "Resume any time by loading again." });
+                }
                 return;
             }
             setModelStatus("error");
@@ -1240,6 +1255,15 @@ export function App() {
      *  active ensureModel rejects with "cancelled", handled above; the partial
      *  stays in OPFS for a later resume. */
     const onCancelDownload = useCallback(() => {
+        deleteOnCancelRef.current = false;
+        try { void getClient().cancelDownload(); } catch { /* */ }
+    }, []);
+
+    /** Stop the download AND delete the partial from OPFS (the Stop modal's
+     *  "Delete partial"). The wipe runs in onLoad's cancel handler once the
+     *  stream has actually aborted + released the OPFS write handle. */
+    const onCancelAndDeleteDownload = useCallback(() => {
+        deleteOnCancelRef.current = true;
         try { void getClient().cancelDownload(); } catch { /* */ }
     }, []);
 
@@ -2382,6 +2406,7 @@ export function App() {
                             onSelectModel={setSelectedModelName}
                             preferredDigest={lastLoadedDigest}
                             onCancelDownload={onCancelDownload}
+                            onCancelAndDeleteDownload={onCancelAndDeleteDownload}
                             onOpenFineTune={() => setTraining("finetune")}
                             canFineTune={modelStatus === "ready" && trainingCap.status === "ok"}
                             fineTuneReason={
@@ -2447,6 +2472,7 @@ export function App() {
                                             onLoad={onLoad}
                                             onDelete={onDeleteModel}
                                             onCancel={onCancelDownload}
+                                            onCancelDelete={onCancelAndDeleteDownload}
                                             selected={selectedModelName}
                                             onSelect={setSelectedModelName}
                                             preferredDigest={lastLoadedDigest}
