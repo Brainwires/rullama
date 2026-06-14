@@ -62,6 +62,9 @@ export function App() {
     // True when the loaded model is the DiffusionGemma engine (block-diffusion
     // denoise loop in onSend instead of the AR token stream).
     const [loadedIsDiffusion, setLoadedIsDiffusion] = useState(false);
+    // Model-picker selection, lifted out of ModelLoader so the main panel and
+    // the sidebar dropdown stay in sync. Seeded from the last-used model below.
+    const [selectedModelName, setSelectedModelName] = useState<string>("");
     const [loadingPercent, setLoadingPercent] = useState(0);
     const [loadingLabel, setLoadingLabel]     = useState("");
     const [statusText, setStatusText]         = useState("no model");
@@ -1213,6 +1216,16 @@ export function App() {
             });
         } catch (e) {
             const err = (e as Error).message ?? String(e);
+            // User pressed Stop — not a failure. The partial stays in OPFS so a
+            // later Load resumes from where it stopped.
+            if (/cancel/i.test(err)) {
+                setModelStatus("idle");
+                setStatusText("download stopped");
+                setLoadingLabel("");
+                setPendingLoadDigest("");
+                showToast({ level: "info", title: "Download stopped", message: "Resume any time by loading again." });
+                return;
+            }
             setModelStatus("error");
             setStatusText(`load failed: ${err}`);
             setLoadingLabel("");
@@ -1222,6 +1235,13 @@ export function App() {
             });
         }
     }, [dismissToast, setLastLoadedDigest, setPendingLoadDigest, showToast]);
+
+    /** Stop an in-progress model download (the picker's Stop button). The
+     *  active ensureModel rejects with "cancelled", handled above; the partial
+     *  stays in OPFS for a later resume. */
+    const onCancelDownload = useCallback(() => {
+        try { void getClient().cancelDownload(); } catch { /* */ }
+    }, []);
 
     // Keep the ref in sync so the mount-time auto-load effect can call
     // the latest onLoad closure without listing it as a hook dep (which
@@ -2358,6 +2378,10 @@ export function App() {
                             onLoadModel={onLoad}
                             onDeleteModel={onDeleteModel}
                             onEjectModel={onEjectModel}
+                            selectedModelName={selectedModelName}
+                            onSelectModel={setSelectedModelName}
+                            preferredDigest={lastLoadedDigest}
+                            onCancelDownload={onCancelDownload}
                             onOpenFineTune={() => setTraining("finetune")}
                             canFineTune={modelStatus === "ready" && trainingCap.status === "ok"}
                             fineTuneReason={
@@ -2422,6 +2446,10 @@ export function App() {
                                             statusText={statusText}
                                             onLoad={onLoad}
                                             onDelete={onDeleteModel}
+                                            onCancel={onCancelDownload}
+                                            selected={selectedModelName}
+                                            onSelect={setSelectedModelName}
+                                            preferredDigest={lastLoadedDigest}
                                         />
                                     </CardContent>
                                 </Card>

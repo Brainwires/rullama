@@ -4,7 +4,7 @@ import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { fmtBytes } from "@/lib/utils";
 import { type ModelEntry, isSupported, listModels } from "@/lib/api";
-import { AlertTriangle, Download, Trash2, Unplug } from "lucide-react";
+import { AlertTriangle, Download, Square, Trash2, Unplug } from "lucide-react";
 
 export type ModelStatus = "idle" | "loading" | "ready" | "error";
 
@@ -19,12 +19,28 @@ interface Props {
      *  so a page reload won't auto-resume. */
     onEject?: () => void;
     onCancel?: () => void;
+    /** Controlled selection (model name) lifted to the parent so every
+     *  ModelLoader instance (main panel + sidebar) shares ONE selection.
+     *  Omit for standalone/uncontrolled use. */
+    selected?: string;
+    onSelect?: (name: string) => void;
+    /** Digest of the last-used / currently-loaded model. Auto-selected on
+     *  first model load instead of the first supported entry. */
+    preferredDigest?: string;
 }
 
 /** Compact single-row model picker. Sits in the top toolbar. */
 export function ModelLoader(props: Props) {
     const [models, setModels] = useState<ModelEntry[]>([]);
-    const [selected, setSelected] = useState<string>("");
+    // Selection is controlled by the parent when `selected`/`onSelect` are
+    // passed (so the main panel + sidebar stay in sync); otherwise fall back to
+    // local state.
+    const [internalSelected, setInternalSelected] = useState<string>("");
+    const selected = props.selected ?? internalSelected;
+    const setSelected = (name: string) => {
+        if (props.selected === undefined) setInternalSelected(name);
+        props.onSelect?.(name);
+    };
     const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
@@ -34,9 +50,14 @@ export function ModelLoader(props: Props) {
         try {
             const ms = await listModels();
             setModels(ms);
+            // Auto-select on first load: prefer the last-used / currently-loaded
+            // model (preferredDigest), else the first supported entry.
             if (ms.length > 0 && !selected) {
+                const preferred = props.preferredDigest
+                    ? ms.find((m) => m.digest === props.preferredDigest)
+                    : undefined;
                 const firstSupported = ms.find(isSupported);
-                setSelected((firstSupported ?? ms[0]).name);
+                setSelected((preferred ?? firstSupported ?? ms[0]).name);
             }
         } catch (e) {
             setError((e as Error).message);
@@ -74,9 +95,9 @@ export function ModelLoader(props: Props) {
                 <select
                     value={selected}
                     onChange={(e) => setSelected(e.target.value)}
-                    disabled={refreshing || models.length === 0}
-                    className="h-7 min-w-0 flex-1 rounded border border-input bg-background px-2 text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    title="Choose a model to load"
+                    disabled={refreshing || models.length === 0 || props.status === "loading"}
+                    className="h-7 min-w-0 flex-1 rounded border border-input bg-background px-2 text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
+                    title={props.status === "loading" ? "Locked while a model is downloading" : "Choose a model to load"}
                 >
                     {models.length === 0 && <option value="">— scanning —</option>}
                     {models.map((m) => (
@@ -85,15 +106,28 @@ export function ModelLoader(props: Props) {
                         </option>
                     ))}
                 </select>
-                <Button
-                    size="sm"
-                    className="h-7 shrink-0 px-2 text-xs"
-                    onClick={() => selectedModel && props.onLoad(selectedModel)}
-                    disabled={!canLoad}
-                >
-                    <Download />
-                    Load
-                </Button>
+                {props.status === "loading" && props.onCancel ? (
+                    <Button
+                        variant="destructive"
+                        size="sm"
+                        className="h-7 shrink-0 px-2 text-xs"
+                        onClick={() => props.onCancel?.()}
+                        title="Stop the download (the partial is kept — Load again to resume)"
+                    >
+                        <Square />
+                        Stop
+                    </Button>
+                ) : (
+                    <Button
+                        size="sm"
+                        className="h-7 shrink-0 px-2 text-xs"
+                        onClick={() => selectedModel && props.onLoad(selectedModel)}
+                        disabled={!canLoad}
+                    >
+                        <Download />
+                        Load
+                    </Button>
+                )}
                 {props.onDelete && (
                     <Button
                         variant="ghost"

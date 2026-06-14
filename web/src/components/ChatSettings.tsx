@@ -22,6 +22,12 @@ interface Props {
     onLoadModel:    (m: ModelEntry) => void;
     onDeleteModel:  (m: ModelEntry) => void;
     onEjectModel:   () => void;
+    /** Shared model-picker selection (kept in sync with the main panel). */
+    selectedModelName?: string;
+    onSelectModel?:     (name: string) => void;
+    preferredDigest?:   string;
+    /** Abort an in-progress model download. */
+    onCancelDownload?:  () => void;
     /** Opens the full-screen Fine-tune (LoRA training) overlay. */
     onOpenFineTune: () => void;
     /** Whether fine-tuning can actually run here — model ready AND the device
@@ -99,6 +105,10 @@ export function ChatSettings(props: Props) {
                             onLoad={props.onLoadModel}
                             onDelete={props.onDeleteModel}
                             onEject={props.onEjectModel}
+                            selected={props.selectedModelName}
+                            onSelect={props.onSelectModel}
+                            preferredDigest={props.preferredDigest}
+                            onCancel={props.onCancelDownload}
                         />
                         <Button
                             variant="outline"

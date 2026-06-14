@@ -616,6 +616,10 @@ export class WorkerClient {
         return this.rpc("ensureModel", args as Record<string, unknown>);
     }
 
+    /** Abort the in-progress download. The active `ensureModel` rejects with
+     *  "cancelled"; the partial stays in OPFS for a later resume. */
+    cancelDownload(): Promise<boolean> { return this.rpc("cancelDownload"); }
+
     // ── Chat persistence ───────────────────────────────────────────────
     dbInit(): Promise<boolean> { return this.rpc("dbInit"); }
     convList(): Promise<ConversationRow[]> { return this.rpc("convList"); }

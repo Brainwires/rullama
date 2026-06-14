@@ -333,6 +333,10 @@ let routerPort: MessagePort | null = null;
  *  immediately, the router treats the core as dead, and re-election
  *  fires cleanly. */
 let shuttingDown = false;
+// Set by the `cancelDownload` RPC (the model picker's Stop button) to abort an
+// in-progress GGUF download. The doDownload loops poll it; the partial is left
+// on disk so a later Load resumes from where Stop hit.
+let downloadCancelled = false;
 
 /** Unique id for this worker's lifetime. Used as the OPFS log file
  *  name + as the localStorage clean-exit marker key. Generated once
@@ -756,6 +760,7 @@ interface EnsureArgs {
 
 async function doDownload(args: EnsureArgs): Promise<{ totalBytes: number; fromCache: boolean }> {
     const { url, modelKey, filename, expectedSize } = args;
+    downloadCancelled = false;
 
     let have = await existingOpfsSize(modelKey, filename);
     // A partial LARGER than the known full size is impossible — it means a
@@ -804,6 +809,7 @@ async function doDownload(args: EnsureArgs): Promise<{ totalBytes: number; fromC
         const MAX_FETCH_RETRIES = 5;
         let fetchAttempt = 0;
         while (true) {
+            if (downloadCancelled) throw new Error("download cancelled");
             const headers: Record<string, string> = {};
             if (currentOffset > 0) headers["Range"] = `bytes=${currentOffset}-`;
             const resp = await fetch(url, { headers });
@@ -838,6 +844,10 @@ async function doDownload(args: EnsureArgs): Promise<{ totalBytes: number; fromC
 
             try {
                 while (true) {
+                    if (downloadCancelled) {
+                        try { writeHandle.flush(); } catch { /* */ }
+                        throw new Error("download cancelled");
+                    }
                     const { value, done } = await reader.read();
                     if (done) break;
                     if (!value) continue;
@@ -875,6 +885,9 @@ async function doDownload(args: EnsureArgs): Promise<{ totalBytes: number; fromC
                 try { writeHandle.flush(); } catch { /* */ }
                 bytesSinceFlush = 0;
 
+                // A user cancel is not a transient network error — don't retry.
+                if (downloadCancelled) throw readErr;
+
                 fetchAttempt += 1;
                 if (fetchAttempt > MAX_FETCH_RETRIES) {
                     throw readErr;
@@ -907,6 +920,11 @@ async function doDownload(args: EnsureArgs): Promise<{ totalBytes: number; fromC
             try { writeHandle.close(); } catch { /* */ }
         }
         const error = (err as Error)?.message ?? String(err);
+        if (downloadCancelled) {
+            // Partial is flushed to OPFS above → a later Load resumes it.
+            notify("downloadCancelled", { modelKey, filename });
+            throw new Error("cancelled");
+        }
         notify("downloadError", { modelKey, filename, error });
         throw new Error(error);
     }
@@ -970,6 +988,10 @@ const RPC: Record<string, Handler> = {
 
     // ── ensureModel ─────────────────────────────────────────────────────
     ensureModel: (a) => handleEnsureModel(a as unknown as EnsureArgs),
+
+    // Abort an in-progress download (the model picker's Stop button). The
+    // partial stays in OPFS so a later Load resumes from where it stopped.
+    cancelDownload: () => { downloadCancelled = true; return true; },
 
     // ── Stateless inference helpers ─────────────────────────────────────
     encode:               (a) => Array.from(requireModel().encode(String(a.text))),
