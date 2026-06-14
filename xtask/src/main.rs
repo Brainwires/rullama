@@ -57,6 +57,24 @@ fn dev() -> ExitCode {
         return ExitCode::from(1);
     }
     let forwarded: Vec<String> = std::env::args().skip(2).collect();
+    // In --public mode the devserver STATIC-serves web/dist/ (no Vite HMR), so a
+    // stale or half-built dist 404s its files — e.g. a page reloaded mid-build
+    // sees the new hashed JS but a not-yet-written sw.js. Build dist fresh first
+    // so what's served always matches source. Local-dev mode reverse-proxies to
+    // Vite (builds on the fly), so there's nothing to pre-build there.
+    if forwarded.iter().any(|a| a == "--public") {
+        eprintln!("$ pnpm -C web build   (refreshing web/dist/ for the --public static serve)");
+        match Command::new("pnpm").args(["-C", "web", "build"]).status() {
+            Ok(s) if s.success() => {}
+            Ok(s) => eprintln!(
+                "xtask: web build failed (exit {}); serving the existing web/dist/ as-is",
+                s.code().unwrap_or(-1)
+            ),
+            Err(e) => eprintln!(
+                "xtask: could not run `pnpm -C web build` ({e}); serving the existing web/dist/ as-is"
+            ),
+        }
+    }
     eprintln!(
         "$ cargo run -q --manifest-path {} --release --{}",
         manifest.display(),
