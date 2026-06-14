@@ -2,14 +2,30 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
+import {
+    Select, SelectContent, SelectItem, SelectTrigger,
+} from "@/components/ui/select";
 import { fmtBytes } from "@/lib/utils";
 import { type ModelEntry, isSupported, listModels } from "@/lib/api";
+import { existingSize } from "@/lib/opfs";
 import {
     AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
     AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
     AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { AlertTriangle, Download, Square, Trash2, Unplug } from "lucide-react";
+import { AlertTriangle, Clock, Cloud, Download, HardDrive, Square, Trash2, Unplug } from "lucide-react";
+
+/** Download state of a catalog model, shown as an icon in the picker. */
+type CacheState = "cached" | "downloading" | "available";
+
+function StatusIcon({ state }: { state: CacheState }) {
+    const base = "size-3.5 shrink-0";
+    if (state === "cached")
+        return <HardDrive className={`${base} text-emerald-500`} aria-label="Downloaded (in this browser)" />;
+    if (state === "downloading")
+        return <Clock className={`${base} text-amber-500`} aria-label="Downloading" />;
+    return <Cloud className={`${base} text-muted-foreground`} aria-label="Available to download" />;
+}
 
 export type ModelStatus = "idle" | "loading" | "ready" | "error";
 
@@ -76,6 +92,31 @@ export function ModelLoader(props: Props) {
 
     useEffect(() => { void refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+    // Per-model "fully downloaded into OPFS?" map, for the picker's status icon.
+    // Recomputed whenever the catalog changes or a load finishes (so a model
+    // flips to the local-storage icon the moment its download completes).
+    const [cached, setCached] = useState<Record<string, boolean>>({});
+    useEffect(() => {
+        let stop = false;
+        void (async () => {
+            const entries = await Promise.all(models.map(async (m) => {
+                const modelKey = m.digest.replace(/[^A-Za-z0-9_.-]/g, "_");
+                const filename = m.name.replace(/[^A-Za-z0-9_.-]/g, "_") + ".gguf";
+                try {
+                    const sz = await existingSize(modelKey, filename);
+                    return [m.name, m.size > 0 && sz >= m.size] as const;
+                } catch { return [m.name, false] as const; }
+            }));
+            if (!stop) setCached(Object.fromEntries(entries));
+        })();
+        return () => { stop = true; };
+    }, [models, props.status]);
+
+    const stateFor = (m: ModelEntry): CacheState => {
+        if (props.status === "loading" && m.name === selected) return "downloading";
+        return cached[m.name] ? "cached" : "available";
+    };
+
     const selectedModel = models.find((m) => m.name === selected);
     const canLoad = !!selectedModel && props.status !== "loading";
 
@@ -100,20 +141,36 @@ export function ModelLoader(props: Props) {
                 the select lets it shrink so the action buttons keep their
                 fixed widths on narrow sidebars instead of wrapping. */}
             <div className="flex flex-nowrap items-center gap-1">
-                <select
-                    value={selected}
-                    onChange={(e) => setSelected(e.target.value)}
+                <Select
+                    value={selected || undefined}
+                    onValueChange={setSelected}
                     disabled={refreshing || models.length === 0 || props.status === "loading"}
-                    className="h-7 min-w-0 flex-1 rounded border border-input bg-background px-2 text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60"
-                    title={props.status === "loading" ? "Locked while a model is downloading" : "Choose a model to load"}
                 >
-                    {models.length === 0 && <option value="">— scanning —</option>}
-                    {models.map((m) => (
-                        <option key={m.name} value={m.name}>
-                            {isSupported(m) ? "✓ " : "✗ "} {m.name} — {fmtBytes(m.size)}{m.heavy ? " ⚠" : ""}
-                        </option>
-                    ))}
-                </select>
+                    <SelectTrigger
+                        className="h-7 min-w-0 flex-1"
+                        title={props.status === "loading" ? "Locked while a model is downloading" : "Choose a model to load"}
+                    >
+                        {selectedModel ? (
+                            <span className="flex min-w-0 items-center gap-1.5">
+                                <StatusIcon state={stateFor(selectedModel)} />
+                                <span className="truncate">{selectedModel.name}</span>
+                            </span>
+                        ) : (
+                            <span className="text-muted-foreground">{models.length === 0 ? "— scanning —" : "Select a model"}</span>
+                        )}
+                    </SelectTrigger>
+                    <SelectContent>
+                        {models.map((m) => (
+                            <SelectItem key={m.name} value={m.name} disabled={!isSupported(m)}>
+                                <span className="flex items-center gap-1.5">
+                                    <StatusIcon state={stateFor(m)} />
+                                    <span>{m.name} — {fmtBytes(m.size)}</span>
+                                    {m.heavy && <AlertTriangle className="size-3 shrink-0 text-amber-500" />}
+                                </span>
+                            </SelectItem>
+                        ))}
+                    </SelectContent>
+                </Select>
                 {props.status === "loading" && props.onCancel ? (
                     <AlertDialog>
                         <AlertDialogTrigger asChild>
