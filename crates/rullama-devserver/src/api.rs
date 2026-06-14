@@ -198,13 +198,35 @@ async fn head_models() -> impl IntoResponse {
     resp
 }
 
+/// 307-redirect a blob request to the R2 CDN. The model key (`family:tag`)
+/// maps to the R2 object key by `:` → `-` (e.g. `diffusiongemma:26b-a4b` →
+/// `diffusiongemma-26b-a4b.gguf`), matching the catalog `url` convention.
+/// `R2_HOST` env overrides the default host. 307 (not 302) preserves the
+/// method + the `Range` header through the redirect.
+fn r2_redirect(key: &str) -> Response {
+    let host = std::env::var("R2_HOST").unwrap_or_else(|_| "models.brainwires.dev".to_string());
+    let location = format!("https://{host}/{}.gguf", key.replace(':', "-"));
+    match HeaderValue::from_str(&location) {
+        Ok(loc) => Response::builder()
+            .status(StatusCode::TEMPORARY_REDIRECT)
+            .header(header::LOCATION, loc)
+            .body(Body::empty())
+            .unwrap(),
+        Err(_) => (StatusCode::NOT_FOUND, format!("model not found: {key}")).into_response(),
+    }
+}
+
 async fn head_blob(
     State(state): State<Arc<AppState>>,
     AxumPath(key): AxumPath<String>,
 ) -> Response {
     let key = urlencoding_decode(&key);
     let Some(blob) = find_blob_path(&state, &key).await else {
-        return (StatusCode::NOT_FOUND, format!("model not found: {key}")).into_response();
+        // Not available in the local Ollama store — fall through to the R2 CDN.
+        // Handles R2-only models (e.g. diffusion-gemma) and any model the user
+        // hasn't pulled locally, so `?localBlob` transparently degrades to the
+        // CDN instead of 404ing.
+        return r2_redirect(&key);
     };
     let meta = match fs::metadata(&blob).await {
         Ok(m) => m,
@@ -229,7 +251,11 @@ async fn get_blob(
 ) -> Response {
     let key = urlencoding_decode(&key);
     let Some(blob) = find_blob_path(&state, &key).await else {
-        return (StatusCode::NOT_FOUND, format!("model not found: {key}")).into_response();
+        // Not available in the local Ollama store — fall through to the R2 CDN.
+        // Handles R2-only models (e.g. diffusion-gemma) and any model the user
+        // hasn't pulled locally, so `?localBlob` transparently degrades to the
+        // CDN instead of 404ing.
+        return r2_redirect(&key);
     };
     let meta = match fs::metadata(&blob).await {
         Ok(m) => m,

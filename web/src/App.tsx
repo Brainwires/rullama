@@ -1057,6 +1057,10 @@ export function App() {
             const modelKey = m.digest.replace(/[^A-Za-z0-9_.-]/g, "_");
             const filename = m.name.replace(/[^A-Za-z0-9_.-]/g, "_") + ".gguf";
             const url = blobUrl(m);
+            // Make the resolved fetch URL visible — diagnoses 404s (e.g. a
+            // sticky localStorage `localBlobPort` routing an R2-only model to
+            // the local devserver, which can't serve it).
+            beacon("chat", `load ${m.name}: fetching ${url}${url === m.url ? " (R2/CDN)" : " (local-blob)"}`);
 
             // Bytes-over-the-wire guard. If OPFS already has the full file
             // we skip the network entirely (offline reload path), so the
