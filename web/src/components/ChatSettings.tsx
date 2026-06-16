@@ -46,6 +46,8 @@ interface Props {
     onMaxTokensChange: (n: number) => void;
     thinking: boolean;
     onThinkingChange: (b: boolean) => void;
+    toolMode: boolean;
+    onToolModeChange: (b: boolean) => void;
     onResetDefaults: () => void;
     // Speech input (chat mic → transcription) VAD config.
     voice: VoiceOptions;
@@ -200,6 +202,23 @@ export function ChatSettings(props: Props) {
                                 Tip: combining thinking with temperature &gt; 0.3 on attached images or audio can produce
                                 wandering chain-of-thought that reads like garbled text. Lower both for crisp multimodal analysis.
                             </p>
+                            <label
+                                className="flex items-start gap-2 text-xs text-muted-foreground"
+                                title="Prepend a tool schema to the system prompt so the model emits <tool_call> blocks, rendered as structured calls. Works on the base model — no adapter needed."
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={props.toolMode}
+                                    onChange={(e) => props.onToolModeChange(e.target.checked)}
+                                    className="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer"
+                                />
+                                <span>
+                                    Tool calling — let the model invoke{" "}
+                                    <code className="rounded bg-muted px-1">set_timer</code>,{" "}
+                                    <code className="rounded bg-muted px-1">get_weather</code>, etc. via{" "}
+                                    <code className="rounded bg-muted px-1">&lt;tool_call&gt;</code> blocks
+                                </span>
+                            </label>
                         </section>
                     </>
                 )}

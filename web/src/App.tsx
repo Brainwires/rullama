@@ -10,6 +10,7 @@ import { VoicePanel } from "@/components/VoicePanel";
 import { ConversationList } from "@/components/ConversationList";
 import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
 import { type ChatMessage, type ImageAttachment, type SamplingOptions, DEFAULT_SAMPLING, DEFAULT_SYSTEM_PROMPT } from "@/lib/types";
+import { TOOL_SCHEMA_PROMPT } from "@/lib/toolFormat";
 import { type ModelEntry, blobUrl, beacon, listModels, isDiffusion } from "@/lib/api";
 import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel, readInflightState, writeInflightState, clearInflightState } from "@/lib/opfs";
 import { saveInflightImage, saveInflightAudio, readInflightImages, readInflightAudio, clearInflightMedia } from "@/lib/inflight_media";
@@ -162,6 +163,9 @@ export function App() {
     // Per-conversation RAG toggle (Knowledge-base grounding). Loaded from
     // the DB when the active conversation changes.
     const [ragEnabled, setRagEnabled]       = useState<boolean>(false);
+    // Tool calling: inject the tool schema into the system prompt so the base
+    // model emits <tool_call> blocks (rendered as structured calls). No adapter.
+    const [toolMode, setToolMode]           = usePersistedState<boolean>("rullama:toolMode", false);
     useEffect(() => {
         let alive = true;
         if (!activeConvId) { setRagEnabled(false); return; }
@@ -1644,6 +1648,15 @@ export function App() {
             } catch { /* embedder not loaded / search failed — proceed without RAG */ }
         }
 
+        // **Tool-calling schema injection.** When tool mode is on, prepend the
+        // tool schema (TOOL_SCHEMA_PROMPT, byte-identical to tool-schema.txt) so
+        // the base model emits <tool_call> blocks — parseToolCalls renders them
+        // as structured blocks (accepts both JSON and pythonic syntax). No
+        // adapter / fine-tune needed; the schema-in-prompt does the work.
+        if (toolMode) {
+            baseSystem = baseSystem ? `${TOOL_SCHEMA_PROMPT}\n\n${baseSystem}` : TOOL_SCHEMA_PROMPT;
+        }
+
         const sysContent = thinking
             ? (baseSystem ? `${THINK_TOKEN}${baseSystem}` : THINK_TOKEN)
             : baseSystem;
@@ -2148,7 +2161,7 @@ export function App() {
                 setBusy(false);
             }
         }
-    }, [activeConvId, busy, lastLoadedDigest, loadedIsDiffusion, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, ragEnabled, refreshConversations, resumeInflightGeneration, sampling, statusText, systemPrompt, thinking, showToast]);
+    }, [activeConvId, busy, lastLoadedDigest, loadedIsDiffusion, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, ragEnabled, toolMode, refreshConversations, resumeInflightGeneration, sampling, statusText, systemPrompt, thinking, showToast]);
 
     // Top-level pipelineProgress subscription. The chat-send flow has
     // its own scoped subscription (around image encode + prefill) but
@@ -2423,6 +2436,8 @@ export function App() {
                             onMaxTokensChange={setMaxTokens}
                             thinking={thinking}
                             onThinkingChange={setThinking}
+                            toolMode={toolMode}
+                            onToolModeChange={setToolMode}
                             onResetDefaults={onResetDefaults}
                             voice={voice}
                             onVoiceChange={setVoice}
