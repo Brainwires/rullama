@@ -11,9 +11,11 @@
 //   pm2 logs rullama-devserver
 //   pm2 restart rullama-devserver
 //
-// We run the release binary DIRECTLY (not via `cargo run`) so PM2
-// restart latency is ~tens of ms instead of cargo's startup overhead.
-// `setup.sh` builds the binary; this file just supervises it.
+// PM2 runs `ops/pm2/start.sh`, which REBUILDS web/dist (vite) and then
+// `exec`s the release devserver binary — so `pm2 restart` actually picks up
+// source edits instead of just relaunching the static server. The server's
+// CLI flags (--public, --no-vite, --cors-origins, port) live in that wrapper.
+// `setup.sh` builds the binary; this file supervises the wrapper.
 
 const path = require("path");
 const repoRoot = path.resolve(__dirname, "..", "..");
@@ -22,27 +24,8 @@ module.exports = {
     apps: [
         {
             name: "rullama-devserver",
-            script: path.join(
-                repoRoot,
-                "crates/rullama-devserver/target/release/rullama-devserver",
-            ),
-            args: [
-                "--public",
-                "--host", "127.0.0.1",
-                "--port", "25321",
-                // We're serving the prebuilt dist/, no Vite needed.
-                "--no-vite",
-                // Whether to also auto-rebuild wasm in the background:
-                // safer to leave this on so a code edit pushes through
-                // immediately. Cost is ~1 wasm-pack run per save burst.
-                // Comment out if you want the public origin to be
-                // strictly static.
-                // "--no-watch",
-                // Origins allowed for cross-origin reads (the page is
-                // loaded from this exact hostname per the Cloudflare
-                // route). Edit to match your tunnel hostname.
-                "--cors-origins", "https://rullama.brainwires.net",
-            ],
+            script: path.join(repoRoot, "ops/pm2/start.sh"),
+            interpreter: "/bin/bash",
             cwd: repoRoot,
             env: {
                 RUST_LOG: "rullama_devserver=info,tower_http=info,warn",
