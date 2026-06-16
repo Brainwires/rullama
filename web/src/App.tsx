@@ -1657,12 +1657,13 @@ export function App() {
             baseSystem = baseSystem ? `${TOOL_SCHEMA_PROMPT}\n\n${baseSystem}` : TOOL_SCHEMA_PROMPT;
         }
 
-        // Thinking mode forces a reasoning channel, which fights tool calling's
-        // "reply with ONLY the tool call" goal (the model over-reasons, does bad
-        // unit math, and leaks markdown into the JSON). Suppress thinking while
-        // tool mode is on.
-        const useThinking = thinking && !toolMode;
-        const sysContent = useThinking
+        // Thinking respects its own toggle (don't silently override it). Tool
+        // calling and thinking can fight — the model may reason before the call
+        // — but the schema now asks for "only the tool call, no reasoning" and
+        // uses natural-language values (no unit math), which is what was driving
+        // the earlier spiral. If both are on and you want a clean call, turn
+        // thinking off; we don't force it.
+        const sysContent = thinking
             ? (baseSystem ? `${THINK_TOKEN}${baseSystem}` : THINK_TOKEN)
             : baseSystem;
 
