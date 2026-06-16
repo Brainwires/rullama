@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "./styles/globals.css";
+import "katex/dist/katex.min.css";
 import { App } from "./App";
 import { getClient } from "@/lib/inference";
 import { ensureFreshServiceWorker } from "@/lib/pwa";

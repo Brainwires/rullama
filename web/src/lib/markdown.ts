@@ -7,6 +7,7 @@
 
 import DOMPurify from "dompurify";
 import { marked, Renderer, type Tokens } from "marked";
+import markedKatex from "marked-katex-extension";
 
 function escapeHtml(s: string): string {
     return s
@@ -37,8 +38,16 @@ renderer.link = function link({ href, title, tokens }: Tokens.Link): string {
 
 marked.setOptions({ gfm: true, breaks: true, pedantic: false, renderer });
 
+// LaTeX math via KaTeX. `$…$` inline / `$$…$$` block (the markers models
+// reach for). `nonStandard: true` accepts `$x$` even with adjacent
+// whitespace (models aren't strict); `throwOnError: false` renders malformed
+// TeX as-is instead of blowing up a whole reply. `output: "html"` skips the
+// MathML twin so there's nothing extra for DOMPurify to second-guess —
+// katex emits plain <span>s with class/style/aria-hidden, all kept below.
+marked.use(markedKatex({ throwOnError: false, nonStandard: true, output: "html" }));
+
 const PURIFY_CONFIG = {
-    ADD_ATTR: ["data-bw-copy", "target"] as string[],
+    ADD_ATTR: ["data-bw-copy", "target", "aria-hidden"] as string[],
     ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|data:image\/[a-z+.\-]+;base64,):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
 };
 

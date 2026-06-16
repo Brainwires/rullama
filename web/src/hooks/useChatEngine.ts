@@ -699,6 +699,25 @@ export function useChatEngine(opts: UseChatEngineParams) {
         // adapter / fine-tune needed; the schema-in-prompt does the work.
         if (toolMode) {
             baseSystem = baseSystem ? `${TOOL_SCHEMA_PROMPT}\n\n${baseSystem}` : TOOL_SCHEMA_PROMPT;
+            // **GPS location injection.** Resolve the user's coordinates up
+            // front (cached; the browser asks permission once) and tell the
+            // model to use them when no place is named. Without this, small
+            // models INVENT a city rather than leaving the location empty, so
+            // the post-hoc "current location" detection on the tool call never
+            // fires — which is why GPS appeared to do nothing. Best-effort: a
+            // denial / timeout just proceeds without a location hint.
+            if (useGps) {
+                try {
+                    const coords = await resolveGeo();
+                    if (coords) {
+                        baseSystem =
+                            `The user's current location is approximately ${coords} ` +
+                            `(latitude,longitude). For weather or other location-aware ` +
+                            `tools, when the user does not name a specific place, use ` +
+                            `exactly "${coords}" as the location argument.\n\n${baseSystem}`;
+                    }
+                } catch { /* geolocation denied / unavailable — proceed without it */ }
+            }
         }
 
         // Thinking always respects its own toggle — never silently overridden.
