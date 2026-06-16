@@ -57,6 +57,39 @@ export const MIN_SNAPSHOT_TOKENS = 256;
 export const MAX_SNAPSHOT_BYTES = isMobileUA() ? 128 * 1024 * 1024 : 384 * 1024 * 1024;
 export const LRU_MAX_SNAPSHOTS = 8;
 
+// ── Per-turn date/time injection ───────────────────────────────────────
+// Each user turn is rendered with a frozen `[YYYY-MM-DD HH:MM]` prefix so
+// the model always knows the current time (the newest turn carries "now")
+// WITHOUT breaking KV-cache reuse: because each turn's stamp is fixed at
+// send time, re-rendering history is byte-stable and the cached prefix
+// still matches. A static note in the system prompt teaches the model to
+// read these. Minute precision keeps the stamp out of the way while still
+// being "current" per turn.
+
+/** Static system-prompt note explaining the per-turn timestamp prefix.
+ *  Constant → stays in the cached front of the sequence. */
+export const TIMESTAMP_SYSTEM_NOTE =
+    "Each user message begins with the date and time it was sent, in square " +
+    "brackets like [2026-01-15 14:02]. Treat the most recent timestamp as the " +
+    "current date and time.";
+
+/** Format an epoch-ms instant as a stable local `YYYY-MM-DD HH:MM`. Pure
+ *  function of `ms` (no `Date.now()`), so a given message always renders
+ *  the same string — the property KV-cache reuse depends on. */
+export function formatTurnTimestamp(ms: number): string {
+    const d = new Date(ms);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+        `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** Prepend the frozen timestamp prefix to a user turn's render content.
+ *  Returns the content unchanged when no timestamp is known (legacy /
+ *  resume turns) so we never emit an unreproducible "now". */
+export function withTurnTimestamp(content: string, createdAt: number | undefined): string {
+    return createdAt == null ? content : `[${formatTurnTimestamp(createdAt)}] ${content}`;
+}
+
 // Persisted snapshot of the currently-running generation. On
 // visibilitychange→hidden we mirror this into localStorage; on boot
 // (or live-tab timeout recovery) we read it back and use it together

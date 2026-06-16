@@ -27,6 +27,7 @@ import { saveInflightImage, saveInflightAudio, readInflightImages, readInflightA
 import {
     THINK_TOKEN, INFLIGHT_KEY,
     MIN_SNAPSHOT_TOKENS, MAX_SNAPSHOT_BYTES, LRU_MAX_SNAPSHOTS,
+    TIMESTAMP_SYSTEM_NOTE, withTurnTimestamp,
     type InflightGen, stepWithTimeout, suggestTitle,
 } from "@/lib/app-helpers";
 
@@ -272,8 +273,9 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 .map((r) => {
                     const images = imagesByMsg.get(r.message_id);
                     return {
-                        role:    r.role as ChatMessage["role"],
-                        content: r.content,
+                        role:      r.role as ChatMessage["role"],
+                        content:   r.content,
+                        createdAt: r.created_at,   // frozen stamp for the [date time] prefix
                         ...(images && images.length ? { images } : {}),
                     };
                 });
@@ -712,6 +714,11 @@ export function useChatEngine(opts: UseChatEngineParams) {
     const onSend = useCallback(async () => {
         if (modelStatus !== "ready" || busy) return;
         const text = prompt.trim();
+        // Frozen send-time for this turn. Captured once and reused for both
+        // the rendered `[date time]` prefix and the persisted created_at, so
+        // the stamp this turn writes into the KV cache matches what history
+        // re-renders later (the invariant that keeps KV-cache reuse intact).
+        const nowMs = Date.now();
         // Snapshot attachments for this turn so the UI can clear them
         // while generation runs.
         const turnImages = pendingImages;
@@ -788,6 +795,14 @@ export function useChatEngine(opts: UseChatEngineParams) {
         // system prompt (`<|think|>You have access to…`) is NOT the trained
         // pattern and the model fails to enter the thinking channel — which is
         // why thinking silently stopped once the tool schema was injected.
+        // Teach the model to read the per-turn `[date time]` prefix we add
+        // to each user turn below. Static text → stays in the cached front
+        // of the sequence (unlike the timestamps themselves, which ride on
+        // the always-re-fed user turns).
+        baseSystem = baseSystem
+            ? `${baseSystem}\n\n${TIMESTAMP_SYSTEM_NOTE}`
+            : TIMESTAMP_SYSTEM_NOTE;
+
         const sysContent = thinking
             ? `${THINK_TOKEN}\n${baseSystem}`
             : baseSystem;
@@ -805,6 +820,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
         const userDisplayMsg: ChatMessage = {
             role: "user",
             content: text,
+            createdAt: nowMs,
             ...(turnImages.length ? { images: turnImages } : {}),
         };
         const displayHistory: ChatMessage[] = [
@@ -818,8 +834,16 @@ export function useChatEngine(opts: UseChatEngineParams) {
         // sentinel-pair-per-attachment as the prompt convention.
         const audioMarkers = "<|audio><audio|>".repeat(turnAudio.length);
         const imageMarkers = "<|image><image|>".repeat(turnImages.length);
-        const userRenderContent = audioMarkers + imageMarkers + text;
-        const renderPriorTurns = userTurns;   // assumed text-only for now
+        // Prefix the live `[date time]` onto the current user turn, and the
+        // frozen stamp onto each historical user turn (model turns unchanged).
+        // Each historical stamp is reproduced from that message's createdAt,
+        // so the re-rendered prefix is byte-stable and the KV cache reuses.
+        const userRenderContent = withTurnTimestamp(audioMarkers + imageMarkers + text, nowMs);
+        const renderPriorTurns: ChatMessage[] = userTurns.map((m) =>
+            m.role === "user"
+                ? { ...m, content: withTurnTimestamp(m.content, m.createdAt) }
+                : m,
+        );
         const renderHistory: ChatMessage[] = sysContent
             ? [
                 { role: "system", content: sysContent },
@@ -842,7 +866,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 convId = row.id;
                 setActiveConvId(convId);
             }
-            const userInsert = await client.msgInsert({ conversationId: convId, role: "user", content: text });
+            const userInsert = await client.msgInsert({ conversationId: convId, role: "user", content: text, createdAt: nowMs });
             // Persist image thumbnails alongside the user turn so reloading
             // the conversation restores the bubble visuals. The JPEG bytes
             // go to OPFS via saveThumb (random-UUID key); only that key

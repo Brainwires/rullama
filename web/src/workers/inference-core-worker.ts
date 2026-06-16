@@ -1604,7 +1604,11 @@ const RPC: Record<string, Handler> = {
         const mid     = (a.messageId as string | undefined) ?? newId();
         const role    = String(a.role);
         const content = String(a.content ?? "");
-        const now     = Date.now();
+        // Caller may pin created_at (the chat path passes its own send-time
+        // `nowMs` so the persisted stamp matches the one already rendered
+        // into the live KV cache — keeps the per-turn timestamp prefix
+        // byte-stable across a reload, preserving KV-cache reuse).
+        const now     = typeof a.createdAt === "number" ? a.createdAt : Date.now();
         db.execParams(
             `INSERT INTO messages (conversation_id, message_id, role, content, created_at)
              VALUES (?, ?, ?, ?, ?)`,

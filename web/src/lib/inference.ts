@@ -660,7 +660,7 @@ export class WorkerClient {
     msgList(conversationId: string): Promise<MessageRow[]> {
         return this.rpc("msgList", { conversationId });
     }
-    msgInsert(opts: { conversationId: string; messageId?: string; role: string; content?: string }): Promise<{ messageId: string; created_at: number }> {
+    msgInsert(opts: { conversationId: string; messageId?: string; role: string; content?: string; createdAt?: number }): Promise<{ messageId: string; created_at: number }> {
         return this.rpc("msgInsert", opts as Record<string, unknown>);
     }
     msgAppend(conversationId: string, messageId: string, delta: string): Promise<boolean> {

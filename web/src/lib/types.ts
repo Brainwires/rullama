@@ -22,6 +22,13 @@ export interface ChatMessage {
      *  that came with files. Not persisted to SQLite — a chat reloaded
      *  from history shows the message text alone. */
     images?: ImageAttachment[];
+    /** Wall-clock send time (ms epoch), frozen per message. Used to
+     *  render a per-turn `[date time]` prefix on user turns so the model
+     *  always sees the current time — without breaking KV-cache reuse,
+     *  since each turn's timestamp is stable once set (the volatile
+     *  "now" only ever appears on the newest turn). Sourced from the DB
+     *  `created_at` for history, `Date.now()` for the turn being sent. */
+    createdAt?: number;
 }
 
 export interface SamplingOptions {
