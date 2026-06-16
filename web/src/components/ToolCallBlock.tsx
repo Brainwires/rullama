@@ -1,4 +1,4 @@
-import { Wrench } from "lucide-react";
+import { Wrench, CornerDownRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ToolCall } from "@/lib/toolFormat";
 
@@ -71,6 +71,12 @@ export function ToolCallBlock({ call, streaming = false }: Props) {
                     </pre>
                 )}
             </div>
+            {call.result && (
+                <div className="flex items-start gap-1.5 border-t border-dashed border-primary/30 px-2.5 py-1.5 text-[0.7rem] text-foreground/90">
+                    <CornerDownRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary/70" />
+                    <span className="break-words">{call.result}</span>
+                </div>
+            )}
         </div>
     );
 }

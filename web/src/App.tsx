@@ -10,7 +10,15 @@ import { VoicePanel } from "@/components/VoicePanel";
 import { ConversationList } from "@/components/ConversationList";
 import { DualSidebarLayout } from "@/components/layouts/DualSidebarLayout";
 import { type ChatMessage, type ImageAttachment, type SamplingOptions, DEFAULT_SAMPLING, DEFAULT_SYSTEM_PROMPT } from "@/lib/types";
-import { TOOL_SCHEMA_PROMPT } from "@/lib/toolFormat";
+import { TOOL_SCHEMA_PROMPT, TOOL_RESPONSE_OPEN, TOOL_RESPONSE_CLOSE } from "@/lib/toolFormat";
+import { parseToolCalls } from "@/lib/parseToolCalls";
+import {
+    isExecutableTool,
+    toolUsesLocation,
+    resolveGeo,
+    executeTool,
+    type Units as ToolUnits,
+} from "@/lib/tools";
 import { type ModelEntry, blobUrl, beacon, listModels, isDiffusion } from "@/lib/api";
 import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel, readInflightState, writeInflightState, clearInflightState } from "@/lib/opfs";
 import { saveInflightImage, saveInflightAudio, readInflightImages, readInflightAudio, clearInflightMedia } from "@/lib/inflight_media";
@@ -166,6 +174,10 @@ export function App() {
     // Tool calling: inject the tool schema into the system prompt so the base
     // model emits <tool_call> blocks (rendered as structured calls). No adapter.
     const [toolMode, setToolMode]           = usePersistedState<boolean>("rullama:toolMode", false);
+    // Tools tab settings — weather executor (lib/tools) + GPS.
+    const [weatherApiKey, setWeatherApiKey] = usePersistedState<string>("rullama:weatherApiKey", "");
+    const [weatherUnits, setWeatherUnits]   = usePersistedState<ToolUnits>("rullama:weatherUnits", "metric");
+    const [useGps, setUseGps]               = usePersistedState<boolean>("rullama:useGps", false);
     useEffect(() => {
         let alive = true;
         if (!activeConvId) { setRagEnabled(false); return; }
@@ -2082,8 +2094,6 @@ export function App() {
 
             const tg0 = performance.now();
             let emitted = 0;
-            let curStr   = (await client.tokenStr(next)) ?? "";
-            let curIsEos = await client.isEos(next);
             let pendingDelta = "";
             let lastFlushAt  = performance.now();
             const flushPending = async () => {
@@ -2093,35 +2103,97 @@ export function App() {
                 try { await client.msgAppend(convId, modelMsgId, delta); } catch { /* */ }
             };
 
-            for (let i = 0; i < maxTokens; i++) {
-                if (cancelRef.current) break;
-                if (curIsEos) break;
-                const piece = curStr.replaceAll("▁", " ");
-                displayHistory[displayHistory.length - 1].content += piece;
-                pendingDelta += piece;
-                setMessages([...displayHistory]);
-                emitted++;
-                if ((emitted % 16 === 0) || (performance.now() - lastFlushAt > 750)) {
-                    await flushPending();
-                    lastFlushAt = performance.now();
+            // Stream tokens into the (open) model bubble until EOS / cancel /
+            // budget. Seeds from the outer `next` (the first sampled token) and
+            // advances it; reused for the post-tool continuation pass below.
+            const streamTurn = async (budget: number) => {
+                let curStr   = (await client.tokenStr(next)) ?? "";
+                let curIsEos = await client.isEos(next);
+                for (let i = 0; i < budget; i++) {
+                    if (cancelRef.current) break;
+                    if (curIsEos) break;
+                    const piece = curStr.replaceAll("▁", " ");
+                    displayHistory[displayHistory.length - 1].content += piece;
+                    pendingDelta += piece;
+                    setMessages([...displayHistory]);
+                    emitted++;
+                    if ((emitted % 16 === 0) || (performance.now() - lastFlushAt > 750)) {
+                        await flushPending();
+                        lastFlushAt = performance.now();
+                    }
+                    const r = await stepWithTimeout(client, next);
+                    next     = r.next;
+                    curStr   = r.str ?? "";
+                    curIsEos = r.isEos;
+                    // Keep the inflight ref fresh so a visibilitychange
+                    // handler can persist current state without coordinating
+                    // with this loop. In-memory only — no localStorage write
+                    // per token (too costly).
+                    if (inflightRef.current) {
+                        inflightRef.current = {
+                            ...inflightRef.current,
+                            emittedSoFar: displayHistory[displayHistory.length - 1].content,
+                            emittedTokenCount: emitted,
+                            lastSampledNext: next,
+                        };
+                    }
                 }
-                const r = await stepWithTimeout(client, next);
-                next     = r.next;
-                curStr   = r.str ?? "";
-                curIsEos = r.isEos;
-                // Keep the inflight ref fresh so a visibilitychange
-                // handler can persist current state without coordinating
-                // with this loop. In-memory only — no localStorage write
-                // per token (too costly).
-                if (inflightRef.current) {
-                    inflightRef.current = {
-                        ...inflightRef.current,
-                        emittedSoFar: displayHistory[displayHistory.length - 1].content,
-                        emittedTokenCount: emitted,
-                        lastSampledNext: next,
-                    };
+            };
+
+            await streamTurn(maxTokens);
+
+            // ─── Tool execution + answer continuation ───────────────────────
+            // If the model emitted an EXECUTABLE <tool_call> (e.g. get_weather),
+            // run it and splice the result back as a <tool_response> block, then
+            // keep generating so the model answers in natural language. The KV
+            // cache is already positioned right after the tool call (streamTurn
+            // broke on EOS without feeding it), so we just feed the response
+            // tokens and continue — no reset, no re-prefill.
+            if (toolMode && !cancelRef.current) {
+                const { calls } = parseToolCalls(displayHistory[displayHistory.length - 1].content);
+                const exec = calls.find(
+                    (c) => !c.pending && !c.result && isExecutableTool(c.name)
+                        && c.arguments && typeof c.arguments === "object",
+                );
+                if (exec) {
+                    setStatusLine(`running ${exec.name}…`);
+                    let geo: string | null = null;
+                    // Only consult GPS when the model gave no place (or asked
+                    // for "here"/"my location") — never prompt when it already
+                    // named a city.
+                    const locArg = typeof (exec.arguments as Record<string, unknown>).location === "string"
+                        ? String((exec.arguments as Record<string, unknown>).location).trim()
+                        : "";
+                    const needsGeo = locArg === "" || /\b(current|my location|here|nearby)\b/i.test(locArg);
+                    if (useGps && toolUsesLocation(exec.name) && needsGeo) {
+                        geo = await resolveGeo();
+                    }
+                    const result = await executeTool(
+                        exec.name,
+                        exec.arguments as Record<string, unknown>,
+                        { weatherApiKey, units: weatherUnits, useGps },
+                        geo,
+                    );
+                    const respBlock = `\n${TOOL_RESPONSE_OPEN}${result.summary}${TOOL_RESPONSE_CLOSE}\n`;
+                    displayHistory[displayHistory.length - 1].content += respBlock;
+                    setMessages([...displayHistory]);
+                    if (convId && modelMsgId) {
+                        try { await client.msgAppend(convId, modelMsgId, respBlock); } catch { /* */ }
+                    }
+                    if (!cancelRef.current) {
+                        // Feed the response text into the model (continuing the
+                        // KV cache), then stream the final answer.
+                        const respIds = await client.encode(respBlock);
+                        for (const id of respIds) {
+                            if (cancelRef.current) break;
+                            next = await client.step(id);
+                        }
+                        setStatusLine(undefined);
+                        await streamTurn(maxTokens);
+                    }
                 }
             }
+
             await flushPending();
             if (convId) {
                 try {
@@ -2185,7 +2257,7 @@ export function App() {
                 setBusy(false);
             }
         }
-    }, [activeConvId, busy, lastLoadedDigest, loadedIsDiffusion, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, ragEnabled, toolMode, refreshConversations, resumeInflightGeneration, sampling, statusText, systemPrompt, thinking, showToast]);
+    }, [activeConvId, busy, lastLoadedDigest, loadedIsDiffusion, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, ragEnabled, toolMode, weatherApiKey, weatherUnits, useGps, refreshConversations, resumeInflightGeneration, sampling, statusText, systemPrompt, thinking, showToast]);
 
     // Top-level pipelineProgress subscription. The chat-send flow has
     // its own scoped subscription (around image encode + prefill) but
@@ -2462,6 +2534,12 @@ export function App() {
                             onThinkingChange={setThinking}
                             toolMode={toolMode}
                             onToolModeChange={setToolMode}
+                            weatherApiKey={weatherApiKey}
+                            onWeatherApiKeyChange={setWeatherApiKey}
+                            weatherUnits={weatherUnits}
+                            onWeatherUnitsChange={setWeatherUnits}
+                            useGps={useGps}
+                            onUseGpsChange={setUseGps}
                             onResetDefaults={onResetDefaults}
                             voice={voice}
                             onVoiceChange={setVoice}

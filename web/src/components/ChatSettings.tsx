@@ -1,8 +1,10 @@
 import { Sparkles, Undo2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
+import { type Units } from "@/lib/tools";
 import { SETTINGS_BOUNDS } from "@/components/SettingsDialog";
 import { ModelLoader, type ModelStatus } from "@/components/ModelLoader";
 import { SpeechInputSettings } from "@/components/SpeechInputSettings";
@@ -48,6 +50,13 @@ interface Props {
     onThinkingChange: (b: boolean) => void;
     toolMode: boolean;
     onToolModeChange: (b: boolean) => void;
+    // Tools tab — weather (WeatherAPI.com, optional key) + GPS.
+    weatherApiKey: string;
+    onWeatherApiKeyChange: (s: string) => void;
+    weatherUnits: Units;
+    onWeatherUnitsChange: (u: Units) => void;
+    useGps: boolean;
+    onUseGpsChange: (b: boolean) => void;
     onResetDefaults: () => void;
     // Speech input (chat mic → transcription) VAD config.
     voice: VoiceOptions;
@@ -55,7 +64,7 @@ interface Props {
     canRecord: boolean;
 }
 
-type TabKey = "model" | "generation" | "speech";
+type TabKey = "model" | "generation" | "tools" | "speech";
 
 /** Chat-tab right sidebar, tabbed because it carries a lot now:
  *  - **Model**: load/eject the inference model + the Fine-tune launcher.
@@ -94,6 +103,7 @@ export function ChatSettings(props: Props) {
             <nav role="tablist" aria-label="Chat settings sections" className="flex shrink-0 border-b border-border px-3">
                 <TabButton label="Model" active={tab === "model"} onClick={() => setTab("model")} />
                 <TabButton label="Generation" active={tab === "generation"} onClick={() => setTab("generation")} />
+                <TabButton label="Tools" active={tab === "tools"} onClick={() => setTab("tools")} />
                 <TabButton label="Speech" active={tab === "speech"} onClick={() => setTab("speech")} />
             </nav>
 
@@ -202,9 +212,17 @@ export function ChatSettings(props: Props) {
                                 Tip: combining thinking with temperature &gt; 0.3 on attached images or audio can produce
                                 wandering chain-of-thought that reads like garbled text. Lower both for crisp multimodal analysis.
                             </p>
+                        </section>
+                    </>
+                )}
+
+                {tab === "tools" && (
+                    <>
+                        <section className="flex flex-col gap-2">
+                            <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">Tool calling</span>
                             <label
                                 className="flex items-start gap-2 text-xs text-muted-foreground"
-                                title="Prepend a tool schema to the system prompt so the model emits <tool_call> blocks, rendered as structured calls. Works on the base model — no adapter needed."
+                                title="Prepend a tool schema to the system prompt so the model emits <tool_call> blocks. Executable tools (weather) actually run and feed their result back to the model; others render as structured calls."
                             >
                                 <input
                                     type="checkbox"
@@ -213,10 +231,78 @@ export function ChatSettings(props: Props) {
                                     className="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer"
                                 />
                                 <span>
-                                    Tool calling — let the model invoke{" "}
-                                    <code className="rounded bg-muted px-1">set_timer</code>,{" "}
-                                    <code className="rounded bg-muted px-1">get_weather</code>, etc. via{" "}
+                                    Enable tool calling — let the model invoke{" "}
+                                    <code className="rounded bg-muted px-1">get_weather</code> and others via{" "}
                                     <code className="rounded bg-muted px-1">&lt;tool_call&gt;</code> blocks
+                                </span>
+                            </label>
+                        </section>
+
+                        <section className="flex flex-col gap-2 border-t border-border pt-3">
+                            <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">Weather</span>
+                            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                                <span className="flex items-center justify-between">
+                                    <span>WeatherAPI.com key</span>
+                                    <a
+                                        href="https://www.weatherapi.com/my/"
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-primary hover:underline"
+                                    >
+                                        Get a free key
+                                    </a>
+                                </span>
+                                <Input
+                                    type="password"
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                    value={props.weatherApiKey}
+                                    onChange={(e) => props.onWeatherApiKeyChange(e.target.value)}
+                                    placeholder="Optional — leave blank to use free Open-Meteo"
+                                    className="h-8 text-xs"
+                                />
+                                <span className="text-[10px] leading-tight text-muted-foreground">
+                                    With a key, weather comes from WeatherAPI.com (richer data). Without one,
+                                    it falls back to the free, keyless Open-Meteo — so weather works either way.
+                                </span>
+                            </label>
+
+                            <div className="flex items-center justify-between pt-1">
+                                <span className="text-xs text-muted-foreground">Units</span>
+                                <div className="inline-flex overflow-hidden rounded-md border border-border">
+                                    {(["metric", "imperial"] as Units[]).map((u) => (
+                                        <button
+                                            key={u}
+                                            type="button"
+                                            onClick={() => props.onWeatherUnitsChange(u)}
+                                            className={cn(
+                                                "px-2.5 py-1 text-xs transition-colors",
+                                                props.weatherUnits === u
+                                                    ? "bg-primary text-primary-foreground"
+                                                    : "bg-background text-muted-foreground hover:text-foreground",
+                                            )}
+                                        >
+                                            {u === "metric" ? "°C" : "°F"}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        </section>
+
+                        <section className="flex flex-col gap-2 border-t border-border pt-3">
+                            <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">Location</span>
+                            <label
+                                className="flex items-start gap-2 text-xs text-muted-foreground"
+                                title="When the model asks for the weather where you are (and gives no city), use the browser's GPS to fill in your coordinates. Asks for permission the first time."
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={props.useGps}
+                                    onChange={(e) => props.onUseGpsChange(e.target.checked)}
+                                    className="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer"
+                                />
+                                <span>
+                                    Use my location (GPS) when no place is given — the browser will ask permission
                                 </span>
                             </label>
                         </section>

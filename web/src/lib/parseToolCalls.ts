@@ -7,7 +7,14 @@
 //
 // A reply with no `<tool_call>` marker passes straight through (calls === []).
 
-import { TOOL_CALL_OPEN_PREFIX, TOOL_CALL_CLOSE, TOOL_PARAMS, type ToolCall } from "@/lib/toolFormat";
+import {
+    TOOL_CALL_OPEN_PREFIX,
+    TOOL_CALL_CLOSE,
+    TOOL_RESPONSE_OPEN,
+    TOOL_RESPONSE_CLOSE,
+    TOOL_PARAMS,
+    type ToolCall,
+} from "@/lib/toolFormat";
 
 export interface ParsedToolCalls {
     calls: ToolCall[];
@@ -153,50 +160,67 @@ export function parseToolCalls(response: string): ParsedToolCalls {
         return { calls: [], prose: response ?? "", pending: false };
     }
 
+    // Pull out any executed-tool result spans first so they never leak into the
+    // visible prose. They're reattached to calls (by order) after parsing. The
+    // markers contain no regex metacharacters, so no escaping is needed.
+    const results: string[] = [];
+    const cleaned = response.replace(
+        new RegExp(`${TOOL_RESPONSE_OPEN}([\\s\\S]*?)${TOOL_RESPONSE_CLOSE}`, "g"),
+        (_m, inner: string) => {
+            results.push(inner.trim());
+            return "";
+        },
+    );
+
     const calls: ToolCall[] = [];
     let prose = "";
     let pending = false;
     let cursor = 0;
 
     for (;;) {
-        const open = response.indexOf(TOOL_CALL_OPEN_PREFIX, cursor);
+        const open = cleaned.indexOf(TOOL_CALL_OPEN_PREFIX, cursor);
         if (open < 0) {
             // No more calls — everything left is prose.
-            prose += response.slice(cursor);
+            prose += cleaned.slice(cursor);
             break;
         }
 
         // Text before this call is prose.
-        prose += response.slice(cursor, open);
+        prose += cleaned.slice(cursor, open);
 
         // Skip the opening tag, tolerating a missing `>` (e.g. `<tool_call\n{…`).
         let innerStart = open + TOOL_CALL_OPEN_PREFIX.length;
-        if (response[innerStart] === ">") innerStart++;
-        const close = response.indexOf(TOOL_CALL_CLOSE, innerStart);
+        if (cleaned[innerStart] === ">") innerStart++;
+        const close = cleaned.indexOf(TOOL_CALL_CLOSE, innerStart);
         if (close < 0) {
             // No explicit </tool_call>. Models frequently omit it — they emit
             // the JSON object then stop (or trail extra braces). Brace-match a
             // complete object so it still renders as a finished call instead of
             // pulsing forever.
-            const end = matchJsonEnd(response, innerStart);
+            const end = matchJsonEnd(cleaned, innerStart);
             if (end >= 0) {
-                calls.push(toCall(response.slice(innerStart, end), false));
+                calls.push(toCall(cleaned.slice(innerStart, end), false));
                 cursor = end;
                 // Swallow stray closing braces / whitespace the model tacked on.
-                while (cursor < response.length && (response[cursor] === "}" || /\s/.test(response[cursor]))) {
+                while (cursor < cleaned.length && (cleaned[cursor] === "}" || /\s/.test(cleaned[cursor]))) {
                     cursor++;
                 }
                 continue;
             }
             // Genuinely mid-JSON — still streaming this call in.
-            calls.push(toCall(response.slice(innerStart), true));
+            calls.push(toCall(cleaned.slice(innerStart), true));
             pending = true;
             break; // nothing usable after an unterminated call
         }
 
-        calls.push(toCall(response.slice(innerStart, close), false));
+        calls.push(toCall(cleaned.slice(innerStart, close), false));
         cursor = close + TOOL_CALL_CLOSE.length;
     }
+
+    // Reattach executed results to their calls, in emission order.
+    results.forEach((r, i) => {
+        if (calls[i]) calls[i].result = r;
+    });
 
     return { calls, prose: prose.trim(), pending };
 }

@@ -17,6 +17,15 @@
 export const TOOL_CALL_OPEN = "<tool_call>";
 export const TOOL_CALL_CLOSE = "</tool_call>";
 
+// After a tool is EXECUTED (lib/tools), its result is spliced back into the
+// model turn wrapped in these markers, then the model continues generating its
+// natural-language answer. The renderer strips this span from the visible prose
+// (it's plumbing) and attaches the inner text to the preceding call as
+// `ToolCall.result` for the result chip. Not part of the LoRA training format —
+// purely an inference-time round-trip convention.
+export const TOOL_RESPONSE_OPEN = "<tool_response>";
+export const TOOL_RESPONSE_CLOSE = "</tool_response>";
+
 // The parser matches the opening tag LENIENTLY by this prefix: small models
 // sometimes drop the closing `>` of `<tool_call>` (a tokenization quirk —
 // observed emitting `<tool_call\n{…`), so we key on `<tool_call` and skip an
@@ -73,4 +82,8 @@ export interface ToolCall {
     /** True while the opening marker has been seen but the closing one hasn't
      *  (the call is still streaming in). */
     pending: boolean;
+    /** The executed tool's result summary, once it has run and been spliced
+     *  back in via the <tool_response> markers. Undefined for render-only
+     *  calls (no executor) or before execution. */
+    result?: string;
 }
