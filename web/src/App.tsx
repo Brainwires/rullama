@@ -1439,7 +1439,10 @@ export function App() {
                     { role: "user",  content: userContent },
                     { role: "model", content: meta.emittedSoFar },
                 ];
-                const rendered = await client.renderChatForContinuation(renderMsgs, false);
+                // with_bos=true to match the main send path — the resume
+                // replay must rebuild the SAME token stream the KV cache was
+                // built from, or restoreKvState / slow-path replay diverges.
+                const rendered = await client.renderChatForContinuation(renderMsgs, true);
                 const ids = await client.encode(rendered);
 
                 setStatusLine("rebuilding session…");
@@ -1662,8 +1665,16 @@ export function App() {
         // tells the model to emit a tool call only when one fits, and otherwise
         // reason + answer normally. So a non-tool prompt still gets a normal
         // (thinking) response; a tool prompt gets the call. No code gating.
+        //
+        // The `<|think|>` control token MUST be followed by a newline and then
+        // the system content — this is exactly how Ollama's gemma4 renderer
+        // emits it (`<|turn>system\n<|think|>\n{system}<turn|>`, see
+        // model/renderers/gemma4.go). Gluing the token directly onto a long
+        // system prompt (`<|think|>You have access to…`) is NOT the trained
+        // pattern and the model fails to enter the thinking channel — which is
+        // why thinking silently stopped once the tool schema was injected.
         const sysContent = thinking
-            ? (baseSystem ? `${THINK_TOKEN}${baseSystem}` : THINK_TOKEN)
+            ? `${THINK_TOKEN}\n${baseSystem}`
             : baseSystem;
 
         // Two parallel histories: `displayHistory` for the chat UI (no
@@ -1795,7 +1806,15 @@ export function App() {
 
             await client.setSampling(sampling);
             await client.reset();
-            const rendered = await client.renderChat(renderHistory, false);
+            // with_bos=true: Gemma 4 has add_bos_token=false, so the tokenizer
+            // does NOT auto-prepend BOS — it must appear in the rendered text
+            // (exactly what Ollama's gemma4 renderer does, gemma4.go:34). The
+            // BPE splitter encodes the `<bos>` CONTROL token to the single BOS
+            // id. Without it the model runs OUT OF DISTRIBUTION (the whole
+            // sequence is mis-anchored): it emits a trivial 1-token reply and
+            // never enters the `<|channel>thought` thinking channel. This was
+            // the real reason thinking + tool-calling silently died.
+            const rendered = await client.renderChat(renderHistory, true);
             const ids = await client.encode(rendered);
 
             // ── Initialize inflight tracking BEFORE the prompt-feed
