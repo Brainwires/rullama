@@ -47,10 +47,7 @@ export const TOOL_PARAMS: Record<string, string[]> = {
 // text or the slot keys drift). When wiring the chat path, prepend this to the
 // system message while the function-call adapter is active (mirrors the RAG
 // preamble in App.tsx).
-export const TOOL_SCHEMA_PROMPT = `You are a function-calling assistant. When the user makes a request, reply with ONLY a single tool call, in exactly this format:
-<tool_call>{"name": "<tool_name>", "arguments": { ... }}</tool_call>
-
-Use only these tools, with these exact names and argument keys:
+export const TOOL_SCHEMA_PROMPT = `You have access to these tools:
 - set_timer(duration)
 - get_weather(location)
 - send_email(to, subject)
@@ -58,7 +55,11 @@ Use only these tools, with these exact names and argument keys:
 - play_music(query)
 - set_reminder(text, time)
 
-Copy the user's own words into the argument values. Do NOT convert units, do math, or round (e.g. for "30 seconds" pass duration "30 seconds", not minutes). Don't overthink tool calls — decide quickly; your final answer must be just the tool call, nothing else.`;
+When the user's request clearly matches one of these tools, reply with a single tool call in exactly this format:
+<tool_call>{"name": "<tool_name>", "arguments": { ... }}</tool_call>
+Use the exact tool name and argument keys, and copy the user's own words into the values — do not convert units, do math, or round (e.g. "30 seconds" stays "30 seconds", not minutes). Don't overthink the tool call.
+
+If no tool fits the request, just answer the user normally. Not every message is a tool call — reason and respond as usual when none applies.`;
 
 /** A single tool call extracted from a model reply. */
 export interface ToolCall {

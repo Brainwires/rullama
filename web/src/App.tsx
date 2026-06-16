@@ -1658,10 +1658,10 @@ export function App() {
         }
 
         // Thinking always respects its own toggle — never silently overridden.
-        // Tool calling stays compatible with thinking: the schema tells the
-        // model NOT to overthink and to make its final answer just the tool
-        // call (it can still reason briefly first). Earlier we wrongly told it
-        // "no reasoning", which contradicts the <|think|> token and broke it.
+        // Tool calling and thinking coexist: the schema is CONDITIONAL — it
+        // tells the model to emit a tool call only when one fits, and otherwise
+        // reason + answer normally. So a non-tool prompt still gets a normal
+        // (thinking) response; a tool prompt gets the call. No code gating.
         const sysContent = thinking
             ? (baseSystem ? `${THINK_TOKEN}${baseSystem}` : THINK_TOKEN)
             : baseSystem;
