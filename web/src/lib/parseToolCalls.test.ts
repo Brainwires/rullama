@@ -19,8 +19,8 @@ describe("parseToolCalls — JSON form", () => {
     });
 
     it("maps the `parameters` alias onto arguments", () => {
-        const r = parseToolCalls(wrap('{"name":"set_timer","parameters":{"duration_minutes":5}}'));
-        expect(r.calls[0]).toMatchObject({ name: "set_timer", arguments: { duration_minutes: 5 } });
+        const r = parseToolCalls(wrap('{"name":"set_timer","parameters":{"duration":5}}'));
+        expect(r.calls[0]).toMatchObject({ name: "set_timer", arguments: { duration: 5 } });
     });
 
     it("extracts prose around a call", () => {
@@ -32,18 +32,18 @@ describe("parseToolCalls — JSON form", () => {
 
     it("parses multiple JSON calls", () => {
         const r = parseToolCalls(
-            wrap('{"name":"set_timer","arguments":{"duration_minutes":1}}') +
-            wrap('{"name":"set_timer","arguments":{"duration_minutes":2}}'),
+            wrap('{"name":"set_timer","arguments":{"duration":1}}') +
+            wrap('{"name":"set_timer","arguments":{"duration":2}}'),
         );
         expect(r.calls).toHaveLength(2);
-        expect(r.calls[1].arguments).toEqual({ duration_minutes: 2 });
+        expect(r.calls[1].arguments).toEqual({ duration: 2 });
     });
 });
 
 describe("parseToolCalls — pythonic form (small-model fallback)", () => {
     it("maps positional args to schema param names", () => {
         const r = parseToolCalls(wrap("set_timer(7)"));
-        expect(r.calls[0]).toMatchObject({ name: "set_timer", arguments: { duration_minutes: 7 } });
+        expect(r.calls[0]).toMatchObject({ name: "set_timer", arguments: { duration: 7 } });
     });
 
     it("parses keyword args", () => {
@@ -99,7 +99,7 @@ describe("parseToolCalls — regression: actual base-model eval outputs", () => 
     const cases: Array<[string, string, Record<string, unknown>]> = [
         ['{"name":"get_weather","arguments":{"location":"Miami"}}', "get_weather", { location: "Miami" }],
         ['{"name":"play_music","arguments":{"query":"classical music"}}', "play_music", { query: "classical music" }],
-        ["set_timer(7)", "set_timer", { duration_minutes: 7 }],
+        ["set_timer(7)", "set_timer", { duration: 7 }],
         ['send_email(to="Priya", subject="Budget Review")', "send_email", { to: "Priya", subject: "Budget Review" }],
         ['set_reminder("call grandma tonight", "tonight")', "set_reminder", { text: "call grandma tonight", time: "tonight" }],
     ];

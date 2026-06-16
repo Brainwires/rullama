@@ -32,7 +32,7 @@ export const TOOL_CALL_OPEN_PREFIX = "<tool_call";
 // tolerant parser accepting both is the right call). Keep in sync with
 // tool-schema.txt / TOOL_SCHEMA_PROMPT below.
 export const TOOL_PARAMS: Record<string, string[]> = {
-    set_timer: ["duration_minutes"],
+    set_timer: ["duration"],
     get_weather: ["location"],
     send_email: ["to", "subject"],
     add_calendar_event: ["title", "date"],
@@ -51,12 +51,14 @@ export const TOOL_SCHEMA_PROMPT = `You are a function-calling assistant. When th
 <tool_call>{"name": "<tool_name>", "arguments": { ... }}</tool_call>
 
 Use only these tools, with these exact names and argument keys:
-- set_timer(duration_minutes)
+- set_timer(duration)
 - get_weather(location)
 - send_email(to, subject)
 - add_calendar_event(title, date)
 - play_music(query)
-- set_reminder(text, time)`;
+- set_reminder(text, time)
+
+Copy the user's own words into the argument values. Do NOT convert units, do math, or round (e.g. for "30 seconds" pass duration "30 seconds", not minutes). Reply with only the tool call — no explanation or reasoning.`;
 
 /** A single tool call extracted from a model reply. */
 export interface ToolCall {

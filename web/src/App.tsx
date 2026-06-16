@@ -1657,7 +1657,12 @@ export function App() {
             baseSystem = baseSystem ? `${TOOL_SCHEMA_PROMPT}\n\n${baseSystem}` : TOOL_SCHEMA_PROMPT;
         }
 
-        const sysContent = thinking
+        // Thinking mode forces a reasoning channel, which fights tool calling's
+        // "reply with ONLY the tool call" goal (the model over-reasons, does bad
+        // unit math, and leaks markdown into the JSON). Suppress thinking while
+        // tool mode is on.
+        const useThinking = thinking && !toolMode;
+        const sysContent = useThinking
             ? (baseSystem ? `${THINK_TOKEN}${baseSystem}` : THINK_TOKEN)
             : baseSystem;
 
