@@ -171,6 +171,35 @@ const DB_NAME  = "rullama-chat.db";
 
 let wasmReady: Promise<unknown> | null = null;
 let model: ModelHandle | null = null;
+
+// ── KV-cache prefix-reuse bookkeeping ──────────────────────────────────
+// The token sequence currently resident in the Model's KV cache, one
+// entry per occupied position. This is the single source of truth for
+// cross-turn prefix reuse (see the `kvReusePlan` RPC): instead of
+// reset()-ing and re-prefilling the whole conversation on every send, a
+// turn whose rendered prompt extends the resident prefix only needs to
+// feed the new suffix.
+//
+// It lives in the CORE (not per-tab JS) because the Model + its KV cache
+// are shared across tabs behind the session lock — per-tab bookkeeping
+// would go stale the moment another tab drove a turn. Within a held
+// session the value is stable, so kvReusePlan can trust it.
+//
+//   `null`  → untrackable: a soft-token embed (image/audio), a restored
+//             KV snapshot, or an adapter swap occupied/changed positions
+//             we can't represent as plain vocab ids. Forces a full reset
+//             on the next turn.
+//   `[]`    → empty cache (post-reset / fresh load).
+//   ids[]   → exactly the resident token sequence; `model.position`
+//             equals its length.
+let residentIds: number[] | null = null;
+/** Append a just-fed plain token to the resident sequence (no-op when
+ *  the sequence is in the untrackable `null` state). */
+function kvCommit(id: number) { if (residentIds) residentIds.push(id); }
+/** Mark the resident sequence untrackable — any future turn re-prefills. */
+function kvInvalidate() { residentIds = null; }
+/** Record that the KV cache is now empty (post-reset / fresh load). */
+function kvCleared() { residentIds = []; }
 let syncHandle: FileSystemSyncAccessHandle | null = null;
 let dbReady: Promise<WasmDbHandle> | null = null;
 // Embedding model (EmbeddingGemma) — loaded concurrently with the chat
@@ -622,6 +651,7 @@ async function handleLoad(args: LoadArgs): Promise<LoadedModelInfo> {
         : await ModelClass.loadFromOpfs(readFn, size, args.maxContext ?? 0);
 
     log(`load: ready vocabSize=${model.vocabSize}`);
+    kvCleared();   // fresh model → empty KV cache
     loadedInfo = {
         name:             args.name ?? null,
         modelKey:         args.modelKey,
@@ -981,6 +1011,7 @@ const RPC: Record<string, Handler> = {
     // ── Model lifecycle ────────────────────────────────────────────────
     load: (a) => handleLoad(a as unknown as LoadArgs),
     free: () => {
+        kvInvalidate();
         if (model) { try { model.free?.(); } catch { /* */ } model = null; }
         if (syncHandle) { try { syncHandle.close(); } catch { /* */ } syncHandle = null; }
         if (loadedInfo) { loadedInfo = null; notify("modelFreed", {}); }
@@ -1004,12 +1035,64 @@ const RPC: Record<string, Handler> = {
     decodeWav:            (a) => requireModel().decodeWav(a.bytes as Uint8Array),
 
     // ── Stateful inference ──────────────────────────────────────────────
-    step:          async (a) => await requireModel().step(Number(a.tokenId)),
-    stepWithEmb:   async (a) => await requireModel().stepWithEmbedding(a.embedding as Float32Array),
+    step:          async (a) => {
+        const tokenId = Number(a.tokenId);
+        const next = await requireModel().step(tokenId);
+        kvCommit(tokenId);   // position advanced by exactly this token
+        return next;
+    },
+    stepWithEmb:   async (a) => {
+        // A soft token (image/audio) occupies a KV position with no vocab
+        // id we can represent — the resident sequence is no longer a
+        // plain-token prefix, so it becomes untrackable.
+        kvInvalidate();
+        return await requireModel().stepWithEmbedding(a.embedding as Float32Array);
+    },
     stepAndDecode: async (a) => {
         const m = requireModel();
-        const next = await m.step(Number(a.tokenId));
+        const tokenId = Number(a.tokenId);
+        const next = await m.step(tokenId);
+        kvCommit(tokenId);
         return { next, isEos: m.isEos(next), str: m.tokenStr(next) ?? null };
+    },
+    // ── KV prefix reuse ─────────────────────────────────────────────────
+    // Decide whether the resident KV cache is a usable prefix of the
+    // turn's full rendered token sequence `ids`, so the caller can skip
+    // re-prefilling the shared head and only feed the new suffix. This is
+    // the cross-turn equivalent of the in-turn "no reset, no re-prefill"
+    // the tool-call continuation already relies on.
+    //
+    // Returns `{ reuse: N }` — feed `ids[N..]` next. When the resident
+    // sequence is NOT a strict prefix (edited history, changed system
+    // prompt, untrackable state, fresh/empty cache, or a position
+    // mismatch from an out-of-band mutation) this RESETS the cache and
+    // returns `{ reuse: 0 }` so the caller prefills from scratch — i.e.
+    // exactly the legacy behaviour as the safe fallback.
+    //
+    // Without truncation support there's no partial reuse: we only keep
+    // the cache when the WHOLE resident sequence matches `ids[0..len]`.
+    kvReusePlan: (a) => {
+        const m = requireModel();
+        const ids = (a.ids as number[]) ?? [];
+        const res = residentIds;
+        let reuse = 0;
+        if (res !== null && res.length > 0 && res.length <= ids.length
+            && m.position === res.length) {
+            // Strict-prefix check against the new render.
+            let prefix = true;
+            for (let i = 0; i < res.length; i++) {
+                if (res[i] !== ids[i]) { prefix = false; break; }
+            }
+            if (prefix) reuse = res.length;
+        }
+        if (reuse === 0) {
+            m.reset();       // also clears sampler history (matches legacy)
+            kvCleared();
+        }
+        // On reuse > 0 the resident sequence already equals ids[0..reuse];
+        // the caller's step() loop will extend it with ids[reuse..] + the
+        // generated tokens.
+        return { reuse };
     },
     encodeImage: async (a) => {
         const cb = (layer: number, total: number) => {
@@ -1112,6 +1195,11 @@ const RPC: Record<string, Handler> = {
 
         // 4. Reset KV cache, drive feed loop (splice soft tokens at sentinel).
         m.reset();
+        // This transcribe drives its own feed loop (incl. soft-token
+        // embeds) directly on the Model, bypassing the tracked step
+        // RPCs — leave the resident sequence untrackable so the next
+        // chat turn re-prefills rather than trusting a stale prefix.
+        kvInvalidate();
         let next = 0;
         for (let i = 0; i < ids.length; i++) {
             const id = ids[i];
@@ -1169,10 +1257,16 @@ const RPC: Record<string, Handler> = {
         if (freed > 0) log(`audio: released ${(freed / (1024 * 1024)).toFixed(1)} MB of GPU weight cache`);
         return freed;
     },
-    reset:        (a) => { void a; return requireModel().reset(); },
+    reset:        (a) => { void a; requireModel().reset(); kvCleared(); },
     setSampling:  (a) => requireModel().setSampling(a.opts),
     saveKvState:  async (a) => { void a; return await requireModel().saveKvState(); },
-    restoreKvState: (a) => { requireModel().restoreKvState(a.bytes as Uint8Array); return true; },
+    restoreKvState: (a) => {
+        requireModel().restoreKvState(a.bytes as Uint8Array);
+        // Snapshot positions don't carry their token ids — the resident
+        // sequence is now occupied but untrackable.
+        kvInvalidate();
+        return true;
+    },
     renderChatForContinuation: (a) =>
         requireModel().renderChatForContinuation(a.messages, !!a.withBos),
     position: (a) => { void a; return requireModel().position; },
@@ -1904,6 +1998,7 @@ const RPC: Record<string, Handler> = {
         const bytes = result.bytes;
         const written = await writeAdapterBytes(name, bytes);
         model = result.takeModel();
+        kvInvalidate();   // training shrank + rebuilt the KV cache — content gone
         log(`training: saved+finished adapter '${name}' (${written} bytes) → OPFS:${ADAPTERS_DIR}/${name}.bin`);
         notify("adapterSaved", { name, size: written });
         // Restore the KV cache to chat-size, same as the standalone
@@ -1948,6 +2043,7 @@ const RPC: Record<string, Handler> = {
         const finished = trainingSession.finish();
         trainingSession = null;
         model = finished;
+        kvInvalidate();   // training shrank + rebuilt the KV cache — content gone
         // **B1 — restore chat's KV cache.** If trainingStart shrunk it,
         // grow it back so chat's next turn has the full context window.
         // Fail-soft: a restore failure just leaves the smaller cache in
@@ -1977,6 +2073,9 @@ const RPC: Record<string, Handler> = {
         if (!name) throw new Error("trainingApplyAdapter: 'name' required");
         const bytes = await readAdapterBytes(name);
         const slots = model.loadAdapter(bytes);
+        // KV entries were computed under the previous adapter config; an
+        // adapter that touches the K/V projections makes them stale.
+        kvInvalidate();
         activeAdapterName = name;
         notify("adapterChanged", { active: name, slots });
         log(`training: applied adapter '${name}' (${slots} slots)`);
@@ -1989,6 +2088,7 @@ const RPC: Record<string, Handler> = {
         if (trainingSession) throw new Error(
             "active training session owns the model — finish it first");
         model.clearAdapter();
+        kvInvalidate();   // base-weight K/V differs from the adapter's
         const was = activeAdapterName;
         activeAdapterName = null;
         notify("adapterChanged", { active: null, was });
@@ -2006,6 +2106,7 @@ const RPC: Record<string, Handler> = {
         if (!name) throw new Error("trainingDeleteAdapter: 'name' required");
         if (activeAdapterName === name && model) {
             try { model.clearAdapter(); } catch { /* */ }
+            kvInvalidate();   // base-weight K/V differs from the adapter's
             activeAdapterName = null;
             notify("adapterChanged", { active: null });
         }

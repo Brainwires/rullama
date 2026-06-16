@@ -79,6 +79,7 @@ const STATEFUL_RPCS = new Set([
     "step",
     "stepWithEmb",
     "stepAndDecode",
+    "kvReusePlan",
     "encodeImage",
     "encodeAudio",
     "transcribeAudio",

@@ -504,6 +504,15 @@ export class WorkerClient {
     stepAndDecode(tokenId: number): Promise<{ next: number; isEos: boolean; str: string | null }> {
         return this.rpc("stepAndDecode", { sid: this.session, tokenId });
     }
+    /** Cross-turn KV-cache prefix reuse. Pass the FULL rendered token
+     *  sequence for the turn; the core decides how much of the resident
+     *  KV cache is a usable prefix and returns `{ reuse: N }` — feed
+     *  `ids[N..]` and skip the head. When nothing is reusable it resets
+     *  the cache and returns `{ reuse: 0 }` (legacy full-prefill). Must
+     *  be called inside an acquired session, before the prefill loop. */
+    kvReusePlan(ids: number[]): Promise<{ reuse: number }> {
+        return this.rpc("kvReusePlan", { sid: this.session, ids });
+    }
     encodeImage(pixels: Float32Array, h: number, w: number): Promise<Float32Array> {
         return this.rpc("encodeImage", { sid: this.session, pixels, h, w });
     }
