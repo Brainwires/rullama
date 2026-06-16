@@ -1657,12 +1657,11 @@ export function App() {
             baseSystem = baseSystem ? `${TOOL_SCHEMA_PROMPT}\n\n${baseSystem}` : TOOL_SCHEMA_PROMPT;
         }
 
-        // Thinking respects its own toggle (don't silently override it). Tool
-        // calling and thinking can fight — the model may reason before the call
-        // — but the schema now asks for "only the tool call, no reasoning" and
-        // uses natural-language values (no unit math), which is what was driving
-        // the earlier spiral. If both are on and you want a clean call, turn
-        // thinking off; we don't force it.
+        // Thinking always respects its own toggle — never silently overridden.
+        // Tool calling stays compatible with thinking: the schema tells the
+        // model NOT to overthink and to make its final answer just the tool
+        // call (it can still reason briefly first). Earlier we wrongly told it
+        // "no reasoning", which contradicts the <|think|> token and broke it.
         const sysContent = thinking
             ? (baseSystem ? `${THINK_TOKEN}${baseSystem}` : THINK_TOKEN)
             : baseSystem;
