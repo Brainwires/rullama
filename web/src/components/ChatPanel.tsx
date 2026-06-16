@@ -165,7 +165,10 @@ function ModelBubble({ content, canSpeak, streaming }: { content: string; canSpe
             {items.map((it, i) =>
                 it.kind === "call"
                     ? <ToolCallBlock key={i} call={it.call} streaming={streaming} />
-                    : <div key={i} className="markdown" dangerouslySetInnerHTML={{ __html: it.html }} />,
+                    // mb-3 separates reasoning prose from a following tool-call
+                    // block; collapses harmlessly against the Speak button on
+                    // the final answer.
+                    : <div key={i} className="markdown mb-3 last:mb-0" dangerouslySetInnerHTML={{ __html: it.html }} />,
             )}
             {isEmpty && (
                 <span className="inline-block animate-pulse text-muted-foreground">▍</span>
