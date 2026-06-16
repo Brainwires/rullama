@@ -1,11 +1,19 @@
 // Tool registry — the bridge between a model-emitted <tool_call> and code that
-// actually does something. Today: weather (WeatherAPI.com / Open-Meteo). The
-// renderer (parseToolCalls + ToolCallBlock) stays visual-only; THIS is where a
-// call gets executed and its result fed back to the model for a final answer.
+// actually does something. Today: weather (WeatherAPI.com / Open-Meteo) across
+// four products — current, forecast, air quality, astronomy. The renderer
+// (parseToolCalls + ToolCallBlock) stays visual-only; THIS is where a call gets
+// executed and its result fed back to the model for a final answer.
 
-import { executeWeather, type Units, type WeatherCtx } from "@/lib/tools/weather";
+import {
+    executeWeather,
+    defaultUnitsFromLocale,
+    type Units,
+    type WeatherKind,
+    type WeatherCtx,
+} from "@/lib/tools/weather";
 
 export type { Units };
+export { defaultUnitsFromLocale };
 
 /** Per-turn settings the executor needs, sourced from the Tools settings tab. */
 export interface ToolSettings {
@@ -21,22 +29,41 @@ export interface ToolRunResult {
     data?: Record<string, unknown>;
 }
 
-// Tools we can actually run. Aliases included because small models emit either
-// the schema name (`get_weather`) or the MCP-server name (`get_current_weather`).
-const WEATHER_NAMES = new Set([
-    "get_weather",
-    "get_current_weather",
-    "weather",
-]);
+// Tool name → weather product. Aliases included because small models emit
+// either the schema name (`get_weather_forecast`) or a shorter/MCP-style
+// variant (`forecast`, `get_current_weather`).
+const WEATHER_KINDS: Record<string, WeatherKind> = {
+    // current conditions
+    get_weather: "current",
+    get_current_weather: "current",
+    weather: "current",
+    current_weather: "current",
+    // multi-day forecast
+    get_weather_forecast: "forecast",
+    get_forecast: "forecast",
+    forecast: "forecast",
+    // air quality
+    get_air_quality: "air_quality",
+    air_quality: "air_quality",
+    get_aqi: "air_quality",
+    // astronomy (sunrise/sunset/moon)
+    get_astronomy: "astronomy",
+    astronomy: "astronomy",
+    get_sun_times: "astronomy",
+};
+
+function weatherKind(name: string): WeatherKind | undefined {
+    return WEATHER_KINDS[name.trim().toLowerCase()];
+}
 
 /** Is there an executor wired up for this tool name? */
 export function isExecutableTool(name: string): boolean {
-    return WEATHER_NAMES.has(name.trim().toLowerCase());
+    return weatherKind(name) !== undefined;
 }
 
 /** Does this tool consult GPS (so we should resolve coords before running)? */
 export function toolUsesLocation(name: string): boolean {
-    return WEATHER_NAMES.has(name.trim().toLowerCase());
+    return weatherKind(name) !== undefined;
 }
 
 /**
@@ -74,17 +101,23 @@ export async function executeTool(
     settings: ToolSettings,
     geo: string | null,
 ): Promise<ToolRunResult> {
-    const lower = name.trim().toLowerCase();
-    if (WEATHER_NAMES.has(lower)) {
+    const kind = weatherKind(name);
+    if (kind) {
         const ctx: WeatherCtx = {
             apiKey: settings.weatherApiKey.trim(),
             units: settings.units,
             geo,
         };
+        const daysRaw = args.days;
+        const days = typeof daysRaw === "number" ? daysRaw
+            : typeof daysRaw === "string" && daysRaw.trim() !== "" && !Number.isNaN(Number(daysRaw))
+                ? Number(daysRaw) : undefined;
         return executeWeather(
+            kind,
             {
                 location: typeof args.location === "string" ? args.location : undefined,
                 units: args.units === "imperial" || args.units === "metric" ? args.units : undefined,
+                days,
             },
             ctx,
         );
