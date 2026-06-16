@@ -43,6 +43,20 @@ export const INFLIGHT_KEY = "rullama:inflight";
 // detector that doesn't depend on a single step's wall time.
 export const STEP_TIMEOUT_MS = 60_000;
 
+// ── Per-conversation KV snapshot tuning ────────────────────────────────
+// Persisting the GPU KV cache lets a reopened conversation skip the full
+// "Reading prompt" prefill (see lib/opfs.ts conv-snapshot helpers). The
+// snapshot scales with conversation length, so guard cost on both ends.
+//
+// MIN: below this many resident tokens a cold prefill is already cheap —
+//   not worth a GPU readback + OPFS write.
+// MAX: refuse to persist a snapshot larger than this to avoid OPFS bloat
+//   and iOS-jetsam pressure (tune smaller on mobile).
+// LRU: keep at most this many conversation snapshots, newest-first.
+export const MIN_SNAPSHOT_TOKENS = 256;
+export const MAX_SNAPSHOT_BYTES = isMobileUA() ? 128 * 1024 * 1024 : 384 * 1024 * 1024;
+export const LRU_MAX_SNAPSHOTS = 8;
+
 // Persisted snapshot of the currently-running generation. On
 // visibilitychange→hidden we mirror this into localStorage; on boot
 // (or live-tab timeout recovery) we read it back and use it together

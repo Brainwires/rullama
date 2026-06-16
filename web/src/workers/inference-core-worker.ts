@@ -20,6 +20,7 @@ const gpuMemBreakdownFn = gpuMemBreakdown as unknown as () => string;
 const gpuMemTotalFn = gpuMemTotalMib as unknown as () => number;
 import * as opfsLogger from "./opfs_logger";
 import type { LogLevel } from "./opfs_logger";
+import { encodeRlcvEnvelope, decodeRlcvEnvelope } from "../lib/convSnapshot";
 
 interface ProbeReport {
     ok:             boolean;
@@ -1266,6 +1267,31 @@ const RPC: Record<string, Handler> = {
         // sequence is now occupied but untrackable.
         kvInvalidate();
         return true;
+    },
+    // ── Per-conversation KV snapshot (RLCV envelope) ────────────────────
+    // Unlike the bare saveKvState/restoreKvState (suspend/resume of an
+    // in-flight turn), these bundle the resident TOKEN sequence alongside
+    // the KV bytes. That's what makes a reopened conversation skip the
+    // prefill: restore seeds `residentIds` so the next turn's kvReusePlan
+    // matches the rendered prefix and only feeds the new suffix.
+    //
+    // Envelope: ["RLCV"][ver u8][rsvd u8×3][idsLen u32][ids u32×n][RLMS kv…]
+    saveConvKv: async (a) => {
+        void a;
+        // Untrackable resident state (media / restored / adapter turn) →
+        // can't tie positions to ids, so no snapshot. Caller skips the write.
+        if (residentIds === null) return null;
+        const ids = residentIds;
+        const kvBytes = await requireModel().saveKvState();
+        return encodeRlcvEnvelope(ids, kvBytes);
+    },
+    restoreConvKv: (a) => {
+        const { ids, kvBytes } = decodeRlcvEnvelope(a.bytes as Uint8Array);
+        // Rust validates layout_hash inside restoreKvState — a model/geometry
+        // mismatch throws here and `residentIds` is left untouched.
+        requireModel().restoreKvState(kvBytes);
+        residentIds = Array.from(ids);   // seed the tracker — the crux of the feature
+        return { ok: true, tokens: ids.length };
     },
     renderChatForContinuation: (a) =>
         requireModel().renderChatForContinuation(a.messages, !!a.withBos),

@@ -19,9 +19,14 @@ import { preprocessImage } from "@/lib/image_preprocess";
 import { decodeAudioFile } from "@/lib/audio_decode";
 import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
 import { readInflightState, writeInflightState, clearInflightState } from "@/lib/opfs";
+import {
+    writeConvSnapshot, readConvSnapshot, deleteConvSnapshot, listConvSnapshots, opfsQuota,
+} from "@/lib/opfs";
+import { rlcvTokenCount } from "@/lib/convSnapshot";
 import { saveInflightImage, saveInflightAudio, readInflightImages, readInflightAudio, clearInflightMedia } from "@/lib/inflight_media";
 import {
     THINK_TOKEN, INFLIGHT_KEY,
+    MIN_SNAPSHOT_TOKENS, MAX_SNAPSHOT_BYTES, LRU_MAX_SNAPSHOTS,
     type InflightGen, stepWithTimeout, suggestTitle,
 } from "@/lib/app-helpers";
 
@@ -40,6 +45,48 @@ export interface UseChatEngineParams {
     weatherApiKey: string;
     weatherUnits: ToolUnits;
     useGps: boolean;
+}
+
+/**
+ * Persist a completed conversation's KV cache, then enforce the LRU cap.
+ * Best-effort: any failure (quota, write error) is swallowed — a missing
+ * snapshot just means that conversation re-prefills on its next reopen.
+ */
+async function persistConvSnapshot(
+    convId: string,
+    bytes: Uint8Array,
+    modelDigest: string,
+    tokenCount: number,
+): Promise<void> {
+    try {
+        // Prune FIRST so writing this one lands us at the LRU cap: keep the
+        // newest (cap-1) OTHER snapshots, drop the rest. Pruning before the
+        // write (not after) also frees room ahead of the quota check.
+        const others = (await listConvSnapshots())
+            .filter((s) => s.convId !== convId)
+            .sort((a, b) => b.meta.updatedAt - a.meta.updatedAt);
+        for (const stale of others.slice(LRU_MAX_SNAPSHOTS - 1)) {
+            await deleteConvSnapshot(stale.convId);
+        }
+        // Quota guard: skip rather than risk filling OPFS (a full disk means
+        // failed writes and, on iOS, jetsam pressure). GGUF weights already
+        // dominate OPFS, so this can genuinely bind on tight devices.
+        const q = await opfsQuota();
+        if (q.quota > 0 && q.usage + bytes.length > q.quota * 0.95) {
+            beacon("pe", "kv snapshot skipped (OPFS near quota)");
+            return;
+        }
+        await writeConvSnapshot(convId, bytes, {
+            modelDigest,
+            version: 1,
+            tokenCount,
+            byteSize: bytes.length,
+            updatedAt: Date.now(),
+        });
+    } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn("[rullama] conv KV snapshot persist failed:", e);
+    }
 }
 
 /**
@@ -93,6 +140,11 @@ export function useChatEngine(opts: UseChatEngineParams) {
     // Resume-on-boot is single-shot; the effect can fire multiple times
     // as model state changes, but we want to attempt resume at most once.
     const resumeAttemptedRef = useRef(false);
+    // Conversations we've already tried to warm from a persisted KV
+    // snapshot this session — restore is a one-shot per conversation (the
+    // live KV cache takes over after the first send). Correctness never
+    // depends on this; kvReusePlan's token check is the real gate.
+    const restoreAttemptedRef = useRef<Set<string>>(new Set());
 
     useEffect(() => {
         let alive = true;
@@ -307,6 +359,9 @@ export function useChatEngine(opts: UseChatEngineParams) {
             if (opfsPaths.length > 0) {
                 void deleteThumbs(opfsPaths);
             }
+            // Sweep the persisted KV snapshot too (deterministic filename).
+            void deleteConvSnapshot(id);
+            restoreAttemptedRef.current.delete(id);
             await refreshConversations();
             if (id === activeConvId) {
                 setActiveConvId(null);
@@ -898,6 +953,33 @@ export function useChatEngine(opts: UseChatEngineParams) {
             } else {
                 try {
                     reuse = (await client.kvReusePlan(Array.from(ids))).reuse;
+                    // First send into this conversation this session and the
+                    // live cache didn't match (fresh tab / page reload)? Try
+                    // to warm the KV from a persisted snapshot, then re-check
+                    // the prefix. One attempt per conversation — the live KV
+                    // takes over afterward. kvReusePlan's token check stays
+                    // the sole correctness gate; this is purely an optimization.
+                    if (reuse === 0 && convId && !restoreAttemptedRef.current.has(convId)) {
+                        restoreAttemptedRef.current.add(convId);
+                        try {
+                            const snap = await readConvSnapshot(convId);
+                            if (snap && snap.meta.modelDigest === lastLoadedDigest) {
+                                await client.restoreConvKv(snap.bytes);
+                                reuse = (await client.kvReusePlan(Array.from(ids))).reuse;
+                                if (reuse > 0) {
+                                    beacon("pe", `kv snapshot restored (${snap.meta.tokenCount} tok)`);
+                                }
+                            }
+                        } catch (e) {
+                            // Stale / corrupt / model-mismatch snapshot. A
+                            // failed restoreKvState validates before mutating,
+                            // but reset to a clean cache to be safe.
+                            await client.reset();
+                            reuse = 0;
+                            // eslint-disable-next-line no-console
+                            console.warn("[rullama] conv KV restore failed:", e);
+                        }
+                    }
                 } catch {
                     // Older core without kvReusePlan, or any failure → reset
                     // and prefill the full sequence, as before.
@@ -1298,6 +1380,28 @@ export function useChatEngine(opts: UseChatEngineParams) {
             const tps = emitted > 0 ? (emitted * 1000 / dt) : 0;
             setStatusLine(`pe ${peMs.toFixed(0)} ms · gen ${emitted} tok in ${dt.toFixed(0)} ms · ${tps.toFixed(2)} tok/s`);
             beacon("chat", `gen ${emitted} tok in ${dt.toFixed(0)} ms (${tps.toFixed(2)} tok/s)`);
+
+            // Persist this conversation's KV cache so a future page reload
+            // reopens it without re-prefilling the whole chain. Only for
+            // trackable (text) turns; only when the chain is long enough to
+            // be worth a GPU readback + write (short chats re-prefill
+            // cheaply); size-capped to bound OPFS / iOS-jetsam pressure.
+            // Done here, inside the still-held session (saveConvKv reads the
+            // KV buffers), and best-effort — a failure never breaks the turn.
+            if (!hasMedia && !cancelRef.current && convId && ids.length >= MIN_SNAPSHOT_TOKENS) {
+                try {
+                    const snapBytes = await client.saveConvKv();
+                    if (snapBytes && snapBytes.length <= MAX_SNAPSHOT_BYTES) {
+                        const tokenCount = rlcvTokenCount(snapBytes);
+                        await persistConvSnapshot(convId, snapBytes, lastLoadedDigest, tokenCount);
+                    } else if (snapBytes) {
+                        beacon("pe", `kv snapshot skipped (${(snapBytes.length / 1048576).toFixed(0)} MB > cap)`);
+                    }
+                } catch (e) {
+                    // eslint-disable-next-line no-console
+                    console.warn("[rullama] conv KV snapshot save failed:", e);
+                }
+            }
         } catch (e) {
             const msg = (e as Error).message;
             const isCancel = msg === "cancelled" || msg.includes("cancelled by caller");
@@ -1460,6 +1564,9 @@ export function useChatEngine(opts: UseChatEngineParams) {
         setStatusLine(undefined);
         setPendingImages([]);
         setPendingAudio([]);
+        // Model changed/ejected → the resident KV is gone and any per-conv
+        // warm-from-snapshot decision is stale; re-evaluate on next open.
+        restoreAttemptedRef.current.clear();
     }, []);
 
     return {

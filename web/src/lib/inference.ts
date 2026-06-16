@@ -607,6 +607,20 @@ export class WorkerClient {
     restoreKvState(bytes: Uint8Array): Promise<boolean> {
         return this.rpc("restoreKvState", { sid: this.session, bytes });
     }
+    /** Build a per-conversation KV snapshot envelope (resident token ids
+     *  + KV/sampler state) for OPFS persistence. Returns `null` when the
+     *  resident cache is untrackable (media/restored/adapter turn) and so
+     *  can't be snapshotted. Session-locked (does a GPU readback). */
+    saveConvKv(): Promise<Uint8Array | null> {
+        return this.rpc("saveConvKv", { sid: this.session });
+    }
+    /** Restore a per-conversation snapshot: writes the KV cache AND seeds
+     *  the core's resident-token tracker so the next turn reuses the
+     *  prefix. Rejects on RLCV/layout mismatch; caller falls back to a
+     *  full prefill. Session-locked. */
+    restoreConvKv(bytes: Uint8Array): Promise<{ ok: boolean; tokens: number }> {
+        return this.rpc("restoreConvKv", { sid: this.session, bytes });
+    }
     /** Render a conversation for *continuation* — if the last message
      *  has role "model", its content renders without the trailing
      *  close marker so the model continues that response on the next

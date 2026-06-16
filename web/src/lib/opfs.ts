@@ -247,6 +247,125 @@ export async function clearInflightState(): Promise<void> {
     } catch { /* */ }
 }
 
+// ── Per-conversation KV-cache snapshots ────────────────────────────────
+//
+// Persist a completed conversation's GPU KV cache so reopening a long chat
+// after a page reload restores the cache instead of re-prefilling the
+// whole prompt chain. Stored in a root-level directory (NOT under
+// OPFS_DIR) so it survives a "Clear cached models" action, same rationale
+// as the inflight snapshot above.
+//
+//   rullama-conv-kv/{convId}.kv    ← RLCV envelope (residentIds + RLMS KV)
+//   rullama-conv-kv/{convId}.json  ← sidecar: digest + LRU metadata
+//
+// The `.kv` payload is opaque here — the core worker builds/parses it via
+// saveConvKv/restoreConvKv. The sidecar lets JS validate model identity
+// and run LRU pruning without touching the (large) payload.
+
+const CONV_KV_DIR = "rullama-conv-kv";
+
+export interface ConvSnapshotMeta {
+    modelDigest: string;
+    version: number;
+    tokenCount: number;
+    byteSize: number;
+    updatedAt: number;
+}
+
+async function convKvDir(create: boolean): Promise<FileSystemDirectoryHandle> {
+    const root = await navigator.storage.getDirectory();
+    return root.getDirectoryHandle(CONV_KV_DIR, { create });
+}
+
+/** Write a conversation's KV snapshot (`.kv`) + sidecar (`.json`). Uses
+ *  the worker sync handle when available, else the async writable stream
+ *  (same fallback as `writeInflightState`). */
+export async function writeConvSnapshot(
+    convId: string,
+    bytes: Uint8Array,
+    meta: ConvSnapshotMeta,
+): Promise<void> {
+    const dir = await convKvDir(true);
+    const fh = await dir.getFileHandle(`${convId}.kv`, { create: true });
+    const fhAny = fh as unknown as {
+        createSyncAccessHandle?(): Promise<FileSystemSyncAccessHandle>;
+        createWritable(): Promise<FileSystemWritableFileStream>;
+    };
+    if (typeof fhAny.createSyncAccessHandle === "function") {
+        const h = await fhAny.createSyncAccessHandle();
+        try {
+            h.truncate(0);
+            h.write(bytes, { at: 0 });
+            h.flush();
+        } finally {
+            h.close();
+        }
+    } else {
+        const w = await fhAny.createWritable();
+        await w.truncate(0);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await w.write(bytes as any);
+        await w.close();
+    }
+    // Sidecar last: if the payload write failed we never claim a valid
+    // snapshot exists. Small JSON → async writable is fine.
+    const metaFh = await dir.getFileHandle(`${convId}.json`, { create: true });
+    const mw = await metaFh.createWritable();
+    await mw.truncate(0);
+    await mw.write(JSON.stringify(meta));
+    await mw.close();
+}
+
+/** Read a conversation's snapshot bytes + metadata, or `null` if absent
+ *  / the sidecar is missing or unparseable. */
+export async function readConvSnapshot(
+    convId: string,
+): Promise<{ bytes: Uint8Array; meta: ConvSnapshotMeta } | null> {
+    try {
+        const dir = await convKvDir(false);
+        const metaFh = await dir.getFileHandle(`${convId}.json`, { create: false });
+        const meta = JSON.parse(await (await metaFh.getFile()).text()) as ConvSnapshotMeta;
+        const fh = await dir.getFileHandle(`${convId}.kv`, { create: false });
+        const bytes = new Uint8Array(await (await fh.getFile()).arrayBuffer());
+        return { bytes, meta };
+    } catch {
+        return null;
+    }
+}
+
+/** Remove a conversation's snapshot (both files). Called on conversation
+ *  delete; deterministic filenames mean no DB lookup is needed. */
+export async function deleteConvSnapshot(convId: string): Promise<void> {
+    try {
+        const dir = await convKvDir(false);
+        try { await dir.removeEntry(`${convId}.kv`); } catch { /* */ }
+        try { await dir.removeEntry(`${convId}.json`); } catch { /* */ }
+    } catch { /* */ }
+}
+
+/** Enumerate all snapshots via their sidecars — for LRU pruning. Skips
+ *  entries whose sidecar can't be read. */
+export async function listConvSnapshots(): Promise<{ convId: string; meta: ConvSnapshotMeta }[]> {
+    const out: { convId: string; meta: ConvSnapshotMeta }[] = [];
+    try {
+        const dir = await convKvDir(false);
+        // OPFS directory handles expose an async entries() iterator.
+        const entries = (dir as unknown as {
+            entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
+        }).entries();
+        for await (const [name, handle] of entries) {
+            if (!name.endsWith(".json") || handle.kind !== "file") continue;
+            const convId = name.slice(0, -".json".length);
+            try {
+                const fh = handle as FileSystemFileHandle;
+                const meta = JSON.parse(await (await fh.getFile()).text()) as ConvSnapshotMeta;
+                out.push({ convId, meta });
+            } catch { /* skip unreadable sidecar */ }
+        }
+    } catch { /* dir absent → empty */ }
+    return out;
+}
+
 export async function wipeAllOpfs(): Promise<boolean> {
     try {
         const root = await navigator.storage.getDirectory();
