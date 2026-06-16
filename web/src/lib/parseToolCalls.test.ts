@@ -144,4 +144,25 @@ describe("parseToolCalls — executed-tool results (multi-call chaining)", () =>
         );
         expect(r.calls[0].result).toBe("Sunny, 30°C");
     });
+
+    it("preserves call/prose order across a conditional 2-step chain", () => {
+        const r = parseToolCalls(
+            wrap('{"name":"get_weather","arguments":{"location":"x"}}') +
+            '<tool_response for="get_weather">66°F</tool_response>' +
+            "It's above 15°, so I'll check air quality." +
+            wrap('{"name":"get_air_quality","arguments":{"location":"x"}}') +
+            '<tool_response for="get_air_quality">Good</tool_response>' +
+            "Air quality is good.",
+        );
+        expect(r.segments.map((s) => s.kind === "call" ? `call:${s.call.name}` : `prose:${s.text}`))
+            .toEqual([
+                "call:get_weather",
+                "prose:It's above 15°, so I'll check air quality.",
+                "call:get_air_quality",
+                "prose:Air quality is good.",
+            ]);
+        // result chips ride along on the call segments
+        const seg0 = r.segments[0];
+        expect(seg0.kind === "call" && seg0.call.result).toBe("66°F");
+    });
 });

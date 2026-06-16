@@ -14,12 +14,21 @@ import {
     type ToolCall,
 } from "@/lib/toolFormat";
 
+/** One piece of a reply, in original emission order — either a run of prose
+ *  or a tool call. Lets the UI interleave reasoning between calls (call →
+ *  result → reasoning → next call → …) instead of grouping all calls first. */
+export type ToolSegment =
+    | { kind: "prose"; text: string }
+    | { kind: "call"; call: ToolCall };
+
 export interface ParsedToolCalls {
     calls: ToolCall[];
-    /** The reply text with all tool-call spans removed. */
+    /** The reply text with all tool-call spans removed (all prose concatenated). */
     prose: string;
     /** True if the last call is still streaming (open seen, no close yet). */
     pending: boolean;
+    /** Prose + calls in original order, for in-order rendering. */
+    segments: ToolSegment[];
 }
 
 /** Best-effort name sniff from a partial JSON body, so a still-streaming call
@@ -155,7 +164,11 @@ function stripName(obj: Record<string, unknown>): Record<string, unknown> {
 
 export function parseToolCalls(response: string): ParsedToolCalls {
     if (!response || !response.includes(TOOL_CALL_OPEN_PREFIX)) {
-        return { calls: [], prose: response ?? "", pending: false };
+        const text = response ?? "";
+        return {
+            calls: [], prose: text, pending: false,
+            segments: text.trim() ? [{ kind: "prose", text }] : [],
+        };
     }
 
     // Pull out any executed-tool result spans first so they never leak into the
@@ -173,20 +186,34 @@ export function parseToolCalls(response: string): ParsedToolCalls {
     );
 
     const calls: ToolCall[] = [];
+    const segments: ToolSegment[] = [];
     let prose = "";
     let pending = false;
     let cursor = 0;
+
+    // Prose accumulates into one string (back-compat) AND becomes an ordered
+    // segment (skipping whitespace-only gaps); a call pushes to both `calls`
+    // and `segments`. Segments hold the SAME call object refs, so the result
+    // reattachment below (which mutates `call.result`) shows through.
+    const addProse = (text: string) => {
+        prose += text;
+        if (text.trim()) segments.push({ kind: "prose", text: text.trim() });
+    };
+    const addCall = (call: ToolCall) => {
+        calls.push(call);
+        segments.push({ kind: "call", call });
+    };
 
     for (;;) {
         const open = cleaned.indexOf(TOOL_CALL_OPEN_PREFIX, cursor);
         if (open < 0) {
             // No more calls — everything left is prose.
-            prose += cleaned.slice(cursor);
+            addProse(cleaned.slice(cursor));
             break;
         }
 
         // Text before this call is prose.
-        prose += cleaned.slice(cursor, open);
+        addProse(cleaned.slice(cursor, open));
 
         // Skip the opening tag, tolerating a missing `>` (e.g. `<tool_call\n{…`).
         let innerStart = open + TOOL_CALL_OPEN_PREFIX.length;
@@ -199,7 +226,7 @@ export function parseToolCalls(response: string): ParsedToolCalls {
             // pulsing forever.
             const end = matchJsonEnd(cleaned, innerStart);
             if (end >= 0) {
-                calls.push(toCall(cleaned.slice(innerStart, end), false));
+                addCall(toCall(cleaned.slice(innerStart, end), false));
                 cursor = end;
                 // Swallow stray closing braces / whitespace the model tacked on.
                 while (cursor < cleaned.length && (cleaned[cursor] === "}" || /\s/.test(cleaned[cursor]))) {
@@ -208,12 +235,12 @@ export function parseToolCalls(response: string): ParsedToolCalls {
                 continue;
             }
             // Genuinely mid-JSON — still streaming this call in.
-            calls.push(toCall(cleaned.slice(innerStart), true));
+            addCall(toCall(cleaned.slice(innerStart), true));
             pending = true;
             break; // nothing usable after an unterminated call
         }
 
-        calls.push(toCall(cleaned.slice(innerStart, close), false));
+        addCall(toCall(cleaned.slice(innerStart, close), false));
         cursor = close + TOOL_CALL_CLOSE.length;
     }
 
@@ -234,5 +261,5 @@ export function parseToolCalls(response: string): ParsedToolCalls {
         if (target) target.result = res.text;
     }
 
-    return { calls, prose: prose.trim(), pending };
+    return { calls, prose: prose.trim(), pending, segments };
 }

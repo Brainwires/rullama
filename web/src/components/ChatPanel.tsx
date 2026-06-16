@@ -138,9 +138,16 @@ function ModelBubble({ content, canSpeak, streaming }: { content: string; canSpe
     // Split tool-call blocks out of the response so they render as structured
     // blocks; the leftover prose goes through markdown as before.
     const tools = useMemo(() => parseToolCalls(parsed.response), [parsed.response]);
-    const html   = useMemo(
-        () => tools.prose ? renderMarkdown(tools.prose) : "",
-        [tools.prose],
+    // Render prose + calls in their original emission order so a multi-step
+    // chain reads call → result → reasoning → next call → result → answer,
+    // instead of all calls grouped above all prose. Prose markdown is rendered
+    // per segment; memoized on `tools` (stable unless the response changes).
+    const items = useMemo(
+        () => tools.segments.map((seg) =>
+            seg.kind === "prose"
+                ? { kind: "prose" as const, html: renderMarkdown(seg.text) }
+                : seg),
+        [tools],
     );
     // Truly-empty (just-started streaming) only when there's no thinking,
     // no tool call, and no prose yet — that's when the caret shows.
@@ -155,12 +162,14 @@ function ModelBubble({ content, canSpeak, streaming }: { content: string; canSpe
                     isComplete={parsed.isComplete}
                 />
             )}
-            {tools.calls.map((c, i) => <ToolCallBlock key={i} call={c} streaming={streaming} />)}
-            {tools.prose ? (
-                <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />
-            ) : isEmpty ? (
+            {items.map((it, i) =>
+                it.kind === "call"
+                    ? <ToolCallBlock key={i} call={it.call} streaming={streaming} />
+                    : <div key={i} className="markdown" dangerouslySetInnerHTML={{ __html: it.html }} />,
+            )}
+            {isEmpty && (
                 <span className="inline-block animate-pulse text-muted-foreground">▍</span>
-            ) : null}
+            )}
             {canSpeak && tools.prose && parsed.isComplete !== false && <SpeakButton text={tools.prose} />}
         </div>
     );
