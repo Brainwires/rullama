@@ -27,7 +27,7 @@ import { saveInflightImage, saveInflightAudio, readInflightImages, readInflightA
 import {
     THINK_TOKEN, INFLIGHT_KEY,
     MIN_SNAPSHOT_TOKENS, MAX_SNAPSHOT_BYTES, LRU_MAX_SNAPSHOTS,
-    TIMESTAMP_SYSTEM_NOTE, withTurnTimestamp,
+    TIMESTAMP_SYSTEM_NOTE, FORMATTING_SYSTEM_NOTE, withTurnTimestamp,
     type InflightGen, stepWithTimeout, suggestTitle,
 } from "@/lib/app-helpers";
 
@@ -802,6 +802,8 @@ export function useChatEngine(opts: UseChatEngineParams) {
         baseSystem = baseSystem
             ? `${baseSystem}\n\n${TIMESTAMP_SYSTEM_NOTE}`
             : TIMESTAMP_SYSTEM_NOTE;
+        // Keep the model from LaTeX-ifying plain values (the "2.X µg/m³" garble).
+        baseSystem = `${baseSystem}\n\n${FORMATTING_SYSTEM_NOTE}`;
 
         const sysContent = thinking
             ? `${THINK_TOKEN}\n${baseSystem}`

@@ -73,6 +73,16 @@ export const TIMESTAMP_SYSTEM_NOTE =
     "brackets like [2026-01-15 14:02]. Treat the most recent timestamp as the " +
     "current date and time.";
 
+/** Static formatting note: keep plain numbers/units OUT of LaTeX. Small models
+ *  otherwise wrap measurements like "2.2 µg/m³" in $…$ math (and sometimes
+ *  garble the digits, e.g. "2.X"); KaTeX then renders that verbatim. Reserve
+ *  math mode for genuine math. Constant → stays in the cached prompt front. */
+export const FORMATTING_SYSTEM_NOTE =
+    "Write ordinary numbers, units, and measurements as plain text — e.g. " +
+    "\"2.2 µg/m³\", \"66°F\", \"30 seconds\". Use $...$ LaTeX only for genuine " +
+    "mathematical expressions (equations, fractions, exponents), never for a " +
+    "lone value with its unit.";
+
 /** Format an epoch-ms instant as a stable local `YYYY-MM-DD HH:MM`. Pure
  *  function of `ms` (no `Date.now()`), so a given message always renders
  *  the same string — the property KV-cache reuse depends on. */
