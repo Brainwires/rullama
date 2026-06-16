@@ -1340,65 +1340,77 @@ export function useChatEngine(opts: UseChatEngineParams) {
 
             await streamTurn(maxTokens);
 
-            // ─── Tool execution + answer continuation ───────────────────────
-            // Run EVERY executable <tool_call> the model emitted this turn — so
-            // "what's the weather and air quality?" (two calls) both fetch — and
-            // splice each result back as a <tool_response> block, then keep
-            // generating so the model answers from all of them. The KV cache is
-            // already positioned right after the last tool call (streamTurn
+            // ─── Agentic tool loop ──────────────────────────────────────────
+            // Each round: run EVERY executable <tool_call> the model just
+            // emitted (so "weather and air quality" fires both at once), feed
+            // the results back, and let the model either answer OR call MORE
+            // tools — then repeat. That's the true multi-STEP loop: call one,
+            // see its result, decide to call another, all inside this single
+            // user turn. It exits the moment a continuation produces no new
+            // executable call (the model's final answer), and is bounded by
+            // MAX_TOOL_ROUNDS as a runaway guard. The KV cache is already
+            // positioned right after the last tool call each round (streamTurn
             // broke on EOS without feeding it), so we feed the response tokens
             // and continue — no reset, no re-prefill.
-            if (toolMode && !cancelRef.current) {
+            //
+            // Cross-round correctness rests on `!c.result`: calls executed in a
+            // prior round already carry their result (parseToolCalls re-attaches
+            // every <tool_response> by name on each parse), so only the freshly
+            // emitted calls are picked up here.
+            const MAX_TOOL_ROUNDS = 5;
+            for (let round = 0; toolMode && !cancelRef.current && round < MAX_TOOL_ROUNDS; round++) {
                 const { calls } = parseToolCalls(displayHistory[displayHistory.length - 1].content);
                 const execCalls = calls.filter(
                     (c): c is typeof c & { arguments: Record<string, unknown> } =>
                         !c.pending && !c.result && isExecutableTool(c.name)
                         && !!c.arguments && typeof c.arguments === "object",
                 );
-                if (execCalls.length > 0) {
-                    setStatusLine(`running ${execCalls.length} tool${execCalls.length > 1 ? "s" : ""}…`);
+                if (execCalls.length === 0) break;   // model answered — no new tools
 
-                    // Resolve GPS once (shared by all calls) — only if at least
-                    // one location-aware call gave no place (or said "here").
-                    // Never prompt when every call already named a city.
-                    const anyNeedsGeo = useGps && execCalls.some((c) => {
-                        if (!toolUsesLocation(c.name)) return false;
-                        const loc = typeof c.arguments.location === "string" ? c.arguments.location.trim() : "";
-                        return loc === "" || /\b(current|my location|here|nearby)\b/i.test(loc);
-                    });
-                    const geo = anyNeedsGeo ? await resolveGeo() : null;
+                setStatusLine(`running ${execCalls.length} tool${execCalls.length > 1 ? "s" : ""}…`);
 
-                    // Execute all calls concurrently; executeTool never rejects
-                    // (failures come back as ok:false with an explanatory
-                    // summary), so order is preserved for result→call matching.
-                    const results = await Promise.all(
-                        execCalls.map((c) =>
-                            executeTool(c.name, c.arguments, { weatherApiKey, units: weatherUnits, useGps }, geo)),
-                    );
+                // Resolve GPS once (shared by all calls) — only if at least one
+                // location-aware call gave no place (or said "here"). Never
+                // prompt when every call already named a city. Cached across
+                // rounds by resolveGeo, so a later round won't re-prompt.
+                const anyNeedsGeo = useGps && execCalls.some((c) => {
+                    if (!toolUsesLocation(c.name)) return false;
+                    const loc = typeof c.arguments.location === "string" ? c.arguments.location.trim() : "";
+                    return loc === "" || /\b(current|my location|here|nearby)\b/i.test(loc);
+                });
+                const geo = anyNeedsGeo ? await resolveGeo() : null;
 
-                    // One named <tool_response for="..."> block per call, in
-                    // emission order; the renderer matches each to its call.
-                    let respBlock = "\n";
-                    execCalls.forEach((c, i) => {
-                        respBlock += toolResponseBlock(c.name, results[i].summary) + "\n";
-                    });
-                    displayHistory[displayHistory.length - 1].content += respBlock;
-                    setMessages([...displayHistory]);
-                    if (convId && modelMsgId) {
-                        try { await client.msgAppend(convId, modelMsgId, respBlock); } catch { /* */ }
-                    }
-                    if (!cancelRef.current) {
-                        // Feed the response text into the model (continuing the
-                        // KV cache), then stream the final answer.
-                        const respIds = await client.encode(respBlock);
-                        for (const id of respIds) {
-                            if (cancelRef.current) break;
-                            next = await client.step(id);
-                        }
-                        setStatusLine(undefined);
-                        await streamTurn(maxTokens);
-                    }
+                // Execute all calls concurrently; executeTool never rejects
+                // (failures come back as ok:false with an explanatory summary),
+                // so order is preserved for result→call matching.
+                const results = await Promise.all(
+                    execCalls.map((c) =>
+                        executeTool(c.name, c.arguments, { weatherApiKey, units: weatherUnits, useGps }, geo)),
+                );
+
+                // One named <tool_response for="..."> block per call, in
+                // emission order; the renderer matches each to its call.
+                let respBlock = "\n";
+                execCalls.forEach((c, i) => {
+                    respBlock += toolResponseBlock(c.name, results[i].summary) + "\n";
+                });
+                displayHistory[displayHistory.length - 1].content += respBlock;
+                setMessages([...displayHistory]);
+                if (convId && modelMsgId) {
+                    try { await client.msgAppend(convId, modelMsgId, respBlock); } catch { /* */ }
                 }
+                if (cancelRef.current) break;
+
+                // Feed the response text into the model (continuing the KV
+                // cache), then stream the continuation — which may answer or
+                // emit the next round's tool calls.
+                const respIds = await client.encode(respBlock);
+                for (const id of respIds) {
+                    if (cancelRef.current) break;
+                    next = await client.step(id);
+                }
+                setStatusLine(undefined);
+                await streamTurn(maxTokens);
             }
 
             await flushPending();
