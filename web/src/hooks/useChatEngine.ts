@@ -5,7 +5,7 @@ import { type ModelStatus } from "@/components/ModelLoader";
 import { beacon } from "@/lib/api";
 import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
-import { TOOL_SCHEMA_PROMPT, TOOL_RESPONSE_OPEN, TOOL_RESPONSE_CLOSE } from "@/lib/toolFormat";
+import { TOOL_SCHEMA_PROMPT, toolResponseBlock } from "@/lib/toolFormat";
 import { parseToolCalls } from "@/lib/parseToolCalls";
 import {
     isExecutableTool,
@@ -1341,38 +1341,47 @@ export function useChatEngine(opts: UseChatEngineParams) {
             await streamTurn(maxTokens);
 
             // ─── Tool execution + answer continuation ───────────────────────
-            // If the model emitted an EXECUTABLE <tool_call> (e.g. get_weather),
-            // run it and splice the result back as a <tool_response> block, then
-            // keep generating so the model answers in natural language. The KV
-            // cache is already positioned right after the tool call (streamTurn
-            // broke on EOS without feeding it), so we just feed the response
-            // tokens and continue — no reset, no re-prefill.
+            // Run EVERY executable <tool_call> the model emitted this turn — so
+            // "what's the weather and air quality?" (two calls) both fetch — and
+            // splice each result back as a <tool_response> block, then keep
+            // generating so the model answers from all of them. The KV cache is
+            // already positioned right after the last tool call (streamTurn
+            // broke on EOS without feeding it), so we feed the response tokens
+            // and continue — no reset, no re-prefill.
             if (toolMode && !cancelRef.current) {
                 const { calls } = parseToolCalls(displayHistory[displayHistory.length - 1].content);
-                const exec = calls.find(
-                    (c) => !c.pending && !c.result && isExecutableTool(c.name)
-                        && c.arguments && typeof c.arguments === "object",
+                const execCalls = calls.filter(
+                    (c): c is typeof c & { arguments: Record<string, unknown> } =>
+                        !c.pending && !c.result && isExecutableTool(c.name)
+                        && !!c.arguments && typeof c.arguments === "object",
                 );
-                if (exec) {
-                    setStatusLine(`running ${exec.name}…`);
-                    let geo: string | null = null;
-                    // Only consult GPS when the model gave no place (or asked
-                    // for "here"/"my location") — never prompt when it already
-                    // named a city.
-                    const locArg = typeof (exec.arguments as Record<string, unknown>).location === "string"
-                        ? String((exec.arguments as Record<string, unknown>).location).trim()
-                        : "";
-                    const needsGeo = locArg === "" || /\b(current|my location|here|nearby)\b/i.test(locArg);
-                    if (useGps && toolUsesLocation(exec.name) && needsGeo) {
-                        geo = await resolveGeo();
-                    }
-                    const result = await executeTool(
-                        exec.name,
-                        exec.arguments as Record<string, unknown>,
-                        { weatherApiKey, units: weatherUnits, useGps },
-                        geo,
+                if (execCalls.length > 0) {
+                    setStatusLine(`running ${execCalls.length} tool${execCalls.length > 1 ? "s" : ""}…`);
+
+                    // Resolve GPS once (shared by all calls) — only if at least
+                    // one location-aware call gave no place (or said "here").
+                    // Never prompt when every call already named a city.
+                    const anyNeedsGeo = useGps && execCalls.some((c) => {
+                        if (!toolUsesLocation(c.name)) return false;
+                        const loc = typeof c.arguments.location === "string" ? c.arguments.location.trim() : "";
+                        return loc === "" || /\b(current|my location|here|nearby)\b/i.test(loc);
+                    });
+                    const geo = anyNeedsGeo ? await resolveGeo() : null;
+
+                    // Execute all calls concurrently; executeTool never rejects
+                    // (failures come back as ok:false with an explanatory
+                    // summary), so order is preserved for result→call matching.
+                    const results = await Promise.all(
+                        execCalls.map((c) =>
+                            executeTool(c.name, c.arguments, { weatherApiKey, units: weatherUnits, useGps }, geo)),
                     );
-                    const respBlock = `\n${TOOL_RESPONSE_OPEN}${result.summary}${TOOL_RESPONSE_CLOSE}\n`;
+
+                    // One named <tool_response for="..."> block per call, in
+                    // emission order; the renderer matches each to its call.
+                    let respBlock = "\n";
+                    execCalls.forEach((c, i) => {
+                        respBlock += toolResponseBlock(c.name, results[i].summary) + "\n";
+                    });
                     displayHistory[displayHistory.length - 1].content += respBlock;
                     setMessages([...displayHistory]);
                     if (convId && modelMsgId) {

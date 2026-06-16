@@ -110,3 +110,38 @@ describe("parseToolCalls — regression: actual base-model eval outputs", () => 
         expect(r.calls[0].arguments).toEqual(args);
     });
 });
+
+describe("parseToolCalls — executed-tool results (multi-call chaining)", () => {
+    it("strips <tool_response> from prose and attaches it to the call by name", () => {
+        const r = parseToolCalls(
+            wrap('{"name":"get_weather","arguments":{"location":"Miami"}}') +
+            '<tool_response for="get_weather">Sunny, 30°C</tool_response>' +
+            "It is sunny in Miami.",
+        );
+        expect(r.calls).toHaveLength(1);
+        expect(r.calls[0].result).toBe("Sunny, 30°C");
+        expect(r.prose).toBe("It is sunny in Miami.");
+        expect(r.prose).not.toContain("tool_response");
+    });
+
+    it("matches each result to the right call even when order differs", () => {
+        const r = parseToolCalls(
+            wrap('{"name":"get_weather","arguments":{"location":"Miami"}}') +
+            wrap('{"name":"get_air_quality","arguments":{"location":"Miami"}}') +
+            // results emitted in the OPPOSITE order — name match must still win
+            '<tool_response for="get_air_quality">AQI 42 (Good)</tool_response>' +
+            '<tool_response for="get_weather">Sunny, 30°C</tool_response>',
+        );
+        expect(r.calls).toHaveLength(2);
+        expect(r.calls[0]).toMatchObject({ name: "get_weather", result: "Sunny, 30°C" });
+        expect(r.calls[1]).toMatchObject({ name: "get_air_quality", result: "AQI 42 (Good)" });
+    });
+
+    it("falls back to positional order for un-named responses", () => {
+        const r = parseToolCalls(
+            wrap('{"name":"get_weather","arguments":{"location":"Miami"}}') +
+            "<tool_response>Sunny, 30°C</tool_response>",
+        );
+        expect(r.calls[0].result).toBe("Sunny, 30°C");
+    });
+});

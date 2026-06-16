@@ -10,8 +10,6 @@
 import {
     TOOL_CALL_OPEN_PREFIX,
     TOOL_CALL_CLOSE,
-    TOOL_RESPONSE_OPEN,
-    TOOL_RESPONSE_CLOSE,
     TOOL_PARAMS,
     type ToolCall,
 } from "@/lib/toolFormat";
@@ -161,13 +159,15 @@ export function parseToolCalls(response: string): ParsedToolCalls {
     }
 
     // Pull out any executed-tool result spans first so they never leak into the
-    // visible prose. They're reattached to calls (by order) after parsing. The
-    // markers contain no regex metacharacters, so no escaping is needed.
-    const results: string[] = [];
+    // visible prose. Each carries an optional `for="<tool_name>"` (see
+    // toolResponseBlock) so we can match it to the right call even when several
+    // tools ran; reattached after parsing. The tags are literal (no regex
+    // metacharacters to escape).
+    const results: { name: string | null; text: string }[] = [];
     const cleaned = response.replace(
-        new RegExp(`${TOOL_RESPONSE_OPEN}([\\s\\S]*?)${TOOL_RESPONSE_CLOSE}`, "g"),
-        (_m, inner: string) => {
-            results.push(inner.trim());
+        /<tool_response(?:\s+for="([^"]*)")?>([\s\S]*?)<\/tool_response>/g,
+        (_m, name: string | undefined, inner: string) => {
+            results.push({ name: name ?? null, text: inner.trim() });
             return "";
         },
     );
@@ -217,10 +217,22 @@ export function parseToolCalls(response: string): ParsedToolCalls {
         cursor = close + TOOL_CALL_CLOSE.length;
     }
 
-    // Reattach executed results to their calls, in emission order.
-    results.forEach((r, i) => {
-        if (calls[i]) calls[i].result = r;
-    });
+    // Reattach executed results to their calls: prefer a name match (robust
+    // when tools ran out of order or non-executable calls are interspersed),
+    // falling back to the next still-unfilled call in emission order.
+    let posIdx = 0;
+    for (const res of results) {
+        let target: ToolCall | undefined;
+        if (res.name) {
+            const want = res.name.toLowerCase();
+            target = calls.find((c) => c.result === undefined && c.name.toLowerCase() === want);
+        }
+        if (!target) {
+            while (posIdx < calls.length && calls[posIdx].result !== undefined) posIdx++;
+            target = calls[posIdx];
+        }
+        if (target) target.result = res.text;
+    }
 
     return { calls, prose: prose.trim(), pending };
 }

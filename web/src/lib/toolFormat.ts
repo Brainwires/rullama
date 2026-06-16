@@ -26,6 +26,15 @@ export const TOOL_CALL_CLOSE = "</tool_call>";
 export const TOOL_RESPONSE_OPEN = "<tool_response>";
 export const TOOL_RESPONSE_CLOSE = "</tool_response>";
 
+/** Build a tool-response block for splicing back into the model turn. The
+ *  tool name is attribute-encoded so the renderer can match the result to the
+ *  right call even when SEVERAL tools run in one turn (or a non-executable
+ *  call is interspersed) — order alone isn't enough then. Tool names are
+ *  `[a-z_]`, so there's nothing to escape. */
+export function toolResponseBlock(name: string, summary: string): string {
+    return `<tool_response for="${name}">${summary}${TOOL_RESPONSE_CLOSE}`;
+}
+
 // The parser matches the opening tag LENIENTLY by this prefix: small models
 // sometimes drop the closing `>` of `<tool_call>` (a tokenization quirk —
 // observed emitting `<tool_call\n{…`), so we key on `<tool_call` and skip an
@@ -72,9 +81,9 @@ export const TOOL_SCHEMA_PROMPT = `You have access to these tools:
 
 For weather: get_weather is current conditions; get_weather_forecast covers the next "days" days (1-10); get_air_quality is pollution/AQI; get_astronomy is sunrise, sunset, and moon. location is a city name, "lat,lon" coordinates, or omitted to mean the user's current location.
 
-When the user's request clearly matches one of these tools, reply with a single tool call in exactly this format:
+When the user's request matches one or more of these tools, reply with a tool call for each, in exactly this format:
 <tool_call>{"name": "<tool_name>", "arguments": { ... }}</tool_call>
-Use the exact tool name and argument keys, and copy the user's own words into the values — do not convert units, do math, or round (e.g. "30 seconds" stays "30 seconds", not minutes).
+If several tools apply (e.g. "weather and air quality"), emit one <tool_call> block per tool, back to back. Use the exact tool name and argument keys, and copy the user's own words into the values — do not convert units, do math, or round (e.g. "30 seconds" stays "30 seconds", not minutes).
 
 If no tool fits the request, just answer the user normally. Not every message is a tool call — reason and respond as usual when none applies.`;
 
