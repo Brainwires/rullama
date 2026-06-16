@@ -25,6 +25,21 @@ export const TOOL_CALL_CLOSE = "</tool_call>";
 // data emits and what callers should produce.
 export const TOOL_CALL_OPEN_PREFIX = "<tool_call";
 
+// Ordered parameter names per tool. Used to map POSITIONAL pythonic-call
+// arguments (e.g. `set_timer(7)` or `set_reminder("call grandma", "tonight")`)
+// onto named keys, since small models given a schema emit BOTH clean JSON and
+// pythonic call syntax (BFCL research confirms both formats are standard and a
+// tolerant parser accepting both is the right call). Keep in sync with
+// tool-schema.txt / TOOL_SCHEMA_PROMPT below.
+export const TOOL_PARAMS: Record<string, string[]> = {
+    set_timer: ["duration_minutes"],
+    get_weather: ["location"],
+    send_email: ["to", "subject"],
+    add_calendar_event: ["title", "date"],
+    play_music: ["query"],
+    set_reminder: ["text", "time"],
+};
+
 // The tool schema, injected as a system preamble so the model copies exact
 // tool names + argument keys instead of memorizing them. MUST stay byte-
 // identical to crates/rullama-finetune/examples/data/tool-schema.txt (the LoRA

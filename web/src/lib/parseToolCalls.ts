@@ -7,7 +7,7 @@
 //
 // A reply with no `<tool_call>` marker passes straight through (calls === []).
 
-import { TOOL_CALL_OPEN_PREFIX, TOOL_CALL_CLOSE, type ToolCall } from "@/lib/toolFormat";
+import { TOOL_CALL_OPEN_PREFIX, TOOL_CALL_CLOSE, TOOL_PARAMS, type ToolCall } from "@/lib/toolFormat";
 
 export interface ParsedToolCalls {
     calls: ToolCall[];
@@ -75,9 +75,71 @@ function toCall(inner: string, pending: boolean): ToolCall {
             stripName(obj);
         return { name: name || "tool", arguments: args, raw, pending };
     } catch {
-        // Not valid JSON (malformed, or still streaming) — keep it raw.
+        // Not JSON — small models often emit pythonic call syntax instead
+        // (e.g. `set_timer(7)` or `send_email(to="Priya", subject="…")`).
+        // Accept that too; both formats are standard per BFCL.
+        const py = parsePythonicCall(raw);
+        if (py) return { name: py.name, arguments: py.arguments, raw, pending };
+        // Genuinely malformed / still streaming — keep it raw.
         return { name: sniffName(raw), arguments: raw, raw, pending };
     }
+}
+
+/** Split a pythonic arg list on top-level commas, respecting quotes/brackets. */
+function splitArgs(s: string): string[] {
+    const out: string[] = [];
+    let depth = 0, inStr = false, esc = false, q = "", start = 0;
+    for (let i = 0; i < s.length; i++) {
+        const c = s[i];
+        if (inStr) {
+            if (esc) esc = false;
+            else if (c === "\\") esc = true;
+            else if (c === q) inStr = false;
+            continue;
+        }
+        if (c === '"' || c === "'") { inStr = true; q = c; }
+        else if (c === "(" || c === "[" || c === "{") depth++;
+        else if (c === ")" || c === "]" || c === "}") depth--;
+        else if (c === "," && depth === 0) { out.push(s.slice(start, i)); start = i + 1; }
+    }
+    out.push(s.slice(start));
+    return out.map((x) => x.trim()).filter((x) => x.length > 0);
+}
+
+/** Coerce a pythonic scalar literal to a JS value (quotes/number/bool/null). */
+function parseScalar(v: string): unknown {
+    const t = v.trim();
+    if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
+        return t.slice(1, -1);
+    }
+    if (t === "true" || t === "True") return true;
+    if (t === "false" || t === "False") return false;
+    if (t === "null" || t === "None") return null;
+    if (t !== "" && !Number.isNaN(Number(t))) return Number(t);
+    return t; // bareword → string
+}
+
+/** Parse `name(args)` pythonic call syntax into `{ name, arguments }`, mapping
+ *  positional args to schema param names. Returns null if it isn't a call. */
+function parsePythonicCall(raw: string): { name: string; arguments: Record<string, unknown> } | null {
+    const m = raw.match(/^\s*([A-Za-z_]\w*)\s*\(([\s\S]*)\)\s*$/);
+    if (!m) return null;
+    const name = m[1];
+    const argstr = m[2].trim();
+    const args: Record<string, unknown> = {};
+    if (argstr.length > 0) {
+        const order = TOOL_PARAMS[name] ?? [];
+        splitArgs(argstr).forEach((part, idx) => {
+            const eq = part.indexOf("=");
+            const isKwarg = eq > 0 && /^[A-Za-z_]\w*$/.test(part.slice(0, eq).trim());
+            if (isKwarg) {
+                args[part.slice(0, eq).trim()] = parseScalar(part.slice(eq + 1));
+            } else {
+                args[order[idx] ?? `arg${idx}`] = parseScalar(part);
+            }
+        });
+    }
+    return { name, arguments: args };
 }
 
 function stripName(obj: Record<string, unknown>): Record<string, unknown> {
