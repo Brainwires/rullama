@@ -34,24 +34,23 @@ describe("buildSysContent", () => {
                 const warm = buildSysContent({ systemPrompt: "You are X.", thinking, toolMode });
                 const plainTurn = buildSysContent({
                     systemPrompt: "You are X.", thinking, toolMode,
-                    ragPreamble: "", gpsLine: "",
+                    gpsLine: "",
                 });
                 expect(warm).toBe(plainTurn);
             }
         }
     });
 
-    it("appends rag + gps AFTER the static core (so the prefix never shifts)", () => {
+    it("appends the gps tail AFTER the static core (so the prefix never shifts)", () => {
         const out = buildSysContent({
             systemPrompt: "SYS", thinking: false, toolMode: true,
-            ragPreamble: "RAGTEXT", gpsLine: "GPSTEXT",
+            gpsLine: "GPSTEXT",
         });
-        // Static core leads (schema → sys prompt → notes); dynamic tail last.
+        // Static core leads (schema → sys prompt → notes); dynamic gps tail last.
         expect(out.startsWith(`${TOOL_SCHEMA_PROMPT}\n\n`)).toBe(true);
-        expect(out.indexOf("SYS")).toBeLessThan(out.indexOf("RAGTEXT"));
-        expect(out.indexOf("RAGTEXT")).toBeLessThan(out.indexOf("GPSTEXT"));
-        // The static core (with no rag/gps) is a strict prefix of this — the
-        // exact property KV reuse relies on.
+        expect(out.indexOf("SYS")).toBeLessThan(out.indexOf("GPSTEXT"));
+        // The static core (no gps) is a strict prefix of this — the exact
+        // property KV reuse relies on.
         const core = buildSysContent({ systemPrompt: "SYS", thinking: false, toolMode: true });
         expect(out.startsWith(core)).toBe(true);
     });

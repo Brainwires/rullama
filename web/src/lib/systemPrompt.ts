@@ -15,9 +15,6 @@ export interface SysContentParts {
     systemPrompt: string;
     thinking: boolean;
     toolMode: boolean;
-    /** Per-turn RAG preamble (already assembled). Omit/empty for the warm
-     *  path and non-RAG turns — RAG content is dynamic per query. */
-    ragPreamble?: string;
     /** Per-turn GPS location line INCLUDING its trailing separator. Omit
      *  for the warm path; only injected on tool-mode turns with GPS. */
     gpsLine?: string;
@@ -28,13 +25,14 @@ export interface SysContentParts {
  * comes first and the per-turn DYNAMIC content is appended at the end:
  *
  *   [think] tool schema → system prompt → notes   ← static (this is the warm)
- *           → RAG preamble → GPS line             ← dynamic, appended
+ *           → GPS line                            ← dynamic, appended
  *
  * This ordering is load-bearing for KV reuse: the pre-warm prefills only
- * the static core, so a turn that adds RAG/GPS still shares that whole core
- * as a prefix (and only re-feeds the appended tail) instead of shifting it
- * and forcing a full re-prefill. With no RAG/GPS the result is byte-
- * identical to the warm.
+ * the static core, so a turn that adds GPS still shares that whole core as a
+ * prefix (and only re-feeds the appended tail) instead of shifting it and
+ * forcing a full re-prefill. With no GPS the result is byte-identical to the
+ * warm. (RAG used to be a dynamic tail here too; it's now the on-demand
+ * `search_knowledge` tool, so retrieval never touches the system prefix.)
  */
 export function buildSysContent(p: SysContentParts): string {
     // Static core — exactly what the warm prefills.
@@ -45,8 +43,6 @@ export function buildSysContent(p: SysContentParts): string {
     base = base ? `${base}\n\n${TIMESTAMP_SYSTEM_NOTE}` : TIMESTAMP_SYSTEM_NOTE;
     base = `${base}\n\n${FORMATTING_SYSTEM_NOTE}`;
     // Dynamic tail — appended so it never shifts the static prefix.
-    const rag = p.ragPreamble?.trim();
-    if (rag) base = `${base}\n\n${rag}`;
     const gps = p.gpsLine?.trim();
     if (gps) base = `${base}\n\n${gps}`;
     return p.thinking ? `${THINK_TOKEN}\n${base}` : base;

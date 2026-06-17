@@ -16,7 +16,6 @@ import {
     executeTool,
     type Units as ToolUnits,
 } from "@/lib/tools";
-import { searchKnowledge, buildRagPreamble } from "@/lib/embedding";
 import { preprocessImage } from "@/lib/image_preprocess";
 import { decodeAudioFile } from "@/lib/audio_decode";
 import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
@@ -170,10 +169,6 @@ export function useChatEngine(opts: UseChatEngineParams) {
     const [activeConvId, setActiveConvId]   = useState<string | null>(() => {
         try { return sessionStorage.getItem("rullama:activeConvId"); } catch { return null; }
     });
-    // Per-conversation RAG toggle (Knowledge-base grounding). Loaded from
-    // the DB when the active conversation changes.
-    const [ragEnabled, setRagEnabled]       = useState<boolean>(false);
-
     // Mirror the active conversation into sessionStorage on every change so a
     // reload reopens it. All the existing `setActiveConvId` call sites stay
     // unchanged — this one effect keeps the store in sync.
@@ -229,19 +224,6 @@ export function useChatEngine(opts: UseChatEngineParams) {
     // live KV cache takes over after the first send). Correctness never
     // depends on this; kvReusePlan's token check is the real gate.
     const restoreAttemptedRef = useRef<Set<string>>(new Set());
-
-    useEffect(() => {
-        let alive = true;
-        if (!activeConvId) { setRagEnabled(false); return; }
-        getClient().embeddings.getRag(activeConvId)
-            .then((r) => { if (alive) setRagEnabled(!!r.enabled); })
-            .catch(() => { if (alive) setRagEnabled(false); });
-        return () => { alive = false; };
-    }, [activeConvId]);
-    const toggleRag = useCallback((on: boolean) => {
-        setRagEnabled(on);
-        if (activeConvId) void getClient().embeddings.setRag(activeConvId, on).catch(() => {});
-    }, [activeConvId]);
 
     // Global Escape → stop generation. Mirrors the toolbar Stop button.
     // Attached to window so it fires regardless of focus (input, sidebar
@@ -1658,19 +1640,12 @@ export function useChatEngine(opts: UseChatEngineParams) {
             }
         }
 
-        // Per-turn dynamic system add-ons (resolved at ENQUEUE time so the job
-        // is self-contained and runs with the settings in effect now). The
-        // static part stays byte-identical to the pre-warmed system block so
-        // KV reuse keeps the cached system prefix. RAG + GPS are per-turn and
-        // not part of the warm — turns that use them re-prefill (fine; that
-        // content changes every turn anyway).
-        let ragPreamble = "";
-        if (ragEnabled && convId) {
-            try {
-                const hits = await searchKnowledge(text, { k: 5, conversationId: convId });
-                ragPreamble = buildRagPreamble(hits) || "";
-            } catch { /* embedder not loaded / search failed — proceed without RAG */ }
-        }
+        // Per-turn dynamic system add-on (resolved at ENQUEUE time so the job is
+        // self-contained and runs with the settings in effect now). The static
+        // part stays byte-identical to the pre-warmed system block so KV reuse
+        // keeps the cached system prefix. GPS is per-turn and not part of the
+        // warm. (RAG is no longer injected here — it's the on-demand
+        // `search_knowledge` tool now, so retrieval never bloats the prefix.)
         let gpsLine = "";
         if (toolMode && useGps) {
             try {
@@ -1684,7 +1659,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 }
             } catch { /* geolocation denied / unavailable — proceed without it */ }
         }
-        const sysContent = buildSysContent({ systemPrompt, thinking, toolMode, ragPreamble, gpsLine });
+        const sysContent = buildSysContent({ systemPrompt, thinking, toolMode, gpsLine });
 
         // Snapshot the prior turns NOW (for the in-memory fast path). If this
         // conversation already has a pending/running job, chain off the DB
@@ -1772,7 +1747,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
     }, [
         activeConvId, commitQueue, kickPump, lastLoadedDigest, loadedIsDiffusion,
         maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt,
-        ragEnabled, sampling, statusText, systemPrompt, thinking, toolMode,
+        sampling, statusText, systemPrompt, thinking, toolMode,
         useGps, weatherApiKey, weatherUnits, showToast,
     ]);
 
@@ -2058,7 +2033,6 @@ export function useChatEngine(opts: UseChatEngineParams) {
         pendingAudio,
         conversations, setConversations,
         activeConvId,
-        ragEnabled, toggleRag,
         inflightRef,
         refreshConversations,
         onSelectConversation,

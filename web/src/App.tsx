@@ -184,7 +184,7 @@ export function App() {
         messages, prompt, setPrompt, busy, statusLine, visionEncodeState,
         runningConvIds, queuedConvIds, activeConvIsGenerating, activeConvIsQueued,
         pendingImages, pendingAudio, conversations, setConversations, activeConvId,
-        ragEnabled, toggleRag, inflightRef,
+        inflightRef,
         onSelectConversation, onCreateConversation, onDeleteConversation,
         onAttachFiles, onRemoveImage, onCaptureAudio, onRemoveAudio, onAudioError,
         onSend, onStop, resetForUnload, warmSystemPrompt,
@@ -375,8 +375,6 @@ export function App() {
                 onToggleHistory={() => setHistoryOpen(!historyOpen)}
                 activeTitle={activeTitle}
                 activeAdapter={activeAdapter}
-                ragEnabled={ragEnabled}
-                onToggleRag={toggleRag}
             />
 
             {(modelStatus === "loading" || modelStatus === "preparing") && (
