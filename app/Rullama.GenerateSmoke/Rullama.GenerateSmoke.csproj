@@ -13,6 +13,9 @@
     <Compile Include="..\Rullama\Interop\RustModel.cs" Link="RustModel.cs" />
     <Compile Include="..\Rullama\Services\InferenceClient.cs" Link="InferenceClient.cs" />
     <Compile Include="..\Rullama\Services\ImagePreprocess.cs" Link="ImagePreprocess.cs" />
+    <Compile Include="..\Rullama\Services\ToolFormat.cs" Link="ToolFormat.cs" />
+    <Compile Include="..\Rullama\Services\ToolCalling.cs" Link="ToolCalling.cs" />
+    <Compile Include="..\Rullama\Services\ToolExecutors.cs" Link="ToolExecutors.cs" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="SkiaSharp" />

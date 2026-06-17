@@ -1,7 +1,9 @@
 using Rullama.Services;
 
-// Exercises the production path (InferenceClient: BuildPrompt → encode → stream).
-// Point RULLAMA_TEST_GGUF at a Gemma 4 GGUF (e.g. an Ollama e2b blob).
+// Fast smoke for the production InferenceClient path.
+//   RULLAMA_TEST_GGUF  – required, path to a Gemma 4 GGUF (e.g. an Ollama e2b blob)
+//   RULLAMA_TEST_VISION=1 – also load the vision tower and run an image test
+//                           (slower: keeps the towers resident).
 
 string? path = Environment.GetEnvironmentVariable("RULLAMA_TEST_GGUF");
 if (path is null)
@@ -9,34 +11,57 @@ if (path is null)
     Console.Error.WriteLine("Set RULLAMA_TEST_GGUF to a Gemma 4 GGUF path.");
     return 1;
 }
+bool visionMode = Environment.GetEnvironmentVariable("RULLAMA_TEST_VISION") == "1";
 
 using var engine = new InferenceClient();
-Console.WriteLine($"loading (full towers, ctx 2048)…");
-await engine.LoadAsync(path, maxContext: 2048, textOnly: false);
+Console.WriteLine($"loading ({(visionMode ? "full towers" : "text-only")}, ctx 1024)…");
+await engine.LoadAsync(path, maxContext: 1024, textOnly: !visionMode);
 Console.WriteLine($"ready · vocab {engine.VocabSize}\n--- reply ---");
 
 var history = new List<(string, string)> { ("user", "Name three primary colors.") };
-int n = await engine.SendAsync(history, maxNew: 64,
-    onPiece: piece => { Console.Write(piece); Console.Out.Flush(); },
-    ct: CancellationToken.None);
+int n = await engine.SendAsync(history, maxNew: 48,
+    onPiece: piece => { Console.Write(piece); Console.Out.Flush(); }, ct: CancellationToken.None);
 Console.WriteLine($"\n--- end ({n} tokens) ---");
 
-// Image splice test (only if the model has a vision tower): synthesize a blue
-// circle on white and ask the model to describe it.
-if (engine.HasVision)
+if (visionMode && engine.HasVision)
 {
     Console.WriteLine("\n[vision] synthesizing a blue circle and asking the model…");
-    byte[] png = MakeBlueCirclePng();
-    Rullama.Services.ProcessedImage img = Rullama.Services.ImagePreprocess.Process(png);
-    Console.WriteLine($"[vision] image {img.Width}x{img.Height}, pixels={img.Pixels.Length}");
+    ProcessedImage img = ImagePreprocess.Process(MakeBlueCirclePng());
     var imgHistory = new List<(string, string)>
     {
         ("user", "<|image><image|>What is in this image? Answer in one short sentence."),
     };
     Console.Write("--- vision reply ---\n");
     int vn = await engine.SendImageAsync(imgHistory, img.Pixels, img.Height, img.Width,
-        maxNew: 64, onPiece: p => { Console.Write(p); Console.Out.Flush(); }, ct: CancellationToken.None);
+        maxNew: 48, onPiece: p => { Console.Write(p); Console.Out.Flush(); }, ct: CancellationToken.None);
     Console.WriteLine($"\n--- end ({vn} tokens) ---");
+}
+
+// Tool-calling test (works text-only): weather via the agentic loop (real Open-Meteo).
+Console.WriteLine("\n[tools] asking for weather with the tool schema…");
+var toolHistory = new List<(string, string)>
+{
+    ("system", ToolFormat.ToolSchemaPrompt),
+    ("user", "What's the weather in Paris right now?"),
+};
+var tsb = new System.Text.StringBuilder();
+await engine.SendAsync(toolHistory, maxNew: 64, onPiece: p => tsb.Append(p), ct: CancellationToken.None);
+Console.WriteLine("round0: " + tsb.ToString().Replace("\n", " "));
+List<ToolCall> calls = ToolCalling.Parse(tsb.ToString());
+Console.WriteLine($"parsed {calls.Count} tool call(s)");
+if (calls.Count > 0)
+{
+    var exec = new ToolExecutors { UseFahrenheit = false, UseLocation = true };
+    foreach (ToolCall call in calls)
+    {
+        string result = await exec.ExecuteAsync(call);
+        Console.WriteLine($"  {call.Name}({string.Join(", ", call.Args)}) -> {result}");
+        tsb.Append(ToolFormat.ToolResponseBlock(call.Name, result));
+    }
+    Console.Write("--- final answer ---\n");
+    await engine.ContinueAsync(toolHistory, tsb.ToString(), maxNew: 64,
+        onPiece: p => { Console.Write(p); Console.Out.Flush(); }, ct: CancellationToken.None);
+    Console.WriteLine("\n--- end ---");
 }
 return 0;
 

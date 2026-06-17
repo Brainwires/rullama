@@ -123,8 +123,8 @@
                     <TextBlock Text="{Binding Content}" TextWrapping="Wrap"
                                IsVisible="{Binding IsUser}"
                                Foreground="{StaticResource Foreground}" FontSize="14" />
-                    <!-- model turns: markdown -->
-                    <md:MarkdownScrollViewer Markdown="{Binding Content}"
+                    <!-- model turns: markdown (tool markers cleaned) -->
+                    <md:MarkdownScrollViewer Markdown="{Binding DisplayContent}"
                                              IsVisible="{Binding !IsUser}" />
                   </StackPanel>
                 </Border>

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Media.Imaging;
@@ -244,26 +245,64 @@ public partial class ChatViewModel : ViewModelBase
 
         _cts = new CancellationTokenSource();
         IsBusy = true;
+        // Accumulate raw assistant text on the worker thread; mirror to the UI.
+        var sb = new StringBuilder();
+        void OnPiece(string piece)
+        {
+            sb.Append(piece);
+            string snap = sb.ToString();
+            Dispatcher.UIThread.Post(() => reply.Content = snap);
+        }
+        void Mirror()
+        {
+            string snap = sb.ToString();
+            Dispatcher.UIThread.Post(() => reply.Content = snap);
+        }
         try
         {
-            void OnPiece(string piece) => Dispatcher.UIThread.Post(() => reply.Content += piece);
+            uint maxNew = (uint)MaxTokens;
             if (image is { } img)
-                await _engine.SendImageAsync(history, img.Pixels, img.Height, img.Width,
-                    maxNew: (uint)MaxTokens, onPiece: OnPiece, ct: _cts.Token);
+                await _engine.SendImageAsync(history, img.Pixels, img.Height, img.Width, maxNew, OnPiece, _cts.Token);
             else
-                await _engine.SendAsync(history, maxNew: (uint)MaxTokens, onPiece: OnPiece, ct: _cts.Token);
+                await _engine.SendAsync(history, maxNew, OnPiece, _cts.Token);
+
+            // Agentic tool loop: run executable tool calls and let the model continue.
+            if (ToolCallingEnabled)
+            {
+                var executor = new ToolExecutors
+                {
+                    UseFahrenheit = UseFahrenheit,
+                    WeatherApiKey = string.IsNullOrWhiteSpace(WeatherApiKey) ? null : WeatherApiKey.Trim(),
+                    UseLocation = UseLocation,
+                };
+                int executed = 0;
+                for (int round = 0; round < 5 && !_cts.IsCancellationRequested; round++)
+                {
+                    List<ToolCall> calls = ToolCalling.Parse(sb.ToString());
+                    if (calls.Count <= executed) break;
+                    for (int i = executed; i < calls.Count; i++)
+                    {
+                        string result = await executor.ExecuteAsync(calls[i]);
+                        sb.Append(ToolFormat.ToolResponseBlock(calls[i].Name, result));
+                    }
+                    executed = calls.Count;
+                    Mirror();
+                    await _engine.ContinueAsync(history, sb.ToString(), maxNew, OnPiece, _cts.Token);
+                }
+            }
         }
         catch (OperationCanceledException) { /* stopped */ }
         catch (Exception e)
         {
-            reply.Content += $"\n[error: {e.Message}]";
+            sb.Append($"\n[error: {e.Message}]");
+            Mirror();
         }
         finally
         {
             IsBusy = false;
             _cts?.Dispose();
             _cts = null;
-            _store.AddMessage(convId, "model", reply.Content);
+            _store.AddMessage(convId, "model", sb.ToString());
             _store.Touch(convId);
             TouchConversation(convId);
         }

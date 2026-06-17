@@ -108,11 +108,35 @@ public sealed class InferenceClient : IDisposable
     }
 
     /// <summary>
-    /// Render history to the exact Gemma 4 chat format the crate tokenizes
-    /// (mirrors template::gemma4_small::render_for_completion): a leading BOS,
-    /// each turn wrapped in &lt;|turn&gt;role\n…&lt;turn|&gt;\n, then an open model turn.
+    /// Continue an open assistant turn (for the agentic tool loop): renders the
+    /// history then an OPEN model turn pre-filled with <paramref name="openAssistant"/>
+    /// (prose + prior tool_calls + spliced tool_responses) and keeps generating.
     /// </summary>
-    private static string BuildPrompt(IReadOnlyList<(string Role, string Content)> history)
+    public async Task<int> ContinueAsync(
+        IReadOnlyList<(string Role, string Content)> history,
+        string openAssistant,
+        uint maxNew,
+        Action<string> onPiece,
+        CancellationToken ct)
+    {
+        RustModel model = _model ?? throw new InvalidOperationException("No model loaded.");
+        return await Task.Run(() =>
+        {
+            model.Reset();
+            uint[] ids = model.Encode(BuildPrompt(history, openAssistant));
+            using CancellationTokenRegistration reg = ct.Register(model.Cancel);
+            return model.Generate(ids, maxNew, onPiece);
+        }, ct);
+    }
+
+    /// <summary>
+    /// Render history to the exact Gemma 4 chat format the crate tokenizes
+    /// (mirrors template::gemma4_small): a leading BOS, each turn wrapped in
+    /// &lt;|turn&gt;role\n…&lt;turn|&gt;\n, then an open model turn. When
+    /// <paramref name="openAssistant"/> is non-null the model turn is pre-filled
+    /// with it and left open (continuation).
+    /// </summary>
+    private static string BuildPrompt(IReadOnlyList<(string Role, string Content)> history, string? openAssistant = null)
     {
         var sb = new StringBuilder();
         sb.Append("<bos>");
@@ -121,6 +145,7 @@ public sealed class InferenceClient : IDisposable
             sb.Append("<|turn>").Append(role).Append('\n').Append(content).Append("<turn|>\n");
         }
         sb.Append("<|turn>model\n");
+        if (openAssistant is not null) sb.Append(openAssistant);
         return sb.ToString();
     }
 
