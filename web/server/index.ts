@@ -103,7 +103,11 @@ app.post("/api/log", async (c) => {
     let payload: unknown;
     try { payload = await c.req.json(); }
     catch (e) { return c.json({ error: `bad JSON: ${(e as Error).message}` }, 400); }
-    fs.appendFileSync(PAGE_LOG, JSON.stringify(payload) + "\n");
+    try {
+        fs.appendFileSync(PAGE_LOG, JSON.stringify(payload) + "\n");
+    } catch (e) {
+        return c.json({ error: `failed to write log: ${(e as Error).message}` }, 500);
+    }
     return c.json({});
 });
 
@@ -112,7 +116,11 @@ app.post("/api/bench-result", async (c) => {
     let payload: unknown;
     try { payload = await c.req.json(); }
     catch (e) { return c.json({ error: `bad JSON: ${(e as Error).message}` }, 400); }
-    fs.appendFileSync(BENCH_LOG, JSON.stringify(payload) + "\n");
+    try {
+        fs.appendFileSync(BENCH_LOG, JSON.stringify(payload) + "\n");
+    } catch (e) {
+        return c.json({ error: `failed to write bench log: ${(e as Error).message}` }, 500);
+    }
     return c.json({});
 });
 
