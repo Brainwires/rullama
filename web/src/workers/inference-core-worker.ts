@@ -1614,6 +1614,12 @@ const RPC: Record<string, Handler> = {
              VALUES (?, ?, ?, ?, ?)`,
             [cid, mid, role, content, now],
         );
+        // Persist to OPFS immediately, like the conv* writers. Without this a
+        // turn that never reaches the end-of-turn dbFlush (reload/close/crash
+        // mid-generation) leaves the flushed conversation row pointing at
+        // message rows that were never written to disk — History lists the
+        // chat but selecting it shows nothing.
+        db.flush();
         return { messageId: mid, created_at: now };
     },
 
@@ -1641,6 +1647,7 @@ const RPC: Record<string, Handler> = {
              WHERE conversation_id = ? AND message_id = ?`,
             [content, cid, mid],
         );
+        db.flush();
         return true;
     },
 
@@ -1658,6 +1665,7 @@ const RPC: Record<string, Handler> = {
              VALUES (?, ?, ?, ?, ?, ?)`,
             [cid, mid, seq, width, height, opfsPath],
         );
+        db.flush();
         return true;
     },
 
