@@ -13,11 +13,15 @@ import {
     TOOL_PARAMS,
     type ToolCall,
 } from "@/lib/toolFormat";
+import { CHANNEL_OPEN, CHANNEL_CLOSE } from "@/lib/parseModel";
 
-/** One piece of a reply, in original emission order — either a run of prose
- *  or a tool call. Lets the UI interleave reasoning between calls (call →
- *  result → reasoning → next call → …) instead of grouping all calls first. */
+/** One piece of a reply, in original emission order — a reasoning block, a run
+ *  of prose, or a tool call. Lets the UI interleave them (thought → call →
+ *  result → fresh thought → next call → … → answer) instead of grouping all
+ *  thinking and all calls separately. A `thinking` segment with
+ *  `isComplete: false` is the one currently streaming in. */
 export type ToolSegment =
+    | { kind: "thinking"; text: string; isThinking: boolean; isComplete: boolean }
     | { kind: "prose"; text: string }
     | { kind: "call"; call: ToolCall };
 
@@ -163,11 +167,12 @@ function stripName(obj: Record<string, unknown>): Record<string, unknown> {
 }
 
 export function parseToolCalls(response: string): ParsedToolCalls {
-    if (!response || !response.includes(TOOL_CALL_OPEN_PREFIX)) {
-        const text = response ?? "";
+    const raw = response ?? "";
+    // Fast path: no tool call AND no reasoning channel → it's all prose.
+    if (!raw || (!raw.includes(TOOL_CALL_OPEN_PREFIX) && !raw.includes(CHANNEL_OPEN))) {
         return {
-            calls: [], prose: text, pending: false,
-            segments: text.trim() ? [{ kind: "prose", text }] : [],
+            calls: [], prose: raw, pending: false,
+            segments: raw.trim() ? [{ kind: "prose", text: raw }] : [],
         };
     }
 
@@ -177,7 +182,7 @@ export function parseToolCalls(response: string): ParsedToolCalls {
     // tools ran; reattached after parsing. The tags are literal (no regex
     // metacharacters to escape).
     const results: { name: string | null; text: string }[] = [];
-    const cleaned = response.replace(
+    const cleaned = raw.replace(
         /<tool_response(?:\s+for="([^"]*)")?>([\s\S]*?)<\/tool_response>/g,
         (_m, name: string | undefined, inner: string) => {
             results.push({ name: name ?? null, text: inner.trim() });
@@ -191,13 +196,45 @@ export function parseToolCalls(response: string): ParsedToolCalls {
     let pending = false;
     let cursor = 0;
 
-    // Prose accumulates into one string (back-compat) AND becomes an ordered
-    // segment (skipping whitespace-only gaps); a call pushes to both `calls`
-    // and `segments`. Segments hold the SAME call object refs, so the result
-    // reattachment below (which mutates `call.result`) shows through.
+    // Prose runs may themselves contain reasoning-channel blocks
+    // (`<|channel>thought…<channel|>`) — the initial thought, plus a fresh one
+    // primed after each tool result. Split those out as `thinking` segments so
+    // each renders as its own collapsible block in order; only true prose lands
+    // in `prose` (back-compat: the answer text used by Speak / empty-check).
+    // An unterminated thought (no close yet) is the one currently streaming.
     const addProse = (text: string) => {
-        prose += text;
-        if (text.trim()) segments.push({ kind: "prose", text: text.trim() });
+        let c = 0;
+        for (;;) {
+            const open = text.indexOf(CHANNEL_OPEN, c);
+            if (open < 0) {
+                const tail = text.slice(c);
+                prose += tail;
+                if (tail.trim()) segments.push({ kind: "prose", text: tail.trim() });
+                break;
+            }
+            const before = text.slice(c, open);
+            prose += before;
+            if (before.trim()) segments.push({ kind: "prose", text: before.trim() });
+            const afterOpen = open + CHANNEL_OPEN.length;
+            const close = text.indexOf(CHANNEL_CLOSE, afterOpen);
+            if (close < 0) {
+                // Still mid-thought (streaming) — runs to the end of the text.
+                segments.push({
+                    kind: "thinking",
+                    text: text.slice(afterOpen).replace(/^\n/, ""),
+                    isThinking: true,
+                    isComplete: false,
+                });
+                break;
+            }
+            segments.push({
+                kind: "thinking",
+                text: text.slice(afterOpen, close).replace(/^\n/, ""),
+                isThinking: false,
+                isComplete: true,
+            });
+            c = close + CHANNEL_CLOSE.length;
+        }
     };
     const addCall = (call: ToolCall) => {
         calls.push(call);

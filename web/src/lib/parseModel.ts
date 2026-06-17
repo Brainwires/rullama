@@ -20,8 +20,14 @@ export interface ParsedModel {
     isComplete: boolean;   // true → close marker seen (thinking block can collapse)
 }
 
-const OPEN  = "<|channel>thought";
-const CLOSE = "<channel|>";
+/** Gemma 4 reasoning-channel markers. Exported so the segment parser
+ *  (parseToolCalls) can split out thinking blocks interleaved with tool
+ *  calls — e.g. a fresh thought after each tool result. */
+export const CHANNEL_OPEN  = "<|channel>thought";
+export const CHANNEL_CLOSE = "<channel|>";
+
+const OPEN  = CHANNEL_OPEN;
+const CLOSE = CHANNEL_CLOSE;
 
 export function parseModelContent(raw: string): ParsedModel {
     if (!raw) return { thinking: null, response: "", isThinking: false, isComplete: false };

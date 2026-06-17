@@ -1,11 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { ThinkingBlock } from "@/components/ThinkingBlock";
 import { ToolCallBlock } from "@/components/ToolCallBlock";
 import { type ChatMessage, type ImageAttachment } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
-import { parseModelContent } from "@/lib/parseModel";
 import { parseToolCalls } from "@/lib/parseToolCalls";
 import { cn } from "@/lib/utils";
 import { Mic, Send, Square, Paperclip, X, Volume2 } from "lucide-react";
@@ -134,14 +132,13 @@ function SpeakButton({ text }: { text: string }) {
 }
 
 function ModelBubble({ content, canSpeak, streaming }: { content: string; canSpeak: boolean; streaming: boolean }) {
-    const parsed = useMemo(() => parseModelContent(content), [content]);
-    // Split tool-call blocks out of the response so they render as structured
-    // blocks; the leftover prose goes through markdown as before.
-    const tools = useMemo(() => parseToolCalls(parsed.response), [parsed.response]);
-    // Render prose + calls in their original emission order so a multi-step
-    // chain reads call → result → reasoning → next call → result → answer,
-    // instead of all calls grouped above all prose. Prose markdown is rendered
-    // per segment; memoized on `tools` (stable unless the response changes).
+    // Single pass over the whole reply: thinking blocks, tool calls, and prose
+    // as ordered segments. Each agentic step can carry its own thought (one is
+    // primed after every tool result), so a chain reads thought → call →
+    // result → fresh thought → next call → … → answer.
+    const tools = useMemo(() => parseToolCalls(content), [content]);
+    // Pre-render prose markdown per segment; memoized on `tools` (stable unless
+    // the content changes). Thinking/call segments pass straight through.
     const items = useMemo(
         () => tools.segments.map((seg) =>
             seg.kind === "prose"
@@ -149,31 +146,27 @@ function ModelBubble({ content, canSpeak, streaming }: { content: string; canSpe
                 : seg),
         [tools],
     );
-    // Truly-empty (just-started streaming) only when there's no thinking,
-    // no tool call, and no prose yet — that's when the caret shows.
-    const isEmpty = parsed.thinking === null && tools.calls.length === 0 && !tools.prose;
+    // Caret only while nothing has rendered yet (just-started streaming).
+    const isEmpty = tools.segments.length === 0;
+    // Hold the Speak button until no thought is still streaming in.
+    const midThought = tools.segments.some((s) => s.kind === "thinking" && !s.isComplete);
     return (
         <div className="rounded-md border-l-2 border-muted-foreground bg-muted/50 p-3 text-sm break-words animate-fade-in">
             <RoleLabel role="model" />
-            {parsed.thinking !== null && (
-                <ThinkingBlock
-                    text={parsed.thinking}
-                    isThinking={parsed.isThinking}
-                    isComplete={parsed.isComplete}
-                />
-            )}
             {items.map((it, i) =>
                 it.kind === "call"
                     ? <ToolCallBlock key={i} call={it.call} streaming={streaming} />
-                    // mb-3 separates reasoning prose from a following tool-call
-                    // block; collapses harmlessly against the Speak button on
-                    // the final answer.
-                    : <div key={i} className="markdown mb-3 last:mb-0" dangerouslySetInnerHTML={{ __html: it.html }} />,
+                    : it.kind === "thinking"
+                        ? <ThinkingBlock key={i} text={it.text} isThinking={it.isThinking} isComplete={it.isComplete} />
+                        // mb-3 separates reasoning prose from a following tool-call
+                        // block; collapses harmlessly against the Speak button on
+                        // the final answer.
+                        : <div key={i} className="markdown mb-3 last:mb-0" dangerouslySetInnerHTML={{ __html: it.html }} />,
             )}
             {isEmpty && (
                 <span className="inline-block animate-pulse text-muted-foreground">▍</span>
             )}
-            {canSpeak && tools.prose && parsed.isComplete !== false && <SpeakButton text={tools.prose} />}
+            {canSpeak && tools.prose && !midThought && <SpeakButton text={tools.prose} />}
         </div>
     );
 }
@@ -240,7 +233,7 @@ export function ChatPanel(props: Props) {
         return () => root.removeEventListener("click", onClick);
     }, []);
 
-    const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         if (e.key === "Enter" && !e.shiftKey && props.canSend) {
             e.preventDefault();
             props.onSend();
@@ -346,7 +339,23 @@ export function ChatPanel(props: Props) {
                     className="hidden"
                     onChange={onFilesPicked}
                 />
-                <Input
+                {/* A <textarea>, NOT an <input>: a lone text input makes every
+                 *  password manager (Chrome/Google, Safari Keychain, 1Password,
+                 *  LastPass, Dashlane) treat the chat box as a login username
+                 *  field and pop a saved-credentials dropdown over it — none of
+                 *  them honor autocomplete="off" reliably. Credential autofill
+                 *  is only ever offered on <input>, so a textarea sidesteps it
+                 *  entirely. rows=1 keeps the single-line look; Enter still
+                 *  sends (onKeyDown), Shift+Enter inserts a newline. */}
+                <textarea
+                    name="rullama-chat-message"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck
+                    data-1p-ignore
+                    data-lpignore="true"
+                    data-form-type="other"
+                    rows={1}
                     placeholder='Say something…'
                     value={props.prompt}
                     onChange={(e) => props.onPromptChange(e.target.value)}
@@ -354,7 +363,13 @@ export function ChatPanel(props: Props) {
                     onFocus={() => setInputFocused(true)}
                     onBlur={() => setInputFocused(false)}
                     disabled={!props.canType}
-                    className="flex-1 min-w-0"
+                    className={cn(
+                        "flex h-9 min-h-9 w-full flex-1 min-w-0 resize-none rounded-md border border-input",
+                        "bg-background px-3 py-1.5 text-sm leading-normal shadow-sm transition-colors",
+                        "placeholder:text-muted-foreground",
+                        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                        "disabled:cursor-not-allowed disabled:opacity-50",
+                    )}
                 />
                 {props.canStop ? (
                     <Button onClick={props.onStop} variant="destructive" title="Stop"><Square /></Button>
