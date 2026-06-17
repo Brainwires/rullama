@@ -1,7 +1,10 @@
+using System.Collections.Generic;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Interactivity;
 using Avalonia.Markup.Xaml;
+using Avalonia.Platform.Storage;
 using Rullama.ViewModels;
 
 namespace Rullama.Views;
@@ -23,6 +26,27 @@ public partial class ChatView : UserControl
                     _scroll.Offset = new Vector(_scroll.Offset.X, _scroll.Extent.Height);
             };
         }
+    }
+
+    private async void Browse_Click(object? sender, RoutedEventArgs e)
+    {
+        TopLevel? top = TopLevel.GetTopLevel(this);
+        if (top is null || DataContext is not ChatViewModel vm)
+            return;
+
+        IReadOnlyList<IStorageFile> files = await top.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Select a GGUF model (or Ollama blob)",
+            AllowMultiple = false,
+            FileTypeFilter = new[]
+            {
+                new FilePickerFileType("GGUF / Ollama blob") { Patterns = new[] { "*.gguf", "sha256-*" } },
+                new FilePickerFileType("All files") { Patterns = new[] { "*" } },
+            },
+        });
+
+        if (files.Count > 0 && files[0].TryGetLocalPath() is { } path)
+            vm.ModelPath = path;
     }
 
     // Enter sends; Shift+Enter inserts a newline (AcceptsReturn handles the latter).

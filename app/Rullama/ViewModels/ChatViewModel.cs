@@ -16,6 +16,7 @@ public partial class ChatViewModel : ViewModelBase
 {
     private readonly InferenceClient _engine = new();
     private readonly ConversationStore _store = new();
+    private readonly SettingsStore _settings = new();
     private CancellationTokenSource? _cts;
     private string? _activeConvId;
 
@@ -38,7 +39,7 @@ public partial class ChatViewModel : ViewModelBase
     private bool _isBusy;
 
     [ObservableProperty]
-    private string _modelPath = Environment.GetEnvironmentVariable("RULLAMA_TEST_GGUF") ?? string.Empty;
+    private string _modelPath = string.Empty;
 
     [ObservableProperty]
     private string _status = "Load a Gemma 4 GGUF to start.";
@@ -84,6 +85,9 @@ public partial class ChatViewModel : ViewModelBase
 
     public ChatViewModel()
     {
+        ModelPath = _settings.Get("modelPath")
+            ?? Environment.GetEnvironmentVariable("RULLAMA_TEST_GGUF")
+            ?? string.Empty;
         foreach (ConversationRow c in _store.List())
             Conversations.Add(new ConversationViewModel(c.Id, c.Title, c.UpdatedAt));
     }
@@ -106,6 +110,7 @@ public partial class ChatViewModel : ViewModelBase
             await _engine.LoadAsync(ModelPath.Trim());
             IsModelLoaded = true;
             ApplySampling();
+            _settings.Set("modelPath", ModelPath.Trim());
             Status = $"Ready · vocab {_engine.VocabSize}";
         }
         catch (Exception e)

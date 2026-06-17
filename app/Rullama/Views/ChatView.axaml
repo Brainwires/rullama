@@ -57,8 +57,13 @@
           <TextBlock Classes="h1" Text="rullama" HorizontalAlignment="Center" />
           <TextBlock Classes="muted" HorizontalAlignment="Center" TextWrapping="Wrap"
                      Text="Gemma 4, fully on-device. Load a GGUF (or an Ollama blob) to begin." />
-          <TextBox Watermark="/path/to/model.gguf or Ollama blob"
-                   Text="{Binding ModelPath, Mode=TwoWay}" />
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBox Grid.Column="0" Margin="0,0,6,0"
+                     Watermark="/path/to/model.gguf or Ollama blob"
+                     Text="{Binding ModelPath, Mode=TwoWay}" />
+            <Button Grid.Column="1" Classes="outline" Content="Browse…"
+                    Click="Browse_Click" />
+          </Grid>
           <Button Classes="primary" Content="Load model"
                   Command="{Binding LoadModelCommand}" IsEnabled="{Binding !IsBusy}"
                   HorizontalAlignment="Center" />
