@@ -98,8 +98,10 @@ unsafe fn c_str<'a>(p: *const c_char) -> Result<&'a str, &'static str> {
 // Streaming callback (raw C function pointer + opaque context)
 // ---------------------------------------------------------------------------
 
-/// Per-token callback: `(ctx, token_id, is_eos)`. Invoked on the worker thread.
-type TokenFn = extern "C" fn(ctx: *mut c_void, token_id: u32, is_eos: i32);
+/// Per-token callback: `(ctx, token_id, piece, is_eos)`. `piece` is the decoded
+/// display text (SentencePiece ▁ already mapped to space), valid only for the
+/// duration of the call. Invoked on the worker thread.
+type TokenFn = extern "C" fn(ctx: *mut c_void, token_id: u32, piece: *const c_char, is_eos: i32);
 
 /// `Send` wrapper so the callback + ctx can cross the command channel. The C#
 /// caller keeps `ctx` alive for the duration of the `rl_generate` call.
@@ -246,7 +248,14 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
                         if m.is_eos_native(cur) {
                             break;
                         }
-                        (cb.f)(cb.ctx, cur, 0);
+                        // Decode here (on the worker thread) so the callback can
+                        // stream display text without re-entering the engine.
+                        let piece = m
+                            .token_str_native(cur)
+                            .unwrap_or_default()
+                            .replace('\u{2581}', " ");
+                        let cpiece = CString::new(piece).unwrap_or_default();
+                        (cb.f)(cb.ctx, cur, cpiece.as_ptr(), 0);
                         produced += 1;
                         cur = pollster::block_on(m.step_native(cur)).map_err(|e| format!("{e}"))?;
                     }
@@ -620,10 +629,15 @@ mod tests {
         assert_eq!(rc, 0, "encode failed: {}", last_error_str());
         assert!(nn > 0);
 
-        extern "C" fn on_tok(ctx: *mut c_void, tok: u32, _eos: i32) {
+        extern "C" fn on_tok(ctx: *mut c_void, tok: u32, piece: *const c_char, _eos: i32) {
             let count = unsafe { &mut *(ctx as *mut u32) };
             *count += 1;
-            eprintln!("tok #{count}: {tok}");
+            let s = if piece.is_null() {
+                String::new()
+            } else {
+                unsafe { CStr::from_ptr(piece) }.to_string_lossy().into_owned()
+            };
+            eprintln!("tok #{count}: {tok} = {s:?}");
         }
         let mut count: u32 = 0;
         let produced = unsafe {

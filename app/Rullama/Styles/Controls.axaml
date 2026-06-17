@@ -163,6 +163,19 @@
     <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
   </Style>
 
+  <!-- ===== Chat bubbles ===== -->
+  <Style Selector="Border.bubble">
+    <Setter Property="Background" Value="{StaticResource Muted50}" />
+    <Setter Property="BorderBrush" Value="{StaticResource MutedForeground}" />
+    <Setter Property="BorderThickness" Value="2,0,0,0" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="Padding" Value="12" />
+  </Style>
+  <Style Selector="Border.bubble.user">
+    <Setter Property="Background" Value="{StaticResource PrimarySoft}" />
+    <Setter Property="BorderBrush" Value="{StaticResource Primary}" />
+  </Style>
+
   <!-- ===== TextBox ===== -->
   <Style Selector="TextBox">
     <Setter Property="Background" Value="{StaticResource Background}" />

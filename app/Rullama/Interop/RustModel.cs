@@ -66,14 +66,19 @@ internal sealed class RustModel : IDisposable
 
     /// <summary>
     /// Stream a generation. Feeds <paramref name="prompt"/> then decodes up to
-    /// <paramref name="maxNew"/> tokens, invoking <paramref name="onToken"/> per
-    /// token (on the native worker thread — marshal to the UI thread yourself).
-    /// Blocking; returns the number of tokens produced. Use <see cref="Cancel"/>.
+    /// <paramref name="maxNew"/> tokens, invoking <paramref name="onPiece"/> per
+    /// token with its decoded display text (on the native worker thread — marshal
+    /// to the UI thread yourself). Blocking; returns the number of tokens
+    /// produced. Use <see cref="Cancel"/> to stop early.
     /// </summary>
-    public int Generate(uint[] prompt, uint maxNew, Action<uint> onToken)
+    public int Generate(uint[] prompt, uint maxNew, Action<string> onPiece)
     {
         // Keep the delegate rooted for the duration of the (synchronous) call.
-        RustCore.TokenCallback cb = (_, tok, _) => onToken(tok);
+        RustCore.TokenCallback cb = (_, _, piece, _) =>
+        {
+            string s = piece == IntPtr.Zero ? string.Empty : Marshal.PtrToStringUTF8(piece) ?? string.Empty;
+            onPiece(s);
+        };
         int produced = RustCore.rl_generate(_h, prompt, (UIntPtr)prompt.Length, maxNew, cb, IntPtr.Zero);
         GC.KeepAlive(cb);
         if (produced < 0)

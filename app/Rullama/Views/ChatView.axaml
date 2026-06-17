@@ -8,9 +8,8 @@
     <vm:ChatViewModel />
   </Design.DataContext>
 
-  <!-- Dual-sidebar layout: HISTORY | conversation | CHAT SETTINGS -->
   <Grid ColumnDefinitions="280,*,340">
-    <!-- Left: conversation list -->
+    <!-- Left: conversation list (static for M1) -->
     <Border Grid.Column="0" Background="{StaticResource Card}"
             BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0">
       <DockPanel Margin="10">
@@ -23,29 +22,79 @@
       </DockPanel>
     </Border>
 
-    <!-- Center: messages + composer -->
-    <DockPanel Grid.Column="1">
-      <!-- Composer -->
-      <Border DockPanel.Dock="Bottom" Background="{StaticResource Background}"
-              BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0" Padding="8">
-        <Grid ColumnDefinitions="Auto,*,Auto" >
-          <Button Grid.Column="0" Classes="ghost icon" Content="+" />
-          <TextBox Grid.Column="1" Margin="6,0" Watermark="Say something…" />
-          <Button Grid.Column="2" Classes="primary" Content="Send" />
-        </Grid>
+    <!-- Center: load panel (until a model is loaded) OR conversation -->
+    <Panel Grid.Column="1">
+      <!-- Load panel -->
+      <Border IsVisible="{Binding !IsModelLoaded}" Padding="24"
+              HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="520">
+        <StackPanel Spacing="12">
+          <TextBlock Classes="h1" Text="rullama" HorizontalAlignment="Center" />
+          <TextBlock Classes="muted" HorizontalAlignment="Center" TextWrapping="Wrap"
+                     Text="Gemma 4, fully on-device. Load a GGUF (or an Ollama blob) to begin." />
+          <TextBox Watermark="/path/to/model.gguf or Ollama blob"
+                   Text="{Binding ModelPath, Mode=TwoWay}" />
+          <Button Classes="primary" Content="Load model"
+                  Command="{Binding LoadModelCommand}" IsEnabled="{Binding !IsBusy}"
+                  HorizontalAlignment="Center" />
+          <TextBlock Classes="muted" Text="{Binding Status}" HorizontalAlignment="Center"
+                     TextWrapping="Wrap" />
+        </StackPanel>
       </Border>
-      <!-- Empty state -->
-      <TextBlock Classes="muted" Text="Say hi." HorizontalAlignment="Center"
-                 VerticalAlignment="Center" />
-    </DockPanel>
 
-    <!-- Right: chat settings -->
+      <!-- Conversation -->
+      <DockPanel IsVisible="{Binding IsModelLoaded}">
+        <!-- Composer -->
+        <Border DockPanel.Dock="Bottom" Background="{StaticResource Background}"
+                BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0" Padding="8">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBox Grid.Column="0" Margin="0,0,6,0"
+                     Watermark="Say something…"
+                     Text="{Binding Input, Mode=TwoWay}"
+                     AcceptsReturn="False">
+              <TextBox.KeyBindings>
+                <KeyBinding Gesture="Enter" Command="{Binding SendCommand}" />
+              </TextBox.KeyBindings>
+            </TextBox>
+            <Button Grid.Column="1" Classes="primary" Content="Send"
+                    Command="{Binding SendCommand}" IsVisible="{Binding !IsBusy}" />
+            <Button Grid.Column="1" Classes="destructive" Content="Stop"
+                    Command="{Binding StopCommand}" IsVisible="{Binding IsBusy}" />
+          </Grid>
+        </Border>
+
+        <!-- Messages -->
+        <ScrollViewer Padding="16,12">
+          <ItemsControl ItemsSource="{Binding Messages}" HorizontalAlignment="Stretch">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <StackPanel Spacing="8" MaxWidth="760" HorizontalAlignment="Center" />
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:ChatMessageViewModel">
+                <Border Classes="bubble" Classes.user="{Binding IsUser}">
+                  <StackPanel Spacing="4">
+                    <TextBlock Classes="label" Text="{Binding RoleLabel}" />
+                    <TextBlock Text="{Binding Content}" TextWrapping="Wrap"
+                               Foreground="{StaticResource Foreground}" FontSize="14" />
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
+      </DockPanel>
+    </Panel>
+
+    <!-- Right: chat settings (static for M1) -->
     <Border Grid.Column="2" Background="{StaticResource Card}"
             BorderBrush="{StaticResource Border}" BorderThickness="1,0,0,0">
       <StackPanel Margin="10" Spacing="8">
         <TextBlock Classes="label" Text="CHAT SETTINGS" />
         <TextBlock Classes="muted" TextWrapping="Wrap"
-                   Text="Model · Generation · Tools · Speech — wired up in M1." />
+                   Text="{Binding Status}" />
+        <TextBlock Classes="muted" TextWrapping="Wrap"
+                   Text="Generation · Tools · Speech controls land next." />
       </StackPanel>
     </Border>
   </Grid>

@@ -19,9 +19,10 @@ internal static class RustCore
 {
     private const string Lib = "rullama_core";
 
-    /// <summary>Per-token streaming callback: (ctx, tokenId, isEos).</summary>
+    /// <summary>Per-token streaming callback: (ctx, tokenId, piece, isEos).
+    /// <c>piece</c> is decoded display text valid only during the call.</summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void TokenCallback(IntPtr ctx, uint tokenId, int isEos);
+    internal delegate void TokenCallback(IntPtr ctx, uint tokenId, IntPtr piece, int isEos);
 
     // ---- diagnostics ----
     [DllImport(Lib, EntryPoint = "rl_version")]
