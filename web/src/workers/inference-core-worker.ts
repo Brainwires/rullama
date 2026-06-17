@@ -15,7 +15,7 @@
 
 // @ts-expect-error — generated bundle, no .d.ts
 import init, { Model, TrainingSession, probeTrainingFit, WasmDatabase, EmbeddingModel, DiffusionGemma, ImageModel, gpuMemBreakdown, gpuMemTotalMib } from "/pkg/rullama.js";
-import { AutoTokenizer, env as hfEnv } from "@huggingface/transformers";
+import { Qwen2Tokenizer } from "../lib/qwen2-bpe";
 
 const gpuMemBreakdownFn = gpuMemBreakdown as unknown as () => string;
 const gpuMemTotalFn = gpuMemTotalMib as unknown as () => number;
@@ -281,44 +281,22 @@ const ImageModelClass = ImageModel as unknown as {
 };
 
 // Qwen2 tokenizer for the image prompt. Lazily loaded from the CDN
-// (`<base>/tokenizer/`) the first time we generate, then cached. The prompt is
-// wrapped in the Qwen chat format before tokenizing (matches the reference
-// pipeline) — `<|im_start|>` / `<|im_end|>` are recognized as the tokenizer's
-// special tokens.
-interface HfTokenizer {
-    (text: string, opts?: { add_special_tokens?: boolean }): { input_ids: { data: BigInt64Array | number[] } };
-}
-let imageTokenizer: HfTokenizer | null = null;
-let imageTokenizerPromise: Promise<HfTokenizer> | null = null;
+// (`<base>/tokenizer/tokenizer.json`) the first time we generate, then cached.
+// The prompt is wrapped in the Qwen chat format before tokenizing (matches the
+// reference pipeline) — `<|im_start|>` / `<|im_end|>` are the tokenizer's
+// special tokens, split out + mapped to their ids directly.
+let imageTokenizer: Qwen2Tokenizer | null = null;
+let imageTokenizerPromise: Promise<Qwen2Tokenizer> | null = null;
 
 /** Load (once) the Qwen2 tokenizer hosted under the image model's CDN base. */
-function ensureImageTokenizer(baseUrl: string): Promise<HfTokenizer> {
+function ensureImageTokenizer(baseUrl: string): Promise<Qwen2Tokenizer> {
     if (imageTokenizer) return Promise.resolve(imageTokenizer);
     if (imageTokenizerPromise) return imageTokenizerPromise;
-    imageTokenizerPromise = (async () => {
-        // Point transformers.js at our CDN instead of the HF Hub, and disable
-        // any local/cache file probing (we're in a Worker, no FS). The model
-        // id is the path segment after the host; remotePathTemplate "{model}"
-        // makes `from_pretrained("z-image-turbo/tokenizer")` resolve to
-        // `<host>/z-image-turbo/tokenizer/<file>`.
-        const e = hfEnv as unknown as {
-            allowRemoteModels: boolean; allowLocalModels: boolean;
-            remoteHost: string; remotePathTemplate: string;
-            useBrowserCache?: boolean;
-        };
-        const u = new URL(baseUrl);
-        e.allowRemoteModels = true;
-        e.allowLocalModels = false;
-        e.remoteHost = `${u.protocol}//${u.host}`;
-        e.remotePathTemplate = "{model}";
-        // Strip the leading slash; everything after the host is the "model id".
-        const modelId = `${u.pathname.replace(/^\/+/, "")}/tokenizer`;
-        const tok = await (AutoTokenizer as unknown as {
-            from_pretrained(id: string): Promise<HfTokenizer>;
-        }).from_pretrained(modelId);
-        imageTokenizer = tok;
-        return tok;
-    })();
+    const url = `${baseUrl.replace(/\/+$/, "")}/tokenizer/tokenizer.json`;
+    imageTokenizerPromise = Qwen2Tokenizer.fromUrl(url).then((t) => {
+        imageTokenizer = t;
+        return t;
+    });
     return imageTokenizerPromise;
 }
 
@@ -328,11 +306,7 @@ async function tokenizeImagePrompt(baseUrl: string, prompt: string): Promise<Uin
     if (!prompt) return new Uint32Array(0);
     const tok = await ensureImageTokenizer(baseUrl);
     const wrapped = `<|im_start|>user\n${prompt}<|im_end|>\n<|im_start|>assistant\n`;
-    const out = tok(wrapped, { add_special_tokens: false });
-    const data = out.input_ids.data;
-    const ids = new Uint32Array(data.length);
-    for (let i = 0; i < data.length; i++) ids[i] = Number(data[i]);
-    return ids;
+    return Uint32Array.from(tok.encode(wrapped));
 }
 
 /** Open a sync read handle over an OPFS-cached diffusion GGUF + a readFn for
