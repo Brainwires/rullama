@@ -86,6 +86,63 @@ internal sealed class RustModel : IDisposable
         return produced;
     }
 
+    // ---- multimodal ----
+    public bool HasVision() => RustCore.rl_has_vision(_h) != 0;
+    public bool HasAudio() => RustCore.rl_has_audio(_h) != 0;
+
+    public (uint Begin, uint End)? ImageSentinels()
+        => RustCore.rl_image_sentinel_ids(_h, out uint b, out uint e) == 0 ? (b, e) : null;
+
+    public (uint Begin, uint End)? AudioSentinels()
+        => RustCore.rl_audio_sentinel_ids(_h, out uint b, out uint e) == 0 ? (b, e) : null;
+
+    public long ImageSoftTokenCount(int h, int w)
+        => RustCore.rl_image_soft_token_count(_h, (UIntPtr)h, (UIntPtr)w);
+
+    public float[] EncodeImage(float[] pixels, int h, int w)
+    {
+        Check(RustCore.rl_encode_image(_h, pixels, (UIntPtr)pixels.Length, (UIntPtr)h, (UIntPtr)w, out IntPtr p, out UIntPtr n), "encode_image");
+        try { return ReadF32(p, n); } finally { RustCore.rl_free_f32(p, n); }
+    }
+
+    public float[] EncodeAudio(float[] pcm)
+    {
+        Check(RustCore.rl_encode_audio(_h, pcm, (UIntPtr)pcm.Length, out IntPtr p, out UIntPtr n), "encode_audio");
+        try { return ReadF32(p, n); } finally { RustCore.rl_free_f32(p, n); }
+    }
+
+    /// <summary>Decode WAV bytes to mono f32 PCM. Standalone (no model needed).</summary>
+    public static float[] DecodeWav(byte[] bytes)
+    {
+        if (RustCore.rl_decode_wav(bytes, (UIntPtr)bytes.Length, out IntPtr p, out UIntPtr n) != 0)
+            throw new InvalidOperationException("decode_wav failed: " + RustCore.LastError());
+        try { return ReadF32(p, n); } finally { RustCore.rl_free_f32(p, n); }
+    }
+
+    /// <summary>Streaming generate with one spliced media item (see rust-core).</summary>
+    public int GenerateSpliced(uint[] prompt, uint sentinelBegin, float[] soft, int dText, uint maxNew, Action<string> onPiece)
+    {
+        RustCore.TokenCallback cb = (_, _, piece, _) =>
+        {
+            string s = piece == IntPtr.Zero ? string.Empty : Marshal.PtrToStringUTF8(piece) ?? string.Empty;
+            onPiece(s);
+        };
+        int produced = RustCore.rl_generate_spliced(
+            _h, prompt, (UIntPtr)prompt.Length, sentinelBegin, soft, (UIntPtr)soft.Length, (UIntPtr)dText, maxNew, cb, IntPtr.Zero);
+        GC.KeepAlive(cb);
+        if (produced < 0)
+            throw new InvalidOperationException($"generate_spliced failed (rc={produced}): {RustCore.LastError()}");
+        return produced;
+    }
+
+    private static float[] ReadF32(IntPtr p, UIntPtr n)
+    {
+        int count = (int)n;
+        var arr = new float[count];
+        if (count > 0) Marshal.Copy(p, arr, 0, count);
+        return arr;
+    }
+
     /// <summary>Request cancellation of an in-flight Generate. Thread-safe.</summary>
     public void Cancel()
     {

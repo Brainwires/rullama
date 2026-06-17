@@ -12,6 +12,10 @@
     <Compile Include="..\Rullama\Interop\RustCore.cs" Link="RustCore.cs" />
     <Compile Include="..\Rullama\Interop\RustModel.cs" Link="RustModel.cs" />
     <Compile Include="..\Rullama\Services\InferenceClient.cs" Link="InferenceClient.cs" />
+    <Compile Include="..\Rullama\Services\ImagePreprocess.cs" Link="ImagePreprocess.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="SkiaSharp" />
   </ItemGroup>
 
   <PropertyGroup>

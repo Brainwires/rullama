@@ -77,17 +77,31 @@
         <!-- Composer -->
         <Border DockPanel.Dock="Bottom" Background="{StaticResource Background}"
                 BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0" Padding="8">
-          <Grid ColumnDefinitions="*,Auto">
-            <TextBox Grid.Column="0" Margin="0,0,6,0"
-                     Watermark="Say something…  (Shift+Enter for newline)"
-                     Text="{Binding Input, Mode=TwoWay}"
-                     AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="140"
-                     KeyDown="Composer_KeyDown" />
-            <Button Grid.Column="1" Classes="primary" Content="Send"
-                    Command="{Binding SendCommand}" IsVisible="{Binding !IsBusy}" />
-            <Button Grid.Column="1" Classes="destructive" Content="Stop"
-                    Command="{Binding StopCommand}" IsVisible="{Binding IsBusy}" />
-          </Grid>
+          <StackPanel Spacing="6">
+            <!-- pending image preview -->
+            <Border IsVisible="{Binding PendingImagePreview, Converter={x:Static ObjectConverters.IsNotNull}}"
+                    HorizontalAlignment="Left">
+              <StackPanel Orientation="Horizontal" Spacing="6">
+                <Image Source="{Binding PendingImagePreview}" Height="48" Stretch="Uniform" />
+                <Button Classes="ghost iconsm" Content="✕" Command="{Binding ClearImageCommand}"
+                        VerticalAlignment="Top" />
+              </StackPanel>
+            </Border>
+            <Grid ColumnDefinitions="Auto,*,Auto">
+              <Button Grid.Column="0" Classes="ghost icon" Content="🖼"
+                      Click="AttachImage_Click" IsEnabled="{Binding IsVisionAvailable}"
+                      ToolTip.Tip="Attach image" />
+              <TextBox Grid.Column="1" Margin="6,0"
+                       Watermark="Say something…  (Shift+Enter for newline)"
+                       Text="{Binding Input, Mode=TwoWay}"
+                       AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="140"
+                       KeyDown="Composer_KeyDown" />
+              <Button Grid.Column="2" Classes="primary" Content="Send"
+                      Command="{Binding SendCommand}" IsVisible="{Binding !IsBusy}" />
+              <Button Grid.Column="2" Classes="destructive" Content="Stop"
+                      Command="{Binding StopCommand}" IsVisible="{Binding IsBusy}" />
+            </Grid>
+          </StackPanel>
         </Border>
 
         <!-- Messages -->
@@ -103,6 +117,8 @@
                 <Border Classes="bubble" Classes.user="{Binding IsUser}">
                   <StackPanel Spacing="4">
                     <TextBlock Classes="label" Text="{Binding RoleLabel}" />
+                    <Image Source="{Binding Image}" IsVisible="{Binding HasImage}"
+                           MaxHeight="180" Stretch="Uniform" HorizontalAlignment="Left" />
                     <!-- user turns: plain text -->
                     <TextBlock Text="{Binding Content}" TextWrapping="Wrap"
                                IsVisible="{Binding IsUser}"

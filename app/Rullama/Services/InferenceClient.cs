@@ -21,8 +21,10 @@ public sealed class InferenceClient : IDisposable
     public bool IsLoaded => _model is not null;
     public uint VocabSize => _model?.VocabSize() ?? 0;
 
-    /// <summary>Load a GGUF by path (off the UI thread). Replaces any prior model.</summary>
-    public async Task LoadAsync(string path, uint maxContext = 2048, bool textOnly = true)
+    /// <summary>Load a GGUF by path (off the UI thread). Replaces any prior model.
+    /// Loads vision/audio towers by default so multimodal works; pass
+    /// textOnly:true on memory-constrained targets.</summary>
+    public async Task LoadAsync(string path, uint maxContext = 2048, bool textOnly = false)
     {
         await Task.Run(() =>
         {
@@ -71,6 +73,37 @@ public sealed class InferenceClient : IDisposable
             uint[] ids = model.Encode(prompt);
             using CancellationTokenRegistration reg = ct.Register(model.Cancel);
             return model.Generate(ids, maxNew, onPiece);
+        }, ct);
+    }
+
+    public bool HasVision => _model?.HasVision() ?? false;
+
+    /// <summary>
+    /// Generate a reply where the latest user turn includes one image. The
+    /// history's user content must contain the &lt;|image&gt;&lt;image|&gt; marker pair;
+    /// the image's soft tokens are spliced at the begin sentinel during prefill.
+    /// </summary>
+    public async Task<int> SendImageAsync(
+        IReadOnlyList<(string Role, string Content)> history,
+        float[] pixels, int h, int w,
+        uint maxNew,
+        Action<string> onPiece,
+        CancellationToken ct)
+    {
+        RustModel model = _model ?? throw new InvalidOperationException("No model loaded.");
+        return await Task.Run(() =>
+        {
+            (uint Begin, uint End)? sent = model.ImageSentinels()
+                ?? throw new InvalidOperationException("This model has no vision tower.");
+            float[] soft = model.EncodeImage(pixels, h, w);
+            long nSoft = model.ImageSoftTokenCount(h, w);
+            int dText = nSoft > 0 ? soft.Length / (int)nSoft : soft.Length;
+
+            model.Reset();
+            string prompt = BuildPrompt(history);
+            uint[] ids = model.Encode(prompt);
+            using CancellationTokenRegistration reg = ct.Register(model.Cancel);
+            return model.GenerateSpliced(ids, sent.Value.Begin, soft, dText, maxNew, onPiece);
         }, ct);
     }
 

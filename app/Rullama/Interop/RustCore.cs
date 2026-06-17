@@ -79,6 +79,42 @@ internal static class RustCore
     [DllImport(Lib, EntryPoint = "rl_cancel")]
     internal static extern void rl_cancel(IntPtr m);
 
+    // ---- multimodal ----
+    [DllImport(Lib, EntryPoint = "rl_free_f32")]
+    internal static extern void rl_free_f32(IntPtr ptr, UIntPtr n);
+
+    [DllImport(Lib, EntryPoint = "rl_has_vision")]
+    internal static extern int rl_has_vision(IntPtr m);
+
+    [DllImport(Lib, EntryPoint = "rl_has_audio")]
+    internal static extern int rl_has_audio(IntPtr m);
+
+    [DllImport(Lib, EntryPoint = "rl_image_sentinel_ids")]
+    internal static extern int rl_image_sentinel_ids(IntPtr m, out uint begin, out uint end);
+
+    [DllImport(Lib, EntryPoint = "rl_audio_sentinel_ids")]
+    internal static extern int rl_audio_sentinel_ids(IntPtr m, out uint begin, out uint end);
+
+    [DllImport(Lib, EntryPoint = "rl_image_soft_token_count")]
+    internal static extern long rl_image_soft_token_count(IntPtr m, UIntPtr h, UIntPtr w);
+
+    [DllImport(Lib, EntryPoint = "rl_encode_image")]
+    internal static extern int rl_encode_image(
+        IntPtr m, float[] pixels, UIntPtr n, UIntPtr h, UIntPtr w, out IntPtr outPtr, out UIntPtr outLen);
+
+    [DllImport(Lib, EntryPoint = "rl_encode_audio")]
+    internal static extern int rl_encode_audio(
+        IntPtr m, float[] pcm, UIntPtr n, out IntPtr outPtr, out UIntPtr outLen);
+
+    [DllImport(Lib, EntryPoint = "rl_decode_wav")]
+    internal static extern int rl_decode_wav(
+        byte[] bytes, UIntPtr n, out IntPtr outPtr, out UIntPtr outLen);
+
+    [DllImport(Lib, EntryPoint = "rl_generate_spliced")]
+    internal static extern int rl_generate_spliced(
+        IntPtr m, uint[] prompt, UIntPtr n, uint sentinelBegin,
+        float[] soft, UIntPtr softLen, UIntPtr dText, uint maxNew, TokenCallback cb, IntPtr ctx);
+
     // ---- helpers ----
     internal static string Version() => Marshal.PtrToStringUTF8(rl_version()) ?? "unknown";
 

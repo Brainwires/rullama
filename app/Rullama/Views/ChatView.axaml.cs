@@ -49,6 +49,27 @@ public partial class ChatView : UserControl
             vm.ModelPath = path;
     }
 
+    private async void AttachImage_Click(object? sender, RoutedEventArgs e)
+    {
+        TopLevel? top = TopLevel.GetTopLevel(this);
+        if (top is null || DataContext is not ChatViewModel vm)
+            return;
+
+        IReadOnlyList<IStorageFile> files = await top.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Attach an image",
+            AllowMultiple = false,
+            FileTypeFilter = new[] { FilePickerFileTypes.ImageAll },
+        });
+        if (files.Count == 0)
+            return;
+
+        await using System.IO.Stream stream = await files[0].OpenReadAsync();
+        using var ms = new System.IO.MemoryStream();
+        await stream.CopyToAsync(ms);
+        await vm.AttachImageAsync(ms.ToArray());
+    }
+
     // Enter sends; Shift+Enter inserts a newline (AcceptsReturn handles the latter).
     private void Composer_KeyDown(object? sender, KeyEventArgs e)
     {

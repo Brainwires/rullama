@@ -22,5 +22,6 @@
     <PackageReference Include="CommunityToolkit.Mvvm" />
     <PackageReference Include="Markdown.Avalonia" />
     <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="SkiaSharp" />
   </ItemGroup>
 </Project>

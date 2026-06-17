@@ -144,6 +144,39 @@ enum Command {
         cb: TokenCb,
         reply: Sender<Result<u32, String>>,
     },
+    HasVision(Sender<bool>),
+    HasAudio(Sender<bool>),
+    Sentinels {
+        audio: bool,
+        reply: Sender<Option<(u32, u32)>>,
+    },
+    ImageSoftCount {
+        h: usize,
+        w: usize,
+        reply: Sender<Option<usize>>,
+    },
+    EncodeImage {
+        pixels: Vec<f32>,
+        h: usize,
+        w: usize,
+        reply: Sender<Result<Vec<f32>, String>>,
+    },
+    EncodeAudio {
+        pcm: Vec<f32>,
+        reply: Sender<Result<Vec<f32>, String>>,
+    },
+    /// Generate with a single spliced media item: during prefill, after the
+    /// `sentinel_begin` token is fed, the soft-token rows in `soft`
+    /// (`soft.len()/d_text` rows) are spliced via step_with_embedding.
+    GenerateSpliced {
+        prompt: Vec<u32>,
+        sentinel_begin: u32,
+        soft: Vec<f32>,
+        d_text: usize,
+        max_new: u32,
+        cb: TokenCb,
+        reply: Sender<Result<u32, String>>,
+    },
     Shutdown,
 }
 
@@ -239,33 +272,97 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
                     for &tok in &prompt {
                         cur = pollster::block_on(m.step_native(tok)).map_err(|e| format!("{e}"))?;
                     }
-                    // Decode loop.
-                    let mut produced = 0u32;
-                    while produced < max_new {
-                        if cancel.load(Ordering::SeqCst) {
-                            break;
-                        }
-                        if m.is_eos_native(cur) {
-                            break;
-                        }
-                        // Decode here (on the worker thread) so the callback can
-                        // stream display text without re-entering the engine.
-                        let piece = m
-                            .token_str_native(cur)
-                            .unwrap_or_default()
-                            .replace('\u{2581}', " ");
-                        let cpiece = CString::new(piece).unwrap_or_default();
-                        (cb.f)(cb.ctx, cur, cpiece.as_ptr(), 0);
-                        produced += 1;
-                        cur = pollster::block_on(m.step_native(cur)).map_err(|e| format!("{e}"))?;
+                    decode_loop(m, cur, max_new, &cb, &cancel)
+                })();
+                let _ = reply.send(res);
+            }
+            Command::HasVision(reply) => {
+                let _ = reply.send(model.as_ref().is_some_and(|m| m.has_vision_native()));
+            }
+            Command::HasAudio(reply) => {
+                let _ = reply.send(model.as_ref().is_some_and(|m| m.has_audio_native()));
+            }
+            Command::Sentinels { audio, reply } => {
+                let r = model.as_ref().and_then(|m| {
+                    if audio { m.audio_sentinel_ids_native() } else { m.image_sentinel_ids_native() }
+                });
+                let _ = reply.send(r);
+            }
+            Command::ImageSoftCount { h, w, reply } => {
+                let _ = reply.send(model.as_ref().and_then(|m| m.image_soft_token_count_native(h, w)));
+            }
+            Command::EncodeImage { pixels, h, w, reply } => {
+                let res = match model.as_mut() {
+                    Some(m) => pollster::block_on(m.encode_image_native(&pixels, h, w, None))
+                        .map_err(|e| format!("{e}")),
+                    None => Err("no model loaded".into()),
+                };
+                let _ = reply.send(res);
+            }
+            Command::EncodeAudio { pcm, reply } => {
+                let res = match model.as_mut() {
+                    Some(m) => pollster::block_on(m.encode_audio_native(&pcm)).map_err(|e| format!("{e}")),
+                    None => Err("no model loaded".into()),
+                };
+                let _ = reply.send(res);
+            }
+            Command::GenerateSpliced {
+                prompt, sentinel_begin, soft, d_text, max_new, cb, reply,
+            } => {
+                let Some(m) = model.as_mut() else {
+                    let _ = reply.send(Err("no model loaded".into()));
+                    continue;
+                };
+                cancel.store(false, Ordering::SeqCst);
+                let res = (|| -> Result<u32, String> {
+                    if prompt.is_empty() {
+                        return Err("empty prompt".into());
                     }
-                    Ok(produced)
+                    if d_text == 0 || soft.len() % d_text != 0 {
+                        return Err("bad soft-token dims".into());
+                    }
+                    let n_soft = soft.len() / d_text;
+                    // Prefill with splice at the begin sentinel.
+                    let mut cur = 0u32;
+                    for &id in &prompt {
+                        cur = pollster::block_on(m.step_native(id)).map_err(|e| format!("{e}"))?;
+                        if id == sentinel_begin {
+                            for r in 0..n_soft {
+                                let row = &soft[r * d_text..(r + 1) * d_text];
+                                cur = pollster::block_on(m.step_with_embedding_native(row))
+                                    .map_err(|e| format!("{e}"))?;
+                            }
+                        }
+                    }
+                    decode_loop(m, cur, max_new, &cb, &cancel)
                 })();
                 let _ = reply.send(res);
             }
             Command::Shutdown => break,
         }
     }
+}
+
+/// Shared decode loop: emit decoded pieces until EOS / max_new / cancel.
+fn decode_loop(
+    m: &mut Model,
+    mut cur: u32,
+    max_new: u32,
+    cb: &TokenCb,
+    cancel: &AtomicBool,
+) -> Result<u32, String> {
+    let mut produced = 0u32;
+    while produced < max_new {
+        if cancel.load(Ordering::SeqCst) || m.is_eos_native(cur) {
+            break;
+        }
+        let piece = m.token_str_native(cur).unwrap_or_default().replace('\u{2581}', " ");
+        let cpiece = CString::new(piece).unwrap_or_default();
+        (cb.f)(cb.ctx, cur, cpiece.as_ptr(), 0);
+        produced += 1;
+        cur = pollster::block_on(m.step_native(cur)).map_err(|e| format!("{e}"))?;
+    }
+    Ok(produced)
 }
 
 /// Opaque engine handle: owns the worker thread, the channel, and the cancel flag.
@@ -575,6 +672,214 @@ pub unsafe extern "C" fn rl_generate(
 pub unsafe extern "C" fn rl_cancel(m: *mut RlModel) {
     if let Some(model) = RlModel::from_ptr(m) {
         model.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multimodal (image + audio in)
+// ---------------------------------------------------------------------------
+
+/// Frees an `f32` array previously returned by this library.
+///
+/// # Safety
+/// `ptr`/`n` must come from a single returned allocation, unused after.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_free_f32(ptr: *mut f32, n: usize) {
+    if !ptr.is_null() {
+        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, n)) });
+    }
+}
+
+fn put_f32(v: Vec<f32>, out: *mut *mut f32, out_len: *mut usize) {
+    let boxed = v.into_boxed_slice();
+    unsafe {
+        *out_len = boxed.len();
+        *out = Box::into_raw(boxed) as *mut f32;
+    }
+}
+
+/// 1 if the loaded model has a vision tower, else 0.
+/// # Safety
+/// `m` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_has_vision(m: *mut RlModel) -> i32 {
+    i32::from(call(m, Command::HasVision).unwrap_or(false))
+}
+
+/// 1 if the loaded model has an audio tower, else 0.
+/// # Safety
+/// `m` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_has_audio(m: *mut RlModel) -> i32 {
+    i32::from(call(m, Command::HasAudio).unwrap_or(false))
+}
+
+unsafe fn sentinels(m: *mut RlModel, audio: bool, begin: *mut u32, end: *mut u32) -> i32 {
+    if begin.is_null() || end.is_null() {
+        set_last_error("null out");
+        return -2;
+    }
+    match call(m, |reply| Command::Sentinels { audio, reply }) {
+        Ok(Some((b, e))) => {
+            unsafe {
+                *begin = b;
+                *end = e;
+            }
+            0
+        }
+        Ok(None) => -7,
+        Err(c) => c,
+    }
+}
+
+/// Image sentinel token ids (begin, end). Returns -7 if absent.
+/// # Safety
+/// `m` valid; `begin`/`end` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_image_sentinel_ids(m: *mut RlModel, begin: *mut u32, end: *mut u32) -> i32 {
+    unsafe { sentinels(m, false, begin, end) }
+}
+
+/// Audio sentinel token ids (begin, end). Returns -7 if absent.
+/// # Safety
+/// `m` valid; `begin`/`end` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_audio_sentinel_ids(m: *mut RlModel, begin: *mut u32, end: *mut u32) -> i32 {
+    unsafe { sentinels(m, true, begin, end) }
+}
+
+/// Soft-token count for an h×w image, or -1 if unavailable.
+/// # Safety
+/// `m` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_image_soft_token_count(m: *mut RlModel, h: usize, w: usize) -> i64 {
+    match call(m, |reply| Command::ImageSoftCount { h, w, reply }) {
+        Ok(Some(n)) => n as i64,
+        _ => -1,
+    }
+}
+
+/// Encode image pixels (channel-first f32) → soft-token embeddings (free with
+/// `rl_free_f32`). Length is `soft_tokens × d_text`.
+/// # Safety
+/// `m` valid; `pixels`/`n` a valid array; `out`/`out_len` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_encode_image(
+    m: *mut RlModel,
+    pixels: *const f32,
+    n: usize,
+    h: usize,
+    w: usize,
+    out: *mut *mut f32,
+    out_len: *mut usize,
+) -> i32 {
+    if out.is_null() || out_len.is_null() {
+        set_last_error("null out");
+        return -2;
+    }
+    let pixels = if pixels.is_null() { Vec::new() } else { unsafe { std::slice::from_raw_parts(pixels, n) }.to_vec() };
+    match call(m, |reply| Command::EncodeImage { pixels, h, w, reply }) {
+        Ok(Ok(v)) => {
+            put_f32(v, out, out_len);
+            0
+        }
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
+        Err(c) => c,
+    }
+}
+
+/// Encode audio PCM (f32 mono) → soft-token embeddings (free with `rl_free_f32`).
+/// # Safety
+/// `m` valid; `pcm`/`n` a valid array; `out`/`out_len` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_encode_audio(
+    m: *mut RlModel,
+    pcm: *const f32,
+    n: usize,
+    out: *mut *mut f32,
+    out_len: *mut usize,
+) -> i32 {
+    if out.is_null() || out_len.is_null() {
+        set_last_error("null out");
+        return -2;
+    }
+    let pcm = if pcm.is_null() { Vec::new() } else { unsafe { std::slice::from_raw_parts(pcm, n) }.to_vec() };
+    match call(m, |reply| Command::EncodeAudio { pcm, reply }) {
+        Ok(Ok(v)) => {
+            put_f32(v, out, out_len);
+            0
+        }
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
+        Err(c) => c,
+    }
+}
+
+/// Decode WAV bytes → mono f32 PCM (free with `rl_free_f32`). Standalone — no
+/// model needed.
+/// # Safety
+/// `bytes`/`n` a valid array; `out`/`out_len` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_decode_wav(bytes: *const u8, n: usize, out: *mut *mut f32, out_len: *mut usize) -> i32 {
+    if bytes.is_null() || out.is_null() || out_len.is_null() {
+        set_last_error("null");
+        return -2;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(bytes, n) };
+    match Model::decode_wav_native(slice) {
+        Ok(v) => {
+            put_f32(v, out, out_len);
+            0
+        }
+        Err(e) => {
+            set_last_error(format!("{e}"));
+            -6
+        }
+    }
+}
+
+/// Streaming generation with one spliced media item: after the `sentinel_begin`
+/// token is fed during prefill, the `soft` rows (`soft_len/d_text` of them) are
+/// spliced via step_with_embedding. Returns produced count (>=0) or negative.
+/// # Safety
+/// `m` valid; `prompt`/`n` and `soft`/`soft_len` valid arrays; `cb` valid; `ctx`
+/// kept alive until return.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_generate_spliced(
+    m: *mut RlModel,
+    prompt: *const u32,
+    n: usize,
+    sentinel_begin: u32,
+    soft: *const f32,
+    soft_len: usize,
+    d_text: usize,
+    max_new: u32,
+    cb: TokenFn,
+    ctx: *mut c_void,
+) -> i32 {
+    let prompt = if prompt.is_null() || n == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(prompt, n) }.to_vec() };
+    let soft = if soft.is_null() || soft_len == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(soft, soft_len) }.to_vec() };
+    let cb = TokenCb { f: cb, ctx };
+    match call(m, |reply| Command::GenerateSpliced {
+        prompt,
+        sentinel_begin,
+        soft,
+        d_text,
+        max_new,
+        cb,
+        reply,
+    }) {
+        Ok(Ok(produced)) => produced as i32,
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
+        Err(c) => c,
     }
 }
 
