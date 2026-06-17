@@ -1,0 +1,173 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- Control styling ported from web/src/components/ui/*. Variants via Classes. -->
+
+  <!-- ===== Buttons ===== -->
+  <!-- Base -->
+  <Style Selector="Button">
+    <Setter Property="MinHeight" Value="36" />
+    <Setter Property="Padding" Value="16,8" />
+    <Setter Property="FontSize" Value="13" />
+    <Setter Property="FontWeight" Value="Medium" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="Foreground" Value="{StaticResource Foreground}" />
+  </Style>
+  <Style Selector="Button /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.12" />
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <!-- Sizes -->
+  <Style Selector="Button.sm">
+    <Setter Property="MinHeight" Value="32" />
+    <Setter Property="Padding" Value="12,4" />
+    <Setter Property="FontSize" Value="12" />
+  </Style>
+  <Style Selector="Button.lg">
+    <Setter Property="MinHeight" Value="40" />
+    <Setter Property="Padding" Value="24,8" />
+  </Style>
+  <Style Selector="Button.icon">
+    <Setter Property="MinHeight" Value="36" />
+    <Setter Property="Width" Value="36" />
+    <Setter Property="Padding" Value="0" />
+  </Style>
+  <Style Selector="Button.iconsm">
+    <Setter Property="MinHeight" Value="28" />
+    <Setter Property="Width" Value="28" />
+    <Setter Property="Height" Value="28" />
+    <Setter Property="Padding" Value="0" />
+  </Style>
+
+  <!-- variant: default (primary) -->
+  <Style Selector="Button.primary">
+    <Setter Property="Foreground" Value="{StaticResource PrimaryForeground}" />
+  </Style>
+  <Style Selector="Button.primary /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Primary}" />
+  </Style>
+  <Style Selector="Button.primary:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource PrimaryActive}" />
+  </Style>
+  <Style Selector="Button.primary:pointerover">
+    <Setter Property="Foreground" Value="{StaticResource PrimaryForeground}" />
+  </Style>
+
+  <!-- variant: destructive -->
+  <Style Selector="Button.destructive">
+    <Setter Property="Foreground" Value="{StaticResource Foreground}" />
+  </Style>
+  <Style Selector="Button.destructive /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Destructive}" />
+  </Style>
+  <Style Selector="Button.destructive:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource DestructiveSoft}" />
+  </Style>
+
+  <!-- variant: outline -->
+  <Style Selector="Button.outline /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Background}" />
+    <Setter Property="BorderBrush" Value="{StaticResource Input}" />
+    <Setter Property="BorderThickness" Value="1" />
+  </Style>
+  <Style Selector="Button.outline:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Accent}" />
+  </Style>
+
+  <!-- variant: secondary -->
+  <Style Selector="Button.secondary /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Accent}" />
+  </Style>
+
+  <!-- variant: ghost -->
+  <Style Selector="Button.ghost /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="Button.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Accent}" />
+  </Style>
+
+  <!-- variant: link -->
+  <Style Selector="Button.link">
+    <Setter Property="Foreground" Value="{StaticResource Primary}" />
+  </Style>
+  <Style Selector="Button.link /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+
+  <!-- Segmented tab button (AppHeader) -->
+  <Style Selector="Button.tab">
+    <Setter Property="MinHeight" Value="28" />
+    <Setter Property="Padding" Value="8,2" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Foreground" Value="{StaticResource MutedForeground}" />
+  </Style>
+  <Style Selector="Button.tab /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="Button.tab.selected">
+    <Setter Property="Foreground" Value="{StaticResource Foreground}" />
+  </Style>
+  <Style Selector="Button.tab.selected /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource Background}" />
+  </Style>
+
+  <!-- ===== Card ===== -->
+  <Style Selector="Border.card">
+    <Setter Property="Background" Value="{StaticResource Card}" />
+    <Setter Property="BorderBrush" Value="{StaticResource Border}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
+  </Style>
+
+  <!-- ===== Badge ===== -->
+  <Style Selector="Border.badge">
+    <Setter Property="CornerRadius" Value="999" />
+    <Setter Property="Padding" Value="10,2" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Background" Value="{StaticResource Muted}" />
+    <Setter Property="BorderBrush" Value="{StaticResource Border}" />
+  </Style>
+  <Style Selector="Border.badge.info">
+    <Setter Property="Background" Value="{StaticResource PrimaryActive}" />
+    <Setter Property="BorderBrush" Value="{StaticResource PrimaryRing}" />
+  </Style>
+
+  <!-- ===== Text helpers ===== -->
+  <Style Selector="TextBlock.h1">
+    <Setter Property="FontSize" Value="24" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{StaticResource Foreground}" />
+  </Style>
+  <Style Selector="TextBlock.title">
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{StaticResource Foreground}" />
+  </Style>
+  <Style Selector="TextBlock.muted">
+    <Setter Property="Foreground" Value="{StaticResource MutedForeground}" />
+    <Setter Property="FontSize" Value="12" />
+  </Style>
+  <Style Selector="TextBlock.label">
+    <Setter Property="Foreground" Value="{StaticResource MutedForeground}" />
+    <Setter Property="FontSize" Value="11" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+  <Style Selector="TextBlock.mono">
+    <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
+  </Style>
+
+  <!-- ===== TextBox ===== -->
+  <Style Selector="TextBox">
+    <Setter Property="Background" Value="{StaticResource Background}" />
+    <Setter Property="BorderBrush" Value="{StaticResource Input}" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="FontSize" Value="13" />
+  </Style>
+</Styles>

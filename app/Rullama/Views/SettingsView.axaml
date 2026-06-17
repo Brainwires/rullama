@@ -1,0 +1,23 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Rullama.ViewModels"
+             x:Class="Rullama.Views.SettingsView"
+             x:DataType="vm:SettingsViewModel"
+             Background="{StaticResource Background}">
+  <Design.DataContext>
+    <vm:SettingsViewModel />
+  </Design.DataContext>
+
+  <StackPanel Margin="24" Spacing="16" MaxWidth="720"
+              HorizontalAlignment="Center" VerticalAlignment="Center">
+    <TextBlock Classes="h1" Text="Settings" />
+    <TextBlock Classes="label" Text="ENVIRONMENT" />
+    <Button Classes="primary" Content="Probe GPU"
+            Command="{Binding ProbeCommand}" IsEnabled="{Binding !IsBusy}"
+            HorizontalAlignment="Left" />
+    <Border Classes="card" Padding="16">
+      <TextBlock Classes="mono" Text="{Binding Environment}" TextWrapping="Wrap"
+                 Foreground="{StaticResource MutedForeground}" />
+    </Border>
+  </StackPanel>
+</UserControl>

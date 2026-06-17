@@ -1,0 +1,29 @@
+# Rust
+/rust-core/target/
+/rust-core/dist/
+**/*.rs.bk
+
+# .NET / Avalonia
+[Bb]in/
+[Oo]bj/
+*.user
+*.userosscache
+.vs/
+*.binlog
+
+# macOS / Xcode (iOS head, later)
+.DS_Store
+*.xcuserstate
+
+# Android
+*.keystore
+!debug.keystore
+
+# Models / large local artifacts (never commit weights)
+*.gguf
+*.safetensors
+/models/
+
+# Env / secrets
+.env
+.env.local
