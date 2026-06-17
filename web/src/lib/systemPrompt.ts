@@ -9,12 +9,17 @@
 
 import { THINK_TOKEN, TIMESTAMP_SYSTEM_NOTE, FORMATTING_SYSTEM_NOTE } from "./app-helpers";
 import { TOOL_SCHEMA_PROMPT } from "./toolFormat";
+import { orchestratorPreamble } from "./tools/orchestrator";
 
 export interface SysContentParts {
     /** The user's raw system prompt (the editable "system message"). */
     systemPrompt: string;
     thinking: boolean;
     toolMode: boolean;
+    /** Programmatic tool calling: when on (and toolMode), the tool block is the
+     *  Rhai-script orchestrator preamble instead of the JSON `<tool_call>`
+     *  schema. Changes the system signature → a one-time re-warm. */
+    orchestratorMode?: boolean;
     /** Per-turn GPS location line INCLUDING its trailing separator. Omit
      *  for the warm path; only injected on tool-mode turns with GPS. */
     gpsLine?: string;
@@ -38,7 +43,8 @@ export function buildSysContent(p: SysContentParts): string {
     // Static core — exactly what the warm prefills.
     let base = p.systemPrompt.trim();
     if (p.toolMode) {
-        base = base ? `${TOOL_SCHEMA_PROMPT}\n\n${base}` : TOOL_SCHEMA_PROMPT;
+        const toolBlock = p.orchestratorMode ? orchestratorPreamble() : TOOL_SCHEMA_PROMPT;
+        base = base ? `${toolBlock}\n\n${base}` : toolBlock;
     }
     base = base ? `${base}\n\n${TIMESTAMP_SYSTEM_NOTE}` : TIMESTAMP_SYSTEM_NOTE;
     base = `${base}\n\n${FORMATTING_SYSTEM_NOTE}`;

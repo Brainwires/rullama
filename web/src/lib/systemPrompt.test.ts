@@ -41,6 +41,24 @@ describe("buildSysContent", () => {
         }
     });
 
+    it("uses the Rhai orchestrator preamble (not the JSON schema) in orchestrator mode", () => {
+        const json = buildSysContent({ systemPrompt: "Hi", thinking: false, toolMode: true });
+        const orch = buildSysContent({ systemPrompt: "Hi", thinking: false, toolMode: true, orchestratorMode: true });
+        expect(orch).not.toBe(json);
+        expect(orch).not.toContain(TOOL_SCHEMA_PROMPT);
+        expect(orch).toContain("Rhai");
+        expect(orch).toContain("get_weather");
+        expect(orch).toContain("Hi");
+    });
+
+    it("warm == plain turn in orchestrator mode too (signature differs from JSON mode → its own warm)", () => {
+        for (const thinking of [false, true]) {
+            const warm = buildSysContent({ systemPrompt: "You are X.", thinking, toolMode: true, orchestratorMode: true });
+            const plainTurn = buildSysContent({ systemPrompt: "You are X.", thinking, toolMode: true, orchestratorMode: true, gpsLine: "" });
+            expect(warm).toBe(plainTurn);
+        }
+    });
+
     it("appends the gps tail AFTER the static core (so the prefix never shifts)", () => {
         const out = buildSysContent({
             systemPrompt: "SYS", thinking: false, toolMode: true,

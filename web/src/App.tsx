@@ -106,6 +106,7 @@ export function App() {
         newsApiKey, setNewsApiKey,
         weatherUnits, setWeatherUnits,
         useGps, setUseGps,
+        orchestratorMode, setOrchestratorMode,
     } = useToolSettings();
 
     // Sidebar visibility (persisted per sidebar, defaulting open when
@@ -192,7 +193,7 @@ export function App() {
     } = useChatEngine({
         modelStatus, loadedIsDiffusion, statusText, lastLoadedDigest,
         hasVision, hasAudio, systemPrompt, sampling, maxTokens, thinking,
-        toolMode, weatherApiKey, newsApiKey, weatherUnits, useGps, activeAdapter,
+        toolMode, orchestratorMode, weatherApiKey, newsApiKey, weatherUnits, useGps, activeAdapter,
     });
 
     // Keep the cycle-break refs current for the model loader.
@@ -203,7 +204,7 @@ export function App() {
     });
 
     // Signature of everything that determines the warmed system block.
-    const sysWarmSig = JSON.stringify({ systemPrompt, thinking, toolMode, activeAdapter });
+    const sysWarmSig = JSON.stringify({ systemPrompt, thinking, toolMode, orchestratorMode, activeAdapter });
     sysWarmSigRef.current = sysWarmSig;
 
     // **Belt-and-suspenders system pre-warm.** The loader's "preparing"
@@ -454,6 +455,8 @@ export function App() {
                             onThinkingChange={setThinking}
                             toolMode={toolMode}
                             onToolModeChange={setToolMode}
+                            orchestratorMode={orchestratorMode}
+                            onOrchestratorModeChange={setOrchestratorMode}
                             weatherApiKey={weatherApiKey}
                             onWeatherApiKeyChange={setWeatherApiKey}
                             newsApiKey={newsApiKey}

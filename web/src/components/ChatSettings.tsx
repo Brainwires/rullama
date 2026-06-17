@@ -53,6 +53,8 @@ interface Props {
     onThinkingChange: (b: boolean) => void;
     toolMode: boolean;
     onToolModeChange: (b: boolean) => void;
+    orchestratorMode: boolean;
+    onOrchestratorModeChange: (b: boolean) => void;
     // Tools tab — weather (WeatherAPI.com, optional key) + GPS + news (GNews key).
     weatherApiKey: string;
     onWeatherApiKeyChange: (s: string) => void;
@@ -321,6 +323,23 @@ export function ChatSettings(props: Props) {
                                     Enable tool calling — let the model invoke{" "}
                                     <code className="rounded bg-muted px-1">get_weather</code> and others via{" "}
                                     <code className="rounded bg-muted px-1">&lt;tool_call&gt;</code> blocks
+                                </span>
+                            </label>
+                            <label
+                                className={`ml-6 flex items-start gap-2 text-xs text-muted-foreground ${props.toolMode ? "" : "pointer-events-none opacity-40"}`}
+                                title="Programmatic tool calling: the model writes ONE Rhai script orchestrating many tools (only the final result returns — far fewer tokens than the sequential loop). Experimental; if a script fails it falls back to the <tool_call> loop."
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={props.orchestratorMode}
+                                    disabled={!props.toolMode}
+                                    onChange={(e) => props.onOrchestratorModeChange(e.target.checked)}
+                                    className="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer"
+                                />
+                                <span>
+                                    Programmatic mode <span className="opacity-70">(experimental)</span> — the model writes one{" "}
+                                    <code className="rounded bg-muted px-1">Rhai</code> script that orchestrates many tools at once;
+                                    only the final answer returns. Falls back to <code className="rounded bg-muted px-1">&lt;tool_call&gt;</code> on error.
                                 </span>
                             </label>
                         </section>

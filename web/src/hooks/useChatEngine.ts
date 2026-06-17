@@ -8,7 +8,7 @@ import { useToast } from "@/lib/toast";
 import { toolResponseBlock } from "@/lib/toolFormat";
 import { buildSysContent } from "@/lib/systemPrompt";
 import { parseToolCalls } from "@/lib/parseToolCalls";
-import { CHANNEL_OPEN } from "@/lib/parseModel";
+import { CHANNEL_OPEN, parseModelContent } from "@/lib/parseModel";
 import {
     isExecutableTool,
     toolUsesLocation,
@@ -16,6 +16,7 @@ import {
     executeTool,
     type Units as ToolUnits,
 } from "@/lib/tools";
+import { runOrchestration, extractScript } from "@/lib/tools/orchestrator";
 import { preprocessImage } from "@/lib/image_preprocess";
 import { decodeAudioFile } from "@/lib/audio_decode";
 import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
@@ -53,6 +54,7 @@ export interface UseChatEngineParams {
     maxTokens: number;
     thinking: boolean;
     toolMode: boolean;
+    orchestratorMode: boolean;
     weatherApiKey: string;
     newsApiKey: string;
     weatherUnits: ToolUnits;
@@ -120,7 +122,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
     const {
         modelStatus, loadedIsDiffusion, statusText, lastLoadedDigest,
         hasVision, hasAudio, systemPrompt, sampling, maxTokens, thinking,
-        toolMode, weatherApiKey, newsApiKey, weatherUnits, useGps, activeAdapter,
+        toolMode, orchestratorMode, weatherApiKey, newsApiKey, weatherUnits, useGps, activeAdapter,
     } = opts;
     const { showToast } = useToast();
 
@@ -899,7 +901,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
         const {
             convId, modelMsgId, userText: text, createdAt: nowMs,
             images: turnImages, audio: turnAudio, sysContent,
-            sampling, maxTokens, thinking, toolMode,
+            sampling, maxTokens, thinking, toolMode, orchestratorMode,
             weatherApiKey, newsApiKey, weatherUnits, useGps, diffusion: diffusionTurn,
         } = job;
 
@@ -1390,6 +1392,61 @@ export function useChatEngine(opts: UseChatEngineParams) {
 
             await streamTurn(maxTokens);
 
+            // ─── Orchestrator mode (Programmatic Tool Calling) ──────────────
+            // The model just wrote a Rhai script orchestrating many tools.
+            // Compile + run it (async tools bridged by memoized replay), and on
+            // success show ONLY the final synthesized answer — the script and
+            // its intermediate tool results stay hidden (that's the token win).
+            // On compile/exec failure (the spike's residual ~1/3) drop into the
+            // JSON `<tool_call>` loop below, in the SAME KV context: hide the
+            // dead script from the user and feed a JSON-format correction, so
+            // the loop's re-parse picks up real calls. Never wrong output —
+            // worst case "no orchestrator this turn".
+            let orchestratedOk = false;
+            if (toolMode && orchestratorMode && !cancelRef.current) {
+                const reply = parseModelContent(displayHistory[displayHistory.length - 1].content).response;
+                const script = extractScript(reply);
+                if (script) {
+                    setStatusLine("orchestrating tools…");
+                    // Resolve GPS once, only if the script names a location tool
+                    // (don't prompt for coords the script never uses).
+                    const usesLoc = /\b(get_weather|get_weather_forecast|get_air_quality|get_astronomy)\b/.test(script);
+                    const geo = useGps && usesLoc ? await resolveGeo() : null;
+                    const res = await runOrchestration(script, {
+                        weatherApiKey, newsApiKey, units: weatherUnits, useGps, geo,
+                        conversationId: convId ?? null,
+                    });
+                    setStatusLine(undefined);
+                    if (res.ok) {
+                        beacon("tg", `orchestrated ${res.calls.length} tool(s) in ${res.passes} pass(es)`);
+                        displayHistory[displayHistory.length - 1].content = res.output;
+                        reflectDisplay(convId, modelMsgId, displayHistory);
+                        if (convId && modelMsgId) {
+                            try { await client.msgSetContent(convId, modelMsgId, res.output); } catch { /* */ }
+                        }
+                        orchestratedOk = true;
+                    } else {
+                        // Fallback to the JSON loop. Hide the failed script (it
+                        // stays in KV — can't un-feed it), then feed a correction
+                        // that reframes the tools as JSON calls and regenerate.
+                        beacon("tg", `orchestration failed (${res.error}); JSON-loop fallback`);
+                        displayHistory[displayHistory.length - 1].content = "";
+                        reflectDisplay(convId, modelMsgId, displayHistory);
+                        if (convId && modelMsgId) {
+                            try { await client.msgSetContent(convId, modelMsgId, ""); } catch { /* */ }
+                        }
+                        const note =
+                            `\n<tool_response for="orchestrator">That script could not run (${res.error}). ` +
+                            `Do NOT write a script. Answer the user now — if a tool is needed, emit ` +
+                            `<tool_call>{"name": "<tool>", "arguments": { ... }}</tool_call> blocks; ` +
+                            `otherwise just reply normally.</tool_response>\n`;
+                        const noteIds = await client.encode(note);
+                        for (const id of noteIds) { if (cancelRef.current) break; next = await client.step(id); }
+                        if (!cancelRef.current) await streamTurn(maxTokens);
+                    }
+                }
+            }
+
             // ─── Agentic tool loop ──────────────────────────────────────────
             // Each round: run EVERY executable <tool_call> the model just
             // emitted (so "weather and air quality" fires both at once), feed
@@ -1408,7 +1465,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
             // every <tool_response> by name on each parse), so only the freshly
             // emitted calls are picked up here.
             const MAX_TOOL_ROUNDS = 5;
-            for (let round = 0; toolMode && !cancelRef.current && round < MAX_TOOL_ROUNDS; round++) {
+            for (let round = 0; toolMode && !orchestratedOk && !cancelRef.current && round < MAX_TOOL_ROUNDS; round++) {
                 const { calls } = parseToolCalls(displayHistory[displayHistory.length - 1].content);
                 const execCalls = calls.filter(
                     (c): c is typeof c & { arguments: Record<string, unknown> } =>
@@ -1660,7 +1717,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 }
             } catch { /* geolocation denied / unavailable — proceed without it */ }
         }
-        const sysContent = buildSysContent({ systemPrompt, thinking, toolMode, gpsLine });
+        const sysContent = buildSysContent({ systemPrompt, thinking, toolMode, orchestratorMode, gpsLine });
 
         // Snapshot the prior turns NOW (for the in-memory fast path). If this
         // conversation already has a pending/running job, chain off the DB
@@ -1707,6 +1764,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
             maxTokens,
             thinking,
             toolMode,
+            orchestratorMode,
             weatherApiKey,
             newsApiKey,
             weatherUnits,
@@ -1749,7 +1807,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
     }, [
         activeConvId, commitQueue, kickPump, lastLoadedDigest, loadedIsDiffusion,
         maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt,
-        sampling, statusText, systemPrompt, thinking, toolMode,
+        sampling, statusText, systemPrompt, thinking, toolMode, orchestratorMode,
         useGps, weatherApiKey, newsApiKey, weatherUnits, showToast,
     ]);
 
@@ -1919,6 +1977,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
             systemPrompt: overrides?.systemPrompt ?? systemPrompt,
             thinking,
             toolMode,
+            orchestratorMode,
         });
         // Render JUST the system turn. The trailing `<|turn>model\n` differs
         // from a real turn's `<|turn>user`, but LCP reuse keeps the whole
@@ -1989,7 +2048,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
             off?.();
             try { await client.releaseSession(); } catch { /* */ }
         }
-    }, [systemPrompt, thinking, toolMode, loadedIsDiffusion, genActive, lastLoadedDigest, activeAdapter]);
+    }, [systemPrompt, thinking, toolMode, orchestratorMode, loadedIsDiffusion, genActive, lastLoadedDigest, activeAdapter]);
 
     // Clear the chat display surface — called by the model loader on
     // eject / delete-while-loaded.

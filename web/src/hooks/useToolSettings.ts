@@ -26,6 +26,10 @@ export function useToolSettings() {
     // wins thereafter.
     const [weatherUnits, setWeatherUnits]   = usePersistedState<ToolUnits>("rullama:weatherUnits", LOCALE_DEFAULT_UNITS);
     const [useGps, setUseGps]               = usePersistedState<boolean>("rullama:useGps", false);
+    // Programmatic tool calling: the model writes ONE Rhai script orchestrating
+    // many tools (Brainwires/tool-orchestrator), instead of the sequential JSON
+    // loop. Experimental, opt-in; failures fall back to the JSON loop.
+    const [orchestratorMode, setOrchestratorMode] = usePersistedState<boolean>("rullama:orchestratorMode", false);
 
     return {
         toolMode, setToolMode,
@@ -33,5 +37,6 @@ export function useToolSettings() {
         newsApiKey, setNewsApiKey,
         weatherUnits, setWeatherUnits,
         useGps, setUseGps,
+        orchestratorMode, setOrchestratorMode,
     };
 }

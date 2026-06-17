@@ -188,6 +188,8 @@ export interface GenJob {
     newsApiKey: string;
     weatherUnits: ToolUnits;
     useGps: boolean;
+    /** Programmatic tool calling (Rhai script orchestration) for this turn. */
+    orchestratorMode: boolean;
     /** Block-diffusion (DiffusionGemma) turn — denoise loop, not AR stream. */
     diffusion: boolean;
     modelDigest: string;
