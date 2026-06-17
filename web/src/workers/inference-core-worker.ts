@@ -14,7 +14,8 @@
 // (the router), one request at a time per stateful RPC.
 
 // @ts-expect-error — generated bundle, no .d.ts
-import init, { Model, TrainingSession, probeTrainingFit, WasmDatabase, EmbeddingModel, DiffusionGemma, gpuMemBreakdown, gpuMemTotalMib } from "/pkg/rullama.js";
+import init, { Model, TrainingSession, probeTrainingFit, WasmDatabase, EmbeddingModel, DiffusionGemma, ImageModel, gpuMemBreakdown, gpuMemTotalMib } from "/pkg/rullama.js";
+import { AutoTokenizer, env as hfEnv } from "@huggingface/transformers";
 
 const gpuMemBreakdownFn = gpuMemBreakdown as unknown as () => string;
 const gpuMemTotalFn = gpuMemTotalMib as unknown as () => number;
@@ -255,6 +256,84 @@ const DiffusionGemmaClass = DiffusionGemma as unknown as {
         totalBytes: number,
     ): Promise<DiffusionGemmaHandle>;
 };
+
+// ── Z-Image-Turbo (text-to-IMAGE engine, `z-image` family) ─────────────────
+// The FOURTH non-Model wasm class. Unlike the chat/diffuser models it loads
+// from a CDN base URL (HTTP Range per-tensor, never OPFS) and `generate` runs
+// the whole pipeline (encode → denoise → VAE decode) in one async call — there
+// is NO per-step callback in this first version, so the UI shows a busy state,
+// not a per-step canvas. Tokenization is JS-side (Qwen2 tokenizer, below); we
+// pass token-id arrays in.
+interface ImageModelHandle {
+    generate(
+        tokens: Uint32Array, negTokens: Uint32Array,
+        cfgScale: number, lh: number, lw: number, steps: number, seed: number,
+    ): Promise<Uint8Array>;
+    readonly defaultSteps: number;
+    readonly stepIndex: number;
+    readonly totalSteps: number;
+    free?(): void;
+}
+let imageModel: ImageModelHandle | null = null;
+let imageInfo: { name: string; baseUrl: string } | null = null;
+const ImageModelClass = ImageModel as unknown as {
+    loadFromUrl(baseUrl: string): Promise<ImageModelHandle>;
+};
+
+// Qwen2 tokenizer for the image prompt. Lazily loaded from the CDN
+// (`<base>/tokenizer/`) the first time we generate, then cached. The prompt is
+// wrapped in the Qwen chat format before tokenizing (matches the reference
+// pipeline) — `<|im_start|>` / `<|im_end|>` are recognized as the tokenizer's
+// special tokens.
+interface HfTokenizer {
+    (text: string, opts?: { add_special_tokens?: boolean }): { input_ids: { data: BigInt64Array | number[] } };
+}
+let imageTokenizer: HfTokenizer | null = null;
+let imageTokenizerPromise: Promise<HfTokenizer> | null = null;
+
+/** Load (once) the Qwen2 tokenizer hosted under the image model's CDN base. */
+function ensureImageTokenizer(baseUrl: string): Promise<HfTokenizer> {
+    if (imageTokenizer) return Promise.resolve(imageTokenizer);
+    if (imageTokenizerPromise) return imageTokenizerPromise;
+    imageTokenizerPromise = (async () => {
+        // Point transformers.js at our CDN instead of the HF Hub, and disable
+        // any local/cache file probing (we're in a Worker, no FS). The model
+        // id is the path segment after the host; remotePathTemplate "{model}"
+        // makes `from_pretrained("z-image-turbo/tokenizer")` resolve to
+        // `<host>/z-image-turbo/tokenizer/<file>`.
+        const e = hfEnv as unknown as {
+            allowRemoteModels: boolean; allowLocalModels: boolean;
+            remoteHost: string; remotePathTemplate: string;
+            useBrowserCache?: boolean;
+        };
+        const u = new URL(baseUrl);
+        e.allowRemoteModels = true;
+        e.allowLocalModels = false;
+        e.remoteHost = `${u.protocol}//${u.host}`;
+        e.remotePathTemplate = "{model}";
+        // Strip the leading slash; everything after the host is the "model id".
+        const modelId = `${u.pathname.replace(/^\/+/, "")}/tokenizer`;
+        const tok = await (AutoTokenizer as unknown as {
+            from_pretrained(id: string): Promise<HfTokenizer>;
+        }).from_pretrained(modelId);
+        imageTokenizer = tok;
+        return tok;
+    })();
+    return imageTokenizerPromise;
+}
+
+/** Wrap a prompt in the Qwen chat format + tokenize → Uint32Array of ids.
+ *  Empty prompt ⇒ empty array (used for an absent negative prompt). */
+async function tokenizeImagePrompt(baseUrl: string, prompt: string): Promise<Uint32Array> {
+    if (!prompt) return new Uint32Array(0);
+    const tok = await ensureImageTokenizer(baseUrl);
+    const wrapped = `<|im_start|>user\n${prompt}<|im_end|>\n<|im_start|>assistant\n`;
+    const out = tok(wrapped, { add_special_tokens: false });
+    const data = out.input_ids.data;
+    const ids = new Uint32Array(data.length);
+    for (let i = 0; i < data.length; i++) ids[i] = Number(data[i]);
+    return ids;
+}
 
 /** Open a sync read handle over an OPFS-cached diffusion GGUF + a readFn for
  *  the streaming TensorFetcher. Mirrors `openEmbedderSyncReadFn`. */
@@ -1439,6 +1518,55 @@ const RPC: Record<string, Handler> = {
         return { text, done: true };
     },
 
+    // ── Z-Image-Turbo (text-to-image) ───────────────────────────────────────
+    // Stream-load all three components from the CDN base URL (per-tensor HTTP
+    // Range — nothing touches OPFS). `imageInfo` mirrors the diffuser/embedder
+    // status shape so the Image tab can probe load state on mount.
+    loadImage: async (a) => {
+        await ensureWasm();
+        if (imageModel) return imageInfo;
+        const baseUrl = String(a.baseUrl);
+        const name = String(a.name ?? "z-image-turbo");
+        log(`image: streaming ${name} from ${baseUrl} (HTTP Range, no OPFS)`);
+        imageModel = await ImageModelClass.loadFromUrl(baseUrl);
+        imageInfo = { name, baseUrl };
+        log(`image: ready defaultSteps=${imageModel.defaultSteps} (${baseUrl})`);
+        notify("imageReady", imageInfo);
+        return imageInfo;
+    },
+
+    imageStatus: () => imageInfo,
+
+    unloadImage: () => {
+        if (imageModel) { try { imageModel.free?.(); } catch { /* */ } imageModel = null; imageInfo = null; }
+        // Drop the cached tokenizer too so a later load re-resolves it (CDN may
+        // have rotated, and it's cheap to refetch).
+        imageTokenizer = null;
+        imageTokenizerPromise = null;
+        return true;
+    },
+
+    // Run the whole text→image pipeline in one async call. Tokenize the prompt
+    // (+ optional negative) JS-side with the Qwen2 tokenizer, then `generate`.
+    // No per-step callback in this version, so there's no `imageStep` notify —
+    // the UI just shows a busy state until this resolves with the RGBA8 bytes.
+    imageGenerate: async (a) => {
+        if (!imageModel) throw new Error("no image model loaded — call loadImage() first");
+        const prompt    = String(a.prompt ?? "");
+        const negPrompt = String(a.negPrompt ?? "");
+        const lh        = Number(a.lh ?? 64);  // latent dims = image px / 8
+        const lw        = Number(a.lw ?? 64);
+        const steps     = Number(a.steps ?? 0);  // 0 ⇒ model default
+        const cfgScale  = Number(a.cfgScale ?? 0); // <=0 ⇒ model default
+        const seed      = Number(a.seed ?? 0x2417);
+        const baseUrl   = imageInfo?.baseUrl ?? "";
+        const tokens    = await tokenizeImagePrompt(baseUrl, prompt);
+        const negTokens = await tokenizeImagePrompt(baseUrl, negPrompt);
+        log(`image: generate ${lw * 8}x${lh * 8} steps=${steps || "default"} cfg=${cfgScale || "default"} tok=${tokens.length} neg=${negTokens.length}`);
+        const rgba = await imageModel.generate(tokens, negTokens, cfgScale, lh, lw, steps, seed);
+        return { rgba, width: lw * 8, height: lh * 8 };
+    },
+
     // Embed a query string → number[] (small payload, JSON-friendly).
     embedText: async (a) => {
         if (!embedder) throw new Error("no embedder loaded — call loadEmbedder() first");
@@ -2339,6 +2467,11 @@ function releaseAllHandles() {
             }).catch(() => {});
             dbReady = null;
         }
+    } catch { /* */ }
+    // Z-Image-Turbo holds GPU buffers (no OPFS handle); free it so its VRAM is
+    // surrendered before the worker exits.
+    try {
+        if (imageModel) { try { imageModel.free?.(); } catch { /* */ } imageModel = null; imageInfo = null; }
     } catch { /* */ }
     loadedInfo = null;
 }

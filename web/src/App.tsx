@@ -14,6 +14,7 @@ import { disposeSharedTts } from "@/lib/tts-client";
 import { ChatSettings } from "@/components/ChatSettings";
 import { AppHeader } from "@/components/AppHeader";
 import { KnowledgeTab } from "@/components/KnowledgeTab";
+import { ImageTab } from "@/components/ImageTab";
 import { TrainingOverlay } from "@/components/TrainingOverlay";
 import { UnsupportedScreen } from "@/components/UnsupportedScreen";
 import { useDeviceTier } from "@/lib/capability";
@@ -47,7 +48,7 @@ export function App() {
     // learning likewise from Voice's sidebar. Keeping training in the same
     // engine context as its tab is what removed the cross-engine reload that
     // used to fail with "model load failed".)
-    const [view, setView] = usePersistedState<"chat" | "voice" | "knowledge" | "settings">("rullama:view", "chat");
+    const [view, setView] = usePersistedState<"chat" | "voice" | "knowledge" | "image" | "settings">("rullama:view", "chat");
     // Migrate any persisted legacy "finetune" view to "chat".
     useEffect(() => {
         if ((view as string) === "finetune") setView("chat");
@@ -313,10 +314,15 @@ export function App() {
         if (premium) return; // keep both engines warm on high-VRAM machines
         const needsInference = view === "chat";
         const needsVoice = view === "voice";
-        if (needsVoice && !needsInference) {
+        // The image engine (Z-Image-Turbo) is GPU-heavy and lives in its own
+        // tab; treat it like Voice — don't keep the chat core resident
+        // alongside it. The ImageTab owns its own load/unload (client.image.*),
+        // so we only tear the chat core down here, same as the voice path.
+        const needsImage = view === "image";
+        if ((needsVoice || needsImage) && !needsInference) {
             teardownInferenceCore();
             setModelStatus("idle"); // returning to chat re-triggers the load below
-        } else if (needsInference && !needsVoice) {
+        } else if (needsInference && !needsVoice && !needsImage) {
             disposeSharedClone();
             disposeSharedTts();
             if (!firstRun && modelStatus !== "ready" && modelStatus !== "loading") {
@@ -467,6 +473,8 @@ export function App() {
                     <VoicePanel settingsHostEl={voiceTabSettingsEl} clipsHostEl={voiceClipsEl} onOpenVoiceLearn={() => setTraining("voicelearn")} />
                 ) : view === "knowledge" ? (
                     <KnowledgeTab activeConvId={activeConvId} />
+                ) : view === "image" ? (
+                    <ImageTab />
                 ) : view === "settings" ? (
                     // Centered max-width wrapper so the form controls
                     // don't stretch across the full main-content width

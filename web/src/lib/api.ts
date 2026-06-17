@@ -175,7 +175,36 @@ export const BAKED_IN_MODELS: readonly ModelEntry[] = [
         url:        `https://${R2_HOST}/diffusiongemma-26b-a4b.gguf`,
         heavy:      true,
     },
+    {
+        // Z-Image-Turbo — text-to-IMAGE generation (the 4th engine, ImageModel
+        // wasm class). NOT a GGUF: three per-tensor safetensors components
+        // (text_encoder/ Qwen3 + transformer/ DiT + vae/) live under the CDN
+        // base `url` and stream per-tensor via HTTP Range — nothing downloads
+        // to OPFS, so this entry never enters the model-picker / ensureModel
+        // path. The Image tab loads it directly through `client.image.load`.
+        // ~31 GB across the three components; desktop-only → heavy advisory ⚠
+        // (and never appears in the chat model picker, which filters on
+        // isSupported()). `size` here is advisory only.
+        name:       "z-image-turbo",
+        family:     "z-image",
+        tag:        "turbo",
+        size:       31000000000,
+        digest:     "z-image-turbo",
+        url:        `https://${R2_HOST}/z-image-turbo`,
+        heavy:      true,
+    },
 ];
+
+/** The Z-Image-Turbo text-to-image model — the Image tab's engine. SEPARATE
+ *  from the chat catalog (it's the ImageModel wasm class, not a Gemma chat
+ *  model) and loaded from a CDN base URL via HTTP Range, never OPFS. */
+export const IMAGE_MODEL = {
+    name:    "z-image-turbo",
+    family:  "z-image",
+    tag:     "turbo",
+    /** CDN root holding `text_encoder/`, `transformer/`, `vae/` (+ `tokenizer/`). */
+    baseUrl: `https://${R2_HOST}/z-image-turbo`,
+} as const;
 
 /**
  * Kokoro-82M TTS model — a SEPARATE model from the chat catalog above (it is
@@ -268,6 +297,14 @@ export function isSupported(m: ModelEntry): boolean {
  *  the standard token-streaming `generate`. */
 export function isDiffusion(m: ModelEntry): boolean {
     return m.family === "diffusion-gemma";
+}
+
+/** Whether this entry is the Z-Image-Turbo text-to-image engine (ImageModel
+ *  wasm class), driven by the Image tab via `client.image.*` rather than the
+ *  chat token stream. Deliberately NOT in `isSupported()` — image gen is its
+ *  own tab and must not appear in the chat model picker. */
+export function isImage(m: ModelEntry): boolean {
+    return m.family === "z-image";
 }
 
 /**

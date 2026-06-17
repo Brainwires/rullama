@@ -474,6 +474,31 @@ export class WorkerClient {
         ) => this.subscribe("diffuserStep", handler as unknown as NotifyHandler),
     };
 
+    // ── Z-Image-Turbo (text-to-image) ──────────────────────────────────
+    /** Lifecycle + generation for the Z-Image-Turbo engine — a separate
+     *  wasm handle (`ImageModel`) in the worker, loaded from a CDN base URL
+     *  via HTTP Range (never OPFS). `generate` runs the entire pipeline
+     *  (encode → denoise → VAE decode) in one async call and resolves with
+     *  the RGBA8 pixels + dimensions — there is NO per-step callback in this
+     *  version, so the UI shows a busy state, not per-step canvas updates. */
+    readonly image = {
+        /** Stream-load all three components from the CDN base URL. */
+        load: (baseUrl: string, name?: string) =>
+            this.rpc<{ name: string; baseUrl: string } | null>("loadImage", { baseUrl, name }),
+        status: () =>
+            this.rpc<{ name: string; baseUrl: string } | null>("imageStatus"),
+        unload: () => this.rpc<boolean>("unloadImage"),
+        /** Tokenize (Qwen2, worker-side) + run the pipeline. `lh`/`lw` are
+         *  LATENT dims (image px ÷ 8); `steps`/`cfgScale` of 0 ⇒ model
+         *  defaults. Resolves with RGBA8 bytes ready for `putImageData`. */
+        generate: (args: {
+            prompt: string; negPrompt?: string;
+            lh?: number; lw?: number; steps?: number; cfgScale?: number; seed?: number;
+        }) => this.rpc<{ rgba: Uint8Array; width: number; height: number }>(
+            "imageGenerate", args as unknown as Record<string, unknown>,
+        ),
+    };
+
     // ── Diagnostic logs (OPFS-backed, see workers/opfs_logger.ts) ──────
     /** Worker-side log file storage. `append` is fire-and-forget so
      *  the main thread never blocks on a beacon; `list/read/delete`
