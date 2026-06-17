@@ -74,13 +74,10 @@
                 BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0" Padding="8">
           <Grid ColumnDefinitions="*,Auto">
             <TextBox Grid.Column="0" Margin="0,0,6,0"
-                     Watermark="Say something…"
+                     Watermark="Say something…  (Shift+Enter for newline)"
                      Text="{Binding Input, Mode=TwoWay}"
-                     AcceptsReturn="False">
-              <TextBox.KeyBindings>
-                <KeyBinding Gesture="Enter" Command="{Binding SendCommand}" />
-              </TextBox.KeyBindings>
-            </TextBox>
+                     AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="140"
+                     KeyDown="Composer_KeyDown" />
             <Button Grid.Column="1" Classes="primary" Content="Send"
                     Command="{Binding SendCommand}" IsVisible="{Binding !IsBusy}" />
             <Button Grid.Column="1" Classes="destructive" Content="Stop"
@@ -89,7 +86,7 @@
         </Border>
 
         <!-- Messages -->
-        <ScrollViewer Padding="16,12">
+        <ScrollViewer x:Name="MessagesScroll" Padding="16,12">
           <ItemsControl ItemsSource="{Binding Messages}" HorizontalAlignment="Stretch">
             <ItemsControl.ItemsPanel>
               <ItemsPanelTemplate>
