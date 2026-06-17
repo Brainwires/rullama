@@ -168,7 +168,7 @@ public partial class ChatViewModel : ViewModelBase
     }
 
     // ---- model loading ----
-    private bool CanLoad => !IsBusy && !IsModelLoaded;
+    private bool CanLoad => !IsBusy && !IsModelLoaded && !IsDownloading;
 
     [RelayCommand(CanExecute = nameof(CanLoad))]
     private async Task LoadModelAsync()
@@ -199,6 +199,54 @@ public partial class ChatViewModel : ViewModelBase
             IsBusy = false;
         }
     }
+
+    // ---- model download ----
+    private readonly ModelDownloader _downloader = new();
+    private CancellationTokenSource? _dlCts;
+
+    public System.Collections.Generic.IReadOnlyList<CatalogModel> Catalog => ModelCatalog.Chat;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(DownloadModelCommand))]
+    private CatalogModel? _selectedCatalogModel;
+
+    [ObservableProperty]
+    private double _downloadProgress;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(DownloadModelCommand))]
+    [NotifyCanExecuteChangedFor(nameof(LoadModelCommand))]
+    private bool _isDownloading;
+
+    private bool CanDownload => SelectedCatalogModel is not null && !IsDownloading && !IsModelLoaded;
+
+    [RelayCommand(CanExecute = nameof(CanDownload))]
+    private async Task DownloadModelAsync()
+    {
+        CatalogModel m = SelectedCatalogModel!;
+        IsDownloading = true;
+        DownloadProgress = 0;
+        _dlCts = new CancellationTokenSource();
+        Status = $"Downloading {m.Name} ({m.SizeLabel})…";
+        try
+        {
+            var progress = new Progress<double>(p => DownloadProgress = p);
+            string path = await _downloader.DownloadAsync(m, progress, _dlCts.Token);
+            ModelPath = path;
+            Status = "Downloaded. Click Load model.";
+        }
+        catch (OperationCanceledException) { Status = "Download cancelled."; }
+        catch (Exception e) { Status = "Download failed: " + e.Message; }
+        finally
+        {
+            IsDownloading = false;
+            _dlCts?.Dispose();
+            _dlCts = null;
+        }
+    }
+
+    [RelayCommand]
+    private void CancelDownload() => _dlCts?.Cancel();
 
     // ---- conversation management ----
     [RelayCommand]

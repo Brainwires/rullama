@@ -57,6 +57,21 @@
           <TextBlock Classes="h1" Text="rullama" HorizontalAlignment="Center" />
           <TextBlock Classes="muted" HorizontalAlignment="Center" TextWrapping="Wrap"
                      Text="Gemma 4, fully on-device. Load a GGUF (or an Ollama blob) to begin." />
+          <!-- Download from catalog -->
+          <TextBlock Classes="label" Text="DOWNLOAD A MODEL" />
+          <Grid ColumnDefinitions="*,Auto,Auto">
+            <ComboBox Grid.Column="0" Margin="0,0,6,0" HorizontalAlignment="Stretch"
+                      ItemsSource="{Binding Catalog}"
+                      SelectedItem="{Binding SelectedCatalogModel, Mode=TwoWay}" />
+            <Button Grid.Column="1" Classes="outline" Content="Download"
+                    Command="{Binding DownloadModelCommand}" IsVisible="{Binding !IsDownloading}" />
+            <Button Grid.Column="2" Classes="destructive" Content="Cancel"
+                    Command="{Binding CancelDownloadCommand}" IsVisible="{Binding IsDownloading}" />
+          </Grid>
+          <ProgressBar IsVisible="{Binding IsDownloading}" Minimum="0" Maximum="1"
+                       Value="{Binding DownloadProgress}" />
+
+          <TextBlock Classes="label" Text="OR USE A LOCAL FILE" Margin="0,8,0,0" />
           <Grid ColumnDefinitions="*,Auto">
             <TextBox Grid.Column="0" Margin="0,0,6,0"
                      Watermark="/path/to/model.gguf or Ollama blob"
