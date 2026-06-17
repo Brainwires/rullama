@@ -15,10 +15,34 @@
       <DockPanel Margin="10">
         <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,8">
           <TextBlock Classes="label" Text="HISTORY" VerticalAlignment="Center" />
-          <Button Grid.Column="1" Classes="outline sm" Content="New" />
+          <Button Grid.Column="1" Classes="outline sm" Content="New"
+                  Command="{Binding NewChatCommand}" />
         </Grid>
-        <TextBlock Classes="muted" TextWrapping="Wrap"
-                   Text="No prior chats yet. Send a message to start one." />
+        <ScrollViewer>
+          <ItemsControl ItemsSource="{Binding Conversations}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:ConversationViewModel">
+                <Border Classes="convitem" Classes.active="{Binding IsActive}" Margin="0,1">
+                  <Grid ColumnDefinitions="*,Auto">
+                    <Button Grid.Column="0" Classes="ghost" HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Left" Padding="6,4"
+                            Command="{Binding $parent[ItemsControl].((vm:ChatViewModel)DataContext).SelectConversationCommand}"
+                            CommandParameter="{Binding}">
+                      <StackPanel>
+                        <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis"
+                                   Foreground="{StaticResource Foreground}" FontSize="12" />
+                        <TextBlock Text="{Binding RelativeTime}" Classes="muted" FontSize="10" />
+                      </StackPanel>
+                    </Button>
+                    <Button Grid.Column="1" Classes="ghost iconsm" Content="✕"
+                            Command="{Binding $parent[ItemsControl].((vm:ChatViewModel)DataContext).DeleteConversationCommand}"
+                            CommandParameter="{Binding}" />
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
       </DockPanel>
     </Border>
 

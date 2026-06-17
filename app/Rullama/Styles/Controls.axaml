@@ -163,6 +163,15 @@
     <Setter Property="FontFamily" Value="{StaticResource MonoFont}" />
   </Style>
 
+  <!-- ===== Conversation list item ===== -->
+  <Style Selector="Border.convitem">
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusSm}" />
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="Border.convitem.active">
+    <Setter Property="Background" Value="{StaticResource PrimaryActive}" />
+  </Style>
+
   <!-- ===== Chat bubbles ===== -->
   <Style Selector="Border.bubble">
     <Setter Property="Background" Value="{StaticResource Muted50}" />

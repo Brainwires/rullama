@@ -11,13 +11,16 @@ using Rullama.Services;
 
 namespace Rullama.ViewModels;
 
-/// <summary>Chat screen: model load + streaming conversation (M1).</summary>
+/// <summary>Chat screen: model load + streaming conversation + SQLite history (M1).</summary>
 public partial class ChatViewModel : ViewModelBase
 {
     private readonly InferenceClient _engine = new();
+    private readonly ConversationStore _store = new();
     private CancellationTokenSource? _cts;
+    private string? _activeConvId;
 
     public ObservableCollection<ChatMessageViewModel> Messages { get; } = new();
+    public ObservableCollection<ConversationViewModel> Conversations { get; } = new();
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SendCommand))]
@@ -34,13 +37,19 @@ public partial class ChatViewModel : ViewModelBase
     [NotifyCanExecuteChangedFor(nameof(LoadModelCommand))]
     private bool _isBusy;
 
-    // Prefill from RULLAMA_TEST_GGUF when set, so dev can just click Load.
     [ObservableProperty]
     private string _modelPath = Environment.GetEnvironmentVariable("RULLAMA_TEST_GGUF") ?? string.Empty;
 
     [ObservableProperty]
     private string _status = "Load a Gemma 4 GGUF to start.";
 
+    public ChatViewModel()
+    {
+        foreach (ConversationRow c in _store.List())
+            Conversations.Add(new ConversationViewModel(c.Id, c.Title, c.UpdatedAt));
+    }
+
+    // ---- model loading ----
     private bool CanLoad => !IsBusy && !IsModelLoaded;
 
     [RelayCommand(CanExecute = nameof(CanLoad))]
@@ -69,6 +78,38 @@ public partial class ChatViewModel : ViewModelBase
         }
     }
 
+    // ---- conversation management ----
+    [RelayCommand]
+    private void NewChat()
+    {
+        _activeConvId = null;
+        Messages.Clear();
+        foreach (ConversationViewModel c in Conversations) c.IsActive = false;
+    }
+
+    [RelayCommand]
+    private void SelectConversation(ConversationViewModel conv)
+    {
+        _activeConvId = conv.Id;
+        foreach (ConversationViewModel c in Conversations) c.IsActive = ReferenceEquals(c, conv);
+        Messages.Clear();
+        foreach (MessageRow m in _store.Messages(conv.Id))
+            Messages.Add(new ChatMessageViewModel(m.Role, m.Content));
+    }
+
+    [RelayCommand]
+    private void DeleteConversation(ConversationViewModel conv)
+    {
+        _store.Delete(conv.Id);
+        Conversations.Remove(conv);
+        if (_activeConvId == conv.Id)
+        {
+            _activeConvId = null;
+            Messages.Clear();
+        }
+    }
+
+    // ---- send / stop ----
     private bool CanSend => IsModelLoaded && !IsBusy && !string.IsNullOrWhiteSpace(Input);
 
     [RelayCommand(CanExecute = nameof(CanSend))]
@@ -77,11 +118,25 @@ public partial class ChatViewModel : ViewModelBase
         string text = Input.Trim();
         Input = string.Empty;
 
+        // Open a conversation lazily on first message.
+        if (_activeConvId is null)
+        {
+            string title = text.Length > 40 ? text[..40] + "…" : text;
+            _activeConvId = _store.Create(title);
+            var conv = new ConversationViewModel(_activeConvId, title, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+            {
+                IsActive = true,
+            };
+            Conversations.Insert(0, conv);
+        }
+        string convId = _activeConvId;
+
         Messages.Add(new ChatMessageViewModel("user", text));
+        _store.AddMessage(convId, "user", text);
+
         var reply = new ChatMessageViewModel("model", string.Empty);
         Messages.Add(reply);
 
-        // Snapshot history (exclude the empty reply we just added).
         List<(string, string)> history = Messages
             .Where(m => !ReferenceEquals(m, reply))
             .Select(m => (m.Role, m.Content))
@@ -95,10 +150,7 @@ public partial class ChatViewModel : ViewModelBase
                 onPiece: piece => Dispatcher.UIThread.Post(() => reply.Content += piece),
                 ct: _cts.Token);
         }
-        catch (OperationCanceledException)
-        {
-            // user pressed Stop
-        }
+        catch (OperationCanceledException) { /* stopped */ }
         catch (Exception e)
         {
             reply.Content += $"\n[error: {e.Message}]";
@@ -108,7 +160,19 @@ public partial class ChatViewModel : ViewModelBase
             IsBusy = false;
             _cts?.Dispose();
             _cts = null;
+            _store.AddMessage(convId, "model", reply.Content);
+            _store.Touch(convId);
+            TouchConversation(convId);
         }
+    }
+
+    private void TouchConversation(string convId)
+    {
+        ConversationViewModel? conv = Conversations.FirstOrDefault(c => c.Id == convId);
+        if (conv is null) return;
+        conv.UpdatedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        int idx = Conversations.IndexOf(conv);
+        if (idx > 0) Conversations.Move(idx, 0);
     }
 
     private bool CanStop => IsBusy && _cts is not null;
