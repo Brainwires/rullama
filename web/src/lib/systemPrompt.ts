@@ -24,18 +24,30 @@ export interface SysContentParts {
 }
 
 /**
- * Assemble the system-turn content. Layering (must match the chat path
- * exactly): RAG preamble → tool schema (+ GPS) → system prompt → timestamp
- * note → formatting note, optionally wrapped in the thinking control token.
+ * Assemble the system-turn content, ordered so the STATIC, cacheable core
+ * comes first and the per-turn DYNAMIC content is appended at the end:
+ *
+ *   [think] tool schema → system prompt → notes   ← static (this is the warm)
+ *           → RAG preamble → GPS line             ← dynamic, appended
+ *
+ * This ordering is load-bearing for KV reuse: the pre-warm prefills only
+ * the static core, so a turn that adds RAG/GPS still shares that whole core
+ * as a prefix (and only re-feeds the appended tail) instead of shifting it
+ * and forcing a full re-prefill. With no RAG/GPS the result is byte-
+ * identical to the warm.
  */
 export function buildSysContent(p: SysContentParts): string {
+    // Static core — exactly what the warm prefills.
     let base = p.systemPrompt.trim();
-    if (p.ragPreamble) base = p.ragPreamble + base;
     if (p.toolMode) {
         base = base ? `${TOOL_SCHEMA_PROMPT}\n\n${base}` : TOOL_SCHEMA_PROMPT;
-        if (p.gpsLine) base = p.gpsLine + base;
     }
     base = base ? `${base}\n\n${TIMESTAMP_SYSTEM_NOTE}` : TIMESTAMP_SYSTEM_NOTE;
     base = `${base}\n\n${FORMATTING_SYSTEM_NOTE}`;
+    // Dynamic tail — appended so it never shifts the static prefix.
+    const rag = p.ragPreamble?.trim();
+    if (rag) base = `${base}\n\n${rag}`;
+    const gps = p.gpsLine?.trim();
+    if (gps) base = `${base}\n\n${gps}`;
     return p.thinking ? `${THINK_TOKEN}\n${base}` : base;
 }

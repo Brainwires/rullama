@@ -142,6 +142,11 @@ export function App() {
     // that lives in the chat engine (created below). Reach it through a ref,
     // kept current by the effect that maintains the other cycle-break refs.
     const prepareRef = useRef<((report: (p: number, l: string) => void) => Promise<void>) | null>(null);
+    // De-dup the system pre-warm: `sysWarmSigRef` is the current warm-input
+    // signature; `warmedSigRef` is the signature last successfully warmed.
+    // Lets the belt-and-suspenders re-warm effect skip when nothing changed.
+    const sysWarmSigRef = useRef("");
+    const warmedSigRef = useRef("");
 
     // Model-load lifecycle (load / eject / delete / cancel, auto-load,
     // reload-after-engine-swap, boot splash). Owns the model status
@@ -163,7 +168,12 @@ export function App() {
         waitInfo,
         onUnloadChat: () => resetChatRef.current(),
         isBusy: () => busyRef.current,
-        onPrepare: (report) => prepareRef.current?.(report) ?? Promise.resolve(),
+        onPrepare: async (report) => {
+            await (prepareRef.current?.(report) ?? Promise.resolve());
+            // Record what we just warmed so the belt re-warm effect doesn't
+            // redundantly redo it on the same config.
+            warmedSigRef.current = sysWarmSigRef.current;
+        },
     });
 
     // Chat engine — conversations, messages, attachments, RAG, and the
@@ -188,6 +198,28 @@ export function App() {
         resetChatRef.current = resetForUnload;
         prepareRef.current = warmSystemPrompt;
     });
+
+    // Signature of everything that determines the warmed system block.
+    const sysWarmSig = JSON.stringify({ systemPrompt, thinking, toolMode, activeAdapter });
+    sysWarmSigRef.current = sysWarmSig;
+
+    // **Belt-and-suspenders system pre-warm.** The loader's "preparing"
+    // phase warms on load, but the warmed prefix can go stale (thinking /
+    // tool-mode toggled, adapter applied/cleared) or never have taken. When
+    // the model is ready and the warm signature differs from what we last
+    // warmed, re-warm so new chats keep hot-starting (kvReusePlan reuses the
+    // resident system prefix). Deduped + debounced; skipped while busy.
+    useEffect(() => {
+        if (modelStatus !== "ready" || loadedIsDiffusion || busy) return;
+        if (warmedSigRef.current === sysWarmSig) return;
+        const t = setTimeout(() => {
+            void (async () => {
+                try { await warmSystemPrompt(); warmedSigRef.current = sysWarmSig; }
+                catch { /* non-fatal — first chat just prefills once */ }
+            })();
+        }, 350);
+        return () => clearTimeout(t);
+    }, [sysWarmSig, modelStatus, loadedIsDiffusion, busy, warmSystemPrompt]);
 
     // Save a new system prompt, then re-warm the KV cache with it so the
     // next new chat hot-starts (and the current conversation's next turn
@@ -252,12 +284,18 @@ export function App() {
                 // withSession so the apply queues behind any other
                 // tab's active work and releases cleanly when done.
                 await c.withSession(() => c.trainingApplyAdapter(activeAdapter));
+                // Applying the adapter invalidated the warmed system KV
+                // (its K/V was computed under base weights). Re-warm with the
+                // adapter active so the first chat still hot-starts.
+                warmedSigRef.current = "";
+                try { await warmSystemPrompt(); warmedSigRef.current = sysWarmSigRef.current; }
+                catch { /* non-fatal */ }
             } catch (e) {
                 console.warn(`[rullama] failed to restore activeAdapter '${activeAdapter}' on boot:`, e);
                 setActiveAdapter(null);
             }
         })();
-    }, [modelStatus, activeAdapter, setActiveAdapter]);
+    }, [modelStatus, activeAdapter, setActiveAdapter, warmSystemPrompt]);
 
     // **One engine resident at a time (except Premium).** Inference (Gemma) and the TTS/clone
     // engines can't share a phone GPU, and on iOS WebKit only a worker's DEATH reclaims its GPU

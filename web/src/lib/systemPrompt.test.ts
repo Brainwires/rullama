@@ -41,14 +41,18 @@ describe("buildSysContent", () => {
         }
     });
 
-    it("injects rag preamble and gps line at their layered positions", () => {
+    it("appends rag + gps AFTER the static core (so the prefix never shifts)", () => {
         const out = buildSysContent({
             systemPrompt: "SYS", thinking: false, toolMode: true,
-            ragPreamble: "RAG\n\n", gpsLine: "GPS\n\n",
+            ragPreamble: "RAGTEXT", gpsLine: "GPSTEXT",
         });
-        // GPS leads (tool-mode front), then tool schema, then rag, then sys.
-        expect(out.startsWith("GPS\n\n")).toBe(true);
-        expect(out.indexOf("RAG\n\n")).toBeGreaterThan(out.indexOf(TOOL_SCHEMA_PROMPT));
-        expect(out.indexOf("SYS")).toBeGreaterThan(out.indexOf("RAG\n\n"));
+        // Static core leads (schema → sys prompt → notes); dynamic tail last.
+        expect(out.startsWith(`${TOOL_SCHEMA_PROMPT}\n\n`)).toBe(true);
+        expect(out.indexOf("SYS")).toBeLessThan(out.indexOf("RAGTEXT"));
+        expect(out.indexOf("RAGTEXT")).toBeLessThan(out.indexOf("GPSTEXT"));
+        // The static core (with no rag/gps) is a strict prefix of this — the
+        // exact property KV reuse relies on.
+        const core = buildSysContent({ systemPrompt: "SYS", thinking: false, toolMode: true });
+        expect(out.startsWith(core)).toBe(true);
     });
 });

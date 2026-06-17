@@ -1110,6 +1110,7 @@ const RPC: Record<string, Handler> = {
         }
         // On reuse > 0 the resident sequence now equals ids[0..reuse]; the
         // caller's step() loop extends it with ids[reuse..] + generated tokens.
+        log(`kvReusePlan: residentLen=${res === null ? "null" : res.length} pos=${m.position} idsLen=${ids.length} → reuse=${reuse}`);
         return { reuse };
     },
     // Pre-warm the KV cache with the system-prompt token block so the FIRST
@@ -1126,6 +1127,7 @@ const RPC: Record<string, Handler> = {
         // Don't overflow the KV cache (tiny max_context on mobile + a large
         // system block). Skip the warm; the first chat just prefills normally.
         if (ids.length >= m.maxContext) {
+            log(`warm: SKIPPED — system ${ids.length} tok >= maxContext ${m.maxContext}`);
             return { tokens: 0 };
         }
         for (let i = 0; i < ids.length; i++) {
@@ -1133,6 +1135,7 @@ const RPC: Record<string, Handler> = {
             kvCommit(ids[i]);
             notify("warmProgress", { done: i + 1, total: ids.length });
         }
+        log(`warm: prefilled ${ids.length} system tokens`);
         return { tokens: ids.length };
     },
     encodeImage: async (a) => {
