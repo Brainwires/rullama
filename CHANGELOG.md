@@ -11,6 +11,39 @@ and may move in any patch release.
 
 ## [Unreleased]
 
+### Multi-conversation chat — background generation + persistent cross-chat queue
+
+The PWA chat no longer locks the whole UI behind one global "busy" flag, so
+several conversations can be managed at once.
+
+- **Browse history while a reply streams.** The displayed messages reflect
+  only the active conversation; the running turn streams into a
+  per-conversation live buffer + the DB regardless of what's on screen.
+  Switching back to a still-generating chat overlays the live partial
+  (including tokens produced since the last DB flush) and resumes painting
+  live. Selecting a conversation is no longer blocked during generation.
+- **New chat shows up immediately.** Clicking *New* creates the conversation
+  row up front (with a reuse-one-empty guard so repeated clicks don't stack
+  duplicate "New chat" rows), and the first app launch starts with one empty
+  chat already present instead of a blank sidebar.
+- **Queue messages across chats.** Sending while a turn is in flight enqueues
+  the message instead of blocking; a single serial FIFO pump drains jobs one
+  at a time (the worker owns one KV cache, so generation stays inherently
+  serial). The sidebar shows per-conversation *generating* / *queued*
+  indicators, and Stop targets the conversation on screen — cancelling its
+  run or dropping its queued message without touching the others.
+- **The queue survives a reload.** Queued jobs — including their image/audio
+  attachment pixels/PCM — are persisted to OPFS (`queue_store.ts`, a per-job
+  generalization of the in-flight-media store) and rebuilt + drained on boot,
+  the same resume guarantee the running generation already had. Same-chat
+  queued sends chain off the finished prior answer.
+
+Internally the old global `busy` becomes `genActive` ("the engine is working
+somewhere"); `onSend` splits into a thin enqueue wrapper plus a parameterized
+`runJob` driven by the pump, which owns session ordering and the active flag.
+The diffusion and tool-calling paths are preserved. Not yet browser-tested
+end-to-end.
+
 ### Image generation — Z-Image-Turbo (new `imagegen` engine)
 
 A first text-to-image engine lands as a sibling to the Gemma text path —
