@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type ModelStatus } from "@/components/ModelLoader";
 import { type ModelEntry, blobUrl, beacon, listModels, isDiffusion } from "@/lib/api";
-import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel } from "@/lib/opfs";
+import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel, deleteSysWarmSnapshot } from "@/lib/opfs";
 import { getNetworkHint } from "@/lib/network";
 import { getClient } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
@@ -478,6 +478,9 @@ export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy, onPrepare }
         if (pendingLoadDigest === m.digest) setPendingLoadDigest("");
 
         const removed = await wipeModel(modelKey, filename);
+        // Sweep this model's persisted system pre-warm so it doesn't orphan
+        // (one file per digest, potentially hundreds of MB).
+        void deleteSysWarmSnapshot(m.digest);
         beacon("chat", removed ? `deleted ${m.name} (${sizeLabel})` : `delete ${m.name} no-op (not cached)`);
         if (removed) {
             showToast({ level: "info", title: `Deleted ${m.name}`, message: `Freed ${sizeLabel} from OPFS` });

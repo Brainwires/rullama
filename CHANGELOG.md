@@ -157,7 +157,13 @@ message, not the chain length.
   hot-starts. Re-warms when the system prompt is saved or thinking /
   tool-mode toggles. `buildSysContent` orders the static system core ahead
   of dynamic RAG / GPS content so the warmed prefix is always a clean,
-  reusable prefix of a real turn.
+  reusable prefix of a real turn. The warm is **persisted to OPFS, one
+  file per model digest** (keyed by the model + system-prompt signature):
+  on reload it's restored instead of recomputed, so the same system prompt
+  is never prefilled more than once per model — even across page reloads.
+  (No-adapter only: a LoRA changes the cached K/V and is applied after the
+  load-time warm, so adapter sessions recompute rather than risk a stale
+  restore.)
 - **Per-conversation KV snapshots** — a conversation's KV cache is
   persisted to OPFS (an `RLCV` envelope = resident token ids + the KV /
   sampler blob, model-digest tagged, LRU-capped, size- and quota-guarded)

@@ -263,6 +263,11 @@ export async function clearInflightState(): Promise<void> {
 // and run LRU pruning without touching the (large) payload.
 
 const CONV_KV_DIR = "rullama-conv-kv";
+// Persisted SYSTEM-PROMPT pre-warm, one file per model digest. The system
+// block rarely changes and doesn't change across reloads, so its warmed KV
+// only ever needs computing once per (model, system-prompt) — persist it
+// here and restore on load instead of re-prefilling every reload.
+const SYSWARM_DIR = "rullama-syswarm";
 
 export interface ConvSnapshotMeta {
     modelDigest: string;
@@ -272,34 +277,39 @@ export interface ConvSnapshotMeta {
     updatedAt: number;
 }
 
-async function convKvDir(create: boolean): Promise<FileSystemDirectoryHandle> {
-    const root = await navigator.storage.getDirectory();
-    return root.getDirectoryHandle(CONV_KV_DIR, { create });
+export interface SysWarmMeta {
+    modelDigest: string;
+    /** Identity of the warmed system block (digest + adapter + sysContent).
+     *  Restore only when it matches the current config exactly. */
+    sig: string;
+    version: number;
+    tokenCount: number;
+    byteSize: number;
+    updatedAt: number;
 }
 
-/** Write a conversation's KV snapshot (`.kv`) + sidecar (`.json`). Uses
- *  the worker sync handle when available, else the async writable stream
- *  (same fallback as `writeInflightState`). */
-export async function writeConvSnapshot(
-    convId: string,
-    bytes: Uint8Array,
-    meta: ConvSnapshotMeta,
+async function snapDir(dirName: string, create: boolean): Promise<FileSystemDirectoryHandle> {
+    const root = await navigator.storage.getDirectory();
+    return root.getDirectoryHandle(dirName, { create });
+}
+
+/** Write a `{key}.kv` payload + `{key}.json` sidecar. Uses the worker sync
+ *  handle when available, else the async writable stream (same fallback as
+ *  `writeInflightState`). Sidecar is written last so we never claim a valid
+ *  snapshot exists before its payload landed. */
+async function writeSnapshotPair(
+    dirName: string, key: string, bytes: Uint8Array, meta: object,
 ): Promise<void> {
-    const dir = await convKvDir(true);
-    const fh = await dir.getFileHandle(`${convId}.kv`, { create: true });
+    const dir = await snapDir(dirName, true);
+    const fh = await dir.getFileHandle(`${key}.kv`, { create: true });
     const fhAny = fh as unknown as {
         createSyncAccessHandle?(): Promise<FileSystemSyncAccessHandle>;
         createWritable(): Promise<FileSystemWritableFileStream>;
     };
     if (typeof fhAny.createSyncAccessHandle === "function") {
         const h = await fhAny.createSyncAccessHandle();
-        try {
-            h.truncate(0);
-            h.write(bytes, { at: 0 });
-            h.flush();
-        } finally {
-            h.close();
-        }
+        try { h.truncate(0); h.write(bytes, { at: 0 }); h.flush(); }
+        finally { h.close(); }
     } else {
         const w = await fhAny.createWritable();
         await w.truncate(0);
@@ -307,25 +317,21 @@ export async function writeConvSnapshot(
         await w.write(bytes as any);
         await w.close();
     }
-    // Sidecar last: if the payload write failed we never claim a valid
-    // snapshot exists. Small JSON → async writable is fine.
-    const metaFh = await dir.getFileHandle(`${convId}.json`, { create: true });
+    const metaFh = await dir.getFileHandle(`${key}.json`, { create: true });
     const mw = await metaFh.createWritable();
     await mw.truncate(0);
     await mw.write(JSON.stringify(meta));
     await mw.close();
 }
 
-/** Read a conversation's snapshot bytes + metadata, or `null` if absent
- *  / the sidecar is missing or unparseable. */
-export async function readConvSnapshot(
-    convId: string,
-): Promise<{ bytes: Uint8Array; meta: ConvSnapshotMeta } | null> {
+async function readSnapshotPair<M>(
+    dirName: string, key: string,
+): Promise<{ bytes: Uint8Array; meta: M } | null> {
     try {
-        const dir = await convKvDir(false);
-        const metaFh = await dir.getFileHandle(`${convId}.json`, { create: false });
-        const meta = JSON.parse(await (await metaFh.getFile()).text()) as ConvSnapshotMeta;
-        const fh = await dir.getFileHandle(`${convId}.kv`, { create: false });
+        const dir = await snapDir(dirName, false);
+        const metaFh = await dir.getFileHandle(`${key}.json`, { create: false });
+        const meta = JSON.parse(await (await metaFh.getFile()).text()) as M;
+        const fh = await dir.getFileHandle(`${key}.kv`, { create: false });
         const bytes = new Uint8Array(await (await fh.getFile()).arrayBuffer());
         return { bytes, meta };
     } catch {
@@ -333,23 +339,36 @@ export async function readConvSnapshot(
     }
 }
 
-/** Remove a conversation's snapshot (both files). Called on conversation
- *  delete; deterministic filenames mean no DB lookup is needed. */
-export async function deleteConvSnapshot(convId: string): Promise<void> {
+async function deleteSnapshotPair(dirName: string, key: string): Promise<void> {
     try {
-        const dir = await convKvDir(false);
-        try { await dir.removeEntry(`${convId}.kv`); } catch { /* */ }
-        try { await dir.removeEntry(`${convId}.json`); } catch { /* */ }
+        const dir = await snapDir(dirName, false);
+        try { await dir.removeEntry(`${key}.kv`); } catch { /* */ }
+        try { await dir.removeEntry(`${key}.json`); } catch { /* */ }
     } catch { /* */ }
 }
 
-/** Enumerate all snapshots via their sidecars — for LRU pruning. Skips
- *  entries whose sidecar can't be read. */
+/** Filesystem-safe key from an arbitrary id (model digest, conv id, …). */
+function snapKey(id: string): string {
+    return id.replace(/[^A-Za-z0-9_.-]/g, "_");
+}
+
+// ── Per-conversation snapshots ─────────────────────────────────────────
+
+export const writeConvSnapshot = (convId: string, bytes: Uint8Array, meta: ConvSnapshotMeta) =>
+    writeSnapshotPair(CONV_KV_DIR, snapKey(convId), bytes, meta);
+
+export const readConvSnapshot = (convId: string) =>
+    readSnapshotPair<ConvSnapshotMeta>(CONV_KV_DIR, snapKey(convId));
+
+export const deleteConvSnapshot = (convId: string) =>
+    deleteSnapshotPair(CONV_KV_DIR, snapKey(convId));
+
+/** Enumerate all conversation snapshots via their sidecars — for LRU
+ *  pruning. Skips entries whose sidecar can't be read. */
 export async function listConvSnapshots(): Promise<{ convId: string; meta: ConvSnapshotMeta }[]> {
     const out: { convId: string; meta: ConvSnapshotMeta }[] = [];
     try {
-        const dir = await convKvDir(false);
-        // OPFS directory handles expose an async entries() iterator.
+        const dir = await snapDir(CONV_KV_DIR, false);
         const entries = (dir as unknown as {
             entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
         }).entries();
@@ -365,6 +384,17 @@ export async function listConvSnapshots(): Promise<{ convId: string; meta: ConvS
     } catch { /* dir absent → empty */ }
     return out;
 }
+
+// ── Persisted system-prompt pre-warm (one per model digest) ────────────
+
+export const writeSysWarmSnapshot = (digest: string, bytes: Uint8Array, meta: SysWarmMeta) =>
+    writeSnapshotPair(SYSWARM_DIR, snapKey(digest), bytes, meta);
+
+export const readSysWarmSnapshot = (digest: string) =>
+    readSnapshotPair<SysWarmMeta>(SYSWARM_DIR, snapKey(digest));
+
+export const deleteSysWarmSnapshot = (digest: string) =>
+    deleteSnapshotPair(SYSWARM_DIR, snapKey(digest));
 
 export async function wipeAllOpfs(): Promise<boolean> {
     try {

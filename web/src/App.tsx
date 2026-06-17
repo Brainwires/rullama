@@ -189,7 +189,7 @@ export function App() {
     } = useChatEngine({
         modelStatus, loadedIsDiffusion, statusText, lastLoadedDigest,
         hasVision, hasAudio, systemPrompt, sampling, maxTokens, thinking,
-        toolMode, weatherApiKey, weatherUnits, useGps,
+        toolMode, weatherApiKey, weatherUnits, useGps, activeAdapter,
     });
 
     // Keep the cycle-break refs current for the model loader.

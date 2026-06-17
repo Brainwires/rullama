@@ -23,6 +23,7 @@ import { saveThumb, loadThumbBlobUrl, deleteThumbs } from "@/lib/image_store";
 import { readInflightState, writeInflightState, clearInflightState } from "@/lib/opfs";
 import {
     writeConvSnapshot, readConvSnapshot, deleteConvSnapshot, listConvSnapshots, opfsQuota,
+    writeSysWarmSnapshot, readSysWarmSnapshot,
 } from "@/lib/opfs";
 import { rlcvTokenCount } from "@/lib/convSnapshot";
 import { saveInflightImage, saveInflightAudio, readInflightImages, readInflightAudio, clearInflightMedia } from "@/lib/inflight_media";
@@ -48,6 +49,9 @@ export interface UseChatEngineParams {
     weatherApiKey: string;
     weatherUnits: ToolUnits;
     useGps: boolean;
+    /** Active LoRA adapter name (or null). Part of the system pre-warm key —
+     *  the adapter changes the cached K/V, so warms are per-adapter. */
+    activeAdapter: string | null;
 }
 
 /**
@@ -108,7 +112,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
     const {
         modelStatus, loadedIsDiffusion, statusText, lastLoadedDigest,
         hasVision, hasAudio, systemPrompt, sampling, maxTokens, thinking,
-        toolMode, weatherApiKey, weatherUnits, useGps,
+        toolMode, weatherApiKey, weatherUnits, useGps, activeAdapter,
     } = opts;
     const { showToast } = useToast();
 
@@ -1594,9 +1598,39 @@ export function useChatEngine(opts: UseChatEngineParams) {
         // system block regardless (only the 1-token opener is re-fed).
         const rendered = await client.renderChat([{ role: "system", content: sysContent }], true);
         const ids = await client.encode(rendered);
+        // Identity of this warmed system block. The persisted warm is keyed
+        // by model digest (one file per model) and restored only when this
+        // signature matches — so the SAME system prompt is never prefilled
+        // more than once per model, even across page reloads. Includes the
+        // active adapter, since LoRA changes the cached K/V.
+        const sig = `${lastLoadedDigest} ${activeAdapter ?? ""} ${sysContent}`;
+        // Persist/restore only when NO adapter is active. A LoRA changes the
+        // cached K/V, but the load-time warm runs before the adapter is
+        // applied, so an adapter-tagged warm could hold base-weight KV and be
+        // wrongly restored once the adapter is live. Adapter users recompute
+        // the warm each load (correctness over the optimization).
+        const canPersist = !!lastLoadedDigest && !activeAdapter;
         await client.acquireSession();
         let off: (() => void) | undefined;
         try {
+            // Fast path: restore a persisted warm for this exact config —
+            // skips the prefill entirely (just writes the KV buffers).
+            if (canPersist) {
+                try {
+                    const snap = await readSysWarmSnapshot(lastLoadedDigest);
+                    if (snap && snap.meta.sig === sig) {
+                        await client.restoreConvKv(snap.bytes);
+                        report?.(100, "preparing model… (restored)");
+                        beacon("pe", `syswarm restored (${snap.meta.tokenCount} tok)`);
+                        return;
+                    }
+                } catch (e) {
+                    // Corrupt / stale / layout-mismatch — fall through to compute.
+                    // eslint-disable-next-line no-console
+                    console.warn("[rullama] syswarm restore skipped:", e);
+                }
+            }
+            // Compute the warm, then persist it for next time.
             if (report) {
                 off = client.subscribe("warmProgress", (p) => {
                     const done = Number((p as { done?: number }).done ?? 0);
@@ -1606,13 +1640,29 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 });
             }
             await client.warmSystem(Array.from(ids));
-            // A new conversation has no snapshot to restore; mark nothing —
-            // the warmed system is resident and kvReusePlan will reuse it.
+            if (canPersist) {
+                try {
+                    const bytes = await client.saveConvKv();
+                    if (bytes && bytes.length <= MAX_SNAPSHOT_BYTES) {
+                        await writeSysWarmSnapshot(lastLoadedDigest, bytes, {
+                            modelDigest: lastLoadedDigest,
+                            sig,
+                            version: 1,
+                            tokenCount: rlcvTokenCount(bytes),
+                            byteSize: bytes.length,
+                            updatedAt: Date.now(),
+                        });
+                    }
+                } catch (e) {
+                    // eslint-disable-next-line no-console
+                    console.warn("[rullama] syswarm persist failed:", e);
+                }
+            }
         } finally {
             off?.();
             try { await client.releaseSession(); } catch { /* */ }
         }
-    }, [systemPrompt, thinking, toolMode, loadedIsDiffusion, busy]);
+    }, [systemPrompt, thinking, toolMode, loadedIsDiffusion, busy, lastLoadedDigest, activeAdapter]);
 
     // Clear the chat display surface — called by the model loader on
     // eject / delete-while-loaded.
