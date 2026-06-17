@@ -9,6 +9,40 @@ While the version stays in the 0.x series, only the modules listed in the
 `sampling`, `lora`) are covered by semver. Everything else is `#[doc(hidden)]`
 and may move in any patch release.
 
+## [Unreleased]
+
+### Image generation — Z-Image-Turbo (new `imagegen` engine)
+
+A first text-to-image engine lands as a sibling to the Gemma text path —
+pure Rust + WebGPU, streaming Z-Image-Turbo's weights from the CDN, no
+GGUF (image models are per-tensor safetensors, not K-quants). Single-stream
+S3-DiT denoiser + FLUX VAE + Qwen3 text encoder, flow-match Euler sampling
+with classifier-free guidance.
+
+- **Async-streaming GPU forwards.** All three components run on the GPU
+  (bf16 matmul for the dominant linears; norms / multi-axis interleaved RoPE
+  / attention / adaLN / GroupNorm / conv / upsample as their own kernels or
+  CPU glue) and stream their weights **per tensor** over a `BlobSource` —
+  the identical code runs native (`FileBlobSource`) and in-browser
+  (`HttpRangeBlobSource`), never holding a shard in memory. Each is validated
+  against its CPU oracle: VAE `max|GPU−CPU|` 4e-6, DiT 2e-5, Qwen3 encoder 0.0.
+- **`ImageModel`** — the 4th wasm-bindgen class (alongside `Model`,
+  `EmbeddingModel`, `DiffusionGemma`): `loadFromUrl(cdnBase)` streams the
+  `text_encoder` / `transformer` / `vae` components via HTTP `Range`;
+  `generate(tokens, negTokens, cfgScale, lh, lw, steps, seed)` returns RGBA8
+  pixels. The composed pipeline (`ImageBundle`) is validated end-to-end
+  natively on the real weights (caption → image).
+- **PWA Image tab.** Prompt / negative-prompt / size / steps / CFG / seed
+  controls, canvas output, PNG download. Tokenization is a dependency-free
+  in-worker Qwen2 byte-level BPE that fetches the model's `tokenizer.json`
+  (no `@huggingface/transformers`, no onnxruntime asset in the bundle).
+- **Weights on the CDN.** Z-Image-Turbo published to R2 at
+  `models.brainwires.dev/z-image-turbo`, byte-exact, serving HTTP `Range`.
+
+Not yet validated in-browser end-to-end (the model is ~31 GB), and the
+bf16 weights re-stream per denoise step — fp8 (~12 GB) + resident per-layer
+weights are the follow-up perf lever. FLUX.2 Klein is a planned second config.
+
 ## [0.5.0] — 2026-06-17
 
 A broad surface expansion since 0.4.0. The Gemma 4 family grows from two
