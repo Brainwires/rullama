@@ -43,6 +43,45 @@ public partial class ChatViewModel : ViewModelBase
     [ObservableProperty]
     private string _status = "Load a Gemma 4 GGUF to start.";
 
+    // ---- generation tunables (Generation tab) ----
+    [ObservableProperty] private double _temperature = 1.0;
+    [ObservableProperty] private double _topK = 64;
+    [ObservableProperty] private double _topP = 0.95;
+    [ObservableProperty] private double _repetitionPenalty = 1.3;
+    [ObservableProperty] private double _maxTokens = 1024;
+    [ObservableProperty] private string _systemPrompt = string.Empty;
+    [ObservableProperty] private bool _thinkingMode;
+
+    partial void OnTemperatureChanged(double value) => ApplySampling();
+    partial void OnTopKChanged(double value) => ApplySampling();
+    partial void OnTopPChanged(double value) => ApplySampling();
+    partial void OnRepetitionPenaltyChanged(double value) => ApplySampling();
+
+    private void ApplySampling()
+    {
+        if (IsModelLoaded)
+            _engine.SetSampling((float)Temperature, (uint)TopK, (float)TopP, (float)RepetitionPenalty, 0);
+    }
+
+    [RelayCommand]
+    private void ResetDefaults()
+    {
+        Temperature = 1.0;
+        TopK = 64;
+        TopP = 0.95;
+        RepetitionPenalty = 1.3;
+        MaxTokens = 1024;
+        SystemPrompt = string.Empty;
+        ThinkingMode = false;
+    }
+
+    private string BuildSystemContent()
+    {
+        string s = SystemPrompt.Trim();
+        if (ThinkingMode) s = "<|think|>" + s; // PWA prepends silently
+        return s;
+    }
+
     public ChatViewModel()
     {
         foreach (ConversationRow c in _store.List())
@@ -66,6 +105,7 @@ public partial class ChatViewModel : ViewModelBase
         {
             await _engine.LoadAsync(ModelPath.Trim());
             IsModelLoaded = true;
+            ApplySampling();
             Status = $"Ready · vocab {_engine.VocabSize}";
         }
         catch (Exception e)
@@ -137,16 +177,18 @@ public partial class ChatViewModel : ViewModelBase
         var reply = new ChatMessageViewModel("model", string.Empty);
         Messages.Add(reply);
 
-        List<(string, string)> history = Messages
+        var history = new List<(string, string)>();
+        string sys = BuildSystemContent();
+        if (!string.IsNullOrWhiteSpace(sys)) history.Add(("system", sys));
+        history.AddRange(Messages
             .Where(m => !ReferenceEquals(m, reply))
-            .Select(m => (m.Role, m.Content))
-            .ToList();
+            .Select(m => (m.Role, m.Content)));
 
         _cts = new CancellationTokenSource();
         IsBusy = true;
         try
         {
-            await _engine.SendAsync(history, maxNew: 512,
+            await _engine.SendAsync(history, maxNew: (uint)MaxTokens,
                 onPiece: piece => Dispatcher.UIThread.Post(() => reply.Content += piece),
                 ct: _cts.Token);
         }

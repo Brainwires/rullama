@@ -1,6 +1,7 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:Rullama.ViewModels"
+             xmlns:c="using:Rullama.Controls"
              x:Class="Rullama.Views.ChatView"
              x:DataType="vm:ChatViewModel"
              Background="{StaticResource Background}">
@@ -110,16 +111,48 @@
       </DockPanel>
     </Panel>
 
-    <!-- Right: chat settings (static for M1) -->
+    <!-- Right: chat settings -->
     <Border Grid.Column="2" Background="{StaticResource Card}"
             BorderBrush="{StaticResource Border}" BorderThickness="1,0,0,0">
-      <StackPanel Margin="10" Spacing="8">
-        <TextBlock Classes="label" Text="CHAT SETTINGS" />
-        <TextBlock Classes="muted" TextWrapping="Wrap"
-                   Text="{Binding Status}" />
-        <TextBlock Classes="muted" TextWrapping="Wrap"
-                   Text="Generation · Tools · Speech controls land next." />
-      </StackPanel>
+      <DockPanel Margin="10">
+        <TextBlock DockPanel.Dock="Top" Classes="label" Text="CHAT SETTINGS" Margin="0,0,0,8" />
+        <TabControl>
+          <TabItem Header="Generation">
+            <ScrollViewer>
+              <StackPanel Spacing="12" Margin="0,8,0,0">
+                <StackPanel Spacing="4">
+                  <TextBlock Classes="label" Text="SYSTEM PROMPT" />
+                  <TextBox Text="{Binding SystemPrompt, Mode=TwoWay}"
+                           AcceptsReturn="True" TextWrapping="Wrap" MinHeight="64"
+                           Watermark="No system prompt set." />
+                </StackPanel>
+                <c:LabeledSlider Label="TEMPERATURE" Minimum="0" Maximum="2" Step="0.05"
+                                 Format="0.00" Value="{Binding Temperature, Mode=TwoWay}" />
+                <c:LabeledSlider Label="TOP-P" Minimum="0" Maximum="1" Step="0.01"
+                                 Format="0.00" Value="{Binding TopP, Mode=TwoWay}" />
+                <c:LabeledSlider Label="TOP-K" Minimum="0" Maximum="200" Step="1"
+                                 Format="0" Value="{Binding TopK, Mode=TwoWay}" />
+                <c:LabeledSlider Label="REPETITION PENALTY" Minimum="0.5" Maximum="2" Step="0.05"
+                                 Format="0.00" Value="{Binding RepetitionPenalty, Mode=TwoWay}" />
+                <c:LabeledSlider Label="MAX TOKENS" Minimum="16" Maximum="4096" Step="16"
+                                 Format="0" Value="{Binding MaxTokens, Mode=TwoWay}" />
+                <CheckBox IsChecked="{Binding ThinkingMode, Mode=TwoWay}" Content="Thinking mode" />
+                <Button Classes="outline sm" Content="Reset to defaults"
+                        Command="{Binding ResetDefaultsCommand}" HorizontalAlignment="Left" />
+              </StackPanel>
+            </ScrollViewer>
+          </TabItem>
+          <TabItem Header="Model">
+            <TextBlock Classes="muted" Margin="0,8" TextWrapping="Wrap" Text="{Binding Status}" />
+          </TabItem>
+          <TabItem Header="Tools">
+            <TextBlock Classes="muted" Margin="0,8" Text="Tool calling — M3." />
+          </TabItem>
+          <TabItem Header="Speech">
+            <TextBlock Classes="muted" Margin="0,8" Text="Voice settings — M4." />
+          </TabItem>
+        </TabControl>
+      </DockPanel>
     </Border>
   </Grid>
 </UserControl>
