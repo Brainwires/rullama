@@ -82,6 +82,115 @@ emit_hf_entries() {
         --argjson multimodal true \
         '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, multimodal:$multimodal}' \
         >> "$ITEMS_TMP"
+
+    # gemma4:12b — same gemma4 arch, Q4_K_M, text-only. Heavy → advisory ⚠ (never blocked).
+    jq -nc \
+        --arg name   "gemma4:12b" \
+        --arg family "gemma4" \
+        --arg tag    "12b" \
+        --argjson size 7381382048 \
+        --arg digest "1278394b693672ac2799eadc9a83fd98259a6a88a40acfb1dcaa6c6fc895a606" \
+        --arg url    "https://${R2_HOST}/gemma4-12b.gguf" \
+        --argjson heavy true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, heavy:$heavy}' \
+        >> "$ITEMS_TMP"
+
+    # gemma4:e2b-it-qat — QAT Q4_0 text weights, ~3.3 GB (< half the std e2b),
+    # text-only (QAT towers ship as a separate projector blob, not merged).
+    jq -nc \
+        --arg name   "gemma4:e2b-it-qat" \
+        --arg family "gemma4" \
+        --arg tag    "e2b-it-qat" \
+        --argjson size 3349514112 \
+        --arg digest "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd" \
+        --arg url    "https://${R2_HOST}/gemma4-e2b-it-qat.gguf" \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url}' \
+        >> "$ITEMS_TMP"
+
+    # gemma4:e4b-it-qat — QAT Q4_0 text weights, 5.15 GB (vs 9.6 GB std), text-only.
+    jq -nc \
+        --arg name   "gemma4:e4b-it-qat" \
+        --arg family "gemma4" \
+        --arg tag    "e4b-it-qat" \
+        --argjson size 5154939136 \
+        --arg digest "e8b6a059ba86947a44ace84d6e5679795bc41862c25c30513142588f0e9dba1d" \
+        --arg url    "https://${R2_HOST}/gemma4-e4b-it-qat.gguf" \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url}' \
+        >> "$ITEMS_TMP"
+
+    # gemma4:12b-it-qat — QAT Q4_0 text weights, 6.98 GB (vs 7.38 GB std), text-only, heavy ⚠.
+    jq -nc \
+        --arg name   "gemma4:12b-it-qat" \
+        --arg family "gemma4" \
+        --arg tag    "12b-it-qat" \
+        --argjson size 6975877728 \
+        --arg digest "faff1a63667fac17ac5e777f47114688fcefea96e220e211aaa8d62c2c4561f1" \
+        --arg url    "https://${R2_HOST}/gemma4-12b-it-qat.gguf" \
+        --argjson heavy true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, heavy:$heavy}' \
+        >> "$ITEMS_TMP"
+
+    # gemma4:e2b-it-q8_0 — 8-bit weights (highest-quality quant), 8.14 GB,
+    # full multimodal blob (text Q8_0 + BF16/F16 towers).
+    jq -nc \
+        --arg name   "gemma4:e2b-it-q8_0" \
+        --arg family "gemma4" \
+        --arg tag    "e2b-it-q8_0" \
+        --argjson size 8140140960 \
+        --arg digest "6aade8551d1aecae00d6520d5db327efbef4b96ff92abef353ef6cd8e4e6d589" \
+        --arg url    "https://${R2_HOST}/gemma4-e2b-it-q8_0.gguf" \
+        --argjson multimodal true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, multimodal:$multimodal}' \
+        >> "$ITEMS_TMP"
+
+    # gemma4:e4b-it-q8_0 — 11.6 GB, full multimodal blob.
+    jq -nc \
+        --arg name   "gemma4:e4b-it-q8_0" \
+        --arg family "gemma4" \
+        --arg tag    "e4b-it-q8_0" \
+        --argjson size 11636104608 \
+        --arg digest "62d767a4c82f7acba2e1da74df317f01ce34b92830712c536260f82acfb63ac9" \
+        --arg url    "https://${R2_HOST}/gemma4-e4b-it-q8_0.gguf" \
+        --argjson multimodal true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, multimodal:$multimodal}' \
+        >> "$ITEMS_TMP"
+
+    # gemma4:12b-it-q8_0 — 12.7 GB, text-only (12b ships no towers), heavy ⚠.
+    jq -nc \
+        --arg name   "gemma4:12b-it-q8_0" \
+        --arg family "gemma4" \
+        --arg tag    "12b-it-q8_0" \
+        --argjson size 12669645728 \
+        --arg digest "047dae1d7894b9de8f08141e841544e007243290c02df8b39872991d1940c795" \
+        --arg url    "https://${R2_HOST}/gemma4-12b-it-q8_0.gguf" \
+        --argjson heavy true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, heavy:$heavy}' \
+        >> "$ITEMS_TMP"
+
+    # gemma4:26b — 26B-A4B sparse MoE (128 experts top-8), 18 GB Q4_K_M, heavy ⚠.
+    jq -nc \
+        --arg name   "gemma4:26b" \
+        --arg family "gemma4" \
+        --arg tag    "26b" \
+        --argjson size 17987569344 \
+        --arg digest "7121486771cbfe218851513210c40b35dbdee93ab1ef43fe36283c883980f0df" \
+        --arg url    "https://${R2_HOST}/gemma4-26b.gguf" \
+        --argjson heavy true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, heavy:$heavy}' \
+        >> "$ITEMS_TMP"
+
+    # diffusiongemma:26b-a4b — block-diffusion on the 26B-A4B MoE backbone
+    # (own engine + family string). 16.8 GB Q4_K_M, heavy ⚠.
+    jq -nc \
+        --arg name   "diffusiongemma:26b-a4b" \
+        --arg family "diffusion-gemma" \
+        --arg tag    "26b-a4b" \
+        --argjson size 16806810336 \
+        --arg digest "d2ca2c032ebfb23cf2d1794a3465e615c7545634d46b3c30652a26d8b07c4ad3" \
+        --arg url    "https://${R2_HOST}/diffusiongemma-26b-a4b.gguf" \
+        --argjson heavy true \
+        '{name:$name, family:$family, tag:$tag, size:$size, digest:$digest, url:$url, heavy:$heavy}' \
+        >> "$ITEMS_TMP"
 }
 
 # ───── Local Ollama scan (only when RULLAMA_SERVE_LOCAL=1) ────────────

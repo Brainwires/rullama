@@ -9,15 +9,14 @@ Cargo.lock.bak
 # wasm-pack / trunk output (regenerate with `wasm-pack build --target web --release`)
 /pkg
 /dist
-/examples/pwa/.served
 
-# examples/web (Vite + React + Hono PWA) — build artifacts and deps
-/examples/web/node_modules
-/examples/web/dist
-/examples/web/dev-dist
-/examples/web/.vite
-/examples/web/tsconfig.tsbuildinfo
-/examples/web/server/dist
+# web (Vite + React + Hono PWA) — build artifacts and deps
+/web/node_modules
+/web/dist
+/web/dev-dist
+/web/.vite
+/web/tsconfig.tsbuildinfo
+/web/server/dist
 
 # editors / OS
 .DS_Store
@@ -30,7 +29,7 @@ Cargo.lock.bak
 /.claude/
 
 # Local audio test fixtures dropped at repo root by manual transcribe testing.
-# Scoped to the root so fixtures committed under examples/ or tests/ still count.
+# Scoped to the root so fixtures committed under web/ or tests/ still count.
 /*.mp3
 /*.wav
 /*.m4a

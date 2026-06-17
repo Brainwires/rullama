@@ -9,7 +9,305 @@ While the version stays in the 0.x series, only the modules listed in the
 `sampling`, `lora`) are covered by semver. Everything else is `#[doc(hidden)]`
 and may move in any patch release.
 
-## [Unreleased]
+## [0.5.0] — 2026-06-17
+
+A broad surface expansion since 0.4.0. The Gemma 4 family grows from two
+dense models to the full runnable GGUF lineup — three new weight quants
+(Q4_0 QAT, Q8_0, Q5_0), the 12B architecture, and the **26B-A4B sparse
+MoE** with per-expert weight streaming that fits it on a low-VRAM GPU. A
+validated **DiffusionGemma** (block-diffusion text) CPU forward + GPU
+kernel set lands as a preview. Beyond text generation: an **embeddings +
+RAG** stack (EmbeddingGemma), **agentic tool calling** — executable weather
+tools over the base model with multi-step conditional chains and per-step
+reasoning (plus the function-call LoRA recipe) — and a second TTS engine,
+**StyleTTS2-LibriTTS** zero-shot voice cloning alongside the Kokoro presets.
+Multi-turn chat gets **KV-cache reuse + prompt caching**: the system prompt
+is pre-warmed once and conversations reuse their resident (and
+OPFS-persisted) KV cache, so a new turn prefills only the new message
+instead of re-reading the whole chain.
+
+### Public API (semver-covered modules)
+
+No changes to `api`, `error`, `sampling`, `lora`. New sibling classes
+(`EmbeddingModel`, `StyleTtsClone`, and an in-flight DiffusionGemma
+surface) are their own entry points, not part of the four covered
+modules. Everything below is internal engine work, the new model
+surfaces, or PWA / tooling assets.
+
+### Gemma 4 — weight quants & model coverage
+
+- **Q4_0** — runs Google's QAT (quantization-aware-trained) builds:
+  `gemma4:{e2b,e4b,12b}-it-qat`. The forward was un-hardcoded from Q4_K to
+  a dtype-routed `matmul_quant_chained` (Q4_K / Q6_K / Q4_0 / F16). QAT is
+  ~half the download at preserved quality. Inference-only — fine-tuning on
+  a QAT base fails early with an actionable error (train Q4_K_M, deploy QAT).
+- **Q8_0** — 8-bit (`-it-q8_0` tags), the highest-quality runnable quant;
+  byte-exact vs ggml `dequantize_row_q8_0`, byte-addressed fused
+  dequant-matmul + GPU-vs-CPU parity.
+- **Q5_0** — 5-bit, required for the 26B / DiffusionGemma Q4_K_M mix (Q5_0
+  on ~half the `ffn_down_exps`). Caught by the real 26B GPU run, not the
+  synthetic tests.
+- **12B architecture** — per-layer KV-head arrays (8 SWA / 1 global),
+  no-V global attention (V := the raw K projection), and 4-byte GPU-upload
+  alignment for odd-multiple Q6_K rows. Un-breaks `gemma4:12b` and enables
+  the 12B QAT build.
+
+### Sparse MoE — `gemma4:26b-a4b` (128 experts, top-8)
+
+- The MoE FFN runs IN PARALLEL with the dense MLP per layer, mirroring
+  Ollama's `model_text.go` 1:1: router (unweighted rmsnorm → ×1/√d →
+  ×scale → softmax → top-k → renorm) → fused `ffn_gate_up_exps` → GeGLU →
+  `ffn_down_exps` → weighted combine, under `post_ffw_norm_1/2`. A
+  per-layer branch, not a new model family (it's still `general.architecture
+  = gemma4`); the standing "MoE out of scope" line is retired.
+- CPU oracle + GPU kernels — `moe_router`, MulmatID `moe_expert_matmul`
+  (Q4_K / Q5_0 / Q8_0), `moe_geglu_halves`, `moe_combine`, plus batched
+  variants for the diffusion canvas — each GPU-vs-CPU parity-tested
+  (≤1.1e-4 on real blk.0/5/29 weights). New 3-D expert-slice dequant +
+  native `FileFetcher` (stream blobs bigger than RAM). `TrainingSession`
+  rejects MoE bases (inference-only).
+- Load-bearing GPU fix surfaced here: **Iris/Metal silently runs only 64
+  of a 128-thread workgroup** — WG=64 is now a hard rule, and parity tests
+  exercise the full index range.
+
+### Low-VRAM weight streaming
+
+- The MeBP per-layer weight-destroy pattern extended to **inference + MoE**:
+  the 26B GPU forward runs on a 16 GB Mac at **~0.6 GB peak** (27× under
+  its 16.7 GB resident set), output byte-identical to the CPU oracle — the
+  model didn't fit at all before.
+- **Per-expert streaming** — fetch only the routed top-8 of 128 experts
+  per layer (`buffer_expert_async` range-fetch), ~16× less bandwidth; with
+  the non-expert weights kept resident, the 26B runs at ~4 s/tok (down from
+  ~8) at ~1.6 GB peak, output unchanged. (`moe_stream_smoke` example;
+  `DG_LAYER_TIME` phase timing.)
+
+### DiffusionGemma — block-diffusion text (preview)
+
+- Validated CPU canvas-forward for the `diffusion-gemma` architecture (the
+  26B-A4B MoE backbone run non-autoregressively over a 256-token "canvas"):
+  the entropy-bound sampler, region-aware unified mask (bidirectional
+  canvas / causal-windowed prompt), full-sequence masked attention, and
+  the self-conditioning gated MLP — all mirroring llama.cpp PR 24423 and
+  diffed against its `llama-diffusion-gemma-eval` oracle (98.4% argmax;
+  99.6% with self-conditioning; a per-layer bisection confirms layer-0
+  correlation 0.9998, i.e. the math is correct and the residual drift is
+  inherent MoE routing-boundary accumulation).
+- **Full GPU canvas forward** (`reference/diffusion/gpu.rs`): the entire
+  forward — dense projections AND the 128-expert MoE FFN — now runs on the
+  GPU, batched over all canvas positions. Dense Q4_K/Q5_0/Q8_0 matmuls reuse
+  the batched MoE-expert kernel with `top_k = 1` (a batched dense quant
+  matmul for free); Q6_K (`attn_v`, the tied lm_head) falls back to a
+  single-row loop; the MoE runs the batched router / expert-matmul / GeGLU /
+  combine path with per-LAYER expert streaming (each layer's ~0.5 GB of
+  stacked experts is made resident then destroyed). Validated GPU-vs-CPU on
+  the real 16.8 GB streamed model: argmax-exact, max-abs ≤ 0.0004.
+- **`DiffusionGemma` engine + browser surface**: a sibling wasm class
+  (`src/diffusion.rs`) like `EmbeddingModel` — streaming loader + the
+  entropy-bound denoise loop over the GPU forward. Native generation
+  validated end-to-end ("The capital of France is" → " Paris."). The wasm
+  `denoiseStep` surface (JS drives the loop, rendering the canvas condensing
+  out of noise) is wired into the PWA: `diffusiongemma:26b-a4b` is now
+  selectable, streams from OPFS, and generates via a denoise-loop chat path.
+  Published to R2 (16.8 GB Q4_K_M). Desktop-class; tens of seconds per
+  denoise step on weak GPUs.
+
+### Embeddings + RAG
+
+- **EmbeddingGemma-300M** (`gemma3` arch, encoder-only) → the
+  `EmbeddingModel` sibling class over a bidirectional GPU forward,
+  bit-identical to the CPU oracle (cosine 0.9997 vs Ollama).
+  SentencePiece-unigram tokenizer (`tokenizer::spm`). Powers the PWA
+  Knowledge tab (drop/paste docs → chunk → embed → rsqlite-wasm vector
+  store) and per/cross-conversation chat RAG. Streaming loader keeps the
+  621 MB GGUF from ever being fully resident (iPhone-safe).
+
+### Chat — tool calling & agents
+
+Tool calling grew from a renderer into a working agent loop over the base
+Gemma 4 model — schema-in-prompt, no adapter required.
+
+- **Renderer + tolerant parser** — `<tool_call>{json}</tool_call>` rendered
+  as a structured block; the parser is hardened for real-model output (a
+  missing `>` on the open tag, a dropped `</tool_call>` closer, and pythonic
+  `func(arg=val)` calls in addition to JSON). Function-call LoRA recipe + a
+  canonical dataset/generator; training is interruptible + resumable
+  (checkpoint/restore) for slow GPUs.
+- **Tools settings tab** — a new Chat-settings tab carries the tool-calling
+  toggle, an optional WeatherAPI.com key, a °C/°F units selector defaulted
+  from the OS locale (°F in the US & a few territories, °C elsewhere), and a
+  GPS toggle.
+- **Executable weather tools** — calls actually run and the result is fed
+  back so the model answers in natural language. Four products — current,
+  forecast, air quality, astronomy — each with a dual backend: WeatherAPI.com
+  when a key is set (richer), and the free, keyless **Open-Meteo** otherwise,
+  so weather works with no key, anywhere on Earth. Called directly from the
+  browser (CORS); only the place name / coords leave the device. Geocoding
+  resolves the "City, ST" / "City, Country" forms the model emits (Open-Meteo
+  matches a bare name only), expanding US state abbreviations.
+- **GPS location** — when enabled, the user's coordinates are resolved
+  (cached; permission asked once) and injected into the system prompt, so
+  "what's the weather?" uses their real location instead of a guessed city.
+- **Multi-call + multi-step agent loop** — the model can emit several tool
+  calls in one turn (all executed concurrently) AND chain across steps: call
+  a tool, see its result, then decide whether to call another — e.g. "if the
+  temperature is above X, show the air quality." Bounded by a runaway guard.
+- **Per-step reasoning** — with thinking on, a fresh reasoning channel is
+  primed after each tool result, so between-step reasoning lands in a
+  collapsible Thought block instead of leaking into the answer. The renderer
+  interleaves thoughts, calls, results, and prose in emission order.
+- **Thinking + tools coexist** — fixed three prompt-render bugs vs Ollama's
+  `model/renderers/gemma4.go` (the oracle for this GGUF) that had silently
+  broken thinking once a tool schema was injected: a missing leading `<bos>`
+  (the killer — the model ran out-of-distribution and emitted a one-token
+  reply), a missing newline after the `<|think|>` control token, and a
+  contradictory schema line. Inference + resume now render with the explicit
+  BOS that Gemma 4's `add_bos_token=false` tokenizer won't auto-add.
+- **LaTeX rendering** — model math renders via KaTeX (`$…$` / `$$…$$`); a
+  system note keeps plain numbers/units (e.g. "2.2 µg/m³") out of math mode
+  so small models don't garble them.
+
+### Chat — KV-cache reuse & prompt caching
+
+Multi-turn chat no longer re-reads the whole conversation on every send.
+The GPU KV cache stays resident across turns and the engine prefills only
+what's new — the "Reading prompt N/total" phase now scales with the new
+message, not the chain length.
+
+- **Cross-turn prefix reuse** — the inference core tracks the exact token
+  sequence resident in the KV cache; a new turn feeds only the suffix past
+  the longest matching prefix instead of resetting and re-prefilling from
+  `<bos>`. Lives in the (cross-tab-shared) core, so it can't go stale
+  behind another tab. Correctness is gated purely on a token-content
+  match — any mismatch (edited history, changed system prompt, model swap)
+  safely falls back to a full prefill, so the worst case is "no speedup,"
+  never wrong output.
+- **`Forward::truncate_kv`** (new) — drops KV positions ≥ N and rewinds
+  `pos`, enabling *longest-common-prefix* reuse: a brand-new chat (or a
+  chat switch, or editing an earlier message) keeps the shared
+  system-prompt head and re-prefills only the divergent tail. Sound for
+  every layer type — the cache is linear and sliding-window attention is a
+  compute-time mask, not a ring buffer — so it's pure `pos`/`kv_lens`
+  bookkeeping, no GPU work. Parity-verified bit-identical to a fresh
+  prefill of the kept prefix (max-abs logit diff 0.0).
+- **System-prompt pre-warm** — after a model loads, a new "preparing"
+  phase prefills the system block into the KV cache (shown as a second
+  segment in the load progress bar / boot splash) so even the FIRST chat
+  hot-starts. Re-warms when the system prompt is saved or thinking /
+  tool-mode toggles. `buildSysContent` orders the static system core ahead
+  of dynamic RAG / GPS content so the warmed prefix is always a clean,
+  reusable prefix of a real turn. The warm is **persisted to OPFS, one
+  file per model digest** (keyed by the model + system-prompt signature):
+  on reload it's restored instead of recomputed, so the same system prompt
+  is never prefilled more than once per model — even across page reloads.
+  (No-adapter only: a LoRA changes the cached K/V and is applied after the
+  load-time warm, so adapter sessions recompute rather than risk a stale
+  restore.)
+- **Per-conversation KV snapshots** — a conversation's KV cache is
+  persisted to OPFS (an `RLCV` envelope = resident token ids + the KV /
+  sampler blob, model-digest tagged, LRU-capped, size- and quota-guarded)
+  and restored on reopen, so reloading the page and reopening a long chat
+  skips the re-prefill entirely. Composes with prefix reuse — a stale
+  snapshot just becomes a shorter reusable prefix.
+- **Per-turn date/time** — each user turn carries a frozen
+  `[Wed 2026-06-17 01:22 CDT]` prefix (weekday, date, local time, timezone)
+  so the model always knows the current time, done cache-safely: the stamp
+  is a pure function of the message's `created_at` given the device's
+  locale/timezone, so it re-renders identically and rides the always-re-fed
+  user turn without shifting the cached prefix. A static, forcefully-worded
+  system note teaches the model to answer time/date/day/timezone questions
+  straight from it — no clock tool, no deliberation.
+- **UI** — a dedicated "Loading model" view (spinner + progress + Stop)
+  replaces the picker while a model is loading/preparing, and the
+  model-tab controls lock during load. The system prompt is now a
+  read-only display with Edit → Save / Cancel and a "preparing…" indicator
+  while the new prompt warms.
+
+### Speech engine (TTS + voice cloning)
+
+The Voice tab gains a second engine — **StyleTTS2-LibriTTS** zero-shot
+cloning (desktop-only) alongside the existing Kokoro preset voices — with
+GPU voice-creation, GPU style-diffusion prosody, and the full English
+Kokoro voicepack set.
+
+- **GPU style encoder** — voice *creation* (reference clip → 256-d style)
+  now runs on the GPU, not just synthesis. New channel-first kernels
+  `conv2d_chf` / `avg_pool2d_half_chf`; bit-exact vs PyTorch (max-abs 5.5e-7).
+- **Style-diffusion prosody (α=0.3/β=0.7)** — restores natural,
+  text-appropriate prosody (the prior α=β=0 path was flat / "accented").
+  StyleTransformer1d denoiser + KDiffusion `denoise_fn` (σ_data=0.2) +
+  ADPM2 sampler + Karras schedule. CPU oracle bit-exact (5e-6); GPU
+  denoiser (f16 matmul + flash attention + AdaLayerNorm + new exact-GELU
+  kernel) is **7–17× faster** than CPU (0.7–1.2 s), corr 0.97 vs PyTorch.
+  Cloned synthesis uses it by default.
+- **Bind-cache leak fixed** — `StyleTtsGpu` now evicts its per-call scratch
+  buffers from the shared bind-group cache on `Drop`. Previously every
+  synth/encode leaked descriptor-table entries, so a long clone session
+  grew unbounded until the GPU exhausted (a tight-loop bench hard-locked a
+  weak integrated GPU after ~3–5 min). Real production fix.
+- Mel frontend (`compute_style` filterbank + window) baked into the GGUF
+  so the Rust encoder reads it directly. New `gpu_yield` dev hook
+  (`ST2_GPU_THROTTLE_MS`, native-only, no-op in prod) lets a weak GPU
+  yield between stages for batch dev/bench runs.
+
+### Cloning surface (desktop-only)
+
+- `StyleTtsClone` wasm-bindgen API: async `load` / `encodeVoice` /
+  `synthesize`, all GPU. Loads off the iPhone text-only path (never on
+  mobile). Model is f32-with-diffusion, **543 MB**, on R2.
+
+### Models / distribution
+
+- **Gemma 4 catalog** — published to R2 (`models.brainwires.dev`) and
+  added across the three catalog mirrors (`web/src/lib/api.ts`,
+  `web/server/ollama.ts`, `docker/entrypoint.sh`): the QAT trio
+  `gemma4:{e2b,e4b,12b}-it-qat` (Q4_0), the Q8_0 trio
+  `gemma4:{e2b,e4b,12b}-it-q8_0` (e2b/e4b full multimodal, 12b text-only),
+  the standard `gemma4:12b`, and the `gemma4:26b` MoE (heavy ⚠). MLX
+  (`-mlx`/`-mxfp8`/`-nvfp4`) and `-cloud` tags are explicitly out — not
+  GGUF / server-side.
+- **EmbeddingGemma-300M** — 621 MB GGUF on R2, in the Knowledge-tab catalog.
+- **Kokoro: all 28 English voicepacks** (af/am American, bf/bm British,
+  ♀/♂) shipped as Voice-tab presets — the GGUF previously bundled only
+  `af_heart`. New f16 GGUF (170.8 MB) on R2; catalog `digest`/`size` bumped
+  (one-time OPFS re-download). StyleTTS2-LibriTTS cloning GGUF added to the
+  catalog.
+
+### Tooling
+
+- New examples: `moe_parity` / `moe_layer_parity` / `moe_chained_smoke`
+  (26B MoE oracle + GPU layer parity), `moe_stream_smoke` (low-VRAM
+  streaming), `diffusion_parity` / `diffusion_config_probe` (DiffusionGemma
+  vs the llama.cpp oracle), `embed_parity`. Test fixtures now read GGUF
+  **headers only** (no whole-blob `fs::read`) — fixed a lib-suite OOM.
+- `clone_fidelity_harness` example — A0 calibration that isolates
+  reference-quality from speaker by cloning Kokoro `af_heart`'s own clean
+  output and measuring speaker-similarity. Finding: clean clone 0.96
+  (ceiling 0.97) vs a noisy clip 0.46 (below the 0.70 different-speaker
+  floor) — clone quality is dominated by reference cleanliness, and
+  quantity saturates by ~15 s.
+- `convert-styletts2-gguf.py` (+ diffusion weights, mel bake) and
+  `styletts2_dump_diffusion_fixtures.py`; Kokoro converter now bundles all
+  downloaded voicepacks.
+
+### Known limitations
+
+- **DiffusionGemma is a preview.** The CPU + GPU forward is validated
+  against the llama.cpp oracle and native generation works end-to-end, and
+  the engine is wired into the PWA — but the in-browser diffusion chat path
+  has **not** been exercised end-to-end (it needs the 16.8 GB model loaded
+  in-browser). There is no bit-level greedy diff vs Ollama's 26B (the CPU
+  oracle is the 1:1 mirror).
+- **Tool calling** runs on the *base* model via schema-in-prompt. Only the
+  weather tools execute; the other example tools (`set_timer`, `send_email`,
+  …) render but don't yet *do* anything. The function-call **LoRA is
+  optional polish** and still has slot-key-precision and multi-slot gaps —
+  base + schema is the supported path.
+- **Fine-tune ↔ inference BOS skew.** Inference now renders the explicit
+  leading `<bos>`; the training-data render paths do not yet, so train and
+  infer should be re-aligned before the function-call LoRA is revisited.
+- **Greedy output is not bit-identical to Ollama** on out-of-distribution
+  prompts; CPU↔GPU parity within rullama is clean (≤8e-5 max abs).
 
 ## [0.4.0] — 2026-06-01
 
@@ -53,7 +351,7 @@ tooling.
   native canonical run still exercises the iPhone path. Bit-identical:
   9.0703 / 11.0554 / 9.1028 across 3 epochs.
 
-### PWA (examples/web)
+### PWA (web)
 
 - Fine-tune tab — `Memory-tight` toggle moved to the bottom of the
   settings stack and labelled **Highly experimental** (slower on Mac,
@@ -81,16 +379,16 @@ tooling.
 ### Dev tooling
 
 - New crate `crates/rullama-devserver/` — native Rust dev server.
-  Replaces `examples/web/serve-iphone.sh` (LAN HTTPS) and
-  `examples/web/serve-tunnel.sh` (HTTP behind Cloudflare tunnel).
+  Replaces `web/serve-iphone.sh` (LAN HTTPS) and
+  `web/serve-tunnel.sh` (HTTP behind Cloudflare tunnel).
   - `cargo dev` brings up the full stack: axum on `:25321` +
     Vite child on `:5173` (with HMR WebSocket forwarding so editing
     React works through either port) + fs watcher on
     `crates/{rullama,rullama-finetune}/src/**` that auto-runs
     `wasm-pack build` and broadcasts a `wasm-rebuilt` event over WS,
-    triggering a page reload in `examples/web/src/lib/dev-hmr.ts`.
+    triggering a page reload in `web/src/lib/dev-hmr.ts`.
   - `cargo dev -- --public` composes tunnel-safe defaults: serves
-    `examples/web/dist/` instead of reverse-proxying Vite (Vite's
+    `web/dist/` instead of reverse-proxying Vite (Vite's
     `fs.allow=[repoRoot]` would otherwise leak the entire repo), disables
     `/api/log` writes, disables `/api/models` listing, disables
     `/__rullama-dev-ws`.
@@ -118,7 +416,7 @@ tooling.
   The crate is **excluded** from the workspace so
   `cargo build --workspace --target wasm32-unknown-unknown` doesn't try
   to compile axum / notify / tokio for wasm.
-- Mac CDP automation harness (`examples/web/test/mac-cdp-test.mjs`) —
+- Mac CDP automation harness (`web/test/mac-cdp-test.mjs`) —
   direct Chrome DevTools Protocol harness bypassing the Playwright
   React 18 click bug, with dataset save+reuse, explicit Memory-tight
   uncheck before training, and post-click worker-beacon verification
@@ -410,7 +708,7 @@ Initial public release. Two crates published to crates.io:
 
 ### Example PWAs
 
-- `examples/web/` — React + Vite + Tailwind + Workbox; production-quality chat PWA with OPFS-backed model cache, conversation history in SQLite (via `rsqlite-wasm`), and service-worker-driven update dialog.
+- `web/` — React + Vite + Tailwind + Workbox; production-quality chat PWA with OPFS-backed model cache, conversation history in SQLite (via `rsqlite-wasm`), and service-worker-driven update dialog.
 - `examples/pwa/` — vanilla JS bench harness and `safaridriver`-driven scripted iPhone runs.
 
 ### Known gaps

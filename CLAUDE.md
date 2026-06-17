@@ -4,11 +4,74 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Browser-resident Gemma 4 inference in pure Rust → WebAssembly + WebGPU. Loads
-Ollama's on-disk GGUF blobs (no server) and runs the forward pass on the local
-GPU through hand-written WGSL. **Scope is intentionally narrow**: Gemma 4 only
-(`gemma4:e2b`, `gemma4:e4b`), `Q4_K_M` mix only (`Q4_K` / `Q6_K` / `F16` / `F32`).
-Other architectures and MoE variants are out of scope.
+Browser-resident AI runtime in pure Rust → WebAssembly + WebGPU. Loads
+Ollama's on-disk GGUF blobs (no server) and runs the forward pass on the
+local GPU through hand-written WGSL. The scope expands as Ollama's does.
+
+**Currently in scope:**
+
+- **Text / vision / audio-input chat** — Gemma 4 only, all dense GGUF
+  variants: `e2b` / `e4b` / `12b` plus the `-it-qat` (Q4_0) and
+  `-it-q8_0` builds. Supported weight quants: `Q4_K` / `Q6_K` / `Q4_0` /
+  `Q8_0` / `F16` / `F32` (+ BF16 towers). The dtype-routed dispatch is
+  `matmul_quant_chained` in `backend/dispatch/matmul.rs`. This is the
+  most mature surface and the parity oracle for everything else.
+- **Gemma 4 MoE (`gemma4:26b-a4b`) + DiffusionGemma** — in-flight (the
+  one sanctioned MoE: it's the backbone DiffusionGemma sits on). MoE is
+  a per-layer FFN branch inside the gemma4 path (parallel dense MLP +
+  routed experts — see `reference/moe.rs`); DiffusionGemma will be a
+  sibling engine à la `EmbeddingModel`. Oracle for MoE-AR is Ollama's
+  `26b-a4b`; for DiffusionGemma it's Unsloth's GGUF + llama-diffusion-cli
+  (Ollama can't run it).
+- **In-browser LoRA fine-tuning** — over the same Gemma 4 forward path.
+  Production-shaped (no Python toolchain, no server upload) and so far
+  has no peer in any other browser-LLM project (see
+  [[project-competitive-landscape]] memory).
+- **Speech synthesis (TTS)** — Kokoro-82M (StyleTTS2 + iSTFTNet) port to
+  Rust/WGSL, in-flight. See `project_tts_kokoro` memory; reference impl
+  is hexgrad/kokoro PyTorch.
+- **Text embeddings + RAG** — EmbeddingGemma-300M (architecture `gemma3`,
+  encoder-only) → `EmbeddingModel` in `embed.rs` over a bidirectional
+  CPU oracle (`reference/embed/`), validated at cosine 0.9997 vs Ollama.
+  Its GGUF is SentencePiece-unigram (scores, not BPE merges) so it needs
+  the `tokenizer::spm` SPM tokenizer. Powers the PWA's Knowledge tab
+  (drop/paste docs → chunk → embed → rsqlite-wasm vector store) and
+  per/cross-conversation chat RAG. CPU forward ships first; a GPU
+  forward + memory-streaming the 621 MB GGUF are the open perf items.
+
+**Planned for future versions (roughly in order):**
+
+- **Image generation** — Ollama added experimental support for FLUX.2
+  [klein] and Z-Image-Turbo on 2026-01-20. Pulling those through the
+  same `/api/blob/<key>` plumbing is straightforward; the engine work
+  (UNet cross-attention, VAE conv kernels, CLIP text encoder) is a
+  second engine living alongside Gemma's. Browser prior art exists
+  (MLC web-stable-diffusion, MDST Engine, SDTurbo-WebGPU) so this is
+  catch-up parity not a moat — but it's table-stakes for the
+  "Ollama in your browser" pitch.
+- **Image editing** — Ollama-driven, once they ship it natively.
+- **Agents** — local multi-step planning + tool use against the
+  in-browser model. Roadmapped after image gen lands.
+
+**Explicitly out of scope:**
+
+- Other transformer architectures and non-Gemma MoE families — porting a
+  second text LLM family for its own sake doesn't pay off; the Gemma 4
+  focus is doing real work for the test surface and parity claims.
+  (The Gemma 4 `26b-a4b` MoE is the sanctioned exception, in service of
+  DiffusionGemma.)
+- Non-GGUF model formats — the `-mlx` / `-mxfp8` / `-nvfp4` Ollama tags
+  are Apple-MLX weights rullama cannot parse; `-cloud` tags are
+  server-side. Neither will ever appear in the catalog.
+- Server-side anything. The whole pitch is "your data never leaves
+  the device."
+- Python in the runtime loop. Native Rust + browser only.
+
+When adding a new model family, follow Kokoro's pattern: a sibling
+module under `crates/rullama/src/` (or its own crate if substantial),
+sharing the `wgpu`/`bytemuck`/`half` foundation and the
+`backend::WgpuCtx` + bind-cache infra, but with its own forward path
+and its own WGSL kernels. The Gemma 4 path stays untouched.
 
 The reference Go impl lives in Ollama's tree at `model/models/gemma4/`. Ops in
 `crates/rullama/src/reference/forward.rs` (CPU oracle) and `forward_chained.rs`
@@ -82,15 +145,12 @@ under `crates/rullama/examples/` (parity, smoke, inspectors, microbenches) and
 
 ## PWA dev loops
 
-Two harnesses against the same `pkg/` bundle:
+The user-facing PWA lives in `web/` (React + Vite + Tailwind + Workbox SW),
+built against the shared `pkg/` wasm bundle. `pnpm dev` (or `cargo dev`)
+auto-runs the wasm build.
 
-| Path              | When to use                                                                 |
-|-------------------|------------------------------------------------------------------------------|
-| `examples/web/`   | User-facing chat PWA work — React + Vite + Tailwind + Workbox SW. `pnpm dev` auto-runs the wasm build. |
-| `examples/pwa/`   | Kernel benchmarks and scripted iPhone runs via `safaridriver`. Build the wasm bundle first, then `./examples/pwa/serve.sh` (HTTPS). |
-
-iPhone runs go through `examples/pwa/run-on-iphone.sh` / `iphone-session-keeper.sh`
-/ `clean-iphone.sh`. Logs land at `/tmp/rullama-page.log` (beacons:
+iPhone / safaridriver runs go through `web/serve-iphone.sh` / `web/serve-tunnel.sh`
+and `web/test/iphone-test.sh`. Logs land at `/tmp/rullama-page.log` (beacons:
 `[chat]`, `[pe]`, `[tg]`, `[gen]`, `[wkr]`, `[rs]`). After kernel changes,
 remember the harness ships **bit-identical** parity vs Ollama on desktop —
 verify locally before touching the iPhone path.
@@ -118,7 +178,7 @@ Add a task by appending a match arm in `xtask/src/main.rs` and the alias line in
 | Mode | Command | Vite proxy? | `/api/log` writeable? | `/api/models` listed? | Use when |
 |------|---------|-------------|-----------------------|-----------------------|----------|
 | Local dev (default) | `cargo dev` | yes (HMR works through :25321) | yes | yes | working locally, **tunnel is OFF** |
-| Public / tunnel-safe | `cargo dev -- --public` | no (serves `examples/web/dist/`) | no | no | tunnel is up, public origin is reachable |
+| Public / tunnel-safe | `cargo dev -- --public` | no (serves `web/dist/`) | no | no | tunnel is up, public origin is reachable |
 
 **Important security boundary**: `cargo dev` (no flags) reverse-proxies `*` to Vite. Vite's `fs.allow=[repoRoot]` exposes every file under the repo to whatever can reach :25321 — including, transitively, anyone on the internet via `https://rullama.brainwires.net`. **Run `cargo dev --public` whenever the Cloudflare tunnel is up.**
 
@@ -197,8 +257,7 @@ crates/rullama-finetune/src/
   dataset_loader.rs       # JSONL + Tokenizer trait
   wasm_bindgen_api.rs     # JS-facing TrainingSession (wasm32 only); save/load adapter as safetensors
 
-examples/web/             # React + Vite production PWA
-examples/pwa/             # Vanilla JS bench + safaridriver scripts
+web/                      # React + Vite production PWA (+ safaridriver scripts)
 tools/ios-bench/          # Excluded from workspace; staticlib for Xcode
 ```
 

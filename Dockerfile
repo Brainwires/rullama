@@ -5,11 +5,10 @@
 # Stage 1 (rust-builder) builds the WebGPU/wasm bundle with the project's
 #         pinned Rust 1.91. Output: /build/pkg/.
 # Stage 2 (web-builder)  builds the new Vite+React+Tailwind PWA from
-#         `examples/web/`. Output: /build/examples/web/dist/.
+#         `web/`. Output: /build/web/dist/.
 # Stage 3 is an unprivileged nginx (UID 101, designed to run under read-only
 #         root FS) that serves:
-#           /                       — the new React PWA (M16)
-#           /examples/pwa/          — the legacy static PWA (backward compat)
+#           /                       — the React PWA
 #           /pkg/                   — wasm-pack output (shared by both)
 #           /api/models             — static JSON index (entrypoint.sh)
 #           /api/blob/<family:tag>  — Range-streamable GGUF blob via symlink
@@ -31,7 +30,6 @@ RUN rustup target add wasm32-unknown-unknown
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-COPY examples ./examples
 # xtask is a workspace member (drives the `cargo docker:*` aliases on the
 # host); cargo metadata refuses to parse the workspace without its manifest
 # present, even though wasm-pack won't compile it for wasm32.
@@ -69,10 +67,10 @@ RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
 
 # Bring in the source + the wasm-pack output. The Vite alias for `/pkg`
 # points at the project root, so `pkg/` must live at /build/pkg/.
-COPY              examples/web                 ./examples/web
+COPY              web                 ./web
 COPY --from=rust-builder /build/pkg            ./pkg
 
-WORKDIR /build/examples/web
+WORKDIR /build/web
 
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
@@ -97,8 +95,7 @@ RUN apk add --no-cache jq \
 
 # Static assets. No Rust source, no node_modules, no target cache.
 COPY --from=rust-builder /build/pkg                   /app/pkg
-COPY --from=web-builder  /build/examples/web/dist     /app/web
-COPY                     examples/pwa                 /app/examples/pwa
+COPY --from=web-builder  /build/web/dist     /app/web
 COPY                     docker/nginx-rullama.conf    /etc/nginx/conf.d/rullama.conf
 COPY                     docker/entrypoint.sh         /usr/local/bin/rullama-entrypoint
 

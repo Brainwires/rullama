@@ -1,0 +1,201 @@
+import { describe, it, expect } from "vitest";
+import { parseToolCalls } from "@/lib/parseToolCalls";
+
+const wrap = (inner: string) => `<tool_call>${inner}</tool_call>`;
+
+describe("parseToolCalls — JSON form", () => {
+    it("passes through prose with no tool call", () => {
+        const r = parseToolCalls("I can't do that directly.");
+        expect(r.calls).toEqual([]);
+        expect(r.prose).toBe("I can't do that directly.");
+        expect(r.pending).toBe(false);
+    });
+
+    it("parses a single clean JSON call", () => {
+        const r = parseToolCalls(wrap('{"name":"get_weather","arguments":{"location":"Miami"}}'));
+        expect(r.calls).toHaveLength(1);
+        expect(r.calls[0]).toMatchObject({ name: "get_weather", arguments: { location: "Miami" }, pending: false });
+        expect(r.prose).toBe("");
+    });
+
+    it("maps the `parameters` alias onto arguments", () => {
+        const r = parseToolCalls(wrap('{"name":"set_timer","parameters":{"duration":5}}'));
+        expect(r.calls[0]).toMatchObject({ name: "set_timer", arguments: { duration: 5 } });
+    });
+
+    it("extracts prose around a call", () => {
+        const r = parseToolCalls(`Sure! ${wrap('{"name":"play_music","arguments":{"query":"jazz"}}')} done.`);
+        expect(r.calls).toHaveLength(1);
+        expect(r.prose).toContain("Sure!");
+        expect(r.prose).toContain("done.");
+    });
+
+    it("parses multiple JSON calls", () => {
+        const r = parseToolCalls(
+            wrap('{"name":"set_timer","arguments":{"duration":1}}') +
+            wrap('{"name":"set_timer","arguments":{"duration":2}}'),
+        );
+        expect(r.calls).toHaveLength(2);
+        expect(r.calls[1].arguments).toEqual({ duration: 2 });
+    });
+});
+
+describe("parseToolCalls — pythonic form (small-model fallback)", () => {
+    it("maps positional args to schema param names", () => {
+        const r = parseToolCalls(wrap("set_timer(7)"));
+        expect(r.calls[0]).toMatchObject({ name: "set_timer", arguments: { duration: 7 } });
+    });
+
+    it("parses keyword args", () => {
+        const r = parseToolCalls(wrap('send_email(to="Priya", subject="Budget Review")'));
+        expect(r.calls[0].arguments).toEqual({ to: "Priya", subject: "Budget Review" });
+    });
+
+    it("maps multiple positional args (with commas inside quoted strings)", () => {
+        const r = parseToolCalls(wrap('set_reminder("call grandma, tonight", "tonight")'));
+        expect(r.calls[0]).toMatchObject({
+            name: "set_reminder",
+            arguments: { text: "call grandma, tonight", time: "tonight" },
+        });
+    });
+
+    it("coerces numeric and bareword scalars", () => {
+        const r = parseToolCalls(wrap("get_weather(Tokyo)"));
+        expect(r.calls[0].arguments).toEqual({ location: "Tokyo" });
+    });
+
+    it("falls back to arg0.. for unknown tools with positional args", () => {
+        const r = parseToolCalls(wrap('unknown_tool("x")'));
+        expect(r.calls[0]).toMatchObject({ name: "unknown_tool", arguments: { arg0: "x" } });
+    });
+});
+
+describe("parseToolCalls — robustness (real model quirks)", () => {
+    it("tolerates a dropped '>' on the open tag", () => {
+        const r = parseToolCalls('<tool_call\n{"name":"set_timer","arguments":{"timer_duration":7}}</tool_call>');
+        expect(r.calls[0]).toMatchObject({ name: "set_timer" });
+    });
+
+    it("brace-matches a missing </tool_call> closer + trailing junk", () => {
+        const r = parseToolCalls('<tool_call>{"name":"audio","arguments":{}}}}');
+        expect(r.calls).toHaveLength(1);
+        expect(r.calls[0]).toMatchObject({ name: "audio", pending: false });
+    });
+
+    it("marks a still-streaming mid-JSON call pending", () => {
+        const r = parseToolCalls('<tool_call>{"name":"get_w');
+        expect(r.calls[0].pending).toBe(true);
+        expect(r.pending).toBe(true);
+    });
+
+    it("keeps genuinely malformed payloads raw without throwing", () => {
+        const r = parseToolCalls(wrap("not json and not a call !!!"));
+        expect(r.calls).toHaveLength(1);
+        expect(typeof r.calls[0].arguments).toBe("string");
+    });
+});
+
+describe("parseToolCalls — regression: actual base-model eval outputs", () => {
+    const cases: Array<[string, string, Record<string, unknown>]> = [
+        ['{"name":"get_weather","arguments":{"location":"Miami"}}', "get_weather", { location: "Miami" }],
+        ['{"name":"play_music","arguments":{"query":"classical music"}}', "play_music", { query: "classical music" }],
+        ["set_timer(7)", "set_timer", { duration: 7 }],
+        ['send_email(to="Priya", subject="Budget Review")', "send_email", { to: "Priya", subject: "Budget Review" }],
+        ['set_reminder("call grandma tonight", "tonight")', "set_reminder", { text: "call grandma tonight", time: "tonight" }],
+    ];
+    it.each(cases)("parses %s", (inner, name, args) => {
+        const r = parseToolCalls(wrap(inner));
+        expect(r.calls).toHaveLength(1);
+        expect(r.calls[0].name).toBe(name);
+        expect(r.calls[0].arguments).toEqual(args);
+    });
+});
+
+describe("parseToolCalls — executed-tool results (multi-call chaining)", () => {
+    it("strips <tool_response> from prose and attaches it to the call by name", () => {
+        const r = parseToolCalls(
+            wrap('{"name":"get_weather","arguments":{"location":"Miami"}}') +
+            '<tool_response for="get_weather">Sunny, 30°C</tool_response>' +
+            "It is sunny in Miami.",
+        );
+        expect(r.calls).toHaveLength(1);
+        expect(r.calls[0].result).toBe("Sunny, 30°C");
+        expect(r.prose).toBe("It is sunny in Miami.");
+        expect(r.prose).not.toContain("tool_response");
+    });
+
+    it("matches each result to the right call even when order differs", () => {
+        const r = parseToolCalls(
+            wrap('{"name":"get_weather","arguments":{"location":"Miami"}}') +
+            wrap('{"name":"get_air_quality","arguments":{"location":"Miami"}}') +
+            // results emitted in the OPPOSITE order — name match must still win
+            '<tool_response for="get_air_quality">AQI 42 (Good)</tool_response>' +
+            '<tool_response for="get_weather">Sunny, 30°C</tool_response>',
+        );
+        expect(r.calls).toHaveLength(2);
+        expect(r.calls[0]).toMatchObject({ name: "get_weather", result: "Sunny, 30°C" });
+        expect(r.calls[1]).toMatchObject({ name: "get_air_quality", result: "AQI 42 (Good)" });
+    });
+
+    it("falls back to positional order for un-named responses", () => {
+        const r = parseToolCalls(
+            wrap('{"name":"get_weather","arguments":{"location":"Miami"}}') +
+            "<tool_response>Sunny, 30°C</tool_response>",
+        );
+        expect(r.calls[0].result).toBe("Sunny, 30°C");
+    });
+
+    it("splits reasoning-channel blocks into thinking segments, in order", () => {
+        const r = parseToolCalls(
+            "<|channel>thought\nNeed the weather first.<channel|>" +
+            wrap('{"name":"get_weather","arguments":{"location":"x"}}') +
+            '<tool_response for="get_weather">66°F</tool_response>' +
+            "<|channel>thought\n66 > 15, check air quality.<channel|>" +
+            wrap('{"name":"get_air_quality","arguments":{"location":"x"}}') +
+            '<tool_response for="get_air_quality">Good</tool_response>' +
+            "Air quality is good.",
+        );
+        expect(r.segments.map((s) =>
+            s.kind === "call" ? `call:${s.call.name}`
+                : s.kind === "thinking" ? `think:${s.text}`
+                    : `prose:${s.text}`,
+        )).toEqual([
+            "think:Need the weather first.",
+            "call:get_weather",
+            "think:66 > 15, check air quality.",
+            "call:get_air_quality",
+            "prose:Air quality is good.",
+        ]);
+        // thinking text is NOT part of the answer prose (Speak/empty-check)
+        expect(r.prose).toBe("Air quality is good.");
+    });
+
+    it("marks an unterminated thought as still streaming", () => {
+        const r = parseToolCalls("<|channel>thought\nweighing it");
+        expect(r.segments).toHaveLength(1);
+        const s = r.segments[0];
+        expect(s.kind === "thinking" && s.isThinking).toBe(true);
+        expect(s.kind === "thinking" && s.isComplete).toBe(false);
+    });
+
+    it("preserves call/prose order across a conditional 2-step chain", () => {
+        const r = parseToolCalls(
+            wrap('{"name":"get_weather","arguments":{"location":"x"}}') +
+            '<tool_response for="get_weather">66°F</tool_response>' +
+            "It's above 15°, so I'll check air quality." +
+            wrap('{"name":"get_air_quality","arguments":{"location":"x"}}') +
+            '<tool_response for="get_air_quality">Good</tool_response>' +
+            "Air quality is good.",
+        );
+        expect(r.segments.map((s) => s.kind === "call" ? `call:${s.call.name}` : `prose:${s.text}`))
+            .toEqual([
+                "call:get_weather",
+                "prose:It's above 15°, so I'll check air quality.",
+                "call:get_air_quality",
+                "prose:Air quality is good.",
+            ]);
+        // result chips ride along on the call segments
+        const seg0 = r.segments[0];
+        expect(seg0.kind === "call" && seg0.call.result).toBe("66°F");
+    });
+});

@@ -10,7 +10,7 @@ pub enum Mode {
     #[default]
     LocalDev,
     /// Tunnel-safe — Vite proxy replaced by a static serve of
-    /// `examples/web/dist/`, model list disabled, log write disabled,
+    /// `web/dist/`, model list disabled, log write disabled,
     /// dev WS disabled. The mode you want when cloudflared is up.
     Public,
 }

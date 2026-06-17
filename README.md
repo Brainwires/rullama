@@ -88,27 +88,16 @@ This emits `pkg/rullama.js` + `pkg/rullama_bg.wasm` + TypeScript typings.
 
 ### Two example PWAs
 
-The repo ships two browser harnesses against the same wasm bundle:
-
-| Path             | Stack                | Purpose                                                         |
-|------------------|----------------------|-----------------------------------------------------------------|
-| `examples/web/`  | React + Vite + Tailwind + Workbox SW | Production-quality chat PWA — service-worker-based offline shell, restart dialog on deploys, attachment UI, conversation history in OPFS + SQLite (`rsqlite-wasm`). |
-| `examples/pwa/`  | Vanilla JS + bash    | Bench harness and `safaridriver`-driven scripted iPhone runs.   |
-
-Pick `examples/web/` for hacking on the user-facing chat experience; pick
-`examples/pwa/` for kernel benchmarks or hands-off iPhone perf reruns.
+The user-facing browser app lives in `web/` — a production-quality React + Vite
++ Tailwind + Workbox chat PWA (service-worker offline shell, restart dialog on
+deploys, attachment UI, conversation history in OPFS + SQLite via
+`rsqlite-wasm`) built against the shared wasm bundle.
 
 ```sh
 # React / Vite PWA — auto-runs the wasm bundle build via `pnpm dev`.
-cd examples/web
+cd web
 pnpm install
 pnpm dev                 # https://localhost:5173/
-
-# Vanilla bench / iPhone harness — needs the wasm bundle built first.
-CERT_FILE=~/.local/share/rullama/cert.pem KEY_FILE=~/.local/share/rullama/key.pem \
-    ./examples/pwa/serve.sh
-# Desktop:  https://localhost:8088/examples/pwa/index.html
-# iPhone:   https://<mac-lan-ip>:8088/examples/pwa/index.html
 ```
 
 The first load streams the ~7 GB blob from the local Ollama install (or an R2
@@ -119,7 +108,7 @@ the same Safari session) reuse the cached file.
 
 ### iPhone scripted runs
 
-The vanilla PWA is fully drivable from the Mac via Apple's `safaridriver`:
+The PWA is fully drivable from the Mac via Apple's `safaridriver`:
 
 ```sh
 # One-time setup on the phone:
@@ -128,9 +117,8 @@ The vanilla PWA is fully drivable from the Mac via Apple's `safaridriver`:
 #                                  Feature Flags → WebGPU = on
 # Then on the Mac:
 safaridriver -p 4444 &
-./examples/pwa/iphone-session-keeper.sh &        # keep an OPFS scope alive
-./examples/pwa/run-on-iphone.sh                  # navigate → Load → chat → log perf
-./examples/pwa/clean-iphone.sh                   # wipe OPFS between trials
+./web/serve-iphone.sh            # HTTPS serve reachable from the phone's Safari
+./web/test/iphone-test.sh        # navigate → Load → chat → log perf
 ```
 
 `/tmp/rullama-page.log` collects beacon traces from the page (`[chat]`,
@@ -192,7 +180,7 @@ vs. the multi-forward path.
 
 **In the browser:** the unified wasm bundle (see [Build](#build-the-wasm-bundle))
 exposes `TrainingSession` to JS alongside `Model`. The Fine-tune tab in
-`examples/web/` drives a full session — dataset upload, hyperparam UI, live
+`web/` drives a full session — dataset upload, hyperparam UI, live
 loss chart, save adapter to OPFS as safetensors. The same `Model` that's
 loaded for inference accepts the trained adapter via `Model.loadAdapter(bytes)`
 (re-runs in the chat tab against the adapted weights).

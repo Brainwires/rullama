@@ -38,7 +38,7 @@ impl Paths {
     }
 
     pub fn web_dir(&self) -> PathBuf {
-        self.repo_root.join("examples/web")
+        self.repo_root.join("web")
     }
     pub fn manifests_dir(&self) -> PathBuf {
         self.ollama_models.join("manifests")
@@ -58,11 +58,11 @@ fn find_repo_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let mut cur: &Path = &cwd;
     loop {
-        // Workspace root has Cargo.toml AND a `crates/` subdir AND a
-        // `pkg/` subdir we expect to serve.
+        // Workspace root has Cargo.toml AND a `crates/` subdir AND the
+        // `web/` PWA project we serve.
         if cur.join("Cargo.toml").is_file()
             && cur.join("crates").is_dir()
-            && cur.join("examples").is_dir()
+            && cur.join("web").is_dir()
         {
             return Ok(cur.to_path_buf());
         }
@@ -70,7 +70,7 @@ fn find_repo_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
             Some(p) => cur = p,
             None => {
                 return Err(format!(
-                    "could not find repo root by walking up from {} (expected Cargo.toml + crates/ + examples/)",
+                    "could not find repo root by walking up from {} (expected Cargo.toml + crates/ + web/)",
                     cwd.display()
                 )
                 .into());
