@@ -10,12 +10,16 @@ import { wikipediaTool } from "@/lib/tools/wikipedia";
 import { timerTool, reminderTool } from "@/lib/tools/reminders";
 import { newsTool } from "@/lib/tools/news";
 import { knowledgeTool } from "@/lib/tools/knowledge";
+import { calculateTool, solveTool, analyzeTool, unitsTool } from "@/lib/tools/compute";
 import type { ToolDef, ToolContext, ToolRunResult, Units } from "@/lib/tools/types";
 
 export type { ToolDef, ToolContext, ToolRunResult, Units };
 export { defaultUnitsFromLocale };
 
 // Every executable tool. Add a ToolDef here to register it.
+// `calculate` is the math GATEWAY (top-level); solve/analyze/units are the
+// unlocked verbs — executable here but NOT listed in TOOL_SCHEMA_PROMPT (the
+// model learns them from the gateway's tool_response). See ./compute.
 const TOOLS: ToolDef[] = [
     weatherTool,
     wikipediaTool,
@@ -23,6 +27,10 @@ const TOOLS: ToolDef[] = [
     reminderTool,
     newsTool,
     knowledgeTool,
+    calculateTool,
+    solveTool,
+    analyzeTool,
+    unitsTool,
 ];
 
 const BY_NAME = new Map<string, ToolDef>();
