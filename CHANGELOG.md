@@ -290,6 +290,25 @@ Kokoro voicepack set.
   `styletts2_dump_diffusion_fixtures.py`; Kokoro converter now bundles all
   downloaded voicepacks.
 
+### Known limitations
+
+- **DiffusionGemma is a preview.** The CPU + GPU forward is validated
+  against the llama.cpp oracle and native generation works end-to-end, and
+  the engine is wired into the PWA — but the in-browser diffusion chat path
+  has **not** been exercised end-to-end (it needs the 16.8 GB model loaded
+  in-browser). There is no bit-level greedy diff vs Ollama's 26B (the CPU
+  oracle is the 1:1 mirror).
+- **Tool calling** runs on the *base* model via schema-in-prompt. Only the
+  weather tools execute; the other example tools (`set_timer`, `send_email`,
+  …) render but don't yet *do* anything. The function-call **LoRA is
+  optional polish** and still has slot-key-precision and multi-slot gaps —
+  base + schema is the supported path.
+- **Fine-tune ↔ inference BOS skew.** Inference now renders the explicit
+  leading `<bos>`; the training-data render paths do not yet, so train and
+  infer should be re-aligned before the function-call LoRA is revisited.
+- **Greedy output is not bit-identical to Ollama** on out-of-distribution
+  prompts; CPU↔GPU parity within rullama is clean (≤8e-5 max abs).
+
 ## [0.4.0] — 2026-06-01
 
 Mac fast path + dev-server overhaul.
