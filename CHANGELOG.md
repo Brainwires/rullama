@@ -19,7 +19,10 @@ validated **DiffusionGemma** (block-diffusion text) CPU forward + GPU
 kernel set lands as a preview. Beyond text generation: an **embeddings +
 RAG** stack (EmbeddingGemma), function-call **tool rendering + LoRA**, and
 a second TTS engine — **StyleTTS2-LibriTTS** zero-shot voice cloning
-alongside the Kokoro presets.
+alongside the Kokoro presets. Multi-turn chat gets **KV-cache reuse +
+prompt caching**: the system prompt is pre-warmed once and conversations
+reuse their resident (and OPFS-persisted) KV cache, so a new turn prefills
+only the new message instead of re-reading the whole chain.
 
 ### Public API (semver-covered modules)
 
@@ -124,6 +127,53 @@ surfaces, or PWA / tooling assets.
   `>` on the open tag). Function-call LoRA recipe + a canonical
   dataset/generator. Training made interruptible + resumable
   (checkpoint/restore) for slow GPUs.
+
+### Chat — KV-cache reuse & prompt caching
+
+Multi-turn chat no longer re-reads the whole conversation on every send.
+The GPU KV cache stays resident across turns and the engine prefills only
+what's new — the "Reading prompt N/total" phase now scales with the new
+message, not the chain length.
+
+- **Cross-turn prefix reuse** — the inference core tracks the exact token
+  sequence resident in the KV cache; a new turn feeds only the suffix past
+  the longest matching prefix instead of resetting and re-prefilling from
+  `<bos>`. Lives in the (cross-tab-shared) core, so it can't go stale
+  behind another tab. Correctness is gated purely on a token-content
+  match — any mismatch (edited history, changed system prompt, model swap)
+  safely falls back to a full prefill, so the worst case is "no speedup,"
+  never wrong output.
+- **`Forward::truncate_kv`** (new) — drops KV positions ≥ N and rewinds
+  `pos`, enabling *longest-common-prefix* reuse: a brand-new chat (or a
+  chat switch, or editing an earlier message) keeps the shared
+  system-prompt head and re-prefills only the divergent tail. Sound for
+  every layer type — the cache is linear and sliding-window attention is a
+  compute-time mask, not a ring buffer — so it's pure `pos`/`kv_lens`
+  bookkeeping, no GPU work. Parity-verified bit-identical to a fresh
+  prefill of the kept prefix (max-abs logit diff 0.0).
+- **System-prompt pre-warm** — after a model loads, a new "preparing"
+  phase prefills the system block into the KV cache (shown as a second
+  segment in the load progress bar / boot splash) so even the FIRST chat
+  hot-starts. Re-warms when the system prompt is saved or thinking /
+  tool-mode toggles. `buildSysContent` orders the static system core ahead
+  of dynamic RAG / GPS content so the warmed prefix is always a clean,
+  reusable prefix of a real turn.
+- **Per-conversation KV snapshots** — a conversation's KV cache is
+  persisted to OPFS (an `RLCV` envelope = resident token ids + the KV /
+  sampler blob, model-digest tagged, LRU-capped, size- and quota-guarded)
+  and restored on reopen, so reloading the page and reopening a long chat
+  skips the re-prefill entirely. Composes with prefix reuse — a stale
+  snapshot just becomes a shorter reusable prefix.
+- **Per-turn date/time** — each user turn carries a frozen `[date time]`
+  prefix so the model always knows the current time, done cache-safely:
+  the stamp is fixed per message (re-rendered identically from its
+  `created_at`), so it rides the always-re-fed user turn without shifting
+  the cached prefix. A static system note teaches the model to read it.
+- **UI** — a dedicated "Loading model" view (spinner + progress + Stop)
+  replaces the picker while a model is loading/preparing, and the
+  model-tab controls lock during load. The system prompt is now a
+  read-only display with Edit → Save / Cancel and a "preparing…" indicator
+  while the new prompt warms.
 
 ### Speech engine (TTS + voice cloning)
 
