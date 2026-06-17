@@ -9,7 +9,7 @@ While the version stays in the 0.x series, only the modules listed in the
 `sampling`, `lora`) are covered by semver. Everything else is `#[doc(hidden)]`
 and may move in any patch release.
 
-## [Unreleased]
+## [0.5.0] — 2026-06-17
 
 A broad surface expansion since 0.4.0. The Gemma 4 family grows from two
 dense models to the full runnable GGUF lineup — three new weight quants
@@ -17,12 +17,14 @@ dense models to the full runnable GGUF lineup — three new weight quants
 MoE** with per-expert weight streaming that fits it on a low-VRAM GPU. A
 validated **DiffusionGemma** (block-diffusion text) CPU forward + GPU
 kernel set lands as a preview. Beyond text generation: an **embeddings +
-RAG** stack (EmbeddingGemma), function-call **tool rendering + LoRA**, and
-a second TTS engine — **StyleTTS2-LibriTTS** zero-shot voice cloning
-alongside the Kokoro presets. Multi-turn chat gets **KV-cache reuse +
-prompt caching**: the system prompt is pre-warmed once and conversations
-reuse their resident (and OPFS-persisted) KV cache, so a new turn prefills
-only the new message instead of re-reading the whole chain.
+RAG** stack (EmbeddingGemma), **agentic tool calling** — executable weather
+tools over the base model with multi-step conditional chains and per-step
+reasoning (plus the function-call LoRA recipe) — and a second TTS engine,
+**StyleTTS2-LibriTTS** zero-shot voice cloning alongside the Kokoro presets.
+Multi-turn chat gets **KV-cache reuse + prompt caching**: the system prompt
+is pre-warmed once and conversations reuse their resident (and
+OPFS-persisted) KV cache, so a new turn prefills only the new message
+instead of re-reading the whole chain.
 
 ### Public API (semver-covered modules)
 
@@ -120,13 +122,50 @@ surfaces, or PWA / tooling assets.
   store) and per/cross-conversation chat RAG. Streaming loader keeps the
   621 MB GGUF from ever being fully resident (iPhone-safe).
 
-### Chat — tool calling
+### Chat — tool calling & agents
 
-- `<tool_call>{json}</tool_call>` renderer rendered as a structured block,
-  with a tolerant parser hardened for real-model output (e.g. a missing
-  `>` on the open tag). Function-call LoRA recipe + a canonical
-  dataset/generator. Training made interruptible + resumable
+Tool calling grew from a renderer into a working agent loop over the base
+Gemma 4 model — schema-in-prompt, no adapter required.
+
+- **Renderer + tolerant parser** — `<tool_call>{json}</tool_call>` rendered
+  as a structured block; the parser is hardened for real-model output (a
+  missing `>` on the open tag, a dropped `</tool_call>` closer, and pythonic
+  `func(arg=val)` calls in addition to JSON). Function-call LoRA recipe + a
+  canonical dataset/generator; training is interruptible + resumable
   (checkpoint/restore) for slow GPUs.
+- **Tools settings tab** — a new Chat-settings tab carries the tool-calling
+  toggle, an optional WeatherAPI.com key, a °C/°F units selector defaulted
+  from the OS locale (°F in the US & a few territories, °C elsewhere), and a
+  GPS toggle.
+- **Executable weather tools** — calls actually run and the result is fed
+  back so the model answers in natural language. Four products — current,
+  forecast, air quality, astronomy — each with a dual backend: WeatherAPI.com
+  when a key is set (richer), and the free, keyless **Open-Meteo** otherwise,
+  so weather works with no key, anywhere on Earth. Called directly from the
+  browser (CORS); only the place name / coords leave the device. Geocoding
+  resolves the "City, ST" / "City, Country" forms the model emits (Open-Meteo
+  matches a bare name only), expanding US state abbreviations.
+- **GPS location** — when enabled, the user's coordinates are resolved
+  (cached; permission asked once) and injected into the system prompt, so
+  "what's the weather?" uses their real location instead of a guessed city.
+- **Multi-call + multi-step agent loop** — the model can emit several tool
+  calls in one turn (all executed concurrently) AND chain across steps: call
+  a tool, see its result, then decide whether to call another — e.g. "if the
+  temperature is above X, show the air quality." Bounded by a runaway guard.
+- **Per-step reasoning** — with thinking on, a fresh reasoning channel is
+  primed after each tool result, so between-step reasoning lands in a
+  collapsible Thought block instead of leaking into the answer. The renderer
+  interleaves thoughts, calls, results, and prose in emission order.
+- **Thinking + tools coexist** — fixed three prompt-render bugs vs Ollama's
+  `model/renderers/gemma4.go` (the oracle for this GGUF) that had silently
+  broken thinking once a tool schema was injected: a missing leading `<bos>`
+  (the killer — the model ran out-of-distribution and emitted a one-token
+  reply), a missing newline after the `<|think|>` control token, and a
+  contradictory schema line. Inference + resume now render with the explicit
+  BOS that Gemma 4's `add_bos_token=false` tokenizer won't auto-add.
+- **LaTeX rendering** — model math renders via KaTeX (`$…$` / `$$…$$`); a
+  system note keeps plain numbers/units (e.g. "2.2 µg/m³") out of math mode
+  so small models don't garble them.
 
 ### Chat — KV-cache reuse & prompt caching
 
@@ -170,11 +209,14 @@ message, not the chain length.
   and restored on reopen, so reloading the page and reopening a long chat
   skips the re-prefill entirely. Composes with prefix reuse — a stale
   snapshot just becomes a shorter reusable prefix.
-- **Per-turn date/time** — each user turn carries a frozen `[date time]`
-  prefix so the model always knows the current time, done cache-safely:
-  the stamp is fixed per message (re-rendered identically from its
-  `created_at`), so it rides the always-re-fed user turn without shifting
-  the cached prefix. A static system note teaches the model to read it.
+- **Per-turn date/time** — each user turn carries a frozen
+  `[Wed 2026-06-17 01:22 CDT]` prefix (weekday, date, local time, timezone)
+  so the model always knows the current time, done cache-safely: the stamp
+  is a pure function of the message's `created_at` given the device's
+  locale/timezone, so it re-renders identically and rides the always-re-fed
+  user turn without shifting the cached prefix. A static, forcefully-worded
+  system note teaches the model to answer time/date/day/timezone questions
+  straight from it — no clock tool, no deliberation.
 - **UI** — a dedicated "Loading model" view (spinner + progress + Stop)
   replaces the picker while a model is loading/preparing, and the
   model-tab controls lock during load. The system prompt is now a
