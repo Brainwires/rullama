@@ -34,22 +34,38 @@ scripts/
 - **Rust 1.91** (matches the crate MSRV), edition 2024.
 - **Build hosts:** desktop (macOS/Windows/Linux) builds with `dotnet` only — no Xcode. Android builds from any host with the Android workload. **iOS** is the only target needing **Xcode 16 / macOS 14+** (later, or via CI).
 
-## Status
+## Status — Stage 1 (desktop) complete
 
-- ✅ **M0 — bridge proven end to end.** `rust-core` builds against real `rullama 0.5.0`; C# P/Invoke → wgpu/Metal probe returns the adapter on this machine:
-  `adapter=AMD Radeon Pro 555 backend=Metal device_type=DiscreteGpu subgroups=true has_f16=true`
-- ⏳ **M1** — model load (path/URL) + streaming token generation; first chat screen.
+All verified end-to-end on an Intel Mac (no Xcode), against the real `gemma4:e2b` model:
+
+- ✅ **Bridge** — C# P/Invoke → `rust-core` → wgpu/Metal (`!Send` owning-thread + streaming callback).
+- ✅ **Chat** — streaming generation, SQLite history, sampling controls, system prompt, markdown, model picker.
+- ✅ **Multimodal** — image input (described a synthesized blue circle); audio input (transcribed a TTS clip).
+- ✅ **Tool calling** — schema injection, tolerant parser, weather executor (Open-Meteo/WeatherAPI), agentic loop.
+- ✅ **Voice** — Kokoro TTS out (24 kHz) + audio understanding in. (Live mic capture is tracked separately.)
+- ✅ **Model mgmt + packaging** — in-app resumable downloads (R2 catalog), Settings, macOS `.app` bundle, CI.
+
+Stage 2 (fine-tuning, RAG, voice-cloning, ROME/MEMIT, mobile) is planned next.
 
 ## Develop
 
 ```bash
 # 1. Build the Rust core (works on macOS 13+, no Xcode)
-cd rust-core && cargo test          # runs the wgpu probe smoke test
+cd rust-core && cargo test          # wgpu probe + (with RULLAMA_TEST_GGUF) load/generate
 ../scripts/build-rust.sh debug      # or release; stages the native lib
 
 # 2. Verify the C# binding
-cd ../app && dotnet run --project Rullama.ProbeSmoke   # prints the GPU adapter
+cd ../app && dotnet run --project Rullama.ProbeSmoke    # prints the GPU adapter
+RULLAMA_TEST_GGUF=/path/to/model.gguf dotnet run --project Rullama.GenerateSmoke
 
 # 3. Run the desktop app
 dotnet run --project Rullama.Desktop
 ```
+
+## Package (macOS)
+
+```bash
+scripts/package-macos.sh            # → dist/Rullama.app (unsigned, self-contained)
+# distribute: codesign + notarytool with an Apple Developer ID
+```
+Windows/Linux packaging + signed builds run in CI (`.github/workflows/ci.yml`).

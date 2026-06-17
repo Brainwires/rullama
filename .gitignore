@@ -3,6 +3,9 @@
 /rust-core/dist/
 **/*.rs.bk
 
+# Packaging output
+/dist/
+
 # .NET / Avalonia
 [Bb]in/
 [Oo]bj/
