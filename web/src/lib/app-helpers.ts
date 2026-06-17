@@ -185,6 +185,7 @@ export interface GenJob {
     thinking: boolean;
     toolMode: boolean;
     weatherApiKey: string;
+    newsApiKey: string;
     weatherUnits: ToolUnits;
     useGps: boolean;
     /** Block-diffusion (DiffusionGemma) turn — denoise loop, not AR stream. */

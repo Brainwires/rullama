@@ -54,6 +54,7 @@ export interface UseChatEngineParams {
     thinking: boolean;
     toolMode: boolean;
     weatherApiKey: string;
+    newsApiKey: string;
     weatherUnits: ToolUnits;
     useGps: boolean;
     /** Active LoRA adapter name (or null). Part of the system pre-warm key —
@@ -119,7 +120,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
     const {
         modelStatus, loadedIsDiffusion, statusText, lastLoadedDigest,
         hasVision, hasAudio, systemPrompt, sampling, maxTokens, thinking,
-        toolMode, weatherApiKey, weatherUnits, useGps, activeAdapter,
+        toolMode, weatherApiKey, newsApiKey, weatherUnits, useGps, activeAdapter,
     } = opts;
     const { showToast } = useToast();
 
@@ -899,7 +900,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
             convId, modelMsgId, userText: text, createdAt: nowMs,
             images: turnImages, audio: turnAudio, sysContent,
             sampling, maxTokens, thinking, toolMode,
-            weatherApiKey, weatherUnits, useGps, diffusion: diffusionTurn,
+            weatherApiKey, newsApiKey, weatherUnits, useGps, diffusion: diffusionTurn,
         } = job;
 
         // Prior-turn history. For a same-conversation queued send (or any job
@@ -1436,7 +1437,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
                     execCalls.map((c) =>
                         executeTool(c.name, c.arguments, {
                             weatherApiKey,
-                            newsApiKey: "", // get_news deferred (needs settings/queue threading)
+                            newsApiKey,
                             units: weatherUnits,
                             useGps,
                             geo,
@@ -1707,6 +1708,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
             thinking,
             toolMode,
             weatherApiKey,
+            newsApiKey,
             weatherUnits,
             useGps,
             diffusion: loadedIsDiffusion,
@@ -1748,7 +1750,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
         activeConvId, commitQueue, kickPump, lastLoadedDigest, loadedIsDiffusion,
         maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt,
         sampling, statusText, systemPrompt, thinking, toolMode,
-        useGps, weatherApiKey, weatherUnits, showToast,
+        useGps, weatherApiKey, newsApiKey, weatherUnits, showToast,
     ]);
 
     // Boot-resume the persisted queue: once the model is ready, rebuild any

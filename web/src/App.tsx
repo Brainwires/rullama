@@ -103,6 +103,7 @@ export function App() {
     const {
         toolMode, setToolMode,
         weatherApiKey, setWeatherApiKey,
+        newsApiKey, setNewsApiKey,
         weatherUnits, setWeatherUnits,
         useGps, setUseGps,
     } = useToolSettings();
@@ -191,7 +192,7 @@ export function App() {
     } = useChatEngine({
         modelStatus, loadedIsDiffusion, statusText, lastLoadedDigest,
         hasVision, hasAudio, systemPrompt, sampling, maxTokens, thinking,
-        toolMode, weatherApiKey, weatherUnits, useGps, activeAdapter,
+        toolMode, weatherApiKey, newsApiKey, weatherUnits, useGps, activeAdapter,
     });
 
     // Keep the cycle-break refs current for the model loader.
@@ -455,6 +456,8 @@ export function App() {
                             onToolModeChange={setToolMode}
                             weatherApiKey={weatherApiKey}
                             onWeatherApiKeyChange={setWeatherApiKey}
+                            newsApiKey={newsApiKey}
+                            onNewsApiKeyChange={setNewsApiKey}
                             weatherUnits={weatherUnits}
                             onWeatherUnitsChange={setWeatherUnits}
                             useGps={useGps}

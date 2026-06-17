@@ -53,9 +53,11 @@ interface Props {
     onThinkingChange: (b: boolean) => void;
     toolMode: boolean;
     onToolModeChange: (b: boolean) => void;
-    // Tools tab — weather (WeatherAPI.com, optional key) + GPS.
+    // Tools tab — weather (WeatherAPI.com, optional key) + GPS + news (GNews key).
     weatherApiKey: string;
     onWeatherApiKeyChange: (s: string) => void;
+    newsApiKey: string;
+    onNewsApiKeyChange: (s: string) => void;
     weatherUnits: Units;
     onWeatherUnitsChange: (u: Units) => void;
     useGps: boolean;
@@ -388,6 +390,35 @@ export function ChatSettings(props: Props) {
                                 />
                                 <span>
                                     Use my location (GPS) when no place is given — the browser will ask permission
+                                </span>
+                            </label>
+                        </section>
+
+                        <section className="flex flex-col gap-2 border-t border-border pt-3">
+                            <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">News</span>
+                            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                                <span className="flex items-center justify-between">
+                                    <span>GNews API key</span>
+                                    <a
+                                        href="https://gnews.io/"
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-primary hover:underline"
+                                    >
+                                        Get a free key
+                                    </a>
+                                </span>
+                                <Input
+                                    type="password"
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                    value={props.newsApiKey}
+                                    onChange={(e) => props.onNewsApiKeyChange(e.target.value)}
+                                    placeholder="Optional — required for the news tool"
+                                    className="h-8 text-xs"
+                                />
+                                <span className="text-[10px] leading-tight text-muted-foreground">
+                                    Enables the get_news tool (gnews.io). Without a key, the model answers from its own knowledge.
                                 </span>
                             </label>
                         </section>

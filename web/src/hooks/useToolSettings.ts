@@ -19,6 +19,7 @@ export function useToolSettings() {
     // prefixes `rullama:` again on top of these.
     const [toolMode, setToolMode]           = usePersistedState<boolean>("rullama:toolMode", false);
     const [weatherApiKey, setWeatherApiKey] = usePersistedState<string>("rullama:weatherApiKey", "");
+    const [newsApiKey, setNewsApiKey]       = usePersistedState<string>("rullama:newsApiKey", "");
     // Default the temperature scale from the user's OS/browser locale (°F for
     // the US & a few territories, °C elsewhere) instead of hard-coding metric.
     // Only used on first run — an explicit choice in the Tools tab persists and
@@ -29,6 +30,7 @@ export function useToolSettings() {
     return {
         toolMode, setToolMode,
         weatherApiKey, setWeatherApiKey,
+        newsApiKey, setNewsApiKey,
         weatherUnits, setWeatherUnits,
         useGps, setUseGps,
     };

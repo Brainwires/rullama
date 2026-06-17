@@ -8,6 +8,7 @@
 import { weatherTool, defaultUnitsFromLocale } from "@/lib/tools/weather";
 import { wikipediaTool } from "@/lib/tools/wikipedia";
 import { timerTool, reminderTool } from "@/lib/tools/reminders";
+import { newsTool } from "@/lib/tools/news";
 import { knowledgeTool } from "@/lib/tools/knowledge";
 import type { ToolDef, ToolContext, ToolRunResult, Units } from "@/lib/tools/types";
 
@@ -15,13 +16,12 @@ export type { ToolDef, ToolContext, ToolRunResult, Units };
 export { defaultUnitsFromLocale };
 
 // Every executable tool. Add a ToolDef here to register it.
-// (newsTool exists in ./news but is deferred — needs the newsApiKey setting +
-// queue threading + GNews CORS verification.)
 const TOOLS: ToolDef[] = [
     weatherTool,
     wikipediaTool,
     timerTool,
     reminderTool,
+    newsTool,
     knowledgeTool,
 ];
 
