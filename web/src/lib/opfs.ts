@@ -409,13 +409,34 @@ export async function wipeAllOpfs(): Promise<boolean> {
  * directory if empty. Returns true if a file was actually removed.
  */
 export async function wipeModel(modelKey: string, filename: string): Promise<boolean> {
+    let root: FileSystemDirectoryHandle;
+    let dlDir: FileSystemDirectoryHandle;
+    let md: FileSystemDirectoryHandle;
     try {
-        const root  = await navigator.storage.getDirectory();
-        const dlDir = await root.getDirectoryHandle(OPFS_DIR, { create: false });
-        const md    = await dlDir.getDirectoryHandle(modelKey, { create: false });
+        root  = await navigator.storage.getDirectory();
+        dlDir = await root.getDirectoryHandle(OPFS_DIR, { create: false });
+        md    = await dlDir.getDirectoryHandle(modelKey, { create: false });
+    } catch {
+        // OPFS dir or model dir absent — genuinely nothing cached. No-op.
+        return false;
+    }
+    try {
         await md.removeEntry(filename);
-        try { await dlDir.removeEntry(modelKey, { recursive: true }); } catch { /* dir not empty / locked */ }
-        return true;
-    } catch { return false; }
+    } catch (e) {
+        const name = (e as DOMException)?.name;
+        if (name === "NotFoundError") return false; // already gone, real no-op
+        // NoModificationAllowedError / InvalidStateError ⇒ an OPFS sync access
+        // handle is still open on this file (the model worker hasn't released
+        // it), so removeEntry can't run and the bytes WON'T be reclaimed.
+        // Surface it instead of silently pretending success — this is exactly
+        // the "leak in delete" symptom (file looks gone, disk stays full).
+        throw new Error(
+            `OPFS delete blocked for ${modelKey}/${filename} (${name ?? "unknown"}): ` +
+            `a sync access handle is still open — the model worker may not have ` +
+            `released it. Eject the model (or reload) and retry.`,
+        );
+    }
+    try { await dlDir.removeEntry(modelKey, { recursive: true }); } catch { /* dir not empty / locked — fine */ }
+    return true;
 }
 

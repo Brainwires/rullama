@@ -1019,6 +1019,21 @@ const RPC: Record<string, Handler> = {
         kvInvalidate();
         if (model) { try { model.free?.(); } catch { /* */ } model = null; }
         if (syncHandle) { try { syncHandle.close(); } catch { /* */ } syncHandle = null; }
+        // Release the rsqlite-wasm OPFS access handle too. Previously free()
+        // left it open (only the shutdown path's releaseAllHandles() closed
+        // it), which both (a) collided with a fresh core's
+        // createSyncAccessHandle → "Database init failed:
+        // NoModificationAllowedError", and (b) pinned the DB file's bytes so
+        // OPFS never reclaimed them after a Delete. Flush first so chat
+        // history/RAG vectors survive; dbReady=null lets ensureDb() lazily
+        // reopen on the next query.
+        if (dbReady) {
+            void dbReady.then((db) => {
+                try { db.flush(); } catch { /* */ }
+                try { db.close(); } catch { /* */ }
+            }).catch(() => {});
+            dbReady = null;
+        }
         if (loadedInfo) { loadedInfo = null; notify("modelFreed", {}); }
     },
 

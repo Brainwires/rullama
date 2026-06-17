@@ -465,7 +465,30 @@ export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy, onPrepare }
 
         const wasLoaded = modelStatus === "ready" && statusText.startsWith(m.name);
         if (wasLoaded) {
-            try { await getClient().withSession(() => getClient().free()); } catch { /* */ }
+            // Fully tear the core worker down (shutdown → releaseAllHandles →
+            // self.close) rather than just free()ing the session, then wait for
+            // the resulting `modelFreed`. This guarantees the worker released its
+            // OPFS handles (model GGUF + rsqlite DB) BEFORE the wipeModel()
+            // removeEntry below — otherwise an open access handle pins the bytes
+            // and removeEntry throws NoModificationAllowedError (the file looks
+            // deleted but disk is never reclaimed — the "leak in delete"). The
+            // 4s fallback keeps the delete from hanging if the notify is missed.
+            const client = getClient();
+            await new Promise<void>((resolve) => {
+                let settled = false;
+                let unsub: () => void = () => {};
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                const finish = () => {
+                    if (settled) return;
+                    settled = true;
+                    try { unsub(); } catch { /* */ }
+                    if (timer !== undefined) clearTimeout(timer);
+                    resolve();
+                };
+                unsub = client.subscribe("modelFreed", finish);
+                timer = setTimeout(finish, 4000);
+                try { client.teardownCore(); } catch { finish(); }
+            });
             setModelStatus("idle");
             setStatusText("no model");
             setHasVision(false);
@@ -477,7 +500,15 @@ export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy, onPrepare }
         // partial we'd otherwise auto-resume.
         if (pendingLoadDigest === m.digest) setPendingLoadDigest("");
 
-        const removed = await wipeModel(modelKey, filename);
+        let removed = false;
+        try {
+            removed = await wipeModel(modelKey, filename);
+        } catch (e) {
+            const msg = (e as Error)?.message ?? String(e);
+            beacon("chat", `delete ${m.name} FAILED: ${msg}`);
+            showToast({ level: "error", title: `Couldn't delete ${m.name}`, message: msg });
+            return;
+        }
         // Sweep this model's persisted system pre-warm so it doesn't orphan
         // (one file per digest, potentially hundreds of MB).
         void deleteSysWarmSnapshot(m.digest);
