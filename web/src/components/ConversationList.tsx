@@ -6,6 +6,10 @@ import { Plus, Trash2 } from "lucide-react";
 interface Props {
     conversations: ConversationRow[];
     activeId:      string | null;
+    /** Conversations whose generation is running right now / waiting in the
+     *  serial queue. Drives the per-row activity indicators. */
+    runningConvIds?: Set<string>;
+    queuedConvIds?:  Set<string>;
     onSelect:      (id: string) => void;
     onCreate:      () => void;
     onDelete:      (id: string) => void;
@@ -49,7 +53,10 @@ export function ConversationList(props: Props) {
                     </p>
                 ) : (
                     <ul className="flex flex-col gap-0.5">
-                        {props.conversations.map((c) => (
+                        {props.conversations.map((c) => {
+                            const running = props.runningConvIds?.has(c.id) ?? false;
+                            const queued  = !running && (props.queuedConvIds?.has(c.id) ?? false);
+                            return (
                             <li
                                 key={c.id}
                                 className={cn(
@@ -65,9 +72,25 @@ export function ConversationList(props: Props) {
                                     className="flex min-w-0 flex-1 flex-col items-start text-left"
                                     title={c.title}
                                 >
-                                    <span className="w-full truncate">{c.title}</span>
+                                    <span className="flex w-full items-center gap-1.5">
+                                        {running && (
+                                            <span
+                                                className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary"
+                                                title="Generating…"
+                                                aria-label="Generating"
+                                            />
+                                        )}
+                                        {queued && (
+                                            <span
+                                                className="h-1.5 w-1.5 shrink-0 rounded-full bg-muted-foreground/50"
+                                                title="Queued"
+                                                aria-label="Queued"
+                                            />
+                                        )}
+                                        <span className="truncate">{c.title}</span>
+                                    </span>
                                     <span className="text-[0.6rem] text-muted-foreground">
-                                        {relativeTime(c.updated_at)}
+                                        {running ? "generating…" : queued ? "queued" : relativeTime(c.updated_at)}
                                     </span>
                                 </button>
                                 <button
@@ -80,7 +103,8 @@ export function ConversationList(props: Props) {
                                     <Trash2 className="h-3.5 w-3.5" />
                                 </button>
                             </li>
-                        ))}
+                            );
+                        })}
                     </ul>
                 )}
             </div>

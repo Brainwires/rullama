@@ -1,7 +1,8 @@
 /// Pure helpers, constants, and the inflight-generation type shared by App.tsx.
 /// Extracted from App.tsx to slim the component file — no React, no closures.
 
-import type { ChatMessage, SamplingOptions } from "@/lib/types";
+import type { ChatMessage, ImageAttachment, SamplingOptions } from "@/lib/types";
+import type { Units as ToolUnits } from "@/lib/tools";
 import { getClient } from "@/lib/inference";
 
 export const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -149,6 +150,51 @@ export interface InflightGen {
      *  toast in that narrow case rather than producing wrong output. */
     mediaPersisted: boolean;
     startedAt: number;
+}
+
+// ── Cross-conversation generation queue ────────────────────────────────
+// A single in-tab serial pump drains GenJobs one at a time (the worker has
+// one GPU-resident KV cache, so generation is inherently serial). Sending a
+// message while another conversation is generating enqueues a GenJob rather
+// than blocking; the user can browse/queue freely. Tunables are captured at
+// ENQUEUE time so a queued job runs with the settings in effect when the
+// user hit Send (least-surprise), not whatever they are when its turn comes.
+//
+// Queued jobs (incl. attachments) are persisted to OPFS (see queue_store.ts)
+// and rebuilt on boot so a page reload still processes them — the same
+// "resume across reload" guarantee the running generation already has.
+export interface GenJob {
+    jobId: string;
+    convId: string;
+    modelMsgId: string;
+    userText: string;
+    /** Frozen send-time stamp (epoch ms). Drives both the rendered
+     *  `[date time]` prefix and the persisted created_at, and gives the
+     *  queue a stable FIFO order across a reload. */
+    createdAt: number;
+    /** When true, the prior-turn history is loaded from the DB at run time
+     *  (drop this job's own trailing user+empty-model pair) rather than from
+     *  the `priorMessages` snapshot. Set for same-conversation queued sends
+     *  (so they chain off the *finished* prior answer) and for all jobs
+     *  rebuilt from OPFS on boot. */
+    priorFromDb: boolean;
+    priorMessages: ChatMessage[];
+    sysContent: string;
+    sampling: SamplingOptions;
+    maxTokens: number;
+    thinking: boolean;
+    toolMode: boolean;
+    weatherApiKey: string;
+    weatherUnits: ToolUnits;
+    useGps: boolean;
+    /** Block-diffusion (DiffusionGemma) turn — denoise loop, not AR stream. */
+    diffusion: boolean;
+    modelDigest: string;
+    /** Raw pixels/PCM carried in-memory while queued; persisted to OPFS so a
+     *  reload can re-encode them through the vision/audio towers. */
+    images: ImageAttachment[];
+    audio: { pcm: Float32Array; durationMs: number }[];
+    status: "queued" | "running";
 }
 
 /** Promise.race wrapper that aborts a single step() call if it hangs.

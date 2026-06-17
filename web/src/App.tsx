@@ -182,6 +182,7 @@ export function App() {
     // state via params.
     const {
         messages, prompt, setPrompt, busy, statusLine, visionEncodeState,
+        runningConvIds, queuedConvIds, activeConvIsGenerating, activeConvIsQueued,
         pendingImages, pendingAudio, conversations, setConversations, activeConvId,
         ragEnabled, toggleRag, inflightRef,
         onSelectConversation, onCreateConversation, onDeleteConversation,
@@ -398,8 +399,10 @@ export function App() {
                         <ConversationList
                             conversations={conversations}
                             activeId={activeConvId}
+                            runningConvIds={runningConvIds}
+                            queuedConvIds={queuedConvIds}
                             onSelect={(id) => { void onSelectConversation(id); }}
-                            onCreate={onCreateConversation}
+                            onCreate={() => void onCreateConversation()}
                             onDelete={(id) => void onDeleteConversation(id)}
                         />
                     ) : view === "voice" ? (
@@ -549,14 +552,20 @@ export function App() {
                     }
                     canType={modelStatus === "ready" && !trainingInProgress}
                     canSend={
+                        // No longer gated on generation: sending while a turn
+                        // is in flight QUEUES the message (it runs serially
+                        // after) rather than blocking.
                         modelStatus === "ready"
-                        && !busy
                         && !trainingInProgress
                         && (prompt.trim().length > 0 || pendingImages.length > 0 || pendingAudio.length > 0)
                     }
-                    canStop={busy}
+                    // Stop targets the conversation on screen: show it when the
+                    // active conversation has a running or queued job (Stop
+                    // cancels the run / drops the queued message). Other
+                    // conversations keep generating untouched.
+                    canStop={activeConvIsGenerating || activeConvIsQueued}
                     canAttach={modelStatus === "ready" && (hasVision || hasAudio) && !trainingInProgress}
-                    canRecord={modelStatus === "ready" && hasAudio && !busy && !trainingInProgress}
+                    canRecord={modelStatus === "ready" && hasAudio && !trainingInProgress}
                     // Speak-a-reply runs the Kokoro TTS engine alongside inference — needs at least
                     // the recommended GPU tier. Hidden on the minimum (mobile) tier.
                     canSpeak={tier === "desktop" || tier === "premium"}

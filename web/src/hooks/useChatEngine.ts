@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type ChatMessage, type ImageAttachment, type SamplingOptions } from "@/lib/types";
 import type { PipelineProgressState } from "@/components/PipelineProgress";
 import { type ModelStatus } from "@/components/ModelLoader";
@@ -27,12 +27,20 @@ import {
 } from "@/lib/opfs";
 import { rlcvTokenCount } from "@/lib/convSnapshot";
 import { saveInflightImage, saveInflightAudio, readInflightImages, readInflightAudio, clearInflightMedia } from "@/lib/inflight_media";
+import { persistQueue, saveJobMedia, loadQueue, dropJobMedia } from "@/lib/queue_store";
 import {
     INFLIGHT_KEY,
     MIN_SNAPSHOT_TOKENS, MAX_SNAPSHOT_BYTES, LRU_MAX_SNAPSHOTS,
     withTurnTimestamp,
-    type InflightGen, stepWithTimeout, suggestTitle,
+    type InflightGen, type GenJob, stepWithTimeout, suggestTitle,
 } from "@/lib/app-helpers";
+
+/** Generate a queue/job id. crypto.randomUUID is available in all the
+ *  contexts the PWA runs in (secure origins + workers). */
+function newJobId(): string {
+    try { return crypto.randomUUID(); }
+    catch { return `job-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`; }
+}
 
 export interface UseChatEngineParams {
     modelStatus: ModelStatus;
@@ -119,8 +127,29 @@ export function useChatEngine(opts: UseChatEngineParams) {
     // Chat state
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [prompt, setPrompt]     = useState("");
-    const [busy, setBusy]         = useState(false);
+    // `genActive` is "the engine is generating SOMEWHERE" (a running job in
+    // this tab), NOT "the active conversation is locked". Sending, switching
+    // conversations, and creating new chats are all allowed while it's true —
+    // they enqueue / browse rather than block. Replaces the old global `busy`.
+    const [genActive, setGenActive] = useState(false);
     const [statusLine, setStatusLine] = useState<string | undefined>();
+
+    // ── Cross-conversation serial queue ────────────────────────────────
+    // `queue` is the source of truth for the UI (running + queued jobs);
+    // `queueRef` mirrors it for the pump + handlers (which need the latest
+    // value inside long-lived async closures). Mutate via `commitQueue`,
+    // which keeps all three in sync (ref, state, OPFS manifest).
+    const [queue, setQueue] = useState<GenJob[]>([]);
+    const queueRef = useRef<GenJob[]>([]);
+    const pumpRunningRef = useRef(false);
+    // Per-conversation live partial assistant text for the running job —
+    // what lets a switch BACK to a generating conversation show tokens
+    // produced past the last 16-token DB flush.
+    const liveBuffersRef = useRef<Map<string, { modelMsgId: string; content: string }>>(new Map());
+    // Conversations ever sent-to this session (for the new-chat reuse guard).
+    const usedConvIds = useRef<Set<string>>(new Set());
+    // One-shot guard for rebuilding the persisted queue on boot.
+    const queueBootRef = useRef(false);
     const [visionEncodeState, setVisionEncodeState] = useState<PipelineProgressState | null>(null);
 
     // Pending attachments — session-only, cleared after each send.
@@ -154,6 +183,35 @@ export function useChatEngine(opts: UseChatEngineParams) {
             else sessionStorage.removeItem("rullama:activeConvId");
         } catch { /* private mode / disabled storage — best-effort */ }
     }, [activeConvId]);
+
+    // Mirrors `activeConvId` for the long-lived `runJob` closure, which must
+    // paint the LATEST active conversation (not the one captured when the job
+    // started). Initialized to the boot-time value.
+    const activeConvIdRef = useRef<string | null>(activeConvId);
+    useEffect(() => { activeConvIdRef.current = activeConvId; }, [activeConvId]);
+
+    // Single point that keeps the queue ref, the render state, and the OPFS
+    // manifest in sync. Only QUEUED jobs are persisted — a running job is
+    // covered by the INFLIGHT_KEY resume path, and persisting it here would
+    // double-run it on reload.
+    const commitQueue = useCallback((next: GenJob[]) => {
+        queueRef.current = next;
+        setQueue(next);
+        void persistQueue(next.filter((j) => j.status === "queued"));
+    }, []);
+
+    // Reflect a generation's growing display into the UI. ALWAYS keep the
+    // conversation's live buffer fresh (so a switch-back can overlay the full
+    // partial), but only repaint `messages` when the user is actually viewing
+    // that conversation — otherwise a background job would clobber whatever
+    // the user is reading.
+    const reflectDisplay = useCallback((convId: string, modelMsgId: string, display: ChatMessage[]) => {
+        const content = display[display.length - 1].content;
+        const buf = liveBuffersRef.current.get(convId);
+        if (buf) buf.content = content;
+        else liveBuffersRef.current.set(convId, { modelMsgId, content });
+        if (convId === activeConvIdRef.current) setMessages([...display]);
+    }, []);
 
     const cancelRef = useRef(false);
     // Tracks the currently-running generation for suspend/resume. Mutated
@@ -190,13 +248,24 @@ export function useChatEngine(opts: UseChatEngineParams) {
     // toggle, anything). No-op when nothing is generating.
     useEffect(() => {
         const onKeyDown = (e: KeyboardEvent) => {
-            if (e.key === "Escape" && busy) {
+            if (e.key !== "Escape") return;
+            // Stop / dequeue the conversation the user is currently viewing.
+            // If it's the running job, cancel it; if it's only queued, drop it.
+            const id = activeConvIdRef.current;
+            if (!id) return;
+            const job = queueRef.current.find((j) => j.convId === id);
+            if (!job) return;
+            if (job.status === "running") {
                 cancelRef.current = true;
+                void getClient().cancelMultimodalEncode().catch(() => { /* */ });
+            } else {
+                commitQueue(queueRef.current.filter((j) => j.jobId !== job.jobId));
+                void dropJobMedia(job.jobId);
             }
         };
         window.addEventListener("keydown", onKeyDown);
         return () => window.removeEventListener("keydown", onKeyDown);
-    }, [busy]);
+    }, [commitQueue]);
 
     // Suspend-on-background. iOS Safari fires visibilitychange→hidden
     // before suspending the WebContent process; we use that window to
@@ -206,7 +275,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
     // replay (Phase F) picks up the slack via the partial response
     // already in the DB.
     useEffect(() => {
-        if (!busy) return;
+        if (!genActive) return;
         const onVis = () => {
             if (document.visibilityState !== "hidden") return;
             const meta = inflightRef.current;
@@ -233,7 +302,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
         };
         document.addEventListener("visibilitychange", onVis);
         return () => document.removeEventListener("visibilitychange", onVis);
-    }, [busy]);
+    }, [genActive]);
 
     // Bootstrap DB + conversation list on mount, then reopen the persisted
     // active conversation (if any). `activeConvId` / `onSelectConversation`
@@ -249,13 +318,26 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 if (!bootConvRestoredRef.current) {
                     bootConvRestoredRef.current = true;
                     const id = activeConvId;
-                    if (id) {
-                        if (rows.some((r) => r.id === id)) {
-                            void onSelectConversation(id);
-                        } else {
-                            // Persisted conversation was deleted elsewhere.
-                            setActiveConvId(null);
-                        }
+                    if (rows.length === 0) {
+                        // First-ever launch: start with one empty chat already
+                        // present in the list (so the user never faces a blank
+                        // sidebar), selected and ready to type into.
+                        try {
+                            const row = await client.convCreate({ title: "New chat", model: null });
+                            setConversations([row]);
+                            setActiveConvId(row.id);
+                            setMessages([]);
+                        } catch { /* DB hiccup — fall back to the empty welcome */ }
+                    } else if (id && rows.some((r) => r.id === id)) {
+                        // Reopen this tab's last conversation.
+                        void onSelectConversation(id);
+                    } else if (id) {
+                        // Persisted conversation was deleted elsewhere — drop it
+                        // and open the most-recent existing conversation.
+                        void onSelectConversation(rows[0].id);
+                    } else {
+                        // Fresh tab, conversations exist — open the newest.
+                        void onSelectConversation(rows[0].id);
                     }
                 }
             } catch (e) {
@@ -275,7 +357,9 @@ export function useChatEngine(opts: UseChatEngineParams) {
     }, [showToast]);
 
     const onSelectConversation = useCallback(async (id: string) => {
-        if (busy) return;
+        // No busy guard: browsing other conversations while a generation runs
+        // in the background is the whole point. The running job keeps
+        // streaming into its live buffer + the DB regardless of what's shown.
         try {
             const client = getClient();
             // Fire both queries in parallel — text rows and image rows are
@@ -320,25 +404,65 @@ export function useChatEngine(opts: UseChatEngineParams) {
                         ...(images && images.length ? { images } : {}),
                     };
                 });
+            // If this conversation has a generation in flight, the DB only
+            // holds tokens up to the last 16-token flush. Overlay the live
+            // buffer's full partial onto the trailing model bubble so switching
+            // back shows the current text, not a stale prefix. (Replace, not
+            // append: the buffer is the full accumulated content; the DB row is
+            // a prefix of it.)
+            const live = liveBuffersRef.current.get(id);
+            if (live) {
+                for (let i = ms.length - 1; i >= 0; i--) {
+                    if (ms[i].role === "model") { ms[i] = { ...ms[i], content: live.content }; break; }
+                }
+            }
             setMessages(ms);
             setActiveConvId(id);
             setStatusLine(undefined);
         } catch (e) {
             showToast({ level: "error", title: "Failed to load conversation", message: (e as Error).message });
         }
-    }, [busy, showToast]);
+    }, [showToast]);
 
-    const onCreateConversation = useCallback(() => {
-        if (busy) return;
-        setMessages([]);
-        setActiveConvId(null);
-        setStatusLine(undefined);
-        setPendingImages([]);
-        // The worker's KV cache is shared across tabs now, so a "new chat"
-        // here doesn't preemptively reset it — onSend will reset inside
-        // its own session window. (Resetting from here would either need
-        // a session we don't have, or be racy with another tab mid-step.)
-    }, [busy]);
+    const onCreateConversation = useCallback(async () => {
+        // No busy guard: a new chat can be started while another conversation
+        // generates in the background. Create the DB row immediately so it
+        // shows in the sidebar before any message is sent.
+        const client = getClient();
+        // Reuse-one-empty: never stack duplicate empty "New chat" rows. If an
+        // unused empty one already exists, just select it. "Empty" = default
+        // title, never sent-to this session, and no message rows in the DB
+        // (the DB check guards against another tab having populated it).
+        try {
+            const empty = conversations.find(
+                (c) => c.title === "New chat" && !usedConvIds.current.has(c.id),
+            );
+            if (empty) {
+                const existing = await client.msgList(empty.id);
+                if (existing.length === 0) {
+                    void onSelectConversation(empty.id);
+                    return;
+                }
+            }
+        } catch { /* fall through to create a fresh row */ }
+        try {
+            const row = await client.convCreate({
+                title: "New chat",
+                model: modelStatus === "ready" ? statusText.split(" ")[0] : null,
+            });
+            setConversations((c) => [row, ...c]);   // newest-first, matches convList order
+            setMessages([]);
+            setActiveConvId(row.id);
+            setStatusLine(undefined);
+            setPendingImages([]);
+            setPendingAudio([]);
+        } catch (e) {
+            showToast({ level: "error", title: "Couldn't start a new chat", message: (e as Error).message });
+        }
+        // The worker's KV cache is shared across tabs; a "new chat" here
+        // doesn't preemptively reset it — runJob resets inside its own
+        // session window when this conversation's first message runs.
+    }, [conversations, modelStatus, statusText, onSelectConversation, showToast]);
 
     const onAttachFiles = useCallback(async (files: FileList) => {
         // Two attach paths: images route through the vision tower,
@@ -391,9 +515,22 @@ export function useChatEngine(opts: UseChatEngineParams) {
     }, []);
 
     const onDeleteConversation = useCallback(async (id: string) => {
-        if (busy) return;
         const c = conversations.find((x) => x.id === id);
         if (!window.confirm(`Delete conversation "${c?.title ?? id}"?\n\nMessages cannot be recovered.`)) return;
+        // Tear down any in-flight or queued work for this conversation first.
+        const job = queueRef.current.find((j) => j.convId === id);
+        if (job) {
+            if (job.status === "running") {
+                // Cancel the running job; the pump finalizes the partial and
+                // advances. cancelRef is reset at the next runJob's start.
+                cancelRef.current = true;
+            } else {
+                // Drop the not-yet-started job from the queue.
+                commitQueue(queueRef.current.filter((j) => j.jobId !== job.jobId));
+            }
+            void dropJobMedia(job.jobId);
+        }
+        liveBuffersRef.current.delete(id);
         try {
             // convDelete returns the OPFS image paths it collected
             // before the FK cascade nuked the rows; we sweep them
@@ -413,7 +550,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
         } catch (e) {
             showToast({ level: "error", title: "Delete failed", message: (e as Error).message });
         }
-    }, [activeConvId, busy, conversations, refreshConversations, showToast]);
+    }, [activeConvId, commitQueue, conversations, refreshConversations, showToast]);
 
     // ── Suspend / resume: pick up an interrupted generation ────────────
     //
@@ -432,10 +569,14 @@ export function useChatEngine(opts: UseChatEngineParams) {
     //   4. Enter the gen loop continuing from `lastSampledNext`,
     //      appending into the existing assistant bubble.
     //   5. On clean completion: clear localStorage + OPFS file.
-    const resumeInflightGeneration = useCallback(async (meta: InflightGen) => {
+    const resumeInflightGeneration = useCallback(async (meta: InflightGen, opts?: { keepActive?: boolean }) => {
+        // `keepActive` is set when the queue pump drives a live-recovery
+        // inline: the pump owns the genActive flag across the whole drain, so
+        // resume must not toggle it here.
+        const keepActive = opts?.keepActive ?? false;
         const client = getClient();
         cancelRef.current = false;
-        setBusy(true);
+        if (!keepActive) setGenActive(true);
 
         // Reconstruct the visible chat so the user sees the partial
         // response while we work to continue it.
@@ -446,6 +587,9 @@ export function useChatEngine(opts: UseChatEngineParams) {
         ];
         setMessages(display);
         setActiveConvId(meta.convId);
+        // Seed the live buffer so switching away/back during the resume keeps
+        // showing the partial.
+        liveBuffersRef.current.set(meta.convId, { modelMsgId: meta.modelMsgId, content: meta.emittedSoFar });
         inflightRef.current = meta;
 
         try {
@@ -478,7 +622,8 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 setStatusLine(undefined);
                 try { await client.releaseSession(); } catch { /* */ }
                 inflightRef.current = null;
-                setBusy(false);
+                liveBuffersRef.current.delete(meta.convId);
+                if (!keepActive) setGenActive(false);
                 // No media cleanup — sibling tab's finally will handle it.
                 return;
             }
@@ -650,7 +795,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 const piece = curStr.replaceAll("▁", " ");
                 display[display.length - 1].content += piece;
                 pendingDelta += piece;
-                setMessages([...display]);
+                reflectDisplay(meta.convId, meta.modelMsgId, display);
                 emitted++;
                 if ((emitted % 16 === 0) || (performance.now() - lastFlushAt > 750)) {
                     await flushPending();
@@ -686,13 +831,14 @@ export function useChatEngine(opts: UseChatEngineParams) {
             }
         } finally {
             inflightRef.current = null;
+            liveBuffersRef.current.delete(meta.convId);
             try { localStorage.removeItem(INFLIGHT_KEY); } catch { /* */ }
             void clearInflightState();
             void clearInflightMedia();
             try { await client.releaseSession(); } catch { /* */ }
-            setBusy(false);
+            if (!keepActive) setGenActive(false);
         }
-    }, [refreshConversations, showToast]);
+    }, [reflectDisplay, refreshConversations, showToast]);
 
     // Boot-resume: once the model is ready, check for a stashed
     // inflight generation and pick it up where it left off.
@@ -752,82 +898,53 @@ export function useChatEngine(opts: UseChatEngineParams) {
         void resumeInflightGeneration(meta);
     }, [modelStatus, lastLoadedDigest, resumeInflightGeneration, showToast]);
 
-    const onSend = useCallback(async () => {
-        if (modelStatus !== "ready" || busy) return;
-        const text = prompt.trim();
-        // Frozen send-time for this turn. Captured once and reused for both
-        // the rendered `[date time]` prefix and the persisted created_at, so
-        // the stamp this turn writes into the KV cache matches what history
-        // re-renders later (the invariant that keeps KV-cache reuse intact).
-        const nowMs = Date.now();
-        // Snapshot attachments for this turn so the UI can clear them
-        // while generation runs.
-        const turnImages = pendingImages;
-        const turnAudio  = pendingAudio;
-        if (!text && turnImages.length === 0 && turnAudio.length === 0) return;
+    // Run ONE queued generation to completion. This is the bulk of the old
+    // `onSend` body, now parameterized by a GenJob so the serial pump can run
+    // jobs for any conversation (not just the active one). It reads turn data
+    // and tunables from `job` (captured at enqueue), reflects tokens into the
+    // UI only when its conversation is on screen, and persists to the DB +
+    // live buffer regardless. The pump (kickPump) owns session ordering and
+    // the genActive flag; runJob does NOT touch them.
+    const runJob = useCallback(async (job: GenJob) => {
         const client = getClient();
-        // Block-diffusion models (DiffusionGemma) generate via a denoise loop,
-        // not the AR token stream — flagged at load time.
-        const diffusionTurn = loadedIsDiffusion;
         cancelRef.current = false;
-        // Flagged by the catch when a recoverable hang is detected so
-        // the finally block can hand off to resumeInflightGeneration
-        // instead of clearing inflight state.
+        // Flagged by the catch when a recoverable hang is detected so the
+        // finally can hand off to resumeInflightGeneration instead of
+        // clearing inflight state.
         let liveRecovery: InflightGen | null = null;
-        setBusy(true);
-        setPrompt("");
-        setPendingImages([]);
-        setPendingAudio([]);
-        setStatusLine(undefined);
 
-        // Build the per-turn dynamic system add-ons. The static part
-        // (systemPrompt + tool schema + notes + thinking) is assembled by
-        // the shared `buildSysContent` so it stays byte-identical to the
-        // pre-warmed system block — that's what lets KV reuse keep the
-        // cached system prefix. RAG + GPS are per-turn/dynamic and are NOT
-        // part of the warm, so turns that use them diverge and re-prefill
-        // (acceptable — that content changes every turn anyway).
+        const {
+            convId, modelMsgId, userText: text, createdAt: nowMs,
+            images: turnImages, audio: turnAudio, sysContent,
+            sampling, maxTokens, thinking, toolMode,
+            weatherApiKey, weatherUnits, useGps, diffusion: diffusionTurn,
+        } = job;
 
-        // **RAG injection.** Retrieve top-K relevant chunks for this query.
-        let ragPreamble = "";
-        if (ragEnabled && activeConvId) {
+        // Prior-turn history. For a same-conversation queued send (or any job
+        // rebuilt from OPFS on boot) load it from the DB so we chain off the
+        // FINISHED previous answer, not a partial snapshot — dropping this
+        // job's own trailing user + empty-model pair.
+        let userTurns: ChatMessage[] = job.priorMessages;
+        if (job.priorFromDb) {
             try {
-                const hits = await searchKnowledge(text, { k: 5, conversationId: activeConvId });
-                ragPreamble = buildRagPreamble(hits) || "";
-            } catch { /* embedder not loaded / search failed — proceed without RAG */ }
+                const rows = (await client.msgList(convId))
+                    .filter((r) => r.role === "user" || r.role === "model");
+                const mi = rows.findIndex((r) => r.message_id === modelMsgId);
+                const cut = mi >= 1 ? mi - 1 : Math.max(0, rows.length - 2);
+                userTurns = rows.slice(0, cut).map((r) => ({
+                    role:      r.role as ChatMessage["role"],
+                    content:   r.content,
+                    createdAt: r.created_at,
+                }));
+            } catch { userTurns = []; }
         }
 
-        // **GPS location injection** (tool mode only). Resolve coords up front
-        // (cached; browser asks once) so the model uses them when no place is
-        // named. Best-effort: a denial/timeout just proceeds without it.
-        let gpsLine = "";
-        if (toolMode && useGps) {
-            try {
-                const coords = await resolveGeo();
-                if (coords) {
-                    gpsLine =
-                        `The user's current location is approximately ${coords} ` +
-                        `(latitude,longitude). For weather or other location-aware ` +
-                        `tools, when the user does not name a specific place, use ` +
-                        `exactly "${coords}" as the location argument.\n\n`;
-                }
-            } catch { /* geolocation denied / unavailable — proceed without it */ }
-        }
-
-        const sysContent = buildSysContent({
-            systemPrompt, thinking, toolMode, ragPreamble, gpsLine,
-        });
-
-        // Two parallel histories: `displayHistory` for the chat UI (no
-        // system message — it's a control signal, not user content) and
-        // `renderHistory` for tokenization (with system at the front).
-        //
-        // The renderer-side content prepends one `<|image><image|>`
-        // sentinel pair per attached image; JS splices the soft-token
-        // embeddings between them during the feed loop. Display bubbles
-        // show only the typed text + thumbnails — sentinels never reach
-        // the user.
-        const userTurns = messages.filter((m) => m.role !== "system");
+        // Two parallel histories: `displayHistory` for the chat UI (no system
+        // message) and `renderHistory` for tokenization (system at the front).
+        // The renderer-side content prepends one `<|image><image|>` sentinel
+        // pair per attached image; JS splices soft-token embeddings between
+        // them during the feed loop. Display bubbles show only the typed text
+        // + thumbnails — sentinels never reach the user.
         const userDisplayMsg: ChatMessage = {
             role: "user",
             content: text,
@@ -839,7 +956,11 @@ export function useChatEngine(opts: UseChatEngineParams) {
             userDisplayMsg,
             { role: "model", content: "" },
         ];
-        setMessages(displayHistory);
+        // Seed the live buffer (empty) and paint immediately if the user is
+        // viewing this conversation.
+        liveBuffersRef.current.set(convId, { modelMsgId, content: "" });
+        reflectDisplay(convId, modelMsgId, displayHistory);
+
         // Audio markers go before image markers so the model "hears"
         // attachments in input order; the image splice already established
         // sentinel-pair-per-attachment as the prompt convention.
@@ -847,8 +968,6 @@ export function useChatEngine(opts: UseChatEngineParams) {
         const imageMarkers = "<|image><image|>".repeat(turnImages.length);
         // Prefix the live `[date time]` onto the current user turn, and the
         // frozen stamp onto each historical user turn (model turns unchanged).
-        // Each historical stamp is reproduced from that message's createdAt,
-        // so the re-rendered prefix is byte-stable and the KV cache reuses.
         const userRenderContent = withTurnTimestamp(audioMarkers + imageMarkers + text, nowMs);
         const renderPriorTurns: ChatMessage[] = userTurns.map((m) =>
             m.role === "user"
@@ -866,49 +985,6 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 { role: "user", content: userRenderContent },
             ];
 
-        let convId = activeConvId;
-        let modelMsgId: string | null = null;
-        try {
-            if (!convId) {
-                const row = await client.convCreate({
-                    title: "New chat",
-                    model: modelStatus === "ready" ? statusText.split(" ")[0] : null,
-                });
-                convId = row.id;
-                setActiveConvId(convId);
-            }
-            const userInsert = await client.msgInsert({ conversationId: convId, role: "user", content: text, createdAt: nowMs });
-            // Persist image thumbnails alongside the user turn so reloading
-            // the conversation restores the bubble visuals. The JPEG bytes
-            // go to OPFS via saveThumb (random-UUID key); only that key
-            // lands in SQLite, keeping rows well under a page. Pixel
-            // arrays aren't persisted — past-turn images aren't re-encoded.
-            for (let i = 0; i < turnImages.length; i++) {
-                const im = turnImages[i];
-                try {
-                    const opfsPath = await saveThumb(im.dataUrl);
-                    await client.msgInsertImage({
-                        conversationId: convId,
-                        messageId:      userInsert.messageId,
-                        seq:            i,
-                        width:          im.w,
-                        height:         im.h,
-                        opfsPath,
-                    });
-                } catch (e) {
-                    showToast({
-                        level: "warn",
-                        title: "Image not persisted",
-                        message: (e as Error).message,
-                    });
-                }
-            }
-            const modelInsert = await client.msgInsert({ conversationId: convId, role: "model", content: "" });
-            modelMsgId = modelInsert.messageId;
-        } catch (e) {
-            showToast({ level: "warn", title: "Persistence failure", message: (e as Error).message });
-        }
-
         // acquireSession blocks if another tab is mid-generation. While
         // we wait, hint via the status line; clear it once we own the
         // session. Cooperative cancel via cancelRef takes over per-step
@@ -920,17 +996,10 @@ export function useChatEngine(opts: UseChatEngineParams) {
             // bubble's content with the evolving canvas in place, then persist
             // the final text. Returns early; the outer finally clears busy.
             if (diffusionTurn) {
-                const replaceModelBubble = (canvas: string) =>
-                    setMessages((prev) => {
-                        const next = [...prev];
-                        for (let i = next.length - 1; i >= 0; i--) {
-                            if (next[i].role === "model") {
-                                next[i] = { ...next[i], content: canvas };
-                                break;
-                            }
-                        }
-                        return next;
-                    });
+                const replaceModelBubble = (canvas: string) => {
+                    displayHistory[displayHistory.length - 1].content = canvas;
+                    reflectDisplay(convId, modelMsgId, displayHistory);
+                };
                 const unsub = client.diffusion.onStep((p) => {
                     replaceModelBubble(p.text);
                     setStatusLine(
@@ -1311,7 +1380,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
                     const piece = curStr.replaceAll("▁", " ");
                     displayHistory[displayHistory.length - 1].content += piece;
                     pendingDelta += piece;
-                    setMessages([...displayHistory]);
+                    reflectDisplay(convId, modelMsgId, displayHistory);
                     emitted++;
                     if ((emitted % 16 === 0) || (performance.now() - lastFlushAt > 750)) {
                         await flushPending();
@@ -1402,7 +1471,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 // block out in order.
                 if (thinking) respBlock += `${CHANNEL_OPEN}\n`;
                 displayHistory[displayHistory.length - 1].content += respBlock;
-                setMessages([...displayHistory]);
+                reflectDisplay(convId, modelMsgId, displayHistory);
                 if (convId && modelMsgId) {
                     try { await client.msgAppend(convId, modelMsgId, respBlock); } catch { /* */ }
                 }
@@ -1481,15 +1550,16 @@ export function useChatEngine(opts: UseChatEngineParams) {
             // isn't stuck behind a stale progress bar.
             setVisionEncodeState(null);
             if (liveRecovery) {
-                // Hand off without clearing — resumeInflightGeneration
-                // owns the metadata + OPFS state from here. Mirror to
-                // localStorage so a page-reload-during-recovery still
-                // resumes via the boot path.
+                // Hand off to resumeInflightGeneration. Mirror to localStorage
+                // so a page-reload-during-recovery still resumes via the boot
+                // path. Run it INLINE (awaited) so the pump doesn't advance to
+                // the next queued job until recovery finishes — and with
+                // keepActive so the pump keeps owning the genActive flag.
                 try { localStorage.setItem(INFLIGHT_KEY, JSON.stringify(liveRecovery)); } catch { /* */ }
                 try { await client.releaseSession(); } catch { /* */ }
-                setBusy(false);
                 const meta = liveRecovery;
-                setTimeout(() => { void resumeInflightGeneration(meta); }, 0);
+                try { await resumeInflightGeneration(meta, { keepActive: true }); }
+                catch { /* recovery best-effort; pump moves on */ }
             } else {
                 // Generation finished (cleanly, by cancel, or by a
                 // non-recoverable error). Discard inflight state — a
@@ -1502,10 +1572,236 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 void clearInflightState();
                 void clearInflightMedia();
                 try { await client.releaseSession(); } catch { /* */ }
-                setBusy(false);
             }
         }
-    }, [activeConvId, busy, lastLoadedDigest, loadedIsDiffusion, maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt, ragEnabled, toolMode, weatherApiKey, weatherUnits, useGps, refreshConversations, resumeInflightGeneration, sampling, statusText, systemPrompt, thinking, showToast]);
+    }, [lastLoadedDigest, reflectDisplay, refreshConversations, resumeInflightGeneration, showToast]);
+
+    // ── Serial FIFO pump ───────────────────────────────────────────────
+    // Drains queued jobs one at a time. Only ONE pump runs per tab
+    // (pumpRunningRef); it reads the live queue from `queueRef` each
+    // iteration so jobs enqueued mid-drain are picked up. Each runJob
+    // acquires/releases the cross-tab session itself, so the session is
+    // free between jobs (other tabs + warmSystemPrompt can interleave).
+    const kickPump = useCallback(() => {
+        if (pumpRunningRef.current) return;
+        pumpRunningRef.current = true;
+        setGenActive(true);
+        void (async () => {
+            try {
+                for (;;) {
+                    const job = queueRef.current.find((j) => j.status === "queued");
+                    if (!job) break;
+                    // Mark running (kept in the queue so the UI shows it).
+                    commitQueue(queueRef.current.map((j) =>
+                        j.jobId === job.jobId ? { ...j, status: "running" as const } : j));
+                    try {
+                        await runJob({ ...job, status: "running" });
+                    } catch (e) {
+                        // eslint-disable-next-line no-console
+                        console.warn("[rullama] job failed:", e);
+                    } finally {
+                        // Remove from the queue, drop its persisted media + live
+                        // buffer. persistQueue (via commitQueue) rewrites the
+                        // manifest to just the still-queued jobs.
+                        commitQueue(queueRef.current.filter((j) => j.jobId !== job.jobId));
+                        liveBuffersRef.current.delete(job.convId);
+                        void dropJobMedia(job.jobId);
+                    }
+                }
+            } finally {
+                pumpRunningRef.current = false;
+                setGenActive(false);
+            }
+        })();
+    }, [commitQueue, runJob]);
+
+    // Build + enqueue a generation for the ACTIVE conversation, then kick the
+    // pump. Never blocks on an in-flight generation — the message queues and
+    // runs serially after whatever is already going. The user/empty-model rows
+    // are persisted to the DB now (so the bubble shows immediately) and the
+    // job (incl. attachment media) is persisted to OPFS so a reload re-runs it.
+    const onSend = useCallback(async () => {
+        if (modelStatus !== "ready") return;
+        const text = prompt.trim();
+        // Frozen send-time for this turn (reused for the rendered `[date time]`
+        // prefix and the persisted created_at, so the KV-cache stamp matches
+        // history re-renders).
+        const nowMs = Date.now();
+        const turnImages = pendingImages;
+        const turnAudio  = pendingAudio;
+        if (!text && turnImages.length === 0 && turnAudio.length === 0) return;
+        const client = getClient();
+
+        // Resolve / create the target conversation. With new-chat-immediately,
+        // activeConvId is normally already a real row; create one as a safety
+        // net if somehow null.
+        let convId = activeConvId;
+        if (!convId) {
+            try {
+                const row = await client.convCreate({
+                    title: "New chat",
+                    model: modelStatus === "ready" ? statusText.split(" ")[0] : null,
+                });
+                convId = row.id;
+                setConversations((c) => [row, ...c]);
+                setActiveConvId(convId);
+            } catch (e) {
+                showToast({ level: "error", title: "Couldn't start the chat", message: (e as Error).message });
+                return;
+            }
+        }
+
+        // Per-turn dynamic system add-ons (resolved at ENQUEUE time so the job
+        // is self-contained and runs with the settings in effect now). The
+        // static part stays byte-identical to the pre-warmed system block so
+        // KV reuse keeps the cached system prefix. RAG + GPS are per-turn and
+        // not part of the warm — turns that use them re-prefill (fine; that
+        // content changes every turn anyway).
+        let ragPreamble = "";
+        if (ragEnabled && convId) {
+            try {
+                const hits = await searchKnowledge(text, { k: 5, conversationId: convId });
+                ragPreamble = buildRagPreamble(hits) || "";
+            } catch { /* embedder not loaded / search failed — proceed without RAG */ }
+        }
+        let gpsLine = "";
+        if (toolMode && useGps) {
+            try {
+                const coords = await resolveGeo();
+                if (coords) {
+                    gpsLine =
+                        `The user's current location is approximately ${coords} ` +
+                        `(latitude,longitude). For weather or other location-aware ` +
+                        `tools, when the user does not name a specific place, use ` +
+                        `exactly "${coords}" as the location argument.\n\n`;
+                }
+            } catch { /* geolocation denied / unavailable — proceed without it */ }
+        }
+        const sysContent = buildSysContent({ systemPrompt, thinking, toolMode, ragPreamble, gpsLine });
+
+        // Snapshot the prior turns NOW (for the in-memory fast path). If this
+        // conversation already has a pending/running job, chain off the DB
+        // instead at run time (priorFromDb) so the new job sees the FINISHED
+        // prior answer rather than a partial.
+        const priorMessages = messages.filter((m) => m.role !== "system");
+        const priorFromDb = queueRef.current.some((j) => j.convId === convId);
+
+        // Persist the user row + image thumbs + empty model row up front, so
+        // the conversation shows the message + an empty bubble immediately —
+        // even before this job's turn in the queue comes up.
+        let modelMsgId = "";
+        try {
+            const userInsert = await client.msgInsert({ conversationId: convId, role: "user", content: text, createdAt: nowMs });
+            for (let i = 0; i < turnImages.length; i++) {
+                const im = turnImages[i];
+                try {
+                    const opfsPath = await saveThumb(im.dataUrl);
+                    await client.msgInsertImage({
+                        conversationId: convId, messageId: userInsert.messageId,
+                        seq: i, width: im.w, height: im.h, opfsPath,
+                    });
+                } catch (e) {
+                    showToast({ level: "warn", title: "Image not persisted", message: (e as Error).message });
+                }
+            }
+            const modelInsert = await client.msgInsert({ conversationId: convId, role: "model", content: "" });
+            modelMsgId = modelInsert.messageId;
+        } catch (e) {
+            showToast({ level: "warn", title: "Persistence failure", message: (e as Error).message });
+            return;
+        }
+
+        const job: GenJob = {
+            jobId: newJobId(),
+            convId,
+            modelMsgId,
+            userText: text,
+            createdAt: nowMs,
+            priorFromDb,
+            priorMessages,
+            sysContent,
+            sampling,
+            maxTokens,
+            thinking,
+            toolMode,
+            weatherApiKey,
+            weatherUnits,
+            useGps,
+            diffusion: loadedIsDiffusion,
+            modelDigest: lastLoadedDigest,
+            images: turnImages,
+            audio: turnAudio,
+            status: "queued",
+        };
+        usedConvIds.current.add(convId);
+
+        // Optimistically show the user's message + an empty model bubble in
+        // the active view, and seed the live buffer so a switch-away keeps it.
+        // ONLY when this conversation has no job already in flight: if it does
+        // (priorFromDb), that running job owns the on-screen display + the
+        // (convId-keyed) live buffer until it finishes, so this queued turn
+        // must not stomp either — it renders when its own runJob begins.
+        if (!priorFromDb) {
+            if (convId === activeConvIdRef.current) {
+                const userDisplayMsg: ChatMessage = {
+                    role: "user", content: text, createdAt: nowMs,
+                    ...(turnImages.length ? { images: turnImages } : {}),
+                };
+                setMessages([...priorMessages, userDisplayMsg, { role: "model", content: "" }]);
+            }
+            liveBuffersRef.current.set(convId, { modelMsgId, content: "" });
+        }
+
+        // Clear the composer.
+        setPrompt("");
+        setPendingImages([]);
+        setPendingAudio([]);
+        setStatusLine(undefined);
+
+        // Persist media files, then enqueue (manifest write) + kick the pump.
+        void saveJobMedia(job);
+        commitQueue([...queueRef.current, job]);
+        kickPump();
+    }, [
+        activeConvId, commitQueue, kickPump, lastLoadedDigest, loadedIsDiffusion,
+        maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt,
+        ragEnabled, sampling, statusText, systemPrompt, thinking, toolMode,
+        useGps, weatherApiKey, weatherUnits, showToast,
+    ]);
+
+    // Boot-resume the persisted queue: once the model is ready, rebuild any
+    // jobs that were queued (behind a running generation) before the last
+    // reload and drain them. The running job itself resumes via the separate
+    // INFLIGHT_KEY path above; queued jobs were never in that manifest, so
+    // there's no double-run. Filter to the current model + still-existing
+    // conversations (their user/empty-model rows are already in the DB, so
+    // they render correctly before their turn).
+    useEffect(() => {
+        if (modelStatus !== "ready") return;
+        if (queueBootRef.current) return;
+        queueBootRef.current = true;
+        void (async () => {
+            try {
+                const jobs = await loadQueue();
+                if (jobs.length === 0) return;
+                const convRows = await getClient().convList();
+                const convIds = new Set(convRows.map((r) => r.id));
+                const valid: GenJob[] = [];
+                for (const j of jobs) {
+                    if (j.modelDigest && lastLoadedDigest && j.modelDigest !== lastLoadedDigest) continue;
+                    if (!convIds.has(j.convId)) { void dropJobMedia(j.jobId); continue; }
+                    usedConvIds.current.add(j.convId);
+                    valid.push(j);
+                }
+                if (valid.length === 0) return;
+                commitQueue([...queueRef.current, ...valid]);
+                kickPump();
+            } catch (e) {
+                // eslint-disable-next-line no-console
+                console.warn("[rullama] queue boot-resume failed:", e);
+            }
+        })();
+    }, [modelStatus, lastLoadedDigest, commitQueue, kickPump]);
 
     // Top-level pipelineProgress subscription. The chat-send flow has
     // its own scoped subscription (around image encode + prefill) but
@@ -1600,14 +1896,26 @@ export function useChatEngine(opts: UseChatEngineParams) {
         showToast({ level: "warn", title: "Mic capture failed", message });
     }, [showToast]);
 
-    // Stop the active generation (toolbar Stop button + Escape key).
+    // Stop / dequeue the conversation the user is viewing (toolbar Stop button
+    // + Escape key). Targets the ACTIVE conversation's job: cancel it if it's
+    // running, or drop it from the queue if it hasn't started — without
+    // touching any other conversation's in-flight or queued work.
     const onStop = useCallback(() => {
-        cancelRef.current = true;
-        // Also break in on any in-flight multimodal encode. The flag is
-        // cleared at the start of the next encode, so calling
-        // unconditionally here doesn't poison subsequent runs.
-        void getClient().cancelMultimodalEncode().catch(() => { /* */ });
-    }, []);
+        const id = activeConvIdRef.current;
+        if (!id) return;
+        const job = queueRef.current.find((j) => j.convId === id);
+        if (!job) return;
+        if (job.status === "running") {
+            cancelRef.current = true;
+            // Also break in on any in-flight multimodal encode. The flag is
+            // cleared at the start of the next encode, so calling
+            // unconditionally here doesn't poison subsequent runs.
+            void getClient().cancelMultimodalEncode().catch(() => { /* */ });
+        } else {
+            commitQueue(queueRef.current.filter((j) => j.jobId !== job.jobId));
+            void dropJobMedia(job.jobId);
+        }
+    }, [commitQueue]);
 
     // Pre-warm the system prompt into the KV cache so the next NEW chat
     // hot-starts (kvReusePlan reuses the resident system prefix and prefills
@@ -1621,7 +1929,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
         overrides?: { systemPrompt?: string },
     ) => {
         if (loadedIsDiffusion) return;   // no AR KV cache to warm
-        if (busy) return;                // don't fight an in-flight turn for the session
+        if (genActive) return;           // don't fight an in-flight turn for the session
         const client = getClient();
         const sysContent = buildSysContent({
             systemPrompt: overrides?.systemPrompt ?? systemPrompt,
@@ -1697,7 +2005,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
             off?.();
             try { await client.releaseSession(); } catch { /* */ }
         }
-    }, [systemPrompt, thinking, toolMode, loadedIsDiffusion, busy, lastLoadedDigest, activeAdapter]);
+    }, [systemPrompt, thinking, toolMode, loadedIsDiffusion, genActive, lastLoadedDigest, activeAdapter]);
 
     // Clear the chat display surface — called by the model loader on
     // eject / delete-while-loaded.
@@ -1711,10 +2019,32 @@ export function useChatEngine(opts: UseChatEngineParams) {
         restoreAttemptedRef.current.clear();
     }, []);
 
+    // Per-conversation generation status for the sidebar indicators + the
+    // active-conversation Stop/Send gating. Derived from the queue (running
+    // jobs stay in it until finished).
+    const runningConvIds = useMemo(
+        () => new Set(queue.filter((j) => j.status === "running").map((j) => j.convId)),
+        [queue],
+    );
+    const queuedConvIds = useMemo(
+        () => new Set(queue.filter((j) => j.status === "queued").map((j) => j.convId)),
+        [queue],
+    );
+    const activeConvIsGenerating = activeConvId != null && runningConvIds.has(activeConvId);
+    const activeConvIsQueued     = activeConvId != null && queuedConvIds.has(activeConvId);
+
     return {
         messages,
         prompt, setPrompt,
-        busy,
+        // `busy` now means "the engine is generating somewhere" (not "this
+        // conversation is locked"). Kept under the old name for the consumers
+        // that only need wake-lock / banner gating.
+        busy: genActive,
+        genActive,
+        runningConvIds,
+        queuedConvIds,
+        activeConvIsGenerating,
+        activeConvIsQueued,
         statusLine,
         visionEncodeState,
         pendingImages,
