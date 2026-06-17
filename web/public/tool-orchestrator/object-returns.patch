@@ -1,0 +1,75 @@
+diff --git a/src/wasm/mod.rs b/src/wasm/mod.rs
+index 69dfeaf..8945305 100644
+--- a/src/wasm/mod.rs
++++ b/src/wasm/mod.rs
+@@ -12,6 +12,42 @@ use wasm_bindgen::prelude::*;
+ use crate::engine::dynamic_to_json;
+ use crate::sandbox::ExecutionLimits as CoreExecutionLimits;
+ 
++/// Convert a parsed JSON value into a Rhai `Dynamic`, so tools that return a
++/// JSON object/array string become first-class Rhai maps/arrays the script can
++/// index (`weather.temp_c`, `cities[0]`). Mirrors `dynamic_to_json` in reverse.
++fn json_to_dynamic(v: &serde_json::Value) -> rhai::Dynamic {
++    match v {
++        serde_json::Value::Null => rhai::Dynamic::UNIT,
++        serde_json::Value::Bool(b) => rhai::Dynamic::from(*b),
++        serde_json::Value::Number(n) => n.as_i64().map_or_else(
++            || rhai::Dynamic::from(n.as_f64().unwrap_or(0.0)),
++            rhai::Dynamic::from_int,
++        ),
++        serde_json::Value::String(s) => rhai::Dynamic::from(s.clone()),
++        serde_json::Value::Array(a) => {
++            let arr: rhai::Array = a.iter().map(json_to_dynamic).collect();
++            rhai::Dynamic::from_array(arr)
++        }
++        serde_json::Value::Object(o) => {
++            let mut map = rhai::Map::new();
++            for (k, val) in o {
++                map.insert(k.as_str().into(), json_to_dynamic(val));
++            }
++            rhai::Dynamic::from_map(map)
++        }
++    }
++}
++
++/// A tool's string result is parsed as JSON when possible (→ Rhai map/array),
++/// otherwise returned verbatim as a Rhai string. This lets the model write the
++/// natural `get_weather("Tokyo").temp_c` style while plain-text tools (e.g.
++/// Wikipedia summaries) still work as strings.
++fn tool_output_to_dynamic(output: &str) -> rhai::Dynamic {
++    serde_json::from_str::<serde_json::Value>(output)
++        .map(|v| json_to_dynamic(&v))
++        .unwrap_or_else(|_| rhai::Dynamic::from(output.to_string()))
++}
++
+ // ============================================================================
+ // Engine Configuration Constants
+ // ============================================================================
+@@ -240,14 +276,16 @@ impl WasmOrchestrator {
+             let max_calls = limits.inner.max_tool_calls;
+             let tool_name = name.clone();
+ 
+-            engine.register_fn(name.as_str(), move |input: rhai::Dynamic| -> String {
++            engine.register_fn(name.as_str(), move |input: rhai::Dynamic| -> rhai::Dynamic {
+                 let call_start = Instant::now();
+ 
+                 // Check call limit
+                 {
+                     let mut c = count.borrow_mut();
+                     if *c >= max_calls {
+-                        return format!("ERROR: Maximum tool calls ({max_calls}) exceeded");
++                        return rhai::Dynamic::from(format!(
++                            "ERROR: Maximum tool calls ({max_calls}) exceeded"
++                        ));
+                     }
+                     *c += 1;
+                 }
+@@ -286,7 +324,7 @@ impl WasmOrchestrator {
+                     calls.borrow_mut().push(call);
+                 }
+ 
+-                output
++                tool_output_to_dynamic(&output)
+             });
+         }
+ 
