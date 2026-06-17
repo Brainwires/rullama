@@ -68,15 +68,53 @@ export function defaultUnitsFromLocale(): Units {
 
 // ─── lat/lon resolution (shared by the keyless Open-Meteo backends) ──────
 
+// US state abbreviation → full name, for disambiguating "City, ST" queries
+// (the model emits "New Glarus, WI", "Miami, FL", …). Open-Meteo's geocoder
+// matches on city only and returns the full state name in `admin1`.
+const US_STATES: Record<string, string> = {
+    al: "alabama", ak: "alaska", az: "arizona", ar: "arkansas", ca: "california",
+    co: "colorado", ct: "connecticut", de: "delaware", fl: "florida", ga: "georgia",
+    hi: "hawaii", id: "idaho", il: "illinois", in: "indiana", ia: "iowa",
+    ks: "kansas", ky: "kentucky", la: "louisiana", me: "maine", md: "maryland",
+    ma: "massachusetts", mi: "michigan", mn: "minnesota", ms: "mississippi", mo: "missouri",
+    mt: "montana", ne: "nebraska", nv: "nevada", nh: "new hampshire", nj: "new jersey",
+    nm: "new mexico", ny: "new york", nc: "north carolina", nd: "north dakota", oh: "ohio",
+    ok: "oklahoma", or: "oregon", pa: "pennsylvania", ri: "rhode island", sc: "south carolina",
+    sd: "south dakota", tn: "tennessee", tx: "texas", ut: "utah", vt: "vermont",
+    va: "virginia", wa: "washington", wv: "west virginia", wi: "wisconsin", wy: "wyoming",
+    dc: "district of columbia",
+};
+
+// Open-Meteo's geocoder matches ONLY a bare place name — "Brodhead, Wisconsin"
+// returns nothing. So we search by the first comma-part (the city) and use the
+// remaining parts (state/country) to disambiguate among matches. WeatherAPI's
+// `q` is flexible and doesn't need this; this is the keyless path only.
 async function geocode(place: string): Promise<{ lat: number; lon: number; label: string }> {
+    const parts = place.split(",").map((s) => s.trim()).filter(Boolean);
+    const city = parts[0] || place;
+    const hints = parts.slice(1).map((s) => s.toLowerCase());
+
     const url = new URL("https://geocoding-api.open-meteo.com/v1/search");
-    url.searchParams.set("name", place);
-    url.searchParams.set("count", "1");
+    url.searchParams.set("name", city);
+    url.searchParams.set("count", "10");
+    url.searchParams.set("language", "en");
     const resp = await fetch(url.toString());
     if (!resp.ok) throw new Error(`Geocoding failed: HTTP ${resp.status}`);
     const d = await resp.json();
-    const hit = d?.results?.[0];
-    if (!hit) throw new Error(`Couldn't find a location named "${place}".`);
+    const results: any[] = d?.results ?? [];
+    if (!results.length) throw new Error(`Couldn't find a location named "${place}".`);
+
+    // Prefer a result whose state/country matches a hint (expanding US state
+    // abbreviations); fall back to the most prominent match (results[0]).
+    let hit = results[0];
+    if (hints.length) {
+        const wanted = hints.flatMap((h) => [h, US_STATES[h]].filter(Boolean));
+        const match = results.find((r) => {
+            const hay = [r.admin1, r.admin2, r.country].filter(Boolean).join(" ").toLowerCase();
+            return wanted.some((w) => hay.includes(w));
+        });
+        if (match) hit = match;
+    }
     const label = [hit.name, hit.admin1, hit.country].filter(Boolean).join(", ");
     return { lat: hit.latitude, lon: hit.longitude, label };
 }
