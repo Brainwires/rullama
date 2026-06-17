@@ -7,6 +7,7 @@ import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
 import { TOOL_SCHEMA_PROMPT, toolResponseBlock } from "@/lib/toolFormat";
 import { parseToolCalls } from "@/lib/parseToolCalls";
+import { CHANNEL_OPEN } from "@/lib/parseModel";
 import {
     isExecutableTool,
     toolUsesLocation,
@@ -1396,6 +1397,15 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 execCalls.forEach((c, i) => {
                     respBlock += toolResponseBlock(c.name, results[i].summary) + "\n";
                 });
+                // When thinking is on, PRIME the reasoning channel after the
+                // results. Left to itself the model reasons about the result in
+                // the open (and even emits a stray `<channel|>` close it never
+                // opened — the leaked "75°F…100°F" rambling). Seeding
+                // `<|channel>thought` makes that post-tool reasoning land in a
+                // proper, collapsible thought block before it answers or calls
+                // the next tool. The renderer (parseToolCalls) splits each such
+                // block out in order.
+                if (thinking) respBlock += `${CHANNEL_OPEN}\n`;
                 displayHistory[displayHistory.length - 1].content += respBlock;
                 setMessages([...displayHistory]);
                 if (convId && modelMsgId) {

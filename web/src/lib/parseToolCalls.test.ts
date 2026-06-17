@@ -145,6 +145,39 @@ describe("parseToolCalls — executed-tool results (multi-call chaining)", () =>
         expect(r.calls[0].result).toBe("Sunny, 30°C");
     });
 
+    it("splits reasoning-channel blocks into thinking segments, in order", () => {
+        const r = parseToolCalls(
+            "<|channel>thought\nNeed the weather first.<channel|>" +
+            wrap('{"name":"get_weather","arguments":{"location":"x"}}') +
+            '<tool_response for="get_weather">66°F</tool_response>' +
+            "<|channel>thought\n66 > 15, check air quality.<channel|>" +
+            wrap('{"name":"get_air_quality","arguments":{"location":"x"}}') +
+            '<tool_response for="get_air_quality">Good</tool_response>' +
+            "Air quality is good.",
+        );
+        expect(r.segments.map((s) =>
+            s.kind === "call" ? `call:${s.call.name}`
+                : s.kind === "thinking" ? `think:${s.text}`
+                    : `prose:${s.text}`,
+        )).toEqual([
+            "think:Need the weather first.",
+            "call:get_weather",
+            "think:66 > 15, check air quality.",
+            "call:get_air_quality",
+            "prose:Air quality is good.",
+        ]);
+        // thinking text is NOT part of the answer prose (Speak/empty-check)
+        expect(r.prose).toBe("Air quality is good.");
+    });
+
+    it("marks an unterminated thought as still streaming", () => {
+        const r = parseToolCalls("<|channel>thought\nweighing it");
+        expect(r.segments).toHaveLength(1);
+        const s = r.segments[0];
+        expect(s.kind === "thinking" && s.isThinking).toBe(true);
+        expect(s.kind === "thinking" && s.isComplete).toBe(false);
+    });
+
     it("preserves call/prose order across a conditional 2-step chain", () => {
         const r = parseToolCalls(
             wrap('{"name":"get_weather","arguments":{"location":"x"}}') +
