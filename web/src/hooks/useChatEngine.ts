@@ -133,10 +133,27 @@ export function useChatEngine(opts: UseChatEngineParams) {
 
     // Conversation persistence (rsqlite-wasm)
     const [conversations, setConversations] = useState<ConversationRow[]>([]);
-    const [activeConvId, setActiveConvId]   = useState<string | null>(null);
+    // Persisted in sessionStorage (PER TAB) so a page reload reopens the same
+    // conversation, without yanking other tabs to it (each tab keeps its own
+    // selection; a fresh tab starts clean). Restored on boot once the
+    // conversation list has loaded (see the bootstrap effect); a stale id
+    // (deleted elsewhere) is cleared there.
+    const [activeConvId, setActiveConvId]   = useState<string | null>(() => {
+        try { return sessionStorage.getItem("rullama:activeConvId"); } catch { return null; }
+    });
     // Per-conversation RAG toggle (Knowledge-base grounding). Loaded from
     // the DB when the active conversation changes.
     const [ragEnabled, setRagEnabled]       = useState<boolean>(false);
+
+    // Mirror the active conversation into sessionStorage on every change so a
+    // reload reopens it. All the existing `setActiveConvId` call sites stay
+    // unchanged — this one effect keeps the store in sync.
+    useEffect(() => {
+        try {
+            if (activeConvId) sessionStorage.setItem("rullama:activeConvId", activeConvId);
+            else sessionStorage.removeItem("rullama:activeConvId");
+        } catch { /* private mode / disabled storage — best-effort */ }
+    }, [activeConvId]);
 
     const cancelRef = useRef(false);
     // Tracks the currently-running generation for suspend/resume. Mutated
@@ -147,6 +164,8 @@ export function useChatEngine(opts: UseChatEngineParams) {
     // Resume-on-boot is single-shot; the effect can fire multiple times
     // as model state changes, but we want to attempt resume at most once.
     const resumeAttemptedRef = useRef(false);
+    // Restore the persisted active conversation at most once on boot.
+    const bootConvRestoredRef = useRef(false);
     // Conversations we've already tried to warm from a persisted KV
     // snapshot this session — restore is a one-shot per conversation (the
     // live KV cache takes over after the first send). Correctness never
@@ -216,7 +235,10 @@ export function useChatEngine(opts: UseChatEngineParams) {
         return () => document.removeEventListener("visibilitychange", onVis);
     }, [busy]);
 
-    // Bootstrap DB + conversation list on mount.
+    // Bootstrap DB + conversation list on mount, then reopen the persisted
+    // active conversation (if any). `activeConvId` / `onSelectConversation`
+    // are read from the first-render closure — exactly the boot-time values
+    // we want — so they're intentionally not in the deps.
     useEffect(() => {
         const client = getClient();
         (async () => {
@@ -224,10 +246,23 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 await client.dbInit();
                 const rows = await client.convList();
                 setConversations(rows);
+                if (!bootConvRestoredRef.current) {
+                    bootConvRestoredRef.current = true;
+                    const id = activeConvId;
+                    if (id) {
+                        if (rows.some((r) => r.id === id)) {
+                            void onSelectConversation(id);
+                        } else {
+                            // Persisted conversation was deleted elsewhere.
+                            setActiveConvId(null);
+                        }
+                    }
+                }
             } catch (e) {
                 showToast({ level: "error", title: "Database init failed", message: (e as Error).message });
             }
         })();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [showToast]);
 
     const refreshConversations = useCallback(async () => {
