@@ -67,11 +67,17 @@ export const LRU_MAX_SNAPSHOTS = 8;
 // being "current" per turn.
 
 /** Static system-prompt note explaining the per-turn timestamp prefix.
- *  Constant → stays in the cached front of the sequence. */
+ *  Constant → stays in the cached front of the sequence. Phrased forcefully:
+ *  small models otherwise deliberate ("I have no clock tool…") instead of just
+ *  reading the stamp they were handed — and tool mode makes them hunt for a
+ *  tool that doesn't (and shouldn't) exist. */
 export const TIMESTAMP_SYSTEM_NOTE =
-    "Each user message begins with the date and time it was sent, in square " +
-    "brackets like [2026-01-15 14:02]. Treat the most recent timestamp as the " +
-    "current date and time.";
+    "Each user message starts with a bracketed stamp of when it was sent — " +
+    "weekday, date, local time, and timezone, e.g. [Wed 2026-06-17 01:22 CDT]. " +
+    "This IS the current date and time; you have it. When the user asks the " +
+    "time, date, day of the week, or their timezone, answer directly and " +
+    "confidently from the most recent stamp — do not deliberate, apologize, or " +
+    "say you lack a clock, and do not call a tool for it.";
 
 /** Static formatting note: keep plain numbers/units OUT of LaTeX. Small models
  *  otherwise wrap measurements like "2.2 µg/m³" in $…$ math (and sometimes
@@ -83,14 +89,24 @@ export const FORMATTING_SYSTEM_NOTE =
     "mathematical expressions (equations, fractions, exponents), never for a " +
     "lone value with its unit.";
 
-/** Format an epoch-ms instant as a stable local `YYYY-MM-DD HH:MM`. Pure
- *  function of `ms` (no `Date.now()`), so a given message always renders
- *  the same string — the property KV-cache reuse depends on. */
+/** Format an epoch-ms instant as a stable local stamp:
+ *  `Wed 2026-06-17 01:22 CDT` (weekday, date, local time, timezone). Pure
+ *  function of `ms` given the device's locale/timezone (constant within a
+ *  session), so a given message always renders the same string — the property
+ *  KV-cache reuse depends on. The weekday + timezone let the model answer
+ *  "what day is it?" / "what's my timezone?" straight from the stamp, with no
+ *  clock tool. (`getHours()` etc. are already local, so this adds no new
+ *  nondeterminism.) */
 export function formatTurnTimestamp(ms: number): string {
     const d = new Date(ms);
     const p = (n: number) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
-        `${p(d.getHours())}:${p(d.getMinutes())}`;
+    const weekday = d.toLocaleDateString("en-US", { weekday: "short" });
+    const tz = new Intl.DateTimeFormat("en-US", { timeZoneName: "short" })
+        .formatToParts(d)
+        .find((part) => part.type === "timeZoneName")?.value ?? "";
+    const date = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    const time = `${p(d.getHours())}:${p(d.getMinutes())}`;
+    return `${weekday} ${date} ${time}${tz ? ` ${tz}` : ""}`;
 }
 
 /** Prepend the frozen timestamp prefix to a user turn's render content.
