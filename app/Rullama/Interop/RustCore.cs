@@ -115,6 +115,28 @@ internal static class RustCore
         IntPtr m, uint[] prompt, UIntPtr n, uint sentinelBegin,
         float[] soft, UIntPtr softLen, UIntPtr dText, uint maxNew, TokenCallback cb, IntPtr ctx);
 
+    // ---- text-to-speech (Kokoro; separate handle) ----
+    [DllImport(Lib, EntryPoint = "rl_tts_create")]
+    internal static extern IntPtr rl_tts_create();
+
+    [DllImport(Lib, EntryPoint = "rl_tts_free")]
+    internal static extern void rl_tts_free(IntPtr t);
+
+    [DllImport(Lib, EntryPoint = "rl_tts_load_path")]
+    internal static extern int rl_tts_load_path(IntPtr t, [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+
+    [DllImport(Lib, EntryPoint = "rl_tts_set_lexicon")]
+    internal static extern int rl_tts_set_lexicon(
+        IntPtr t, [MarshalAs(UnmanagedType.LPUTF8Str)] string goldPath, [MarshalAs(UnmanagedType.LPUTF8Str)] string silverPath);
+
+    [DllImport(Lib, EntryPoint = "rl_tts_synthesize")]
+    internal static extern int rl_tts_synthesize(
+        IntPtr t, [MarshalAs(UnmanagedType.LPUTF8Str)] string text, [MarshalAs(UnmanagedType.LPUTF8Str)] string voice,
+        out IntPtr outPtr, out UIntPtr outLen);
+
+    [DllImport(Lib, EntryPoint = "rl_tts_sample_rate")]
+    internal static extern uint rl_tts_sample_rate(IntPtr t);
+
     // ---- helpers ----
     internal static string Version() => Marshal.PtrToStringUTF8(rl_version()) ?? "unknown";
 

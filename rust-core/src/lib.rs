@@ -32,6 +32,7 @@ use rullama::api::Model;
 use rullama::backend::WgpuCtx;
 use rullama::gguf::{FileFetcher, TensorFetcher};
 use rullama::sampling::SamplingOptions;
+use rullama::tts::KokoroTts;
 
 // ---------------------------------------------------------------------------
 // Thread-local last-error (set on, and read from, the calling thread)
@@ -881,6 +882,142 @@ pub unsafe extern "C" fn rl_generate_spliced(
         }
         Err(c) => c,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Text-to-speech (Kokoro) — a SEPARATE model handle with its own owning thread.
+// ---------------------------------------------------------------------------
+
+const TTS_SAMPLE_RATE: u32 = 24_000;
+
+enum TtsCommand {
+    Load { bytes: Vec<u8>, reply: Sender<Result<(), String>> },
+    SetLexicon { gold: Vec<u8>, silver: Vec<u8>, reply: Sender<()> },
+    Synthesize { text: String, voice: String, reply: Sender<Result<Vec<f32>, String>> },
+    Shutdown,
+}
+
+fn tts_worker(rx: mpsc::Receiver<TtsCommand>) {
+    let mut tts: Option<KokoroTts> = None;
+    for cmd in rx {
+        match cmd {
+            TtsCommand::Load { bytes, reply } => {
+                let r = pollster::block_on(KokoroTts::load_native(bytes)).map_err(|e| format!("{e}"));
+                match r {
+                    Ok(t) => { tts = Some(t); let _ = reply.send(Ok(())); }
+                    Err(e) => { let _ = reply.send(Err(e)); }
+                }
+            }
+            TtsCommand::SetLexicon { gold, silver, reply } => {
+                if let Some(t) = tts.as_mut() { t.set_lexicon_native(&gold, &silver); }
+                let _ = reply.send(());
+            }
+            TtsCommand::Synthesize { text, voice, reply } => {
+                let r = match tts.as_mut() {
+                    Some(t) => {
+                        let (pcm, _oov) = pollster::block_on(t.synthesize_native(&text, &voice, None));
+                        Ok(pcm)
+                    }
+                    None => Err("tts not loaded".into()),
+                };
+                let _ = reply.send(r);
+            }
+            TtsCommand::Shutdown => break,
+        }
+    }
+}
+
+/// Opaque TTS handle (Kokoro). Owns its worker thread.
+pub struct RlTts {
+    tx: Sender<TtsCommand>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rl_tts_create() -> *mut RlTts {
+    let (tx, rx) = mpsc::channel();
+    match std::thread::Builder::new().name("rullama-tts".into()).spawn(move || tts_worker(rx)) {
+        Ok(handle) => Box::into_raw(Box::new(RlTts { tx, handle: Some(handle) })),
+        Err(e) => {
+            set_last_error(format!("failed to spawn tts thread: {e}"));
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// # Safety
+/// `t` must be NULL or a handle from `rl_tts_create`, unused afterward.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_tts_free(t: *mut RlTts) {
+    if t.is_null() { return; }
+    let mut b = unsafe { Box::from_raw(t) };
+    let _ = b.tx.send(TtsCommand::Shutdown);
+    if let Some(h) = b.handle.take() { let _ = h.join(); }
+}
+
+fn tts_call<T>(t: *mut RlTts, make: impl FnOnce(Sender<T>) -> TtsCommand) -> Result<T, i32> {
+    let Some(tts) = (unsafe { t.as_ref() }) else {
+        set_last_error("null tts handle");
+        return Err(-1);
+    };
+    let (tx, rx) = mpsc::channel();
+    if tts.tx.send(make(tx)).is_err() {
+        set_last_error("tts worker gone");
+        return Err(-2);
+    }
+    rx.recv().map_err(|_| { set_last_error("tts dropped reply"); -3 })
+}
+
+/// Load the Kokoro GGUF from a path.
+/// # Safety
+/// `t` valid; `path` a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_tts_load_path(t: *mut RlTts, path: *const c_char) -> i32 {
+    let path = match unsafe { c_str(path) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+    let bytes = match std::fs::read(&path) { Ok(b) => b, Err(e) => { set_last_error(format!("read {path}: {e}")); return -6; } };
+    match tts_call(t, |reply| TtsCommand::Load { bytes, reply }) {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => { set_last_error(e); -6 }
+        Err(c) => c,
+    }
+}
+
+/// Set the G2P lexicon from gold (+ optional silver) JSON file paths.
+/// # Safety
+/// `t` valid; paths valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_tts_set_lexicon(t: *mut RlTts, gold_path: *const c_char, silver_path: *const c_char) -> i32 {
+    let gp = match unsafe { c_str(gold_path) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+    let sp = match unsafe { c_str(silver_path) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+    let gold = std::fs::read(&gp).unwrap_or_default();
+    let silver = std::fs::read(&sp).unwrap_or_default();
+    match tts_call(t, |reply| TtsCommand::SetLexicon { gold, silver, reply }) {
+        Ok(()) => 0,
+        Err(c) => c,
+    }
+}
+
+/// Synthesize text → mono f32 PCM at `rl_tts_sample_rate` (free with `rl_free_f32`).
+/// # Safety
+/// `t` valid; `text`/`voice` valid C strings; `out`/`out_len` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_tts_synthesize(t: *mut RlTts, text: *const c_char, voice: *const c_char, out: *mut *mut f32, out_len: *mut usize) -> i32 {
+    if out.is_null() || out_len.is_null() { set_last_error("null out"); return -2; }
+    let text = match unsafe { c_str(text) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+    let voice = match unsafe { c_str(voice) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+    match tts_call(t, |reply| TtsCommand::Synthesize { text, voice, reply }) {
+        Ok(Ok(pcm)) => { put_f32(pcm, out, out_len); 0 }
+        Ok(Err(e)) => { set_last_error(e); -6 }
+        Err(c) => c,
+    }
+}
+
+/// TTS PCM sample rate (Hz).
+/// # Safety
+/// `t` may be NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn rl_tts_sample_rate(_t: *mut RlTts) -> u32 {
+    TTS_SAMPLE_RATE
 }
 
 // ---------------------------------------------------------------------------

@@ -20,6 +20,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Rullama.ProbeSmoke", "Rulla
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Rullama.GenerateSmoke", "Rullama.GenerateSmoke\Rullama.GenerateSmoke.csproj", "{019A20F0-D1AF-4F7A-99C9-4C0B9D968F38}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Rullama.TtsSmoke", "Rullama.TtsSmoke\Rullama.TtsSmoke.csproj", "{717B130F-B9B7-41A5-A008-4C11CC0F8EDF}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -102,6 +104,18 @@ Global
 		{019A20F0-D1AF-4F7A-99C9-4C0B9D968F38}.Release|x64.Build.0 = Release|Any CPU
 		{019A20F0-D1AF-4F7A-99C9-4C0B9D968F38}.Release|x86.ActiveCfg = Release|Any CPU
 		{019A20F0-D1AF-4F7A-99C9-4C0B9D968F38}.Release|x86.Build.0 = Release|Any CPU
+		{717B130F-B9B7-41A5-A008-4C11CC0F8EDF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{717B130F-B9B7-41A5-A008-4C11CC0F8EDF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{717B130F-B9B7-41A5-A008-4C11CC0F8EDF}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{717B130F-B9B7-41A5-A008-4C11CC0F8EDF}.Debug|x64.Build.0 = Debug|Any CPU
+		{717B130F-B9B7-41A5-A008-4C11CC0F8EDF}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{717B130F-B9B7-41A5-A008-4C11CC0F8EDF}.Debug|x86.Build.0 = Debug|Any CPU
+		{717B130F-B9B7-41A5-A008-4C11CC0F8EDF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{717B130F-B9B7-41A5-A008-4C11CC0F8EDF}.Release|Any CPU.Build.0 = Release|Any CPU
+		{717B130F-B9B7-41A5-A008-4C11CC0F8EDF}.Release|x64.ActiveCfg = Release|Any CPU
+		{717B130F-B9B7-41A5-A008-4C11CC0F8EDF}.Release|x64.Build.0 = Release|Any CPU
+		{717B130F-B9B7-41A5-A008-4C11CC0F8EDF}.Release|x86.ActiveCfg = Release|Any CPU
+		{717B130F-B9B7-41A5-A008-4C11CC0F8EDF}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
