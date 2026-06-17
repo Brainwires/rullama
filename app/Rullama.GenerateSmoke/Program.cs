@@ -12,16 +12,22 @@ if (path is null)
     return 1;
 }
 bool visionMode = Environment.GetEnvironmentVariable("RULLAMA_TEST_VISION") == "1";
+bool audioOnly = Environment.GetEnvironmentVariable("RULLAMA_TEST_AUDIO_ONLY") == "1";
+bool full = visionMode || audioOnly;
 
 using var engine = new InferenceClient();
-Console.WriteLine($"loading ({(visionMode ? "full towers" : "text-only")}, ctx 1024)…");
-await engine.LoadAsync(path, maxContext: 1024, textOnly: !visionMode);
-Console.WriteLine($"ready · vocab {engine.VocabSize}\n--- reply ---");
+Console.WriteLine($"loading ({(full ? "full towers" : "text-only")}, ctx 1024)…");
+await engine.LoadAsync(path, maxContext: 1024, textOnly: !full);
+Console.WriteLine($"ready · vocab {engine.VocabSize}");
 
-var history = new List<(string, string)> { ("user", "Name three primary colors.") };
-int n = await engine.SendAsync(history, maxNew: 48,
-    onPiece: piece => { Console.Write(piece); Console.Out.Flush(); }, ct: CancellationToken.None);
-Console.WriteLine($"\n--- end ({n} tokens) ---");
+if (!audioOnly)
+{
+    Console.WriteLine("--- reply ---");
+    var history = new List<(string, string)> { ("user", "Name three primary colors.") };
+    int n = await engine.SendAsync(history, maxNew: 48,
+        onPiece: piece => { Console.Write(piece); Console.Out.Flush(); }, ct: CancellationToken.None);
+    Console.WriteLine($"\n--- end ({n} tokens) ---");
+}
 
 if (visionMode && engine.HasVision)
 {
@@ -36,6 +42,20 @@ if (visionMode && engine.HasVision)
         maxNew: 48, onPiece: p => { Console.Write(p); Console.Out.Flush(); }, ct: CancellationToken.None);
     Console.WriteLine($"\n--- end ({vn} tokens) ---");
 }
+
+// Audio-in test: transcribe a WAV (the TtsSmoke output if present).
+if (full && engine.HasAudio && File.Exists("/tmp/rullama_tts.wav"))
+{
+    Console.WriteLine("\n[audio] transcribing /tmp/rullama_tts.wav…");
+    float[] pcm = InferenceClient.DecodeWav(File.ReadAllBytes("/tmp/rullama_tts.wav"));
+    var aHistory = new List<(string, string)> { ("user", "<|audio><audio|>Transcribe this audio.") };
+    Console.Write("--- transcript ---\n");
+    int an = await engine.SendAudioAsync(aHistory, pcm, maxNew: 48,
+        onPiece: p => { Console.Write(p); Console.Out.Flush(); }, ct: CancellationToken.None);
+    Console.WriteLine($"\n--- end ({an} tokens) ---");
+}
+
+if (audioOnly) return 0;
 
 // Tool-calling test (works text-only): weather via the agentic loop (real Open-Meteo).
 Console.WriteLine("\n[tools] asking for weather with the tool schema…");

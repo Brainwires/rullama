@@ -50,12 +50,44 @@ public partial class ChatViewModel : ViewModelBase
     [ObservableProperty]
     private bool _isVisionAvailable;
 
+    [ObservableProperty]
+    private bool _isAudioAvailable;
+
     // Pending image attachment (preprocessed pixels + preview thumbnail).
     private ProcessedImage? _pendingImage;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SendCommand))]
     private Bitmap? _pendingImagePreview;
+
+    // Pending audio attachment (decoded mono PCM + a short label).
+    private float[]? _pendingAudioPcm;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SendCommand))]
+    private string? _pendingAudioLabel;
+
+    /// <summary>Decode + stage a WAV for the next message (called by the view).</summary>
+    public async Task AttachAudioAsync(byte[] wavBytes)
+    {
+        try
+        {
+            float[] pcm = await Task.Run(() => InferenceClient.DecodeWav(wavBytes));
+            _pendingAudioPcm = pcm;
+            PendingAudioLabel = $"🎵 {pcm.Length / 24000.0:0.0}s";
+        }
+        catch (Exception e)
+        {
+            Status = "Audio failed: " + e.Message;
+        }
+    }
+
+    [RelayCommand]
+    private void ClearAudio()
+    {
+        _pendingAudioPcm = null;
+        PendingAudioLabel = null;
+    }
 
     /// <summary>Preprocess + stage an image for the next message (called by the view).</summary>
     public async Task AttachImageAsync(byte[] bytes)
@@ -154,8 +186,9 @@ public partial class ChatViewModel : ViewModelBase
             IsModelLoaded = true;
             ApplySampling();
             IsVisionAvailable = _engine.HasVision;
+            IsAudioAvailable = _engine.HasAudio;
             _settings.Set("modelPath", ModelPath.Trim());
-            Status = $"Ready · vocab {_engine.VocabSize}{(IsVisionAvailable ? " · vision" : "")}";
+            Status = $"Ready · vocab {_engine.VocabSize}{(IsVisionAvailable ? " · vision" : "")}{(IsAudioAvailable ? " · audio" : "")}";
         }
         catch (Exception e)
         {
@@ -200,7 +233,7 @@ public partial class ChatViewModel : ViewModelBase
 
     // ---- send / stop ----
     private bool CanSend => IsModelLoaded && !IsBusy
-        && (!string.IsNullOrWhiteSpace(Input) || PendingImagePreview is not null);
+        && (!string.IsNullOrWhiteSpace(Input) || PendingImagePreview is not null || PendingAudioLabel is not null);
 
     [RelayCommand(CanExecute = nameof(CanSend))]
     private async Task SendAsync()
@@ -208,11 +241,14 @@ public partial class ChatViewModel : ViewModelBase
         string text = Input.Trim();
         Input = string.Empty;
 
-        // Detach any pending image for this turn.
+        // Detach any pending media for this turn.
         ProcessedImage? image = _pendingImage;
         Bitmap? preview = PendingImagePreview;
         _pendingImage = null;
         PendingImagePreview = null;
+        float[]? audio = _pendingAudioPcm;
+        _pendingAudioPcm = null;
+        PendingAudioLabel = null;
 
         // Open a conversation lazily on first message.
         if (_activeConvId is null)
@@ -235,8 +271,11 @@ public partial class ChatViewModel : ViewModelBase
         var reply = new ChatMessageViewModel("model", string.Empty);
         Messages.Add(reply);
 
-        // Engine history: prepend the image sentinel pair to this user turn's content.
-        string promptUserContent = image is not null ? "<|image><image|>" + text : text;
+        // Engine history: prepend the media sentinel pair to this user turn's content.
+        string promptUserContent =
+            image is not null ? "<|image><image|>" + text
+            : audio is not null ? "<|audio><audio|>" + text
+            : text;
         var history = new List<(string, string)>();
         string sys = BuildSystemContent();
         if (!string.IsNullOrWhiteSpace(sys)) history.Add(("system", sys));
@@ -263,6 +302,8 @@ public partial class ChatViewModel : ViewModelBase
             uint maxNew = (uint)MaxTokens;
             if (image is { } img)
                 await _engine.SendImageAsync(history, img.Pixels, img.Height, img.Width, maxNew, OnPiece, _cts.Token);
+            else if (audio is { } pcm)
+                await _engine.SendAudioAsync(history, pcm, maxNew, OnPiece, _cts.Token);
             else
                 await _engine.SendAsync(history, maxNew, OnPiece, _cts.Token);
 

@@ -77,6 +77,40 @@ public sealed class InferenceClient : IDisposable
     }
 
     public bool HasVision => _model?.HasVision() ?? false;
+    public bool HasAudio => _model?.HasAudio() ?? false;
+
+    // Text embedding dim (soft-token row width) for gemma4 e2b/e4b — matches the
+    // reference worker's hardcoded audio dText. Image rows derive it from the
+    // soft-token count instead.
+    private const int TextEmbeddingDim = 1536;
+
+    /// <summary>Decode WAV bytes to mono f32 PCM (standalone; no model state).</summary>
+    public static float[] DecodeWav(byte[] wav) => RustModel.DecodeWav(wav);
+
+    /// <summary>
+    /// Generate a reply where the latest user turn includes one audio clip. The
+    /// history's user content must contain the &lt;|audio&gt;&lt;audio|&gt; marker pair;
+    /// the audio's soft tokens are spliced at the begin sentinel during prefill.
+    /// </summary>
+    public async Task<int> SendAudioAsync(
+        IReadOnlyList<(string Role, string Content)> history,
+        float[] pcm,
+        uint maxNew,
+        Action<string> onPiece,
+        CancellationToken ct)
+    {
+        RustModel model = _model ?? throw new InvalidOperationException("No model loaded.");
+        return await Task.Run(() =>
+        {
+            (uint Begin, uint End)? sent = model.AudioSentinels()
+                ?? throw new InvalidOperationException("This model has no audio tower.");
+            float[] soft = model.EncodeAudio(pcm);
+            model.Reset();
+            uint[] ids = model.Encode(BuildPrompt(history));
+            using CancellationTokenRegistration reg = ct.Register(model.Cancel);
+            return model.GenerateSpliced(ids, sent.Value.Begin, soft, TextEmbeddingDim, maxNew, onPiece);
+        }, ct);
+    }
 
     /// <summary>
     /// Generate a reply where the latest user turn includes one image. The

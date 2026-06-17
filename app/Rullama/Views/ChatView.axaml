@@ -87,18 +87,29 @@
                         VerticalAlignment="Top" />
               </StackPanel>
             </Border>
-            <Grid ColumnDefinitions="Auto,*,Auto">
+            <!-- pending audio chip -->
+            <Border IsVisible="{Binding PendingAudioLabel, Converter={x:Static ObjectConverters.IsNotNull}}"
+                    HorizontalAlignment="Left">
+              <StackPanel Orientation="Horizontal" Spacing="6">
+                <TextBlock Classes="muted" Text="{Binding PendingAudioLabel}" VerticalAlignment="Center" />
+                <Button Classes="ghost iconsm" Content="✕" Command="{Binding ClearAudioCommand}" />
+              </StackPanel>
+            </Border>
+            <Grid ColumnDefinitions="Auto,Auto,*,Auto">
               <Button Grid.Column="0" Classes="ghost icon" Content="🖼"
                       Click="AttachImage_Click" IsEnabled="{Binding IsVisionAvailable}"
                       ToolTip.Tip="Attach image" />
-              <TextBox Grid.Column="1" Margin="6,0"
+              <Button Grid.Column="1" Classes="ghost icon" Content="🎵"
+                      Click="AttachAudio_Click" IsEnabled="{Binding IsAudioAvailable}"
+                      ToolTip.Tip="Attach audio (WAV)" />
+              <TextBox Grid.Column="2" Margin="6,0"
                        Watermark="Say something…  (Shift+Enter for newline)"
                        Text="{Binding Input, Mode=TwoWay}"
                        AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="140"
                        KeyDown="Composer_KeyDown" />
-              <Button Grid.Column="2" Classes="primary" Content="Send"
+              <Button Grid.Column="3" Classes="primary" Content="Send"
                       Command="{Binding SendCommand}" IsVisible="{Binding !IsBusy}" />
-              <Button Grid.Column="2" Classes="destructive" Content="Stop"
+              <Button Grid.Column="3" Classes="destructive" Content="Stop"
                       Command="{Binding StopCommand}" IsVisible="{Binding IsBusy}" />
             </Grid>
           </StackPanel>
