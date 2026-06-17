@@ -87,6 +87,12 @@ public partial class ChatViewModel : ViewModelBase
     [ObservableProperty] private string _systemPrompt = string.Empty;
     [ObservableProperty] private bool _thinkingMode;
 
+    // ---- tool calling (Tools tab) ----
+    [ObservableProperty] private bool _toolCallingEnabled;
+    [ObservableProperty] private string _weatherApiKey = string.Empty;
+    [ObservableProperty] private bool _useFahrenheit;
+    [ObservableProperty] private bool _useLocation;
+
     partial void OnTemperatureChanged(double value) => ApplySampling();
     partial void OnTopKChanged(double value) => ApplySampling();
     partial void OnTopPChanged(double value) => ApplySampling();
@@ -113,6 +119,8 @@ public partial class ChatViewModel : ViewModelBase
     private string BuildSystemContent()
     {
         string s = SystemPrompt.Trim();
+        if (ToolCallingEnabled)
+            s = s.Length > 0 ? ToolFormat.ToolSchemaPrompt + "\n\n" + s : ToolFormat.ToolSchemaPrompt;
         if (ThinkingMode) s = "<|think|>" + s; // PWA prepends silently
         return s;
     }

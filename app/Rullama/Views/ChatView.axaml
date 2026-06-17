@@ -170,7 +170,22 @@
             <TextBlock Classes="muted" Margin="0,8" TextWrapping="Wrap" Text="{Binding Status}" />
           </TabItem>
           <TabItem Header="Tools">
-            <TextBlock Classes="muted" Margin="0,8" Text="Tool calling — M3." />
+            <ScrollViewer>
+              <StackPanel Spacing="12" Margin="0,8,0,0">
+                <CheckBox IsChecked="{Binding ToolCallingEnabled, Mode=TwoWay}"
+                          Content="Enable tool calling" />
+                <TextBlock Classes="muted" TextWrapping="Wrap"
+                           Text="Lets the model call get_weather and other tools via &lt;tool_call&gt; blocks." />
+                <StackPanel Spacing="4">
+                  <TextBlock Classes="label" Text="WEATHERAPI.COM KEY (OPTIONAL)" />
+                  <TextBox Text="{Binding WeatherApiKey, Mode=TwoWay}" PasswordChar="•"
+                           Watermark="blank = free Open-Meteo" />
+                </StackPanel>
+                <CheckBox IsChecked="{Binding UseFahrenheit, Mode=TwoWay}" Content="Use °F (imperial)" />
+                <CheckBox IsChecked="{Binding UseLocation, Mode=TwoWay}"
+                          Content="Use my location (IP-based) when none is given" />
+              </StackPanel>
+            </ScrollViewer>
           </TabItem>
           <TabItem Header="Speech">
             <TextBlock Classes="muted" Margin="0,8" Text="Voice settings — M4." />
