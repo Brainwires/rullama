@@ -1,4 +1,5 @@
-import { Sparkles, Undo2 } from "lucide-react";
+import { useState } from "react";
+import { Loader2, Pencil, Sparkles, Undo2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,7 +42,9 @@ interface Props {
     fineTuneReason: string;
     // Generation settings.
     systemPrompt: string;
-    onSystemPromptChange: (s: string) => void;
+    /** Persist a new system prompt AND re-warm the KV cache with it. The
+     *  editor awaits this to show its "preparing…" state. */
+    onSaveSystemPrompt: (s: string) => Promise<void>;
     sampling: SamplingOptions;
     onSamplingChange: (s: SamplingOptions) => void;
     maxTokens: number;
@@ -75,6 +78,24 @@ export function ChatSettings(props: Props) {
     const B = SETTINGS_BOUNDS;
     const setS = (patch: Partial<SamplingOptions>) => props.onSamplingChange({ ...props.sampling, ...patch });
     const [tab, setTab] = usePersistedState<TabKey>("chat:settings:tab", "model");
+
+    // System-prompt editor: read-only by default, Edit → Save/Cancel.
+    // `sysPreparing` covers the post-save warm so the user sees the model
+    // being prepared before the new prompt takes effect.
+    const [editingSys, setEditingSys] = useState(false);
+    const [sysDraft, setSysDraft] = useState(props.systemPrompt);
+    const [sysPreparing, setSysPreparing] = useState(false);
+    const beginEditSys = () => { setSysDraft(props.systemPrompt); setEditingSys(true); };
+    const cancelEditSys = () => { setSysDraft(props.systemPrompt); setEditingSys(false); };
+    const saveSys = async () => {
+        setSysPreparing(true);
+        try {
+            await props.onSaveSystemPrompt(sysDraft);
+            setEditingSys(false);
+        } finally {
+            setSysPreparing(false);
+        }
+    };
 
     return (
         <div className="flex h-full min-h-0 flex-col">
@@ -145,12 +166,60 @@ export function ChatSettings(props: Props) {
                     <>
                         <section className="flex flex-col gap-2">
                             <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">System prompt</span>
-                            <Textarea
-                                value={props.systemPrompt}
-                                onChange={(e) => props.onSystemPromptChange(e.target.value)}
-                                placeholder='Optional. e.g. "You are a pirate."'
-                                className="min-h-[3rem] text-xs"
-                            />
+                            {editingSys ? (
+                                <>
+                                    <Textarea
+                                        value={sysDraft}
+                                        onChange={(e) => setSysDraft(e.target.value)}
+                                        placeholder='Optional. e.g. "You are a pirate."'
+                                        className="min-h-[4rem] text-xs"
+                                        autoFocus
+                                        disabled={sysPreparing}
+                                    />
+                                    <div className="flex items-center gap-2">
+                                        <Button
+                                            size="sm"
+                                            className="h-7 px-2 text-xs"
+                                            onClick={() => void saveSys()}
+                                            disabled={sysPreparing}
+                                        >
+                                            {sysPreparing && <Loader2 className="animate-spin" />}
+                                            {sysPreparing ? "Preparing…" : "Save"}
+                                        </Button>
+                                        <Button
+                                            size="sm"
+                                            variant="ghost"
+                                            className="h-7 px-2 text-xs"
+                                            onClick={cancelEditSys}
+                                            disabled={sysPreparing}
+                                        >
+                                            Cancel
+                                        </Button>
+                                        {sysPreparing && (
+                                            <span className="text-[11px] text-muted-foreground">
+                                                preparing model with the new prompt…
+                                            </span>
+                                        )}
+                                    </div>
+                                </>
+                            ) : (
+                                <>
+                                    <div className="min-h-[3rem] whitespace-pre-wrap break-words rounded-md border border-input bg-muted/30 px-2 py-1.5 text-xs text-foreground/90">
+                                        {props.systemPrompt.trim() || (
+                                            <span className="italic text-muted-foreground">No system prompt set.</span>
+                                        )}
+                                    </div>
+                                    <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-7 self-start px-2 text-xs"
+                                        onClick={beginEditSys}
+                                    >
+                                        <Pencil />
+                                        Edit
+                                    </Button>
+                                </>
+                            )}
                         </section>
 
                         <section className="flex flex-col gap-2 border-t border-border pt-3">

@@ -513,6 +513,13 @@ export class WorkerClient {
     kvReusePlan(ids: number[]): Promise<{ reuse: number }> {
         return this.rpc("kvReusePlan", { sid: this.session, ids });
     }
+    /** Pre-warm the KV cache with the system-prompt token block so the next
+     *  new conversation hot-starts (kvReusePlan reuses this prefix). Resets
+     *  the cache, feeds `ids`, leaves them resident. Emits `warmProgress`
+     *  notifications per token. Session-locked. */
+    warmSystem(ids: number[]): Promise<{ tokens: number }> {
+        return this.rpc("warmSystem", { sid: this.session, ids });
+    }
     encodeImage(pixels: Float32Array, h: number, w: number): Promise<Float32Array> {
         return this.rpc("encodeImage", { sid: this.session, pixels, h, w });
     }

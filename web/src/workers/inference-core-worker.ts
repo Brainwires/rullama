@@ -1112,6 +1112,29 @@ const RPC: Record<string, Handler> = {
         // caller's step() loop extends it with ids[reuse..] + generated tokens.
         return { reuse };
     },
+    // Pre-warm the KV cache with the system-prompt token block so the FIRST
+    // chat after a cold model load (or after the system prompt changes)
+    // hot-starts: kvReusePlan then reuses this resident prefix and prefills
+    // only the user's message. Resets first, feeds every id, leaves
+    // residentIds = ids. Emits `warmProgress` per token so the loader's
+    // progress bar can show a "Preparing model" phase. Session-locked.
+    warmSystem: async (a) => {
+        const m = requireModel();
+        const ids = (a.ids as number[]) ?? [];
+        m.reset();
+        kvCleared();
+        // Don't overflow the KV cache (tiny max_context on mobile + a large
+        // system block). Skip the warm; the first chat just prefills normally.
+        if (ids.length >= m.maxContext) {
+            return { tokens: 0 };
+        }
+        for (let i = 0; i < ids.length; i++) {
+            await m.step(ids[i]);
+            kvCommit(ids[i]);
+            notify("warmProgress", { done: i + 1, total: ids.length });
+        }
+        return { tokens: ids.length };
+    },
     encodeImage: async (a) => {
         const cb = (layer: number, total: number) => {
             notify("pipelineProgress", { layer, total });

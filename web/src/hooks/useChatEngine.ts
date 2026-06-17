@@ -5,7 +5,8 @@ import { type ModelStatus } from "@/components/ModelLoader";
 import { beacon } from "@/lib/api";
 import { getClient, type ConversationRow } from "@/lib/inference";
 import { useToast } from "@/lib/toast";
-import { TOOL_SCHEMA_PROMPT, toolResponseBlock } from "@/lib/toolFormat";
+import { toolResponseBlock } from "@/lib/toolFormat";
+import { buildSysContent } from "@/lib/systemPrompt";
 import { parseToolCalls } from "@/lib/parseToolCalls";
 import { CHANNEL_OPEN } from "@/lib/parseModel";
 import {
@@ -26,9 +27,9 @@ import {
 import { rlcvTokenCount } from "@/lib/convSnapshot";
 import { saveInflightImage, saveInflightAudio, readInflightImages, readInflightAudio, clearInflightMedia } from "@/lib/inflight_media";
 import {
-    THINK_TOKEN, INFLIGHT_KEY,
+    INFLIGHT_KEY,
     MIN_SNAPSHOT_TOKENS, MAX_SNAPSHOT_BYTES, LRU_MAX_SNAPSHOTS,
-    TIMESTAMP_SYSTEM_NOTE, FORMATTING_SYSTEM_NOTE, withTurnTimestamp,
+    withTurnTimestamp,
     type InflightGen, stepWithTimeout, suggestTitle,
 } from "@/lib/app-helpers";
 
@@ -740,75 +741,43 @@ export function useChatEngine(opts: UseChatEngineParams) {
         setPendingAudio([]);
         setStatusLine(undefined);
 
-        let baseSystem = systemPrompt.trim();
+        // Build the per-turn dynamic system add-ons. The static part
+        // (systemPrompt + tool schema + notes + thinking) is assembled by
+        // the shared `buildSysContent` so it stays byte-identical to the
+        // pre-warmed system block — that's what lets KV reuse keep the
+        // cached system prefix. RAG + GPS are per-turn/dynamic and are NOT
+        // part of the warm, so turns that use them diverge and re-prefill
+        // (acceptable — that content changes every turn anyway).
 
-        // **RAG injection.** If RAG is enabled for this conversation and an
-        // embedder is loaded, retrieve the top-K relevant chunks (this
-        // conversation's docs + global docs) and prepend them to the system
-        // prompt with source attribution. Best-effort: a failure here never
-        // blocks the send.
+        // **RAG injection.** Retrieve top-K relevant chunks for this query.
+        let ragPreamble = "";
         if (ragEnabled && activeConvId) {
             try {
                 const hits = await searchKnowledge(text, { k: 5, conversationId: activeConvId });
-                const preamble = buildRagPreamble(hits);
-                if (preamble) baseSystem = preamble + baseSystem;
+                ragPreamble = buildRagPreamble(hits) || "";
             } catch { /* embedder not loaded / search failed — proceed without RAG */ }
         }
 
-        // **Tool-calling schema injection.** When tool mode is on, prepend the
-        // tool schema (TOOL_SCHEMA_PROMPT, byte-identical to tool-schema.txt) so
-        // the base model emits <tool_call> blocks — parseToolCalls renders them
-        // as structured blocks (accepts both JSON and pythonic syntax). No
-        // adapter / fine-tune needed; the schema-in-prompt does the work.
-        if (toolMode) {
-            baseSystem = baseSystem ? `${TOOL_SCHEMA_PROMPT}\n\n${baseSystem}` : TOOL_SCHEMA_PROMPT;
-            // **GPS location injection.** Resolve the user's coordinates up
-            // front (cached; the browser asks permission once) and tell the
-            // model to use them when no place is named. Without this, small
-            // models INVENT a city rather than leaving the location empty, so
-            // the post-hoc "current location" detection on the tool call never
-            // fires — which is why GPS appeared to do nothing. Best-effort: a
-            // denial / timeout just proceeds without a location hint.
-            if (useGps) {
-                try {
-                    const coords = await resolveGeo();
-                    if (coords) {
-                        baseSystem =
-                            `The user's current location is approximately ${coords} ` +
-                            `(latitude,longitude). For weather or other location-aware ` +
-                            `tools, when the user does not name a specific place, use ` +
-                            `exactly "${coords}" as the location argument.\n\n${baseSystem}`;
-                    }
-                } catch { /* geolocation denied / unavailable — proceed without it */ }
-            }
+        // **GPS location injection** (tool mode only). Resolve coords up front
+        // (cached; browser asks once) so the model uses them when no place is
+        // named. Best-effort: a denial/timeout just proceeds without it.
+        let gpsLine = "";
+        if (toolMode && useGps) {
+            try {
+                const coords = await resolveGeo();
+                if (coords) {
+                    gpsLine =
+                        `The user's current location is approximately ${coords} ` +
+                        `(latitude,longitude). For weather or other location-aware ` +
+                        `tools, when the user does not name a specific place, use ` +
+                        `exactly "${coords}" as the location argument.\n\n`;
+                }
+            } catch { /* geolocation denied / unavailable — proceed without it */ }
         }
 
-        // Thinking always respects its own toggle — never silently overridden.
-        // Tool calling and thinking coexist: the schema is CONDITIONAL — it
-        // tells the model to emit a tool call only when one fits, and otherwise
-        // reason + answer normally. So a non-tool prompt still gets a normal
-        // (thinking) response; a tool prompt gets the call. No code gating.
-        //
-        // The `<|think|>` control token MUST be followed by a newline and then
-        // the system content — this is exactly how Ollama's gemma4 renderer
-        // emits it (`<|turn>system\n<|think|>\n{system}<turn|>`, see
-        // model/renderers/gemma4.go). Gluing the token directly onto a long
-        // system prompt (`<|think|>You have access to…`) is NOT the trained
-        // pattern and the model fails to enter the thinking channel — which is
-        // why thinking silently stopped once the tool schema was injected.
-        // Teach the model to read the per-turn `[date time]` prefix we add
-        // to each user turn below. Static text → stays in the cached front
-        // of the sequence (unlike the timestamps themselves, which ride on
-        // the always-re-fed user turns).
-        baseSystem = baseSystem
-            ? `${baseSystem}\n\n${TIMESTAMP_SYSTEM_NOTE}`
-            : TIMESTAMP_SYSTEM_NOTE;
-        // Keep the model from LaTeX-ifying plain values (the "2.X µg/m³" garble).
-        baseSystem = `${baseSystem}\n\n${FORMATTING_SYSTEM_NOTE}`;
-
-        const sysContent = thinking
-            ? `${THINK_TOKEN}\n${baseSystem}`
-            : baseSystem;
+        const sysContent = buildSysContent({
+            systemPrompt, thinking, toolMode, ragPreamble, gpsLine,
+        });
 
         // Two parallel histories: `displayHistory` for the chat UI (no
         // system message — it's a control signal, not user content) and
@@ -959,54 +928,41 @@ export function useChatEngine(opts: UseChatEngineParams) {
             const ids = await client.encode(rendered);
 
             // ── Cross-turn KV-cache prefix reuse ─────────────────────────────
-            // The KV cache already holds the system prompt + every prior turn
-            // of this conversation from the last send (we no longer reset
-            // between turns). Ask the core how much of this turn's full token
-            // sequence is a usable prefix of the resident cache, so we only
-            // prefill the NEW suffix instead of re-reading the whole chat from
-            // `<bos>` — the "Reading prompt N/total" phase that otherwise grows
-            // with conversation length.
+            // Reuse as much of the resident KV cache as is a prefix of this
+            // turn's token sequence, so we only prefill the NEW suffix instead
+            // of re-reading the whole chat from `<bos>`. The resident cache may
+            // be: this conversation continuing (full reuse), the pre-warmed
+            // system block (new chat → system reused, hot-start), or another
+            // conversation (LCP keeps the shared system head).
             //
-            // Media turns feed soft-token embeds the core can't track as plain
-            // ids, so they reset + full-prefill. The core also resets whenever
-            // the resident cache is NOT a strict prefix (edited history,
-            // changed system prompt, another tab drove a turn, fresh load) and
-            // returns reuse=0 — making full-prefill the safe fallback, i.e.
-            // exactly the legacy behaviour.
+            // For an existing conversation's FIRST send this session, restore
+            // its persisted snapshot FIRST so we reuse the whole conversation
+            // rather than just the warm system prefix. New conversations have
+            // no snapshot → fall through to the warm/live cache. Media turns
+            // can't be tracked (soft tokens) → reset + full prefill.
             const hasMedia = turnImages.length > 0 || turnAudio.length > 0;
             let reuse = 0;
             if (hasMedia) {
                 await client.reset();
             } else {
+                if (convId && !restoreAttemptedRef.current.has(convId)) {
+                    restoreAttemptedRef.current.add(convId);
+                    try {
+                        const snap = await readConvSnapshot(convId);
+                        if (snap && snap.meta.modelDigest === lastLoadedDigest) {
+                            await client.restoreConvKv(snap.bytes);
+                            beacon("pe", `kv snapshot restored (${snap.meta.tokenCount} tok)`);
+                        }
+                    } catch (e) {
+                        // Missing/stale/mismatched snapshot — kvReusePlan below
+                        // falls back to whatever's resident (warm system) or a
+                        // full reset. No corruption: the token check is the gate.
+                        // eslint-disable-next-line no-console
+                        console.warn("[rullama] conv KV restore skipped:", e);
+                    }
+                }
                 try {
                     reuse = (await client.kvReusePlan(Array.from(ids))).reuse;
-                    // First send into this conversation this session and the
-                    // live cache didn't match (fresh tab / page reload)? Try
-                    // to warm the KV from a persisted snapshot, then re-check
-                    // the prefix. One attempt per conversation — the live KV
-                    // takes over afterward. kvReusePlan's token check stays
-                    // the sole correctness gate; this is purely an optimization.
-                    if (reuse === 0 && convId && !restoreAttemptedRef.current.has(convId)) {
-                        restoreAttemptedRef.current.add(convId);
-                        try {
-                            const snap = await readConvSnapshot(convId);
-                            if (snap && snap.meta.modelDigest === lastLoadedDigest) {
-                                await client.restoreConvKv(snap.bytes);
-                                reuse = (await client.kvReusePlan(Array.from(ids))).reuse;
-                                if (reuse > 0) {
-                                    beacon("pe", `kv snapshot restored (${snap.meta.tokenCount} tok)`);
-                                }
-                            }
-                        } catch (e) {
-                            // Stale / corrupt / model-mismatch snapshot. A
-                            // failed restoreKvState validates before mutating,
-                            // but reset to a clean cache to be safe.
-                            await client.reset();
-                            reuse = 0;
-                            // eslint-disable-next-line no-console
-                            console.warn("[rullama] conv KV restore failed:", e);
-                        }
-                    }
                 } catch {
                     // Older core without kvReusePlan, or any failure → reset
                     // and prefill the full sequence, as before.
@@ -1614,6 +1570,50 @@ export function useChatEngine(opts: UseChatEngineParams) {
         void getClient().cancelMultimodalEncode().catch(() => { /* */ });
     }, []);
 
+    // Pre-warm the system prompt into the KV cache so the next NEW chat
+    // hot-starts (kvReusePlan reuses the resident system prefix and prefills
+    // only the user's message). Called by the model loader during its
+    // "preparing" phase (with `report` driving the progress bar) and after
+    // the system prompt is saved (no report — the editor shows its own
+    // "preparing" state). `overrides.systemPrompt` lets the save path warm
+    // with the just-entered value without waiting for the state update.
+    const warmSystemPrompt = useCallback(async (
+        report?: (percent: number, label: string) => void,
+        overrides?: { systemPrompt?: string },
+    ) => {
+        if (loadedIsDiffusion) return;   // no AR KV cache to warm
+        if (busy) return;                // don't fight an in-flight turn for the session
+        const client = getClient();
+        const sysContent = buildSysContent({
+            systemPrompt: overrides?.systemPrompt ?? systemPrompt,
+            thinking,
+            toolMode,
+        });
+        // Render JUST the system turn. The trailing `<|turn>model\n` differs
+        // from a real turn's `<|turn>user`, but LCP reuse keeps the whole
+        // system block regardless (only the 1-token opener is re-fed).
+        const rendered = await client.renderChat([{ role: "system", content: sysContent }], true);
+        const ids = await client.encode(rendered);
+        await client.acquireSession();
+        let off: (() => void) | undefined;
+        try {
+            if (report) {
+                off = client.subscribe("warmProgress", (p) => {
+                    const done = Number((p as { done?: number }).done ?? 0);
+                    const total = Number((p as { total?: number }).total ?? 0);
+                    report(total > 0 ? Math.round((done / total) * 100) : 0,
+                        `preparing model… ${done}/${total}`);
+                });
+            }
+            await client.warmSystem(Array.from(ids));
+            // A new conversation has no snapshot to restore; mark nothing —
+            // the warmed system is resident and kvReusePlan will reuse it.
+        } finally {
+            off?.();
+            try { await client.releaseSession(); } catch { /* */ }
+        }
+    }, [systemPrompt, thinking, toolMode, loadedIsDiffusion, busy]);
+
     // Clear the chat display surface — called by the model loader on
     // eject / delete-while-loaded.
     const resetForUnload = useCallback(() => {
@@ -1650,5 +1650,6 @@ export function useChatEngine(opts: UseChatEngineParams) {
         onSend,
         onStop,
         resetForUnload,
+        warmSystemPrompt,
     };
 }

@@ -27,7 +27,7 @@ function StatusIcon({ state }: { state: CacheState }) {
     return <Cloud className={`${base} text-muted-foreground`} aria-label="Available to download" />;
 }
 
-export type ModelStatus = "idle" | "loading" | "ready" | "error";
+export type ModelStatus = "idle" | "loading" | "preparing" | "ready" | "error";
 
 interface Props {
     status: ModelStatus;

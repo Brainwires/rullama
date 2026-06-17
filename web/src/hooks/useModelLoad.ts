@@ -20,6 +20,12 @@ export interface UseModelLoadParams {
     onUnloadChat: () => void;
     /** Read the chat-busy flag at call time (delete/eject no-op mid-generation). */
     isBusy: () => boolean;
+    /** Pre-warm the system prompt into the KV cache after a (non-diffusion)
+     *  model finishes loading, so the first chat hot-starts. Runs during the
+     *  "preparing" phase; `report(percent, label)` drives the progress bar /
+     *  boot splash. Best-effort — a rejection is swallowed and the model
+     *  still goes "ready". */
+    onPrepare?: (report: (percent: number, label: string) => void) => Promise<void>;
 }
 
 /**
@@ -31,7 +37,7 @@ export interface UseModelLoadParams {
  * / `pendingLoadDigest` that drive auto-resume. The cross-tab sync mutates
  * several of these (model meta broadcasts), so their setters are returned.
  */
-export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy }: UseModelLoadParams) {
+export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy, onPrepare }: UseModelLoadParams) {
     const { showToast, dismissToast } = useToast();
     const confirm = useConfirm();
 
@@ -75,6 +81,10 @@ export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy }: UseModelL
     // Set by the Stop modal's "Delete partial" choice; read in onLoad's
     // download-cancelled handler to wipe the partial after the stream aborts.
     const deleteOnCancelRef = useRef(false);
+    // Latest `onPrepare` (system pre-warm), read at call time so onLoad's
+    // identity doesn't churn and we never call a stale closure.
+    const onPrepareRef = useRef(onPrepare);
+    onPrepareRef.current = onPrepare;
 
     // **Boot-splash driver.** The static HTML splash auto-holds itself
     // when `rullama:lastLoadedDigest` is in localStorage (see index.html)
@@ -89,7 +99,7 @@ export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy }: UseModelL
             __rullamaBootRelease?: () => void;
         };
         const w = window as unknown as BootApi;
-        if (modelStatus === "loading") {
+        if (modelStatus === "loading" || modelStatus === "preparing") {
             const detail = waitInfo?.message ?? loadingLabel;
             w.__rullamaBootProgress?.(loadingPercent, detail || undefined);
         } else if (modelStatus === "ready" || modelStatus === "error") {
@@ -269,6 +279,25 @@ export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy }: UseModelL
                 setHasVision(client.hasVision);
                 setHasAudio(client.hasAudio);
                 setLoadedIsDiffusion(false);
+            }
+            // **Preparing phase.** Pre-warm the system prompt into the KV
+            // cache so the FIRST chat hot-starts instead of re-reading the
+            // system block. Shown as a distinct "preparing" step in the same
+            // progress bar / boot splash. Skipped for DiffusionGemma (no AR
+            // KV cache). Best-effort: a warm failure just means the first
+            // chat prefills the system once, as before.
+            if (!isDiffusion(m) && onPrepareRef.current) {
+                setModelStatus("preparing");
+                setLoadingPercent(0);
+                setLoadingLabel("preparing model…");
+                try {
+                    await onPrepareRef.current((percent, label) => {
+                        setLoadingPercent(percent);
+                        setLoadingLabel(label);
+                    });
+                } catch (e) {
+                    console.warn("[rullama] system pre-warm failed:", e);
+                }
             }
             setModelStatus("ready");
             setStatusText(`${m.name}${fromCache ? " ⚡" : ""}`);

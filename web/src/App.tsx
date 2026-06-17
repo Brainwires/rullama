@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ModelLoader, ModelLoadProgress } from "@/components/ModelLoader";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -138,6 +138,10 @@ export function App() {
     // refs, kept current by the effect just below.
     const busyRef = useRef(false);
     const resetChatRef = useRef<() => void>(() => {});
+    // The model loader's "preparing" phase pre-warms the system prompt, but
+    // that lives in the chat engine (created below). Reach it through a ref,
+    // kept current by the effect that maintains the other cycle-break refs.
+    const prepareRef = useRef<((report: (p: number, l: string) => void) => Promise<void>) | null>(null);
 
     // Model-load lifecycle (load / eject / delete / cancel, auto-load,
     // reload-after-engine-swap, boot splash). Owns the model status
@@ -159,6 +163,7 @@ export function App() {
         waitInfo,
         onUnloadChat: () => resetChatRef.current(),
         isBusy: () => busyRef.current,
+        onPrepare: (report) => prepareRef.current?.(report) ?? Promise.resolve(),
     });
 
     // Chat engine — conversations, messages, attachments, RAG, and the
@@ -170,7 +175,7 @@ export function App() {
         ragEnabled, toggleRag, inflightRef,
         onSelectConversation, onCreateConversation, onDeleteConversation,
         onAttachFiles, onRemoveImage, onCaptureAudio, onRemoveAudio, onAudioError,
-        onSend, onStop, resetForUnload,
+        onSend, onStop, resetForUnload, warmSystemPrompt,
     } = useChatEngine({
         modelStatus, loadedIsDiffusion, statusText, lastLoadedDigest,
         hasVision, hasAudio, systemPrompt, sampling, maxTokens, thinking,
@@ -181,7 +186,21 @@ export function App() {
     useEffect(() => {
         busyRef.current = busy;
         resetChatRef.current = resetForUnload;
+        prepareRef.current = warmSystemPrompt;
     });
+
+    // Save a new system prompt, then re-warm the KV cache with it so the
+    // next new chat hot-starts (and the current conversation's next turn
+    // reuses the new system block). The editor awaits this to show its
+    // "preparing…" state. Best-effort warm — a failure just means the
+    // first chat prefills the new system once.
+    const onSaveSystemPrompt = useCallback(async (value: string) => {
+        setSystemPrompt(value);
+        if (modelStatus === "ready") {
+            try { await warmSystemPrompt(undefined, { systemPrompt: value }); }
+            catch { /* non-fatal */ }
+        }
+    }, [setSystemPrompt, warmSystemPrompt, modelStatus]);
 
     // Page/session lifecycle: env probe, crash-detect, pagehide marker.
     useSessionLifecycle(setView);
@@ -203,7 +222,7 @@ export function App() {
     // user actually waits on — model download/load and token generation.
     // No-op on platforms without `navigator.wakeLock` (older iOS, private
     // mode). See `lib/wakeLock.ts` for the iOS hide-release dance.
-    useWakeLock(modelStatus === "loading" || busy);
+    useWakeLock(modelStatus === "loading" || modelStatus === "preparing" || busy);
 
     // **D1 — restore active adapter on reload.** The adapter bytes
     // survive in OPFS but the "this one is loaded into Model" state
@@ -315,7 +334,7 @@ export function App() {
                 onToggleRag={toggleRag}
             />
 
-            {modelStatus === "loading" && (
+            {(modelStatus === "loading" || modelStatus === "preparing") && (
                 <ModelLoadProgress percent={loadingPercent} label={waitInfo?.message ?? loadingLabel} />
             )}
 
@@ -380,7 +399,7 @@ export function App() {
                                 : "Fine-tuning unavailable on this device"
                             }
                             systemPrompt={systemPrompt}
-                            onSystemPromptChange={setSystemPrompt}
+                            onSaveSystemPrompt={onSaveSystemPrompt}
                             sampling={sampling}
                             onSamplingChange={setSampling}
                             maxTokens={maxTokens}
