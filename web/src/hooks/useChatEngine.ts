@@ -1452,7 +1452,14 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 // so order is preserved for result→call matching.
                 const results = await Promise.all(
                     execCalls.map((c) =>
-                        executeTool(c.name, c.arguments, { weatherApiKey, units: weatherUnits, useGps }, geo)),
+                        executeTool(c.name, c.arguments, {
+                            weatherApiKey,
+                            newsApiKey: "", // get_news deferred (needs settings/queue threading)
+                            units: weatherUnits,
+                            useGps,
+                            geo,
+                            conversationId: convId ?? null,
+                        })),
                 );
 
                 // One named <tool_response for="..."> block per call, in

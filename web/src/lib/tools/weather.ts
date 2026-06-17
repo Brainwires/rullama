@@ -17,6 +17,8 @@
 // (sunrise/sunset/moon). The registry (lib/tools/index.ts) maps each tool
 // name onto one of these `WeatherKind`s.
 
+import type { ToolDef, ToolContext } from "@/lib/tools/types";
+
 export type Units = "metric" | "imperial";
 export type WeatherKind = "current" | "forecast" | "air_quality" | "astronomy";
 
@@ -389,3 +391,46 @@ export async function executeWeather(
         return { ok: false, summary: `Weather lookup failed: ${(e as Error).message}` };
     }
 }
+
+// ─── ToolDef (registered in lib/tools/index.ts) ──────────────────────────
+
+// Tool name → weather product. Aliases included because small models emit
+// either the schema name or a shorter/MCP-style variant.
+const WEATHER_KINDS: Record<string, WeatherKind> = {
+    get_weather: "current",
+    get_current_weather: "current",
+    weather: "current",
+    current_weather: "current",
+    get_weather_forecast: "forecast",
+    get_forecast: "forecast",
+    forecast: "forecast",
+    get_air_quality: "air_quality",
+    air_quality: "air_quality",
+    get_aqi: "air_quality",
+    get_astronomy: "astronomy",
+    astronomy: "astronomy",
+    get_sun_times: "astronomy",
+};
+
+export const weatherTool: ToolDef = {
+    names: Object.keys(WEATHER_KINDS),
+    usesLocation: true,
+    run(name: string, args: Record<string, unknown>, ctx: ToolContext) {
+        const kind = WEATHER_KINDS[name.trim().toLowerCase()] ?? "current";
+        const daysRaw = args.days;
+        const days = typeof daysRaw === "number"
+            ? daysRaw
+            : typeof daysRaw === "string" && daysRaw.trim() !== "" && !Number.isNaN(Number(daysRaw))
+                ? Number(daysRaw)
+                : undefined;
+        return executeWeather(
+            kind,
+            {
+                location: typeof args.location === "string" ? args.location : undefined,
+                units: args.units === "imperial" || args.units === "metric" ? args.units : undefined,
+                days,
+            },
+            { apiKey: ctx.weatherApiKey.trim(), units: ctx.units, geo: ctx.geo },
+        );
+    },
+};

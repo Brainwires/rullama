@@ -1,75 +1,67 @@
 // Tool registry — the bridge between a model-emitted <tool_call> and code that
-// actually does something. Today: weather (WeatherAPI.com / Open-Meteo) across
-// four products — current, forecast, air quality, astronomy. The renderer
-// (parseToolCalls + ToolCallBlock) stays visual-only; THIS is where a call gets
-// executed and its result fed back to the model for a final answer.
+// actually does something. Generalized over `ToolDef`s (see ./types): each tool
+// declares its names + a run(); this module builds a name→def map and exposes
+// the three hooks useChatEngine's agentic loop needs. The same registry will
+// back the future tool-orchestrator (it registers these same defs as Rhai
+// functions). The renderer (parseToolCalls + ToolCallBlock) stays visual-only.
 
-import {
-    executeWeather,
-    defaultUnitsFromLocale,
-    type Units,
-    type WeatherKind,
-    type WeatherCtx,
-} from "@/lib/tools/weather";
+import { weatherTool, defaultUnitsFromLocale } from "@/lib/tools/weather";
+import { wikipediaTool } from "@/lib/tools/wikipedia";
+import { timerTool, reminderTool } from "@/lib/tools/reminders";
+import { knowledgeTool } from "@/lib/tools/knowledge";
+import type { ToolDef, ToolContext, ToolRunResult, Units } from "@/lib/tools/types";
 
-export type { Units };
+export type { ToolDef, ToolContext, ToolRunResult, Units };
 export { defaultUnitsFromLocale };
 
-/** Per-turn settings the executor needs, sourced from the Tools settings tab. */
-export interface ToolSettings {
-    weatherApiKey: string;
-    units: Units;
-    useGps: boolean;
-}
+// Every executable tool. Add a ToolDef here to register it.
+// (newsTool exists in ./news but is deferred — needs the newsApiKey setting +
+// queue threading + GNews CORS verification.)
+const TOOLS: ToolDef[] = [
+    weatherTool,
+    wikipediaTool,
+    timerTool,
+    reminderTool,
+    knowledgeTool,
+];
 
-/** A normalized tool outcome. `summary` is what we feed back to the model. */
-export interface ToolRunResult {
-    ok: boolean;
-    summary: string;
-    data?: Record<string, unknown>;
-}
+const BY_NAME = new Map<string, ToolDef>();
+for (const t of TOOLS) for (const n of t.names) BY_NAME.set(n.toLowerCase(), t);
 
-// Tool name → weather product. Aliases included because small models emit
-// either the schema name (`get_weather_forecast`) or a shorter/MCP-style
-// variant (`forecast`, `get_current_weather`).
-const WEATHER_KINDS: Record<string, WeatherKind> = {
-    // current conditions
-    get_weather: "current",
-    get_current_weather: "current",
-    weather: "current",
-    current_weather: "current",
-    // multi-day forecast
-    get_weather_forecast: "forecast",
-    get_forecast: "forecast",
-    forecast: "forecast",
-    // air quality
-    get_air_quality: "air_quality",
-    air_quality: "air_quality",
-    get_aqi: "air_quality",
-    // astronomy (sunrise/sunset/moon)
-    get_astronomy: "astronomy",
-    astronomy: "astronomy",
-    get_sun_times: "astronomy",
-};
-
-function weatherKind(name: string): WeatherKind | undefined {
-    return WEATHER_KINDS[name.trim().toLowerCase()];
+function toolFor(name: string): ToolDef | undefined {
+    return BY_NAME.get(name.trim().toLowerCase());
 }
 
 /** Is there an executor wired up for this tool name? */
 export function isExecutableTool(name: string): boolean {
-    return weatherKind(name) !== undefined;
+    return toolFor(name) !== undefined;
 }
 
 /** Does this tool consult GPS (so we should resolve coords before running)? */
 export function toolUsesLocation(name: string): boolean {
-    return weatherKind(name) !== undefined;
+    return toolFor(name)?.usesLocation ?? false;
+}
+
+/** Execute a tool call and return a model-friendly result. */
+export async function executeTool(
+    name: string,
+    args: Record<string, unknown>,
+    ctx: ToolContext,
+): Promise<ToolRunResult> {
+    const t = toolFor(name);
+    if (!t) {
+        return {
+            ok: false,
+            summary: `No executor is wired up for "${name}". Answer the user directly instead.`,
+        };
+    }
+    return t.run(name, args, ctx);
 }
 
 /**
  * One-shot browser geolocation, with a short-lived in-memory cache so we don't
- * re-prompt the user on every weather call. Resolves to "lat,lon" or null
- * (no API, denied, or timed out — the caller falls back to asking the user).
+ * re-prompt the user on every location-aware call. Resolves to "lat,lon" or
+ * null (no API, denied, or timed out — the caller falls back to asking).
  */
 let geoCache: { coords: string; at: number } | null = null;
 const GEO_TTL_MS = 5 * 60_000;
@@ -88,42 +80,4 @@ export async function resolveGeo(timeoutMs = 8000): Promise<string | null> {
             { enableHighAccuracy: false, timeout: timeoutMs, maximumAge: GEO_TTL_MS },
         );
     });
-}
-
-/**
- * Execute a tool call and return a model-friendly result. `geo` is the
- * already-resolved "lat,lon" (or null) — the caller resolves it on the user's
- * send gesture so the permission prompt happens in a user-activation context.
- */
-export async function executeTool(
-    name: string,
-    args: Record<string, unknown>,
-    settings: ToolSettings,
-    geo: string | null,
-): Promise<ToolRunResult> {
-    const kind = weatherKind(name);
-    if (kind) {
-        const ctx: WeatherCtx = {
-            apiKey: settings.weatherApiKey.trim(),
-            units: settings.units,
-            geo,
-        };
-        const daysRaw = args.days;
-        const days = typeof daysRaw === "number" ? daysRaw
-            : typeof daysRaw === "string" && daysRaw.trim() !== "" && !Number.isNaN(Number(daysRaw))
-                ? Number(daysRaw) : undefined;
-        return executeWeather(
-            kind,
-            {
-                location: typeof args.location === "string" ? args.location : undefined,
-                units: args.units === "imperial" || args.units === "metric" ? args.units : undefined,
-                days,
-            },
-            ctx,
-        );
-    }
-    return {
-        ok: false,
-        summary: `No executor is wired up for "${name}". Answer the user directly instead.`,
-    };
 }
