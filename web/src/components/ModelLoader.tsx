@@ -13,7 +13,7 @@ import {
     AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
     AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { AlertTriangle, Clock, Cloud, Download, HardDrive, Square, Trash2, Unplug } from "lucide-react";
+import { AlertTriangle, Clock, Cloud, Download, HardDrive, Loader2, Square, Trash2, Unplug } from "lucide-react";
 
 /** Download state of a catalog model, shown as an icon in the picker. */
 type CacheState = "cached" | "downloading" | "available";
@@ -276,6 +276,80 @@ export function ModelLoader(props: Props) {
                     {props.status === "error" && <Badge tone="err">error</Badge>}
                     {error && <span className="text-xs text-destructive">{error}</span>}
                 </div>
+            )}
+        </div>
+    );
+}
+
+/** Active-load view: replaces the model picker while a model is
+ *  downloading/loading ("loading") or pre-warming the system prompt
+ *  ("preparing"). Shows a spinner + progress bar + label, and a Stop
+ *  control during the download phase. */
+export function LoadingModel(props: {
+    status: ModelStatus;            // "loading" | "preparing"
+    percent: number;
+    label: string;
+    modelName?: string;
+    /** Stop the download, keep the partial in OPFS (download phase only). */
+    onCancel?: () => void;
+    /** Stop the download AND delete the partial (download phase only). */
+    onCancelDelete?: () => void;
+}) {
+    const isPreparing = props.status === "preparing";
+    const pct = Math.max(0, Math.min(100, props.percent));
+    const name = props.modelName?.trim();
+    const heading = isPreparing
+        ? `Preparing ${name ?? "model"}…`
+        : `Loading ${name ?? "model"}…`;
+    return (
+        <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-2">
+                <Loader2 className="size-4 shrink-0 animate-spin text-primary" />
+                <span className="truncate text-sm font-medium" title={heading}>{heading}</span>
+            </div>
+            <Progress value={pct} />
+            <p className="font-mono tabular-nums text-[0.7rem] text-muted-foreground">
+                {props.label || (isPreparing ? "preparing…" : "starting…")}
+            </p>
+            {/* Stop is meaningful only during the download/load phase; the
+                short prepare prefill has nothing to cancel. */}
+            {!isPreparing && props.onCancel && (
+                <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                        <Button
+                            variant="destructive"
+                            size="sm"
+                            className="h-7 w-fit px-2 text-xs"
+                            title="Stop the download"
+                        >
+                            <Square />
+                            Stop
+                        </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                        <AlertDialogHeader>
+                            <AlertDialogTitle>Stop download?</AlertDialogTitle>
+                            <AlertDialogDescription>
+                                Keep the partial in this browser's storage to resume
+                                later, or delete it to free the space now.
+                            </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                            <AlertDialogCancel>Continue downloading</AlertDialogCancel>
+                            {props.onCancelDelete && (
+                                <AlertDialogAction
+                                    onClick={() => props.onCancelDelete?.()}
+                                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                >
+                                    Delete partial
+                                </AlertDialogAction>
+                            )}
+                            <AlertDialogAction onClick={() => props.onCancel?.()}>
+                                Keep partial
+                            </AlertDialogAction>
+                        </AlertDialogFooter>
+                    </AlertDialogContent>
+                </AlertDialog>
             )}
         </div>
     );

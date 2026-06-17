@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ModelLoader, ModelLoadProgress } from "@/components/ModelLoader";
+import { ModelLoader, ModelLoadProgress, LoadingModel } from "@/components/ModelLoader";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChatPanel } from "@/components/ChatPanel";
@@ -480,7 +480,35 @@ export function App() {
                 <ChatPanel
                     messages={messages}
                     emptyState={
-                        modelStatus !== "ready" ? (
+                        modelStatus === "ready" ? (
+                            <WelcomeScreen
+                                modelName={statusText}
+                                onSuggest={(p) => setPrompt(p)}
+                            />
+                        ) : (modelStatus === "loading" || modelStatus === "preparing") ? (
+                            <div className="mx-auto mt-6 w-full max-w-md">
+                                <Card>
+                                    <CardHeader>
+                                        <CardTitle>Loading model</CardTitle>
+                                        <CardDescription>
+                                            Setting up the model in your browser — this runs
+                                            entirely on-device. The first load caches to local
+                                            OPFS storage so future visits are instant.
+                                        </CardDescription>
+                                    </CardHeader>
+                                    <CardContent>
+                                        <LoadingModel
+                                            status={modelStatus}
+                                            percent={loadingPercent}
+                                            label={waitInfo?.message ?? loadingLabel}
+                                            modelName={selectedModelName || statusText}
+                                            onCancel={onCancelDownload}
+                                            onCancelDelete={onCancelAndDeleteDownload}
+                                        />
+                                    </CardContent>
+                                </Card>
+                            </div>
+                        ) : (
                             <div className="mx-auto mt-6 w-full max-w-md">
                                 <Card>
                                     <CardHeader>
@@ -509,11 +537,6 @@ export function App() {
                                     </CardContent>
                                 </Card>
                             </div>
-                        ) : (
-                            <WelcomeScreen
-                                modelName={statusText}
-                                onSuggest={(p) => setPrompt(p)}
-                            />
                         )
                     }
                     canType={modelStatus === "ready" && !trainingInProgress}

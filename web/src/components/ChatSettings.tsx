@@ -7,7 +7,7 @@ import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
 import { type Units } from "@/lib/tools";
 import { SETTINGS_BOUNDS } from "@/components/SettingsDialog";
-import { ModelLoader, type ModelStatus } from "@/components/ModelLoader";
+import { ModelLoader, LoadingModel, type ModelStatus } from "@/components/ModelLoader";
 import { SpeechInputSettings } from "@/components/SpeechInputSettings";
 import { type ModelEntry } from "@/lib/api";
 import { type SamplingOptions } from "@/lib/types";
@@ -132,26 +132,42 @@ export function ChatSettings(props: Props) {
                 {tab === "model" && (
                     <section className="flex flex-col gap-2">
                         <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">Model</span>
-                        <ModelLoader
-                            status={props.modelStatus}
-                            loadingPercent={props.loadingPercent}
-                            loadingLabel={props.loadingLabel}
-                            statusText={props.statusText}
-                            onLoad={props.onLoadModel}
-                            onDelete={props.onDeleteModel}
-                            onEject={props.onEjectModel}
-                            selected={props.selectedModelName}
-                            onSelect={props.onSelectModel}
-                            preferredDigest={props.preferredDigest}
-                            onCancel={props.onCancelDownload}
-                            onCancelDelete={props.onCancelAndDeleteDownload}
-                        />
+                        {/* While a model is loading/preparing, swap the picker for
+                            the loading view (Stop stays available) so its controls
+                            can't be touched mid-load. */}
+                        {(props.modelStatus === "loading" || props.modelStatus === "preparing") ? (
+                            <LoadingModel
+                                status={props.modelStatus}
+                                percent={props.loadingPercent}
+                                label={props.loadingLabel}
+                                modelName={props.selectedModelName || props.statusText}
+                                onCancel={props.onCancelDownload}
+                                onCancelDelete={props.onCancelAndDeleteDownload}
+                            />
+                        ) : (
+                            <ModelLoader
+                                status={props.modelStatus}
+                                loadingPercent={props.loadingPercent}
+                                loadingLabel={props.loadingLabel}
+                                statusText={props.statusText}
+                                onLoad={props.onLoadModel}
+                                onDelete={props.onDeleteModel}
+                                onEject={props.onEjectModel}
+                                selected={props.selectedModelName}
+                                onSelect={props.onSelectModel}
+                                preferredDigest={props.preferredDigest}
+                                onCancel={props.onCancelDownload}
+                                onCancelDelete={props.onCancelAndDeleteDownload}
+                            />
+                        )}
                         <Button
                             variant="outline"
                             size="sm"
                             className="h-8 justify-start gap-2 text-xs"
                             onClick={props.onOpenFineTune}
-                            disabled={!props.canFineTune}
+                            disabled={!props.canFineTune
+                                || props.modelStatus === "loading"
+                                || props.modelStatus === "preparing"}
                             title={props.canFineTune
                                 ? "Fine-tune (LoRA) the loaded model on your own data"
                                 : props.fineTuneReason}
