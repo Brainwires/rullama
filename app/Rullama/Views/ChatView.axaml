@@ -2,6 +2,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:Rullama.ViewModels"
              xmlns:c="using:Rullama.Controls"
+             xmlns:md="https://github.com/whistyun/Markdown.Avalonia"
              x:Class="Rullama.Views.ChatView"
              x:DataType="vm:ChatViewModel"
              Background="{StaticResource Background}">
@@ -100,8 +101,13 @@
                 <Border Classes="bubble" Classes.user="{Binding IsUser}">
                   <StackPanel Spacing="4">
                     <TextBlock Classes="label" Text="{Binding RoleLabel}" />
+                    <!-- user turns: plain text -->
                     <TextBlock Text="{Binding Content}" TextWrapping="Wrap"
+                               IsVisible="{Binding IsUser}"
                                Foreground="{StaticResource Foreground}" FontSize="14" />
+                    <!-- model turns: markdown -->
+                    <md:MarkdownScrollViewer Markdown="{Binding Content}"
+                                             IsVisible="{Binding !IsUser}" />
                   </StackPanel>
                 </Border>
               </DataTemplate>
