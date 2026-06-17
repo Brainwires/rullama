@@ -36,3 +36,6 @@ Cargo.lock.bak
 
 # PM2-managed devserver log files
 /ops/pm2/*.log
+
+# Local model weight downloads (Z-Image-Turbo etc.) — never commit
+weights/
