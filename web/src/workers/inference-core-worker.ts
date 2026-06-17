@@ -65,6 +65,10 @@ interface ModelHandle {
     tokenStr(id: number): string | null | undefined;
     isEos(id: number): boolean;
     reset(): void;
+    /** Truncate the KV cache to its first `n` positions (keep [0, n),
+     *  rewind so the next step appends at n). Powers longest-common-prefix
+     *  reuse; clears sampler history (the tail is a fresh context). */
+    truncateKv(n: number): void;
     setSampling(opts: unknown): void;
     renderChat(messages: unknown, withBos: boolean): string;
     imageSoftTokenCount(h: number, w: number): number;
@@ -1077,22 +1081,35 @@ const RPC: Record<string, Handler> = {
         const ids = (a.ids as number[]) ?? [];
         const res = residentIds;
         let reuse = 0;
-        if (res !== null && res.length > 0 && res.length <= ids.length
-            && m.position === res.length) {
-            // Strict-prefix check against the new render.
-            let prefix = true;
-            for (let i = 0; i < res.length; i++) {
-                if (res[i] !== ids[i]) { prefix = false; break; }
+        if (res !== null && res.length > 0 && m.position === res.length) {
+            // Longest common prefix between the resident cache and the new
+            // render. Unlike a strict-prefix check, this also fires across
+            // DIVERGENT sequences — most importantly, a brand-new chat whose
+            // shared head is the system prompt. We keep [0, p) and re-prefill
+            // only the tail.
+            const maxP = Math.min(res.length, ids.length);
+            let p = 0;
+            while (p < maxP && res[p] === ids[p]) p++;
+            if (p === res.length) {
+                // Resident is a full prefix (same conversation continuing) —
+                // keep everything, no truncation, sampler history preserved.
+                reuse = p;
+            } else if (p > 0) {
+                // Divergence at p (new chat / edited history / chat switch):
+                // drop the resident tail, keep the shared head. truncateKv
+                // also clears sampler history — the tail past p is a fresh
+                // sampling context, matching reset() for a from-scratch turn.
+                m.truncateKv(p);
+                residentIds = res.slice(0, p);
+                reuse = p;
             }
-            if (prefix) reuse = res.length;
         }
         if (reuse === 0) {
             m.reset();       // also clears sampler history (matches legacy)
             kvCleared();
         }
-        // On reuse > 0 the resident sequence already equals ids[0..reuse];
-        // the caller's step() loop will extend it with ids[reuse..] + the
-        // generated tokens.
+        // On reuse > 0 the resident sequence now equals ids[0..reuse]; the
+        // caller's step() loop extends it with ids[reuse..] + generated tokens.
         return { reuse };
     },
     encodeImage: async (a) => {
