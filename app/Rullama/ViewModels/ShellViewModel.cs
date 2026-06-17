@@ -1,5 +1,6 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Rullama.Services;
 
 namespace Rullama.ViewModels;
 
@@ -9,8 +10,10 @@ namespace Rullama.ViewModels;
 /// </summary>
 public partial class ShellViewModel : ViewModelBase
 {
+    private readonly TtsService _tts = new();
+
     public ChatViewModel Chat { get; } = new();
-    public VoiceViewModel Voice { get; } = new();
+    public VoiceViewModel Voice { get; }
     public SettingsViewModel Settings { get; } = new();
 
     [ObservableProperty]
@@ -27,6 +30,7 @@ public partial class ShellViewModel : ViewModelBase
 
     public ShellViewModel()
     {
+        Voice = new VoiceViewModel(_tts);
         _current = Chat;
     }
 
