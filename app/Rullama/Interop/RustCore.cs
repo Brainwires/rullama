@@ -164,6 +164,30 @@ internal static class RustCore
     [DllImport(Lib, EntryPoint = "rl_tts_sample_rate")]
     internal static extern uint rl_tts_sample_rate(IntPtr t);
 
+    // ---- voice cloning (StyleTTS2; separate handle) ----
+    [DllImport(Lib, EntryPoint = "rl_clone_create")]
+    internal static extern IntPtr rl_clone_create();
+
+    [DllImport(Lib, EntryPoint = "rl_clone_free")]
+    internal static extern void rl_clone_free(IntPtr t);
+
+    [DllImport(Lib, EntryPoint = "rl_clone_load_path")]
+    internal static extern int rl_clone_load_path(IntPtr t, [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+
+    [DllImport(Lib, EntryPoint = "rl_clone_set_lexicon")]
+    internal static extern int rl_clone_set_lexicon(
+        IntPtr t, [MarshalAs(UnmanagedType.LPUTF8Str)] string goldPath, [MarshalAs(UnmanagedType.LPUTF8Str)] string silverPath);
+
+    [DllImport(Lib, EntryPoint = "rl_clone_encode_voice")]
+    internal static extern int rl_clone_encode_voice(IntPtr t, float[] pcm, UIntPtr n, out IntPtr outPtr, out UIntPtr outLen);
+
+    [DllImport(Lib, EntryPoint = "rl_clone_synthesize")]
+    internal static extern int rl_clone_synthesize(
+        IntPtr t, [MarshalAs(UnmanagedType.LPUTF8Str)] string text, float[] voice, UIntPtr voiceLen, out IntPtr outPtr, out UIntPtr outLen);
+
+    [DllImport(Lib, EntryPoint = "rl_clone_sample_rate")]
+    internal static extern uint rl_clone_sample_rate(IntPtr t);
+
     // ---- embeddings (EmbeddingGemma; separate handle) ----
     [DllImport(Lib, EntryPoint = "rl_embed_create")]
     internal static extern IntPtr rl_embed_create();

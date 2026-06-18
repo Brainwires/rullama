@@ -33,6 +33,7 @@ use rullama::backend::WgpuCtx;
 use rullama::embed::EmbeddingModel;
 use rullama::gguf::{FileFetcher, TensorFetcher};
 use rullama::sampling::SamplingOptions;
+use rullama::styletts2_clone::StyleTtsClone;
 use rullama::tts::KokoroTts;
 use rullama_finetune::session::TrainingSession;
 use rullama_finetune::shared::config::{LoraConfig, LrScheduler, TrainingHyperparams};
@@ -1123,6 +1124,150 @@ pub unsafe extern "C" fn rl_tts_synthesize(t: *mut RlTts, text: *const c_char, v
 /// `t` may be NULL.
 #[unsafe(no_mangle)]
 pub extern "C" fn rl_tts_sample_rate(_t: *mut RlTts) -> u32 {
+    TTS_SAMPLE_RATE
+}
+
+// ---------------------------------------------------------------------------
+// Voice cloning (StyleTTS2) — a SEPARATE model handle with its own thread.
+// ---------------------------------------------------------------------------
+
+enum CloneCommand {
+    Load { bytes: Vec<u8>, reply: Sender<Result<(), String>> },
+    SetLexicon { gold: Vec<u8>, silver: Vec<u8>, reply: Sender<()> },
+    EncodeVoice { pcm: Vec<f32>, reply: Sender<Result<Vec<f32>, String>> },
+    Synthesize { text: String, voice: Vec<f32>, reply: Sender<Result<Vec<f32>, String>> },
+    Shutdown,
+}
+
+fn clone_worker(rx: mpsc::Receiver<CloneCommand>) {
+    let mut clone: Option<StyleTtsClone> = None;
+    for cmd in rx {
+        match cmd {
+            CloneCommand::Load { bytes, reply } => {
+                let r = pollster::block_on(StyleTtsClone::load_native(bytes)).map_err(|e| format!("{e}"));
+                match r {
+                    Ok(c) => { clone = Some(c); let _ = reply.send(Ok(())); }
+                    Err(e) => { let _ = reply.send(Err(e)); }
+                }
+            }
+            CloneCommand::SetLexicon { gold, silver, reply } => {
+                if let Some(c) = clone.as_mut() { c.set_lexicon_native(&gold, &silver); }
+                let _ = reply.send(());
+            }
+            CloneCommand::EncodeVoice { pcm, reply } => {
+                let r = match clone.as_mut() {
+                    Some(c) => Ok(pollster::block_on(c.encode_voice_native(&pcm, None))),
+                    None => Err("clone model not loaded".into()),
+                };
+                let _ = reply.send(r);
+            }
+            CloneCommand::Synthesize { text, voice, reply } => {
+                let r = match clone.as_mut() {
+                    Some(c) => Ok(pollster::block_on(c.synthesize_native(&text, &voice, None))),
+                    None => Err("clone model not loaded".into()),
+                };
+                let _ = reply.send(r);
+            }
+            CloneCommand::Shutdown => break,
+        }
+    }
+}
+
+/// Opaque voice-clone handle (StyleTTS2).
+pub struct RlClone {
+    tx: Sender<CloneCommand>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rl_clone_create() -> *mut RlClone {
+    let (tx, rx) = mpsc::channel();
+    match std::thread::Builder::new().name("rullama-clone".into()).spawn(move || clone_worker(rx)) {
+        Ok(handle) => Box::into_raw(Box::new(RlClone { tx, handle: Some(handle) })),
+        Err(e) => { set_last_error(format!("failed to spawn clone thread: {e}")); std::ptr::null_mut() }
+    }
+}
+
+/// # Safety
+/// `t` must be NULL or a handle from `rl_clone_create`, unused afterward.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_clone_free(t: *mut RlClone) {
+    if t.is_null() { return; }
+    let mut b = unsafe { Box::from_raw(t) };
+    let _ = b.tx.send(CloneCommand::Shutdown);
+    if let Some(h) = b.handle.take() { let _ = h.join(); }
+}
+
+fn clone_call<T>(t: *mut RlClone, make: impl FnOnce(Sender<T>) -> CloneCommand) -> Result<T, i32> {
+    let Some(c) = (unsafe { t.as_ref() }) else { set_last_error("null clone handle"); return Err(-1); };
+    let (tx, rx) = mpsc::channel();
+    if c.tx.send(make(tx)).is_err() { set_last_error("clone worker gone"); return Err(-2); }
+    rx.recv().map_err(|_| { set_last_error("clone dropped reply"); -3 })
+}
+
+/// Load the StyleTTS2 GGUF from a path.
+/// # Safety
+/// `t` valid; `path` a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_clone_load_path(t: *mut RlClone, path: *const c_char) -> i32 {
+    let path = match unsafe { c_str(path) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+    let bytes = match std::fs::read(&path) { Ok(b) => b, Err(e) => { set_last_error(format!("read {path}: {e}")); return -6; } };
+    match clone_call(t, |reply| CloneCommand::Load { bytes, reply }) {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => { set_last_error(e); -6 }
+        Err(c) => c,
+    }
+}
+
+/// Set the G2P lexicon from gold + silver JSON file paths.
+/// # Safety
+/// `t` valid; paths valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_clone_set_lexicon(t: *mut RlClone, gold_path: *const c_char, silver_path: *const c_char) -> i32 {
+    let gp = match unsafe { c_str(gold_path) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+    let sp = match unsafe { c_str(silver_path) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+    let gold = std::fs::read(&gp).unwrap_or_default();
+    let silver = std::fs::read(&sp).unwrap_or_default();
+    match clone_call(t, |reply| CloneCommand::SetLexicon { gold, silver, reply }) {
+        Ok(()) => 0,
+        Err(c) => c,
+    }
+}
+
+/// Encode a 24 kHz mono reference clip → a speaker-voice vector (free with `rl_free_f32`).
+/// # Safety
+/// `t` valid; `pcm`/`n` a valid array; `out`/`out_len` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_clone_encode_voice(t: *mut RlClone, pcm: *const f32, n: usize, out: *mut *mut f32, out_len: *mut usize) -> i32 {
+    if out.is_null() || out_len.is_null() { set_last_error("null out"); return -2; }
+    let pcm = if pcm.is_null() || n == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(pcm, n) }.to_vec() };
+    match clone_call(t, |reply| CloneCommand::EncodeVoice { pcm, reply }) {
+        Ok(Ok(v)) => { put_f32(v, out, out_len); 0 }
+        Ok(Err(e)) => { set_last_error(e); -6 }
+        Err(c) => c,
+    }
+}
+
+/// Synthesize text with a cloned voice vector → 24 kHz PCM (free with `rl_free_f32`).
+/// # Safety
+/// `t` valid; `text` a valid C string; `voice`/`voice_len` a valid array; `out`/`out_len` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_clone_synthesize(t: *mut RlClone, text: *const c_char, voice: *const f32, voice_len: usize, out: *mut *mut f32, out_len: *mut usize) -> i32 {
+    if out.is_null() || out_len.is_null() { set_last_error("null out"); return -2; }
+    let text = match unsafe { c_str(text) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+    let voice = if voice.is_null() || voice_len == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(voice, voice_len) }.to_vec() };
+    match clone_call(t, |reply| CloneCommand::Synthesize { text, voice, reply }) {
+        Ok(Ok(pcm)) => { put_f32(pcm, out, out_len); 0 }
+        Ok(Err(e)) => { set_last_error(e); -6 }
+        Err(c) => c,
+    }
+}
+
+/// Clone TTS PCM sample rate (Hz).
+/// # Safety
+/// `t` may be NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn rl_clone_sample_rate(_t: *mut RlClone) -> u32 {
     TTS_SAMPLE_RATE
 }
 

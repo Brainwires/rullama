@@ -80,4 +80,70 @@ public partial class VoiceViewModel : ViewModelBase
         _cts?.Cancel();
         _tts.Stop();
     }
+
+    // ---- voice cloning (StyleTTS2) ----
+    private readonly CloneService _clone = new();
+    private byte[]? _referenceWav;
+
+    public bool CloneAvailable => CloneService.Available;
+
+    [ObservableProperty] private string? _referenceLabel;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(CloneSpeakCommand))]
+    private string _cloneText = "This is my cloned voice, generated on device.";
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(CreateVoiceCommand))]
+    [NotifyCanExecuteChangedFor(nameof(CloneSpeakCommand))]
+    private bool _isCloning;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(CloneSpeakCommand))]
+    private bool _hasClonedVoice;
+
+    [ObservableProperty] private string _cloneStatus = "Upload a reference WAV, create a voice, then speak.";
+
+    /// <summary>Stage a reference WAV (called by the view).</summary>
+    public void SetReference(byte[] wav, string name)
+    {
+        _referenceWav = wav;
+        ReferenceLabel = name;
+        HasClonedVoice = false;
+        CloneStatus = "Reference loaded — click Create voice.";
+    }
+
+    [RelayCommand(CanExecute = nameof(CanCreateVoice))]
+    private async Task CreateVoiceAsync()
+    {
+        if (_referenceWav is null) { CloneStatus = "Upload a reference WAV first."; return; }
+        IsCloning = true;
+        CloneStatus = "Encoding voice from reference…";
+        try
+        {
+            await _clone.CreateVoiceAsync(_referenceWav, CancellationToken.None);
+            HasClonedVoice = true;
+            CloneStatus = "Voice ready — type text and Speak.";
+        }
+        catch (Exception e) { CloneStatus = "Failed: " + e.Message; }
+        finally { IsCloning = false; }
+    }
+
+    private bool CanCreateVoice => !IsCloning;
+
+    private bool CanCloneSpeak => HasClonedVoice && !IsCloning && !string.IsNullOrWhiteSpace(CloneText);
+
+    [RelayCommand(CanExecute = nameof(CanCloneSpeak))]
+    private async Task CloneSpeakAsync()
+    {
+        IsCloning = true;
+        CloneStatus = "Synthesizing in cloned voice…";
+        try
+        {
+            await _clone.SpeakAsync(CloneText.Trim(), CancellationToken.None);
+            CloneStatus = "Done.";
+        }
+        catch (Exception e) { CloneStatus = "Failed: " + e.Message; }
+        finally { IsCloning = false; }
+    }
 }

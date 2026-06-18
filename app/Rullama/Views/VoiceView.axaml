@@ -32,6 +32,22 @@
       </StackPanel>
 
       <TextBlock Classes="muted" Text="{Binding Status}" TextWrapping="Wrap" />
+
+      <!-- Voice cloning (StyleTTS2) -->
+      <TextBlock Classes="label" Text="VOICE CLONING" Margin="0,12,0,0" />
+      <TextBlock Classes="muted" FontSize="11" TextWrapping="Wrap"
+                 Text="Clone a voice from a short 24 kHz WAV reference, then speak any text in it." />
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <Button Classes="outline" Content="Upload reference (.wav)" Click="UploadRef_Click"
+                IsEnabled="{Binding CloneAvailable}" />
+        <TextBlock Classes="muted" Text="{Binding ReferenceLabel}" VerticalAlignment="Center" />
+      </StackPanel>
+      <Button Classes="outline" Content="Create voice" Command="{Binding CreateVoiceCommand}"
+              IsEnabled="{Binding CloneAvailable}" HorizontalAlignment="Left" />
+      <TextBox Text="{Binding CloneText, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap"
+               MinHeight="56" Watermark="Text to speak in the cloned voice…" />
+      <Button Classes="primary" Content="Speak (cloned)" Command="{Binding CloneSpeakCommand}" HorizontalAlignment="Left" />
+      <TextBlock Classes="muted" Text="{Binding CloneStatus}" TextWrapping="Wrap" />
     </StackPanel>
   </ScrollViewer>
 </UserControl>
