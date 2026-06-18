@@ -154,6 +154,16 @@ internal sealed class RustModel : IDisposable
         return loss;
     }
 
+    /// <summary>Load a LoRA adapter (safetensors bytes) into the chat model; returns slot count.</summary>
+    public int LoadAdapter(byte[] bytes)
+    {
+        int rc = RustCore.rl_load_adapter(_h, bytes, (UIntPtr)bytes.Length);
+        if (rc < 0) throw new InvalidOperationException($"load_adapter failed (rc={rc}): {RustCore.LastError()}");
+        return rc;
+    }
+
+    public void ClearAdapter() => Check(RustCore.rl_clear_adapter(_h), "clear_adapter");
+
     public byte[] TrainerSaveAdapter()
     {
         Check(RustCore.rl_trainer_save_adapter(_h, out IntPtr p, out UIntPtr n), "trainer save_adapter");

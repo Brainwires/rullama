@@ -201,6 +201,12 @@ enum Command {
     TrainerSaveAdapter {
         reply: Sender<Result<Vec<u8>, String>>,
     },
+    /// Load a LoRA adapter (safetensors bytes) into the chat model.
+    LoadAdapter {
+        bytes: Vec<u8>,
+        reply: Sender<Result<usize, String>>,
+    },
+    ClearAdapter(Sender<()>),
     Shutdown,
 }
 
@@ -403,6 +409,17 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
                     None => Err("no trainer".into()),
                 };
                 let _ = reply.send(r);
+            }
+            Command::LoadAdapter { bytes, reply } => {
+                let r = match model.as_mut() {
+                    Some(m) => m.load_adapter_native(&bytes).map_err(|e| format!("{e}")),
+                    None => Err("no model loaded".into()),
+                };
+                let _ = reply.send(r);
+            }
+            Command::ClearAdapter(reply) => {
+                if let Some(m) = model.as_mut() { m.clear_adapter_native(); }
+                let _ = reply.send(());
             }
             Command::Shutdown => break,
         }
@@ -1268,6 +1285,31 @@ pub unsafe extern "C" fn rl_trainer_save_adapter(m: *mut RlModel, out: *mut *mut
     match call(m, |reply| Command::TrainerSaveAdapter { reply }) {
         Ok(Ok(bytes)) => { put_bytes(bytes, out, out_len); 0 }
         Ok(Err(e)) => { set_last_error(e); -6 }
+        Err(c) => c,
+    }
+}
+
+/// Load a LoRA adapter (safetensors bytes) into the chat model. Returns slot
+/// count (>=0) or negative on error.
+/// # Safety
+/// `m` valid; `bytes`/`n` a valid array.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_load_adapter(m: *mut RlModel, bytes: *const u8, n: usize) -> i32 {
+    let bytes = if bytes.is_null() || n == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(bytes, n) }.to_vec() };
+    match call(m, |reply| Command::LoadAdapter { bytes, reply }) {
+        Ok(Ok(slots)) => slots as i32,
+        Ok(Err(e)) => { set_last_error(e); -6 }
+        Err(c) => c,
+    }
+}
+
+/// Clear any active LoRA adapter from the chat model.
+/// # Safety
+/// `m` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_clear_adapter(m: *mut RlModel) -> i32 {
+    match call(m, Command::ClearAdapter) {
+        Ok(()) => 0,
         Err(c) => c,
     }
 }

@@ -29,6 +29,8 @@
                     Command="{Binding ShowCommand}" CommandParameter="voice" Content="Voice" />
             <Button Classes="tab" Classes.selected="{Binding IsKnowledge}"
                     Command="{Binding ShowCommand}" CommandParameter="knowledge" Content="Knowledge" />
+            <Button Classes="tab" Classes.selected="{Binding IsTune}"
+                    Command="{Binding ShowCommand}" CommandParameter="tune" Content="Tune" />
             <Button Classes="tab" Classes.selected="{Binding IsSettings}"
                     Command="{Binding ShowCommand}" CommandParameter="settings" Content="Settings" />
           </StackPanel>

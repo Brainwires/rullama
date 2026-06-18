@@ -98,6 +98,12 @@ internal static class RustCore
     [DllImport(Lib, EntryPoint = "rl_trainer_save_adapter")]
     internal static extern int rl_trainer_save_adapter(IntPtr m, out IntPtr outPtr, out UIntPtr outLen);
 
+    [DllImport(Lib, EntryPoint = "rl_load_adapter")]
+    internal static extern int rl_load_adapter(IntPtr m, byte[] bytes, UIntPtr n);
+
+    [DllImport(Lib, EntryPoint = "rl_clear_adapter")]
+    internal static extern int rl_clear_adapter(IntPtr m);
+
     [DllImport(Lib, EntryPoint = "rl_has_vision")]
     internal static extern int rl_has_vision(IntPtr m);
 
