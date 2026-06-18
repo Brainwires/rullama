@@ -25,7 +25,7 @@ export function useChatTunables() {
 
     const [systemPrompt, setSystemPrompt] = usePersistedState<string>("systemPrompt", DEFAULT_SYSTEM_PROMPT);
     const [sampling,     setSampling]     = usePersistedState<SamplingOptions>("sampling", DEFAULT_SAMPLING);
-    const [maxTokens,    setMaxTokens]    = usePersistedState<number>("maxTokens", 1024);
+    const [maxTokens,    setMaxTokens]    = usePersistedState<number>("maxTokens", 4096);
     const [thinking,     setThinking]     = usePersistedState<boolean>("thinking", true);
     const [voice,        setVoice]        = usePersistedState<VoiceOptions>("voice", DEFAULT_VOICE_OPTIONS);
 

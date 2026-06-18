@@ -16,7 +16,7 @@ export const SETTINGS_BOUNDS = {
     top_k:              { min: 0,    max: 200,  step: 1,    fallback: 64   },
     top_p:              { min: 0,    max: 1,    step: 0.01, fallback: 0.95 },
     repetition_penalty: { min: 0.5,  max: 2.0,  step: 0.05, fallback: 1.3  },
-    maxTokens:          { min: 16,   max: 4096, step: 16,   fallback: 1024 },
+    maxTokens:          { min: 16,   max: 16384, step: 16,  fallback: 4096 },
 } as const;
 
 type TabKey = "general" | "logs";

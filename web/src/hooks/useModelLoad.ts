@@ -233,13 +233,13 @@ export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy, onPrepare }
 
             setLoadingLabel("loading into wasm…");
             const mobile = isMobileUA();
-            // KV-cache cap on mobile. Was 2048 (~530 MB KV); dropped to
-            // 1024 (~265 MB) for multimodal-capable checkpoints because
-            // iPhone Safari WebContent peaks during text-prefill +
-            // resident multimodal scratch were tipping over jetsam on
-            // audio-attached Send. Text-only loads keep the 2048 ceiling
-            // since there's no multimodal tower competing for budget.
-            const mobileMaxCtx = m.multimodal ? 1024 : 2048;
+            // KV-cache cap on mobile. Tool calling + thinking blow past a
+            // 1024-token window fast (the prompt's tool schema alone is
+            // several hundred tokens), so the old 1024/2048 caps were
+            // crashing real turns with "context length exceeded". Bumped 4×
+            // (multimodal 4096, text-only 8192) — the earlier jetsam concern
+            // at larger contexts was never actually confirmed.
+            const mobileMaxCtx = m.multimodal ? 4096 : 8192;
             // textOnly policy:
             //   Catalog drives it everywhere — `multimodal: true` on a
             //   BAKED_IN_MODELS / R2 entry means the blob carries the
