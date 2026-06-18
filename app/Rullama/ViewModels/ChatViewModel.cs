@@ -48,6 +48,29 @@ public partial class ChatViewModel : ViewModelBase
         AdapterStatus = "Adapter cleared.";
     }
 
+    // ---- ROME knowledge editing (mutates the chat model) ----
+    [ObservableProperty] private string _editPrompt = "The Eiffel Tower is located in the city of";
+    [ObservableProperty] private string _editSubject = "Eiffel Tower";
+    [ObservableProperty] private string _editTarget = "Rome";
+    [ObservableProperty] private double _editLayer = 5;
+    [ObservableProperty] private bool _isEditing;
+    [ObservableProperty] private string _editStatus = string.Empty;
+
+    [RelayCommand]
+    private async Task RomeEditAsync()
+    {
+        if (!IsModelLoaded) { EditStatus = "Load a model first."; return; }
+        IsEditing = true;
+        EditStatus = "Applying edit (slow — iterative gradient)…";
+        try
+        {
+            await _engine.RomeEditAsync(EditPrompt.Trim(), EditSubject.Trim(), EditTarget.Trim(), (uint)EditLayer);
+            EditStatus = "Edit applied — ask the model to see the change.";
+        }
+        catch (Exception e) { EditStatus = "Edit failed: " + e.Message; }
+        finally { IsEditing = false; }
+    }
+
     public ObservableCollection<ChatMessageViewModel> Messages { get; } = new();
     public ObservableCollection<ConversationViewModel> Conversations { get; } = new();
 

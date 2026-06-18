@@ -104,6 +104,12 @@ internal static class RustCore
     [DllImport(Lib, EntryPoint = "rl_clear_adapter")]
     internal static extern int rl_clear_adapter(IntPtr m);
 
+    [DllImport(Lib, EntryPoint = "rl_rome_edit")]
+    internal static extern int rl_rome_edit(
+        IntPtr m, [MarshalAs(UnmanagedType.LPUTF8Str)] string prompt,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string subject,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string target, uint layer);
+
     [DllImport(Lib, EntryPoint = "rl_has_vision")]
     internal static extern int rl_has_vision(IntPtr m);
 

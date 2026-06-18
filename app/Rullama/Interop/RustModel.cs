@@ -164,6 +164,10 @@ internal sealed class RustModel : IDisposable
 
     public void ClearAdapter() => Check(RustCore.rl_clear_adapter(_h), "clear_adapter");
 
+    /// <summary>ROME knowledge edit (mutates the model). Slow.</summary>
+    public void RomeEdit(string prompt, string subject, string target, uint layer)
+        => Check(RustCore.rl_rome_edit(_h, prompt, subject, target, layer), "rome_edit");
+
     public byte[] TrainerSaveAdapter()
     {
         Check(RustCore.rl_trainer_save_adapter(_h, out IntPtr p, out UIntPtr n), "trainer save_adapter");

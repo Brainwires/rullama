@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread::JoinHandle;
 
-use rullama::api::Model;
+use rullama::api::{Model, RomeIterativeHparams};
 use rullama::backend::WgpuCtx;
 use rullama::embed::EmbeddingModel;
 use rullama::gguf::{FileFetcher, TensorFetcher};
@@ -207,6 +207,14 @@ enum Command {
         reply: Sender<Result<usize, String>>,
     },
     ClearAdapter(Sender<()>),
+    /// ROME knowledge edit: make `subject` (in `prompt`) predict `target` at `layer`.
+    RomeEdit {
+        prompt: String,
+        subject: String,
+        target: String,
+        layer: u32,
+        reply: Sender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -420,6 +428,22 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
             Command::ClearAdapter(reply) => {
                 if let Some(m) = model.as_mut() { m.clear_adapter_native(); }
                 let _ = reply.send(());
+            }
+            Command::RomeEdit { prompt, subject, target, layer, reply } => {
+                let r = (|| -> Result<(), String> {
+                    let m = model.as_mut().ok_or("no model loaded")?;
+                    let prompt_ids = m.encode_tokens(&prompt);
+                    let t = if target.starts_with(' ') { target.clone() } else { format!(" {target}") };
+                    let target_ids = m.encode_tokens(&t);
+                    let target_id = *target_ids.first().ok_or("empty target")?;
+                    let pos = m.find_subject_last_pos(&prompt_ids, &subject)
+                        .ok_or("subject not found in prompt")?;
+                    pollster::block_on(m.rome_edit_iterative_native(
+                        &prompt_ids, pos, layer, target_id, RomeIterativeHparams::default(),
+                    )).map_err(|e| format!("{e}"))?;
+                    Ok(())
+                })();
+                let _ = reply.send(r);
             }
             Command::Shutdown => break,
         }
@@ -1310,6 +1334,28 @@ pub unsafe extern "C" fn rl_load_adapter(m: *mut RlModel, bytes: *const u8, n: u
 pub unsafe extern "C" fn rl_clear_adapter(m: *mut RlModel) -> i32 {
     match call(m, Command::ClearAdapter) {
         Ok(()) => 0,
+        Err(c) => c,
+    }
+}
+
+/// ROME knowledge edit (mutates the chat model): make `subject` within `prompt`
+/// predict `target` at `layer`. Slow (iterative gradient). Returns 0 on success.
+/// # Safety
+/// `m` valid; `prompt`/`subject`/`target` valid C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_rome_edit(
+    m: *mut RlModel,
+    prompt: *const c_char,
+    subject: *const c_char,
+    target: *const c_char,
+    layer: u32,
+) -> i32 {
+    let prompt = match unsafe { c_str(prompt) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+    let subject = match unsafe { c_str(subject) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+    let target = match unsafe { c_str(target) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+    match call(m, |reply| Command::RomeEdit { prompt, subject, target, layer, reply }) {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => { set_last_error(e); -6 }
         Err(c) => c,
     }
 }

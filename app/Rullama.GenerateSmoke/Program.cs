@@ -15,10 +15,26 @@ bool visionMode = Environment.GetEnvironmentVariable("RULLAMA_TEST_VISION") == "
 bool audioOnly = Environment.GetEnvironmentVariable("RULLAMA_TEST_AUDIO_ONLY") == "1";
 bool full = visionMode || audioOnly;
 
+bool romeMode = Environment.GetEnvironmentVariable("RULLAMA_TEST_ROME") == "1";
+
 using var engine = new InferenceClient();
 Console.WriteLine($"loading ({(full ? "full towers" : "text-only")}, ctx 1024)…");
 await engine.LoadAsync(path, maxContext: 1024, textOnly: !full);
 Console.WriteLine($"ready · vocab {engine.VocabSize}");
+
+if (romeMode)
+{
+    const string q = "The Eiffel Tower is located in the city of";
+    var h = new List<(string, string)> { ("user", q) };
+    Console.Write("[rome] before: ");
+    await engine.SendAsync(h, 12, p => Console.Write(p), CancellationToken.None);
+    Console.WriteLine("\n[rome] applying edit (Eiffel Tower -> Rome, layer 5)…");
+    await engine.RomeEditAsync(q, "Eiffel Tower", "Rome", 5);
+    Console.Write("[rome] after: ");
+    await engine.SendAsync(h, 12, p => Console.Write(p), CancellationToken.None);
+    Console.WriteLine();
+    return 0;
+}
 
 if (!audioOnly)
 {

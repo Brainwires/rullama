@@ -203,6 +203,16 @@
                         IsEnabled="{Binding IsModelLoaded}" />
               </StackPanel>
               <TextBlock Classes="muted" FontSize="11" TextWrapping="Wrap" Text="{Binding AdapterStatus}" />
+
+              <TextBlock Classes="label" Text="KNOWLEDGE EDIT (ROME)" Margin="0,8,0,0" />
+              <TextBlock Classes="muted" FontSize="11" TextWrapping="Wrap"
+                         Text="Rewrites a fact in-place. Slow on this GPU." />
+              <TextBox Watermark="Prompt" Text="{Binding EditPrompt, Mode=TwoWay}" />
+              <TextBox Watermark="Subject" Text="{Binding EditSubject, Mode=TwoWay}" />
+              <TextBox Watermark="New target" Text="{Binding EditTarget, Mode=TwoWay}" />
+              <Button Classes="outline sm" Content="Apply edit" Command="{Binding RomeEditCommand}"
+                      IsEnabled="{Binding !IsEditing}" />
+              <TextBlock Classes="muted" FontSize="11" TextWrapping="Wrap" Text="{Binding EditStatus}" />
             </StackPanel>
           </TabItem>
           <TabItem Header="Tools">

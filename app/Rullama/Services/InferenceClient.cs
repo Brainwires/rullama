@@ -63,6 +63,13 @@ public sealed class InferenceClient : IDisposable
 
     public void ClearAdapter() { lock (_gate) _model?.ClearAdapter(); }
 
+    /// <summary>ROME knowledge edit on the chat model (slow; off the UI thread).</summary>
+    public async Task RomeEditAsync(string prompt, string subject, string target, uint layer)
+    {
+        RustModel m = _model ?? throw new InvalidOperationException("No model loaded.");
+        await Task.Run(() => m.RomeEdit(prompt, subject, target, layer));
+    }
+
     /// <summary>
     /// Generate a reply for the given history (role/content pairs), streaming
     /// decoded pieces to <paramref name="onPiece"/>. Cancellable via
