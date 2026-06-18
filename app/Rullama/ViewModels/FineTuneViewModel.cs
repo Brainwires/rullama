@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -17,6 +18,9 @@ public partial class FineTuneViewModel : ViewModelBase
 {
     private readonly TrainingService _svc = new();
     private CancellationTokenSource? _cts;
+
+    /// <summary>Per-step loss, plotted live by the Sparkline.</summary>
+    public ObservableCollection<double> LossHistory { get; } = new();
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(StartCommand))]
@@ -58,6 +62,7 @@ public partial class FineTuneViewModel : ViewModelBase
         IsRunning = true;
         HasAdapter = false;
         Progress = 0;
+        LossHistory.Clear();
         _cts = new CancellationTokenSource();
         Status = "Loading model + starting trainer…";
         try
@@ -67,6 +72,7 @@ public partial class FineTuneViewModel : ViewModelBase
                 {
                     Progress = (s + 1) / Steps;
                     Status = $"step {s + 1}/{(int)Steps} · loss {loss:0.000}";
+                    LossHistory.Add(loss);
                 }),
                 ct: _cts.Token);
             HasAdapter = true;

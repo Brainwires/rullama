@@ -41,6 +41,9 @@
       </StackPanel>
 
       <ProgressBar IsVisible="{Binding IsRunning}" Minimum="0" Maximum="1" Value="{Binding Progress}" />
+      <Border Classes="card" Height="64" Padding="6">
+        <c:Sparkline Values="{Binding LossHistory}" Stroke="{StaticResource Primary}" />
+      </Border>
       <TextBlock Classes="muted" Text="{Binding Status}" TextWrapping="Wrap" />
     </StackPanel>
   </ScrollViewer>
