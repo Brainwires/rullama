@@ -210,6 +210,11 @@
                 <CheckBox IsChecked="{Binding UseFahrenheit, Mode=TwoWay}" Content="Use °F (imperial)" />
                 <CheckBox IsChecked="{Binding UseLocation, Mode=TwoWay}"
                           Content="Use my location (IP-based) when none is given" />
+                <TextBlock Classes="label" Text="KNOWLEDGE" Margin="0,8,0,0" />
+                <CheckBox IsChecked="{Binding UseKnowledge, Mode=TwoWay}" IsEnabled="{Binding RagAvailable}"
+                          Content="Use knowledge base (RAG)" />
+                <TextBlock Classes="muted" FontSize="11" TextWrapping="Wrap"
+                           Text="Retrieves relevant chunks from the Knowledge tab to ground answers." />
               </StackPanel>
             </ScrollViewer>
           </TabItem>

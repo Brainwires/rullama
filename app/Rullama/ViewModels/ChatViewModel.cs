@@ -20,8 +20,12 @@ public partial class ChatViewModel : ViewModelBase
     private readonly InferenceClient _engine = new();
     private readonly ConversationStore _store = new();
     private readonly SettingsStore _settings = new();
+    private readonly RagService _rag;
     private CancellationTokenSource? _cts;
     private string? _activeConvId;
+
+    [ObservableProperty] private bool _useKnowledge;
+    public bool RagAvailable => RagService.Available;
 
     public ObservableCollection<ChatMessageViewModel> Messages { get; } = new();
     public ObservableCollection<ConversationViewModel> Conversations { get; } = new();
@@ -158,8 +162,11 @@ public partial class ChatViewModel : ViewModelBase
         return s;
     }
 
-    public ChatViewModel()
+    public ChatViewModel() : this(null) { }
+
+    public ChatViewModel(RagService? rag)
     {
+        _rag = rag ?? new RagService();
         ModelPath = _settings.Get("modelPath")
             ?? Environment.GetEnvironmentVariable("RULLAMA_TEST_GGUF")
             ?? string.Empty;
@@ -319,6 +326,14 @@ public partial class ChatViewModel : ViewModelBase
         var reply = new ChatMessageViewModel("model", string.Empty);
         Messages.Add(reply);
 
+        // Retrieve knowledge context (RAG) for this query, if enabled.
+        string ragContext = string.Empty;
+        if (UseKnowledge && RagService.Available && text.Length > 0)
+        {
+            try { ragContext = await _rag.BuildContextAsync(text, 5, CancellationToken.None); }
+            catch (Exception e) { Status = "Knowledge search failed: " + e.Message; }
+        }
+
         // Engine history: prepend the media sentinel pair to this user turn's content.
         string promptUserContent =
             image is not null ? "<|image><image|>" + text
@@ -326,6 +341,7 @@ public partial class ChatViewModel : ViewModelBase
             : text;
         var history = new List<(string, string)>();
         string sys = BuildSystemContent();
+        if (ragContext.Length > 0) sys = sys.Length > 0 ? ragContext + "\n\n" + sys : ragContext;
         if (!string.IsNullOrWhiteSpace(sys)) history.Add(("system", sys));
         foreach (ChatMessageViewModel m in Messages.Where(m => !ReferenceEquals(m, reply)))
             history.Add(ReferenceEquals(m, userMsg) ? ("user", promptUserContent) : (m.Role, m.Content));

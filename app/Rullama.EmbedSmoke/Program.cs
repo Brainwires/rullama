@@ -25,7 +25,25 @@ float[] vc = embed.Embed(c, dim);
 Console.WriteLine($"len(a)={va.Length}");
 Console.WriteLine($"cos(a,b) related   = {Cosine(va, vb):0.000}");
 Console.WriteLine($"cos(a,c) unrelated = {Cosine(va, vc):0.000}");
-return Cosine(va, vb) > Cosine(va, vc) ? 0 : 1;
+
+// RAG: index a 2-chunk doc and confirm a sun-age query retrieves the sun chunk.
+Console.WriteLine("\n[rag] indexing + searching…");
+string kdb = Path.Combine(
+    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Rullama", "knowledge.db");
+if (File.Exists(kdb)) File.Delete(kdb);
+using var rag = new Rullama.Services.RagService();
+const string doc =
+    "The Sun is a star at the center of the Solar System. It is about 4.6 billion years old.\n\n" +
+    "Mars is the fourth planet from the Sun, known as the Red Planet, with a thin atmosphere.";
+int chunks = await rag.IndexTextAsync("Space facts", doc, null, CancellationToken.None);
+Console.WriteLine($"indexed {chunks} chunk(s)");
+var hits = await rag.SearchAsync("How old is the Sun?", 2, CancellationToken.None);
+foreach (Rullama.Services.SearchHit h in hits)
+    Console.WriteLine($"  [{h.Score:0.000}] {h.Text[..Math.Min(64, h.Text.Length)]}");
+bool ragOk = hits.Count > 0 && hits[0].Text.Contains("4.6 billion");
+Console.WriteLine($"rag top-hit correct: {ragOk}");
+
+return (Cosine(va, vb) > Cosine(va, vc) && ragOk) ? 0 : 1;
 
 static double Cosine(float[] x, float[] y)
 {

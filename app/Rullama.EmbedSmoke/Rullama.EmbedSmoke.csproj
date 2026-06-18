@@ -10,6 +10,13 @@
   <ItemGroup>
     <Compile Include="..\Rullama\Interop\RustCore.cs" Link="RustCore.cs" />
     <Compile Include="..\Rullama\Interop\RustEmbed.cs" Link="RustEmbed.cs" />
+    <Compile Include="..\Rullama\Services\Paths.cs" Link="Paths.cs" />
+    <Compile Include="..\Rullama\Services\TextSplit.cs" Link="TextSplit.cs" />
+    <Compile Include="..\Rullama\Services\KnowledgeStore.cs" Link="KnowledgeStore.cs" />
+    <Compile Include="..\Rullama\Services\RagService.cs" Link="RagService.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
   </ItemGroup>
 
   <PropertyGroup>

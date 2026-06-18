@@ -11,9 +11,11 @@ namespace Rullama.ViewModels;
 public partial class ShellViewModel : ViewModelBase
 {
     private readonly TtsService _tts = new();
+    private readonly RagService _rag = new();
 
-    public ChatViewModel Chat { get; } = new();
+    public ChatViewModel Chat { get; }
     public VoiceViewModel Voice { get; }
+    public KnowledgeViewModel Knowledge { get; }
     public SettingsViewModel Settings { get; } = new();
 
     [ObservableProperty]
@@ -26,11 +28,16 @@ public partial class ShellViewModel : ViewModelBase
     private bool _isVoice;
 
     [ObservableProperty]
+    private bool _isKnowledge;
+
+    [ObservableProperty]
     private bool _isSettings;
 
     public ShellViewModel()
     {
+        Chat = new ChatViewModel(_rag);
         Voice = new VoiceViewModel(_tts);
+        Knowledge = new KnowledgeViewModel(_rag);
         _current = Chat;
     }
 
@@ -39,7 +46,9 @@ public partial class ShellViewModel : ViewModelBase
     {
         IsChat = tab == "chat";
         IsVoice = tab == "voice";
+        IsKnowledge = tab == "knowledge";
         IsSettings = tab == "settings";
-        Current = IsVoice ? Voice : IsSettings ? (ViewModelBase)Settings : Chat;
+        if (IsKnowledge) Knowledge.RefreshDocuments();
+        Current = IsVoice ? Voice : IsKnowledge ? Knowledge : IsSettings ? (ViewModelBase)Settings : Chat;
     }
 }
