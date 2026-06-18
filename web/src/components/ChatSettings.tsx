@@ -2,6 +2,11 @@ import { useState } from "react";
 import { Loader2, Pencil, Sparkles, Undo2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import {
+    AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+    AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+    AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
@@ -307,41 +312,36 @@ export function ChatSettings(props: Props) {
 
                 {tab === "tools" && (
                     <>
-                        <section className="flex flex-col gap-2">
+                        <section className="flex flex-col gap-3">
                             <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">Tool calling</span>
-                            <label
-                                className="flex items-start gap-2 text-xs text-muted-foreground"
-                                title="Prepend a tool schema to the system prompt so the model emits <tool_call> blocks. Executable tools (weather) actually run and feed their result back to the model; others render as structured calls."
-                            >
-                                <input
-                                    type="checkbox"
-                                    checked={props.toolMode}
-                                    onChange={(e) => props.onToolModeChange(e.target.checked)}
-                                    className="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer"
-                                />
+                            <div className="flex items-start justify-between gap-3 text-xs text-muted-foreground">
                                 <span>
-                                    Enable tool calling — let the model invoke{" "}
+                                    {props.toolMode ? "Enabled" : "Disabled"} — let the model invoke{" "}
                                     <code className="rounded bg-muted px-1">get_weather</code> and others via{" "}
-                                    <code className="rounded bg-muted px-1">&lt;tool_call&gt;</code> blocks
+                                    <code className="rounded bg-muted px-1">&lt;tool_call&gt;</code> blocks.
                                 </span>
-                            </label>
-                            <label
-                                className={`ml-6 flex items-start gap-2 text-xs text-muted-foreground ${props.toolMode ? "" : "pointer-events-none opacity-40"}`}
-                                title="Programmatic tool calling: the model writes ONE Rhai script orchestrating many tools (only the final result returns — far fewer tokens than the sequential loop). Experimental; if a script fails it falls back to the <tool_call> loop."
-                            >
-                                <input
-                                    type="checkbox"
-                                    checked={props.orchestratorMode}
-                                    disabled={!props.toolMode}
-                                    onChange={(e) => props.onOrchestratorModeChange(e.target.checked)}
-                                    className="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer"
+                                <ConfirmToggleButton
+                                    enabled={props.toolMode}
+                                    onToggle={props.onToolModeChange}
+                                    label="tool calling"
+                                    modelReady={props.modelStatus === "ready"}
                                 />
-                                <span>
-                                    Programmatic mode <span className="opacity-70">(experimental)</span> — the model writes one{" "}
-                                    <code className="rounded bg-muted px-1">Rhai</code> script that orchestrates many tools at once;
-                                    only the final answer returns. Falls back to <code className="rounded bg-muted px-1">&lt;tool_call&gt;</code> on error.
-                                </span>
-                            </label>
+                            </div>
+                            {props.toolMode && (
+                                <div className="ml-3 flex items-start justify-between gap-3 border-l border-border pl-3 text-xs text-muted-foreground">
+                                    <span>
+                                        Programmatic mode <span className="opacity-70">(experimental)</span> — the model writes one{" "}
+                                        <code className="rounded bg-muted px-1">Rhai</code> script orchestrating many tools at once;
+                                        only the final answer returns. Falls back to <code className="rounded bg-muted px-1">&lt;tool_call&gt;</code> on error.
+                                    </span>
+                                    <ConfirmToggleButton
+                                        enabled={props.orchestratorMode}
+                                        onToggle={props.onOrchestratorModeChange}
+                                        label="programmatic mode"
+                                        modelReady={props.modelStatus === "ready"}
+                                    />
+                                </div>
+                            )}
                         </section>
 
                         <section className="flex flex-col gap-2 border-t border-border pt-3">
@@ -456,6 +456,52 @@ export function ChatSettings(props: Props) {
                 )}
             </div>
         </div>
+    );
+}
+
+/**
+ * Enable/disable toggle for a setting that's part of the system prompt — so
+ * flipping it rebuilds the warmed system-prompt KV cache (the per-model
+ * pre-prepare). A confirmation makes that cost explicit instead of silently
+ * re-warming in the background. The actual re-warm fires from App's sysWarmSig
+ * effect once the setting changes; this dialog just gates the change.
+ */
+function ConfirmToggleButton({
+    enabled, onToggle, label, modelReady,
+}: {
+    enabled: boolean;
+    onToggle: (next: boolean) => void;
+    label: string;
+    modelReady: boolean;
+}) {
+    const verb = enabled ? "Disable" : "Enable";
+    return (
+        <AlertDialog>
+            <AlertDialogTrigger asChild>
+                <Button
+                    variant={enabled ? "secondary" : "default"}
+                    size="sm"
+                    className="h-7 shrink-0 px-3 text-xs"
+                >
+                    {verb}
+                </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+                <AlertDialogHeader>
+                    <AlertDialogTitle>{verb} {label}?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                        This changes the system prompt, so the cached system prompt will be
+                        rebuilt{modelReady
+                            ? " now — a brief re-prepare before your next chat."
+                            : " the next time a model loads."}
+                    </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => onToggle(!enabled)}>{verb}</AlertDialogAction>
+                </AlertDialogFooter>
+            </AlertDialogContent>
+        </AlertDialog>
     );
 }
 
