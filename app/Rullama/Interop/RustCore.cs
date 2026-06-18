@@ -83,6 +83,21 @@ internal static class RustCore
     [DllImport(Lib, EntryPoint = "rl_free_f32")]
     internal static extern void rl_free_f32(IntPtr ptr, UIntPtr n);
 
+    [DllImport(Lib, EntryPoint = "rl_free_bytes")]
+    internal static extern void rl_free_bytes(IntPtr ptr, UIntPtr n);
+
+    // ---- fine-tuning (LoRA; reuses the model handle) ----
+    [DllImport(Lib, EntryPoint = "rl_trainer_begin")]
+    internal static extern int rl_trainer_begin(
+        IntPtr m, uint rank, float alpha, float dropout,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string targetModules, UIntPtr maxSeqLen, double learningRate);
+
+    [DllImport(Lib, EntryPoint = "rl_trainer_step")]
+    internal static extern int rl_trainer_step(IntPtr m, uint[] inputIds, UIntPtr n, uint target, out float loss);
+
+    [DllImport(Lib, EntryPoint = "rl_trainer_save_adapter")]
+    internal static extern int rl_trainer_save_adapter(IntPtr m, out IntPtr outPtr, out UIntPtr outLen);
+
     [DllImport(Lib, EntryPoint = "rl_has_vision")]
     internal static extern int rl_has_vision(IntPtr m);
 

@@ -34,6 +34,8 @@ use rullama::embed::EmbeddingModel;
 use rullama::gguf::{FileFetcher, TensorFetcher};
 use rullama::sampling::SamplingOptions;
 use rullama::tts::KokoroTts;
+use rullama_finetune::session::TrainingSession;
+use rullama_finetune::shared::config::{LoraConfig, LrScheduler, TrainingHyperparams};
 
 // ---------------------------------------------------------------------------
 // Thread-local last-error (set on, and read from, the calling thread)
@@ -179,6 +181,26 @@ enum Command {
         cb: TokenCb,
         reply: Sender<Result<u32, String>>,
     },
+    /// Convert the loaded Model into a LoRA TrainingSession (consumes the Model).
+    TrainerBegin {
+        rank: u32,
+        alpha: f32,
+        dropout: f32,
+        target_modules: Vec<String>,
+        max_seq_len: usize,
+        learning_rate: f64,
+        reply: Sender<Result<(), String>>,
+    },
+    /// One training step on (input_ids → target); returns the loss.
+    TrainerStep {
+        input_ids: Vec<u32>,
+        target: u32,
+        reply: Sender<Result<f32, String>>,
+    },
+    /// Serialize the trained LoRA adapter to safetensors bytes.
+    TrainerSaveAdapter {
+        reply: Sender<Result<Vec<u8>, String>>,
+    },
     Shutdown,
 }
 
@@ -186,6 +208,7 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
     // `!Send` engine state — created and dropped only on this thread.
     let mut ctx: Option<WgpuCtx> = None;
     let mut model: Option<Model> = None;
+    let mut trainer: Option<TrainingSession> = None;
 
     for cmd in rx {
         match cmd {
@@ -232,13 +255,16 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
                 }
             }
             Command::Encode { text, reply } => {
-                let _ = reply.send(match model.as_ref() {
+                // Fall back to the trainer's model so tokenization works during training.
+                let mref = model.as_ref().or_else(|| trainer.as_ref().map(|t| t.model()));
+                let _ = reply.send(match mref {
                     Some(m) => Ok(m.encode_tokens(&text)),
                     None => Err("no model loaded".into()),
                 });
             }
             Command::TokenStr { id, reply } => {
-                let _ = reply.send(model.as_ref().and_then(|m| m.token_str_native(id)));
+                let mref = model.as_ref().or_else(|| trainer.as_ref().map(|t| t.model()));
+                let _ = reply.send(mref.and_then(|m| m.token_str_native(id)));
             }
             Command::SetSampling { opts, reply } => {
                 if let Some(m) = model.as_mut() {
@@ -253,7 +279,8 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
                 let _ = reply.send(());
             }
             Command::VocabSize(reply) => {
-                let _ = reply.send(model.as_ref().map_or(0, |m| m.vocab_size_native()));
+                let mref = model.as_ref().or_else(|| trainer.as_ref().map(|t| t.model()));
+                let _ = reply.send(mref.map_or(0, |m| m.vocab_size_native()));
             }
             Command::Position(reply) => {
                 let _ = reply.send(model.as_ref().map_or(0, |m| m.position_native()));
@@ -339,6 +366,43 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
                     decode_loop(m, cur, max_new, &cb, &cancel)
                 })();
                 let _ = reply.send(res);
+            }
+            Command::TrainerBegin { rank, alpha, dropout, target_modules, max_seq_len, learning_rate, reply } => {
+                let Some(m) = model.take() else {
+                    let _ = reply.send(Err("no model loaded".into()));
+                    continue;
+                };
+                let mut lora = LoraConfig::default();
+                lora.rank = rank;
+                lora.alpha = alpha;
+                lora.dropout = dropout;
+                if !target_modules.is_empty() { lora.target_modules = target_modules; }
+                let mut hp = TrainingHyperparams::default();
+                hp.epochs = 1;
+                hp.batch_size = 1;
+                hp.gradient_accumulation_steps = 1;
+                hp.warmup_steps = 0;
+                hp.lr_scheduler = LrScheduler::Constant;
+                hp.max_seq_len = max_seq_len;
+                hp.learning_rate = learning_rate;
+                match TrainingSession::new(m, lora, hp) {
+                    Ok(t) => { trainer = Some(t); let _ = reply.send(Ok(())); }
+                    Err(e) => { let _ = reply.send(Err(format!("{e:?}"))); } // model consumed on error
+                }
+            }
+            Command::TrainerStep { input_ids, target, reply } => {
+                let r = match trainer.as_mut() {
+                    Some(t) => pollster::block_on(t.step(&input_ids, target)).map_err(|e| format!("{e:?}")),
+                    None => Err("no trainer (call rl_trainer_begin)".into()),
+                };
+                let _ = reply.send(r);
+            }
+            Command::TrainerSaveAdapter { reply } => {
+                let r = match trainer.as_ref() {
+                    Some(t) => pollster::block_on(t.save_adapter_to_bytes()).map_err(|e| format!("{e:?}")),
+                    None => Err("no trainer".into()),
+                };
+                let _ = reply.send(r);
             }
             Command::Shutdown => break,
         }
@@ -1121,6 +1185,88 @@ pub unsafe extern "C" fn rl_embed(t: *mut RlEmbed, text: *const c_char, target_d
     let text = match unsafe { c_str(text) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
     match embed_call(t, |reply| EmbedCommand::Embed { text, target_dim, reply }) {
         Ok(Ok(v)) => { put_f32(v, out, out_len); 0 }
+        Ok(Err(e)) => { set_last_error(e); -6 }
+        Err(c) => c,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fine-tuning (LoRA) — reuses the model handle (the Model becomes a trainer).
+// ---------------------------------------------------------------------------
+
+/// Frees a byte array previously returned by this library (e.g. adapter bytes).
+/// # Safety
+/// `ptr`/`n` must come from a single returned allocation, unused after.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_free_bytes(ptr: *mut u8, n: usize) {
+    if !ptr.is_null() {
+        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, n)) });
+    }
+}
+
+fn put_bytes(v: Vec<u8>, out: *mut *mut u8, out_len: *mut usize) {
+    let boxed = v.into_boxed_slice();
+    unsafe {
+        *out_len = boxed.len();
+        *out = Box::into_raw(boxed) as *mut u8;
+    }
+}
+
+/// Convert the loaded model into a LoRA training session (consumes the model).
+/// `target_modules` is a comma-separated list (empty → defaults).
+/// # Safety
+/// `m` valid; `target_modules` a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_trainer_begin(
+    m: *mut RlModel,
+    rank: u32,
+    alpha: f32,
+    dropout: f32,
+    target_modules: *const c_char,
+    max_seq_len: usize,
+    learning_rate: f64,
+) -> i32 {
+    let mods = match unsafe { c_str(target_modules) } {
+        Ok(s) => s.split(',').map(|x| x.trim().to_owned()).filter(|x| !x.is_empty()).collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+    match call(m, |reply| Command::TrainerBegin {
+        rank, alpha, dropout, target_modules: mods, max_seq_len, learning_rate, reply,
+    }) {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => { set_last_error(e); -6 }
+        Err(c) => c,
+    }
+}
+
+/// One training step on (input_ids → target). Writes the loss to `*out_loss`.
+/// # Safety
+/// `m` valid; `input_ids`/`n` a valid array; `out_loss` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_trainer_step(
+    m: *mut RlModel,
+    input_ids: *const u32,
+    n: usize,
+    target: u32,
+    out_loss: *mut f32,
+) -> i32 {
+    if out_loss.is_null() { set_last_error("null out"); return -2; }
+    let ids = if input_ids.is_null() || n == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(input_ids, n) }.to_vec() };
+    match call(m, |reply| Command::TrainerStep { input_ids: ids, target, reply }) {
+        Ok(Ok(loss)) => { unsafe { *out_loss = loss }; 0 }
+        Ok(Err(e)) => { set_last_error(e); -6 }
+        Err(c) => c,
+    }
+}
+
+/// Serialize the trained LoRA adapter → safetensors bytes (free with `rl_free_bytes`).
+/// # Safety
+/// `m` valid; `out`/`out_len` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_trainer_save_adapter(m: *mut RlModel, out: *mut *mut u8, out_len: *mut usize) -> i32 {
+    if out.is_null() || out_len.is_null() { set_last_error("null out"); return -2; }
+    match call(m, |reply| Command::TrainerSaveAdapter { reply }) {
+        Ok(Ok(bytes)) => { put_bytes(bytes, out, out_len); 0 }
         Ok(Err(e)) => { set_last_error(e); -6 }
         Err(c) => c,
     }

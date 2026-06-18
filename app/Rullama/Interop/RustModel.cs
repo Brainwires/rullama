@@ -143,6 +143,30 @@ internal sealed class RustModel : IDisposable
         return arr;
     }
 
+    // ---- fine-tuning (LoRA) — converts this model into a trainer ----
+    public void TrainerBegin(uint rank, float alpha, float dropout, string targetModulesCsv, int maxSeqLen, double learningRate)
+        => Check(RustCore.rl_trainer_begin(_h, rank, alpha, dropout, targetModulesCsv, (UIntPtr)maxSeqLen, learningRate), "trainer begin");
+
+    /// <summary>One training step on (inputIds → target); returns the loss.</summary>
+    public float TrainerStep(uint[] inputIds, uint target)
+    {
+        Check(RustCore.rl_trainer_step(_h, inputIds, (UIntPtr)inputIds.Length, target, out float loss), "trainer step");
+        return loss;
+    }
+
+    public byte[] TrainerSaveAdapter()
+    {
+        Check(RustCore.rl_trainer_save_adapter(_h, out IntPtr p, out UIntPtr n), "trainer save_adapter");
+        try
+        {
+            int count = (int)n;
+            var b = new byte[count];
+            if (count > 0) Marshal.Copy(p, b, 0, count);
+            return b;
+        }
+        finally { RustCore.rl_free_bytes(p, n); }
+    }
+
     /// <summary>Request cancellation of an in-flight Generate. Thread-safe.</summary>
     public void Cancel()
     {

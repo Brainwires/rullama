@@ -24,6 +24,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Rullama.TtsSmoke", "Rullama
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Rullama.EmbedSmoke", "Rullama.EmbedSmoke\Rullama.EmbedSmoke.csproj", "{A27D511D-5871-46D4-A2CB-7D96B3155F0D}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Rullama.FinetuneSmoke", "Rullama.FinetuneSmoke\Rullama.FinetuneSmoke.csproj", "{BE3ADFEB-B8F4-4974-A363-FBEADCF3F784}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -130,6 +132,18 @@ Global
 		{A27D511D-5871-46D4-A2CB-7D96B3155F0D}.Release|x64.Build.0 = Release|Any CPU
 		{A27D511D-5871-46D4-A2CB-7D96B3155F0D}.Release|x86.ActiveCfg = Release|Any CPU
 		{A27D511D-5871-46D4-A2CB-7D96B3155F0D}.Release|x86.Build.0 = Release|Any CPU
+		{BE3ADFEB-B8F4-4974-A363-FBEADCF3F784}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BE3ADFEB-B8F4-4974-A363-FBEADCF3F784}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BE3ADFEB-B8F4-4974-A363-FBEADCF3F784}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{BE3ADFEB-B8F4-4974-A363-FBEADCF3F784}.Debug|x64.Build.0 = Debug|Any CPU
+		{BE3ADFEB-B8F4-4974-A363-FBEADCF3F784}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{BE3ADFEB-B8F4-4974-A363-FBEADCF3F784}.Debug|x86.Build.0 = Debug|Any CPU
+		{BE3ADFEB-B8F4-4974-A363-FBEADCF3F784}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BE3ADFEB-B8F4-4974-A363-FBEADCF3F784}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BE3ADFEB-B8F4-4974-A363-FBEADCF3F784}.Release|x64.ActiveCfg = Release|Any CPU
+		{BE3ADFEB-B8F4-4974-A363-FBEADCF3F784}.Release|x64.Build.0 = Release|Any CPU
+		{BE3ADFEB-B8F4-4974-A363-FBEADCF3F784}.Release|x86.ActiveCfg = Release|Any CPU
+		{BE3ADFEB-B8F4-4974-A363-FBEADCF3F784}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
