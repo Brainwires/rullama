@@ -27,6 +27,27 @@ public partial class ChatViewModel : ViewModelBase
     [ObservableProperty] private bool _useKnowledge;
     public bool RagAvailable => RagService.Available;
 
+    [ObservableProperty] private string _adapterStatus = "No adapter loaded.";
+
+    /// <summary>Load a trained LoRA adapter into the chat model (called by the view).</summary>
+    public async Task LoadAdapterAsync(string path)
+    {
+        if (!IsModelLoaded) { AdapterStatus = "Load a model first."; return; }
+        try
+        {
+            int slots = await _engine.LoadAdapterAsync(path);
+            AdapterStatus = $"Adapter loaded ({slots} slots): {System.IO.Path.GetFileName(path)}";
+        }
+        catch (Exception e) { AdapterStatus = "Adapter load failed: " + e.Message; }
+    }
+
+    [RelayCommand]
+    private void ClearAdapter()
+    {
+        _engine.ClearAdapter();
+        AdapterStatus = "Adapter cleared.";
+    }
+
     public ObservableCollection<ChatMessageViewModel> Messages { get; } = new();
     public ObservableCollection<ConversationViewModel> Conversations { get; } = new();
 

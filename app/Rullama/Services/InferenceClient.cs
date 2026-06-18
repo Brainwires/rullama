@@ -53,6 +53,16 @@ public sealed class InferenceClient : IDisposable
         lock (_gate) _model?.SetSampling(temperature, topK, topP, repetitionPenalty, seed);
     }
 
+    /// <summary>Load a LoRA adapter (safetensors file) into the chat model.</summary>
+    public async Task<int> LoadAdapterAsync(string path)
+    {
+        RustModel m = _model ?? throw new InvalidOperationException("No model loaded.");
+        byte[] bytes = await Task.Run(() => System.IO.File.ReadAllBytes(path));
+        return await Task.Run(() => m.LoadAdapter(bytes));
+    }
+
+    public void ClearAdapter() { lock (_gate) _model?.ClearAdapter(); }
+
     /// <summary>
     /// Generate a reply for the given history (role/content pairs), streaming
     /// decoded pieces to <paramref name="onPiece"/>. Cancellable via

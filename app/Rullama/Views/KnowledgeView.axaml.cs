@@ -23,16 +23,28 @@ public partial class KnowledgeView : UserControl
 
         IReadOnlyList<IStorageFile> files = await top.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Index a text file",
+            Title = "Index a document",
             AllowMultiple = false,
-            FileTypeFilter = new[] { new FilePickerFileType("Text") { Patterns = new[] { "*.txt", "*.md" } } },
+            FileTypeFilter = new[] { new FilePickerFileType("Text / PDF") { Patterns = new[] { "*.txt", "*.md", "*.pdf" } } },
         });
         if (files.Count == 0)
             return;
 
-        using StreamReader reader = new(await files[0].OpenReadAsync());
-        string text = await reader.ReadToEndAsync();
-        await vm.IndexTextAsync(files[0].Name, text);
+        IStorageFile file = files[0];
+        string text;
+        if (file.Name.EndsWith(".pdf", System.StringComparison.OrdinalIgnoreCase))
+        {
+            await using System.IO.Stream s = await file.OpenReadAsync();
+            using var ms = new System.IO.MemoryStream();
+            await s.CopyToAsync(ms);
+            text = Rullama.Services.PdfText.Extract(ms.ToArray());
+        }
+        else
+        {
+            using StreamReader reader = new(await file.OpenReadAsync());
+            text = await reader.ReadToEndAsync();
+        }
+        await vm.IndexTextAsync(file.Name, text);
     }
 
     private void InitializeComponent() => AvaloniaXamlLoader.Load(this);

@@ -193,7 +193,17 @@
             </ScrollViewer>
           </TabItem>
           <TabItem Header="Model">
-            <TextBlock Classes="muted" Margin="0,8" TextWrapping="Wrap" Text="{Binding Status}" />
+            <StackPanel Spacing="10" Margin="0,8,0,0">
+              <TextBlock Classes="muted" TextWrapping="Wrap" Text="{Binding Status}" />
+              <TextBlock Classes="label" Text="LORA ADAPTER" />
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Classes="outline sm" Content="Load adapter…" Click="LoadAdapter_Click"
+                        IsEnabled="{Binding IsModelLoaded}" />
+                <Button Classes="outline sm" Content="Clear" Command="{Binding ClearAdapterCommand}"
+                        IsEnabled="{Binding IsModelLoaded}" />
+              </StackPanel>
+              <TextBlock Classes="muted" FontSize="11" TextWrapping="Wrap" Text="{Binding AdapterStatus}" />
+            </StackPanel>
           </TabItem>
           <TabItem Header="Tools">
             <ScrollViewer>

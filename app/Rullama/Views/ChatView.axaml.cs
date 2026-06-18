@@ -70,6 +70,21 @@ public partial class ChatView : UserControl
         await vm.AttachImageAsync(ms.ToArray());
     }
 
+    private async void LoadAdapter_Click(object? sender, RoutedEventArgs e)
+    {
+        TopLevel? top = TopLevel.GetTopLevel(this);
+        if (top is null || DataContext is not ChatViewModel vm)
+            return;
+        IReadOnlyList<IStorageFile> files = await top.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Load a LoRA adapter",
+            AllowMultiple = false,
+            FileTypeFilter = new[] { new FilePickerFileType("Adapter") { Patterns = new[] { "*.safetensors" } } },
+        });
+        if (files.Count > 0 && files[0].TryGetLocalPath() is { } path)
+            await vm.LoadAdapterAsync(path);
+    }
+
     private async void AttachAudio_Click(object? sender, RoutedEventArgs e)
     {
         TopLevel? top = TopLevel.GetTopLevel(this);
