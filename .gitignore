@@ -5,6 +5,8 @@
 
 # Packaging output
 /dist/
+# Android cross-compiled native libs (built by scripts/build-rust-android.sh)
+/app/Rullama.Android/jniLibs/
 
 # .NET / Avalonia
 [Bb]in/

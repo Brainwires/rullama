@@ -25,4 +25,16 @@
   <ItemGroup>
     <ProjectReference Include="..\Rullama\Rullama.csproj" />
   </ItemGroup>
+
+  <!-- Bundle the rust-core native libs (built by scripts/build-rust-android.sh
+       into jniLibs/<abi>/librullama_core.so). P/Invoke DllImport("rullama_core")
+       resolves them from the APK at runtime. -->
+  <ItemGroup>
+    <AndroidNativeLibrary Include="jniLibs\arm64-v8a\librullama_core.so" Condition="Exists('jniLibs\arm64-v8a\librullama_core.so')">
+      <Abi>arm64-v8a</Abi>
+    </AndroidNativeLibrary>
+    <AndroidNativeLibrary Include="jniLibs\x86_64\librullama_core.so" Condition="Exists('jniLibs\x86_64\librullama_core.so')">
+      <Abi>x86_64</Abi>
+    </AndroidNativeLibrary>
+  </ItemGroup>
 </Project>
