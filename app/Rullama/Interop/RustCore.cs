@@ -137,6 +137,23 @@ internal static class RustCore
     [DllImport(Lib, EntryPoint = "rl_tts_sample_rate")]
     internal static extern uint rl_tts_sample_rate(IntPtr t);
 
+    // ---- embeddings (EmbeddingGemma; separate handle) ----
+    [DllImport(Lib, EntryPoint = "rl_embed_create")]
+    internal static extern IntPtr rl_embed_create();
+
+    [DllImport(Lib, EntryPoint = "rl_embed_free")]
+    internal static extern void rl_embed_free(IntPtr t);
+
+    [DllImport(Lib, EntryPoint = "rl_embed_load_path")]
+    internal static extern int rl_embed_load_path(IntPtr t, [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+
+    [DllImport(Lib, EntryPoint = "rl_embed_dim")]
+    internal static extern uint rl_embed_dim(IntPtr t);
+
+    [DllImport(Lib, EntryPoint = "rl_embed")]
+    internal static extern int rl_embed(
+        IntPtr t, [MarshalAs(UnmanagedType.LPUTF8Str)] string text, UIntPtr targetDim, out IntPtr outPtr, out UIntPtr outLen);
+
     // ---- helpers ----
     internal static string Version() => Marshal.PtrToStringUTF8(rl_version()) ?? "unknown";
 

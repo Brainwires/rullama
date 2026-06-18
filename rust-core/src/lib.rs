@@ -30,6 +30,7 @@ use std::thread::JoinHandle;
 
 use rullama::api::Model;
 use rullama::backend::WgpuCtx;
+use rullama::embed::EmbeddingModel;
 use rullama::gguf::{FileFetcher, TensorFetcher};
 use rullama::sampling::SamplingOptions;
 use rullama::tts::KokoroTts;
@@ -1018,6 +1019,111 @@ pub unsafe extern "C" fn rl_tts_synthesize(t: *mut RlTts, text: *const c_char, v
 #[unsafe(no_mangle)]
 pub extern "C" fn rl_tts_sample_rate(_t: *mut RlTts) -> u32 {
     TTS_SAMPLE_RATE
+}
+
+// ---------------------------------------------------------------------------
+// Embeddings (EmbeddingGemma) — a SEPARATE model handle with its own thread.
+// ---------------------------------------------------------------------------
+
+enum EmbedCommand {
+    Load { bytes: Vec<u8>, reply: Sender<Result<(), String>> },
+    Dim(Sender<u32>),
+    Embed { text: String, target_dim: usize, reply: Sender<Result<Vec<f32>, String>> },
+    Shutdown,
+}
+
+fn embed_worker(rx: mpsc::Receiver<EmbedCommand>) {
+    let mut model: Option<EmbeddingModel> = None;
+    for cmd in rx {
+        match cmd {
+            EmbedCommand::Load { bytes, reply } => {
+                let r = pollster::block_on(EmbeddingModel::load_native(bytes)).map_err(|e| format!("{e}"));
+                match r {
+                    Ok(m) => { model = Some(m); let _ = reply.send(Ok(())); }
+                    Err(e) => { let _ = reply.send(Err(e)); }
+                }
+            }
+            EmbedCommand::Dim(reply) => {
+                let _ = reply.send(model.as_ref().map_or(0, |m| m.dim_native()));
+            }
+            EmbedCommand::Embed { text, target_dim, reply } => {
+                let r = match model.as_ref() {
+                    Some(m) => pollster::block_on(m.embed_native(&text, target_dim)).map_err(|e| format!("{e}")),
+                    None => Err("embedding model not loaded".into()),
+                };
+                let _ = reply.send(r);
+            }
+            EmbedCommand::Shutdown => break,
+        }
+    }
+}
+
+/// Opaque embedding-model handle.
+pub struct RlEmbed {
+    tx: Sender<EmbedCommand>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rl_embed_create() -> *mut RlEmbed {
+    let (tx, rx) = mpsc::channel();
+    match std::thread::Builder::new().name("rullama-embed".into()).spawn(move || embed_worker(rx)) {
+        Ok(handle) => Box::into_raw(Box::new(RlEmbed { tx, handle: Some(handle) })),
+        Err(e) => { set_last_error(format!("failed to spawn embed thread: {e}")); std::ptr::null_mut() }
+    }
+}
+
+/// # Safety
+/// `t` must be NULL or a handle from `rl_embed_create`, unused afterward.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_embed_free(t: *mut RlEmbed) {
+    if t.is_null() { return; }
+    let mut b = unsafe { Box::from_raw(t) };
+    let _ = b.tx.send(EmbedCommand::Shutdown);
+    if let Some(h) = b.handle.take() { let _ = h.join(); }
+}
+
+fn embed_call<T>(t: *mut RlEmbed, make: impl FnOnce(Sender<T>) -> EmbedCommand) -> Result<T, i32> {
+    let Some(e) = (unsafe { t.as_ref() }) else { set_last_error("null embed handle"); return Err(-1); };
+    let (tx, rx) = mpsc::channel();
+    if e.tx.send(make(tx)).is_err() { set_last_error("embed worker gone"); return Err(-2); }
+    rx.recv().map_err(|_| { set_last_error("embed dropped reply"); -3 })
+}
+
+/// Load the embedding GGUF from a path.
+/// # Safety
+/// `t` valid; `path` a valid C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_embed_load_path(t: *mut RlEmbed, path: *const c_char) -> i32 {
+    let path = match unsafe { c_str(path) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+    let bytes = match std::fs::read(&path) { Ok(b) => b, Err(e) => { set_last_error(format!("read {path}: {e}")); return -6; } };
+    match embed_call(t, |reply| EmbedCommand::Load { bytes, reply }) {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) => { set_last_error(e); -6 }
+        Err(c) => c,
+    }
+}
+
+/// Native embedding dimension (0 if not loaded).
+/// # Safety
+/// `t` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_embed_dim(t: *mut RlEmbed) -> u32 {
+    embed_call(t, EmbedCommand::Dim).unwrap_or(0)
+}
+
+/// Embed text → f32 vector of length `target_dim` (Matryoshka; free with `rl_free_f32`).
+/// # Safety
+/// `t` valid; `text` a valid C string; `out`/`out_len` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rl_embed(t: *mut RlEmbed, text: *const c_char, target_dim: usize, out: *mut *mut f32, out_len: *mut usize) -> i32 {
+    if out.is_null() || out_len.is_null() { set_last_error("null out"); return -2; }
+    let text = match unsafe { c_str(text) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+    match embed_call(t, |reply| EmbedCommand::Embed { text, target_dim, reply }) {
+        Ok(Ok(v)) => { put_f32(v, out, out_len); 0 }
+        Ok(Err(e)) => { set_last_error(e); -6 }
+        Err(c) => c,
+    }
 }
 
 // ---------------------------------------------------------------------------
