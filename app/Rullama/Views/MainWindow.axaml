@@ -7,7 +7,7 @@
         mc:Ignorable="d" d:DesignWidth="1200" d:DesignHeight="800"
         x:Class="Rullama.Views.MainWindow"
         x:DataType="vm:ShellViewModel"
-        Icon="/Assets/avalonia-logo.ico"
+        Icon="/Assets/rullama-512.png"
         Title="Rullama"
         Width="1200" Height="800" MinWidth="860" MinHeight="540"
         Background="{StaticResource Background}">

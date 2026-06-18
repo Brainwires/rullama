@@ -23,6 +23,7 @@ echo "==> Assembling $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
 cp -R "$PUB/." "$OUT/Contents/MacOS/"
+[ -f "$ROOT/app/Rullama.Desktop/rullama.icns" ] && cp "$ROOT/app/Rullama.Desktop/rullama.icns" "$OUT/Contents/Resources/rullama.icns"
 cat > "$OUT/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -33,6 +34,7 @@ cat > "$OUT/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>0.1.0</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleExecutable</key><string>Rullama.Desktop</string>
+  <key>CFBundleIconFile</key><string>rullama</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
