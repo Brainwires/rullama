@@ -626,6 +626,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
 
             // Fast path: KV snapshot from OPFS.
             let kvIntact = false;
+            let snapshotIncompatible = false;
             if (!forceSlowPath) {
                 const snapshotBytes = await readInflightState();
                 if (snapshotBytes && snapshotBytes.length > 0) {
@@ -633,10 +634,31 @@ export function useChatEngine(opts: UseChatEngineParams) {
                         await client.restoreKvState(snapshotBytes);
                         kvIntact = true;
                     } catch (e) {
+                        const m = (e as Error).message ?? "";
+                        // A snapshot that the core REJECTS (vs a transient GPU
+                        // error) means its KV format/config changed since it was
+                        // saved — e.g. a build that flipped the KV cache to f16
+                        // or bumped the snapshot version. Don't grind a full
+                        // re-prefill on a memory-constrained phone; abandon the
+                        // resume. Other restore failures still fall through to
+                        // the slow replay (the legit KV-evicted case).
+                        snapshotIncompatible = /kv snapshot/i.test(m);
                         // eslint-disable-next-line no-console
-                        console.warn("[rullama] KV restore failed; falling back to replay:", e);
+                        console.warn(
+                            `[rullama] KV restore failed; ${snapshotIncompatible ? "abandoning resume (incompatible snapshot)" : "falling back to replay"}:`,
+                            e,
+                        );
                     }
                 }
+            }
+
+            // Stale, now-incompatible inflight snapshot (post-deploy migration):
+            // keep whatever partial text was already persisted to the message and
+            // bail out — the finally block clears the stale state, so the next
+            // load starts clean and a fresh send works normally.
+            if (snapshotIncompatible) {
+                setStatusLine(undefined);
+                return;
             }
 
             // Slow path: rebuild KV from a continuation render. For
