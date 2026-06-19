@@ -233,18 +233,12 @@ export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy, onPrepare }
 
             setLoadingLabel("loading into wasm…");
             const mobile = isMobileUA();
-            // KV-cache cap on mobile. The cache is PREALLOCATED to this many
-            // tokens at load; the browser OPFS loaders use an f16 KV cache
-            // (packed 2 halves/u32), HALVING the per-token byte cost. We size
-            // each to the SAME byte footprint as the original known-stable f32
-            // config (multimodal 1024 f32, text 2048 f32) — so f16 DOUBLES each
-            // window at no extra RAM: multimodal 2048 (= 1024 f32 bytes),
-            // text-only 4096 (= 2048 f32 bytes). Going higher overshot the
-            // device KV budget and jetsam-crashed at load on the multimodal
-            // path (4096 f16 = 2× the stable footprint). 4096 is also the hard
-            // ceiling anyway: attention.wgsl's workgroup `scores` is
-            // MAX_HISTORY=4096 (16 KB; 8192 hits Apple's 32 KB limit).
-            const mobileMaxCtx = m.multimodal ? 2048 : 4096;
+            // KV-cache cap on mobile (PREALLOCATED in f32 at load). Back to the
+            // original known-stable values — f16 KV (which would have let these
+            // double for the same RAM) is gated off on mobile for now because
+            // the f16 attention kernel appears to fault on iOS Safari WebGPU
+            // during the warm. See api.rs `load_streaming_with_max_context`.
+            const mobileMaxCtx = m.multimodal ? 1024 : 2048;
             // textOnly policy:
             //   Catalog drives it everywhere — `multimodal: true` on a
             //   BAKED_IN_MODELS / R2 entry means the blob carries the
