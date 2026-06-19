@@ -1346,6 +1346,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
             let emitted = 0;
             let pendingDelta = "";
             let lastFlushAt  = performance.now();
+            let ctxLimitHit  = false;   // KV window filled → graceful stop, not a failure
             const flushPending = async () => {
                 if (!convId || !modelMsgId || pendingDelta.length === 0) return;
                 const delta = pendingDelta;
@@ -1371,7 +1372,21 @@ export function useChatEngine(opts: UseChatEngineParams) {
                         await flushPending();
                         lastFlushAt = performance.now();
                     }
-                    const r = await stepWithTimeout(client, next);
+                    let r;
+                    try {
+                        r = await stepWithTimeout(client, next);
+                    } catch (e) {
+                        // Hitting the KV window is a graceful STOP, not a failure:
+                        // the tokens so far are already rendered. Treat it like
+                        // EOS (keep the partial answer) instead of surfacing a
+                        // scary "Generation failed" — only a soft, once-per-turn
+                        // notice. Any other error still propagates.
+                        if (/context length exceeded/i.test((e as Error).message)) {
+                            ctxLimitHit = true;
+                            break;
+                        }
+                        throw e;
+                    }
                     next     = r.next;
                     curStr   = r.str ?? "";
                     curIsEos = r.isEos;
@@ -1537,6 +1552,15 @@ export function useChatEngine(opts: UseChatEngineParams) {
             }
 
             await flushPending();
+            if (ctxLimitHit) {
+                // Soft, non-error notice — the answer above is complete up to the
+                // model's context window; it wasn't a crash or failure.
+                showToast({
+                    level: "info",
+                    title: "Reached the context limit",
+                    message: "The reply stopped at the model's context window. Shorten the chat or raise the context to continue.",
+                });
+            }
             if (convId) {
                 try {
                     await client.convTouch(convId, suggestTitle(text));

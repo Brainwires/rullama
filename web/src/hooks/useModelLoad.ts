@@ -233,13 +233,16 @@ export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy, onPrepare }
 
             setLoadingLabel("loading into wasm…");
             const mobile = isMobileUA();
-            // KV-cache cap on mobile. Tool calling + thinking blow past a
-            // 1024-token window fast (the prompt's tool schema alone is
-            // several hundred tokens), so the old 1024/2048 caps were
-            // crashing real turns with "context length exceeded". Bumped 4×
-            // (multimodal 4096, text-only 8192) — the earlier jetsam concern
-            // at larger contexts was never actually confirmed.
-            const mobileMaxCtx = m.multimodal ? 4096 : 8192;
+            // KV-cache cap on mobile. The cache is PREALLOCATED to this many
+            // tokens in f32 at load (per non-donor layer: max_context *
+            // n_kv_heads * head_dim * 4 * 2), and on iPhone that baseline is
+            // the jetsam ceiling — 4096 (~several hundred MB) crashes mid-gen,
+            // 1024 was cramped. 2048/4096 is the safe-but-roomier middle (2×
+            // the original 1024/2048). A genuinely larger window needs an f16
+            // KV cache (halves the preallocation) — tracked separately.
+            // Multimodal stays lower: the vision/audio scratch competes for the
+            // same budget (esp. with media attached).
+            const mobileMaxCtx = m.multimodal ? 2048 : 4096;
             // textOnly policy:
             //   Catalog drives it everywhere — `multimodal: true` on a
             //   BAKED_IN_MODELS / R2 entry means the blob carries the
