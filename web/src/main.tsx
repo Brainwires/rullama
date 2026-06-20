@@ -10,6 +10,18 @@ import { ToastProvider } from "@/lib/toast";
 import { Toaster } from "@/components/Toaster";
 import { ConfirmProvider } from "@/lib/confirm";
 
+// ─── TEMPORARY: recovery escape hatch guard ───────────────────────────────
+// The actual recovery (kill SW + caches + state) runs in the inline <script>
+// at the top of index.html — it has to, to beat the stale service worker and
+// the app bundle. This is just a belt-and-suspenders halt: if the page is in
+// `?reset` mode and somehow reaches the module before index.html's reload,
+// stop here so the app/worker never spawn and read poisoned state.
+if (typeof window !== "undefined"
+    && ((window as unknown as { __RULLAMA_RESET?: boolean }).__RULLAMA_RESET
+        || new URLSearchParams(window.location.search).get("reset"))) {
+    throw new Error("[reset] boot halted — recovery in progress");
+}
+
 // Automation hook for safaridriver-driven debugging on iPhone.
 // Gated by `?automation=1` URL param so the surface is invisible in
 // normal use. Exposes the worker client + a canned end-to-end repro

@@ -2,6 +2,63 @@
 <html lang="en" class="dark">
 <head>
     <meta charset="utf-8" />
+
+    <!-- TEMPORARY recovery escape hatch. A stale service worker after a deploy
+         keeps serving precached chunks that mismatch the fresh index.html and
+         crash the app on boot before any in-app recovery runs. Open the app
+         with a query param to force a clean slate:
+           ?reset=1    → kill the service worker + all caches + local state,
+                         KEEP the downloaded model (no 7 GB re-download)
+           ?reset=all  → also remove the downloaded model
+         Navigation is NetworkFirst, so this fresh HTML loads past the stale SW;
+         this runs FIRST (before the app bundle), kills the SW, then reloads to a
+         clean URL (param stripped, so it can't loop). Remove once the SW update
+         flow is fixed. -->
+    <script>
+      (function () {
+        try {
+          var v = new URLSearchParams(location.search).get("reset");
+          if (!v) return;
+          window.__RULLAMA_RESET = true; // main.tsx halts on this if it runs first
+          var keepModel = v !== "all";
+          var clean = location.pathname;
+          try { document.title = "Recovering…"; } catch (e) {}
+          (async function () {
+            // 1) Kill the service worker(s) — the usual culprit after an update.
+            try {
+              if ("serviceWorker" in navigator) {
+                var regs = await navigator.serviceWorker.getRegistrations();
+                for (var i = 0; i < regs.length; i++) { try { await regs[i].unregister(); } catch (e) {} }
+              }
+            } catch (e) {}
+            // 2) Drop all Cache Storage (precached / stale bundles).
+            try {
+              if ("caches" in window) {
+                var ks = await caches.keys();
+                for (var j = 0; j < ks.length; j++) { try { await caches.delete(ks[j]); } catch (e) {} }
+              }
+            } catch (e) {}
+            // 3) Local key/value state.
+            try { localStorage.clear(); } catch (e) {}
+            try { sessionStorage.clear(); } catch (e) {}
+            // 4) OPFS state dirs — KEEP rullama-models unless a full wipe.
+            try {
+              if (navigator.storage && navigator.storage.getDirectory) {
+                var root = await navigator.storage.getDirectory();
+                var names = [];
+                for await (var ent of root.entries()) { names.push(ent[0]); }
+                for (var k = 0; k < names.length; k++) {
+                  if (keepModel && names[k] === "rullama-models") continue;
+                  try { await root.removeEntry(names[k], { recursive: true }); } catch (e) {}
+                }
+              }
+            } catch (e) {}
+            // Reload into the clean app (param stripped → no loop).
+            location.replace(clean);
+          })();
+        } catch (e) {}
+      })();
+    </script>
     <!-- Fixed scale, no user zoom. iOS otherwise lets a double-tap or
          pinch zoom the PWA in ways that break the standalone layout. -->
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover" />
