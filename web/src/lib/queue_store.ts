@@ -43,7 +43,6 @@ interface PersistedJob {
     weatherApiKey: string;
     newsApiKey: string;
     weatherUnits: ToolUnits;
-    useGps: boolean;
     orchestratorMode: boolean;
     diffusion: boolean;
     modelDigest: string;
@@ -111,7 +110,7 @@ function toPersisted(j: GenJob): PersistedJob {
         userText: j.userText, createdAt: j.createdAt, sysContent: j.sysContent,
         sampling: j.sampling, maxTokens: j.maxTokens, thinking: j.thinking,
         toolMode: j.toolMode, weatherApiKey: j.weatherApiKey, newsApiKey: j.newsApiKey,
-        weatherUnits: j.weatherUnits, useGps: j.useGps,
+        weatherUnits: j.weatherUnits,
         orchestratorMode: j.orchestratorMode, diffusion: j.diffusion,
         modelDigest: j.modelDigest,
         nImages: j.images.filter((im) => im.pixels).length,
@@ -202,7 +201,7 @@ export async function loadQueue(): Promise<GenJob[]> {
             priorMessages, sysContent: p.sysContent, sampling: p.sampling,
             maxTokens: p.maxTokens, thinking: p.thinking, toolMode: p.toolMode,
             weatherApiKey: p.weatherApiKey, newsApiKey: p.newsApiKey ?? "", weatherUnits: p.weatherUnits,
-            useGps: p.useGps, orchestratorMode: p.orchestratorMode ?? false,
+            orchestratorMode: p.orchestratorMode ?? false,
             diffusion: p.diffusion, modelDigest: p.modelDigest,
             images, audio, status: "queued",
         });

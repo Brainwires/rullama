@@ -67,8 +67,6 @@ interface Props {
     onNewsApiKeyChange: (s: string) => void;
     weatherUnits: Units;
     onWeatherUnitsChange: (u: Units) => void;
-    useGps: boolean;
-    onUseGpsChange: (b: boolean) => void;
     onResetDefaults: () => void;
     // Speech input (chat mic → transcription) VAD config.
     voice: VoiceOptions;
@@ -393,24 +391,6 @@ export function ChatSettings(props: Props) {
                                     ))}
                                 </div>
                             </div>
-                        </section>
-
-                        <section className="flex flex-col gap-2 border-t border-border pt-3">
-                            <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">Location</span>
-                            <label
-                                className="flex items-start gap-2 text-xs text-muted-foreground"
-                                title="When the model asks for the weather where you are (and gives no city), use the browser's GPS to fill in your coordinates. Asks for permission the first time."
-                            >
-                                <input
-                                    type="checkbox"
-                                    checked={props.useGps}
-                                    onChange={(e) => props.onUseGpsChange(e.target.checked)}
-                                    className="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer"
-                                />
-                                <span>
-                                    Use my location (GPS) when no place is given — the browser will ask permission
-                                </span>
-                            </label>
                         </section>
 
                         <section className="flex flex-col gap-2 border-t border-border pt-3">

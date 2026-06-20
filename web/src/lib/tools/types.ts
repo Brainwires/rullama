@@ -12,9 +12,9 @@ export interface ToolContext {
     weatherApiKey: string;
     newsApiKey: string;
     units: Units;
-    useGps: boolean;
-    /** Pre-resolved "lat,lon" (GPS) or null — the caller resolves it for
-     *  location-aware tools so the permission prompt rides a user gesture. */
+    /** Resolved "lat,lon" (GPS) or null — the caller resolves it on demand when
+     *  a location tool is called without a place; the OS permission prompt is
+     *  the user's only control (no separate enable toggle). */
     geo: string | null;
     /** Active conversation id, for `search_knowledge` scoping. */
     conversationId: string | null;

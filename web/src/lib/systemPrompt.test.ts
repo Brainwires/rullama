@@ -25,17 +25,13 @@ describe("buildSysContent", () => {
         expect(out).toBe(`${TIMESTAMP_SYSTEM_NOTE}\n\n${FORMATTING_SYSTEM_NOTE}`);
     });
 
-    it("is byte-identical for the WARM path (no rag/gps) vs a plain turn", () => {
-        // The whole pre-warm hot-start hinges on this: the warmed system
-        // block must equal what a plain (no-RAG, no-GPS) turn renders, or
-        // the KV cache wouldn't reuse it.
+    it("is byte-identical for the WARM path vs a plain turn (content is fully static)", () => {
+        // The whole pre-warm hot-start hinges on this: the warmed system block
+        // must equal what a real turn renders, or the KV cache wouldn't reuse it.
         for (const thinking of [false, true]) {
             for (const toolMode of [false, true]) {
                 const warm = buildSysContent({ systemPrompt: "You are X.", thinking, toolMode });
-                const plainTurn = buildSysContent({
-                    systemPrompt: "You are X.", thinking, toolMode,
-                    gpsLine: "",
-                });
+                const plainTurn = buildSysContent({ systemPrompt: "You are X.", thinking, toolMode });
                 expect(warm).toBe(plainTurn);
             }
         }
@@ -54,22 +50,14 @@ describe("buildSysContent", () => {
     it("warm == plain turn in orchestrator mode too (signature differs from JSON mode → its own warm)", () => {
         for (const thinking of [false, true]) {
             const warm = buildSysContent({ systemPrompt: "You are X.", thinking, toolMode: true, orchestratorMode: true });
-            const plainTurn = buildSysContent({ systemPrompt: "You are X.", thinking, toolMode: true, orchestratorMode: true, gpsLine: "" });
+            const plainTurn = buildSysContent({ systemPrompt: "You are X.", thinking, toolMode: true, orchestratorMode: true });
             expect(warm).toBe(plainTurn);
         }
     });
 
-    it("appends the gps tail AFTER the static core (so the prefix never shifts)", () => {
-        const out = buildSysContent({
-            systemPrompt: "SYS", thinking: false, toolMode: true,
-            gpsLine: "GPSTEXT",
-        });
-        // Static core leads (schema → sys prompt → notes); dynamic gps tail last.
+    it("leads with the tool schema in tool mode (static core, no dynamic tail)", () => {
+        const out = buildSysContent({ systemPrompt: "SYS", thinking: false, toolMode: true });
         expect(out.startsWith(`${TOOL_SCHEMA_PROMPT}\n\n`)).toBe(true);
-        expect(out.indexOf("SYS")).toBeLessThan(out.indexOf("GPSTEXT"));
-        // The static core (no gps) is a strict prefix of this — the exact
-        // property KV reuse relies on.
-        const core = buildSysContent({ systemPrompt: "SYS", thinking: false, toolMode: true });
-        expect(out.startsWith(core)).toBe(true);
+        expect(out).toContain("SYS");
     });
 });

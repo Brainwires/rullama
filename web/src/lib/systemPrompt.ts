@@ -3,9 +3,11 @@
 // Both the chat send path and the system-prompt PRE-WARM (which prefills
 // the system block into the KV cache so a new chat hot-starts) must build
 // this identically — otherwise the warmed prefix wouldn't match what a real
-// turn renders and the KV cache wouldn't reuse it. The warm passes no RAG /
-// GPS (those are per-turn, dynamic), so a plain (no-RAG, no-GPS) turn's
-// system block is byte-identical to the warmed one.
+// turn renders and the KV cache wouldn't reuse it. The content is now FULLY
+// STATIC (no per-turn dynamic tail), so every turn's system block is
+// byte-identical to the warmed one. (RAG became the on-demand
+// `search_knowledge` tool, and GPS is resolved per tool call, not injected
+// into the system prefix — neither touches this builder anymore.)
 
 import { THINK_TOKEN, TIMESTAMP_SYSTEM_NOTE, FORMATTING_SYSTEM_NOTE } from "./app-helpers";
 import { TOOL_SCHEMA_PROMPT } from "./toolFormat";
@@ -20,27 +22,20 @@ export interface SysContentParts {
      *  Rhai-script orchestrator preamble instead of the JSON `<tool_call>`
      *  schema. Changes the system signature → a one-time re-warm. */
     orchestratorMode?: boolean;
-    /** Per-turn GPS location line INCLUDING its trailing separator. Omit
-     *  for the warm path; only injected on tool-mode turns with GPS. */
-    gpsLine?: string;
 }
 
 /**
- * Assemble the system-turn content, ordered so the STATIC, cacheable core
- * comes first and the per-turn DYNAMIC content is appended at the end:
+ * Assemble the system-turn content:
  *
- *   [think] tool schema → system prompt → notes   ← static (this is the warm)
- *           → GPS line                            ← dynamic, appended
+ *   [think] tool schema → system prompt → notes
  *
- * This ordering is load-bearing for KV reuse: the pre-warm prefills only
- * the static core, so a turn that adds GPS still shares that whole core as a
- * prefix (and only re-feeds the appended tail) instead of shifting it and
- * forcing a full re-prefill. With no GPS the result is byte-identical to the
- * warm. (RAG used to be a dynamic tail here too; it's now the on-demand
- * `search_knowledge` tool, so retrieval never touches the system prefix.)
+ * Fully static and cacheable — the pre-warm prefills exactly this, so a real
+ * turn's system block is byte-identical to the warm and the KV cache reuses the
+ * whole prefix. (RAG and GPS used to be dynamic tails here; RAG is now the
+ * on-demand `search_knowledge` tool and GPS is resolved per tool call, so
+ * nothing dynamic touches the system prefix.)
  */
 export function buildSysContent(p: SysContentParts): string {
-    // Static core — exactly what the warm prefills.
     let base = p.systemPrompt.trim();
     if (p.toolMode) {
         const toolBlock = p.orchestratorMode ? orchestratorPreamble() : TOOL_SCHEMA_PROMPT;
@@ -48,8 +43,5 @@ export function buildSysContent(p: SysContentParts): string {
     }
     base = base ? `${base}\n\n${TIMESTAMP_SYSTEM_NOTE}` : TIMESTAMP_SYSTEM_NOTE;
     base = `${base}\n\n${FORMATTING_SYSTEM_NOTE}`;
-    // Dynamic tail — appended so it never shifts the static prefix.
-    const gps = p.gpsLine?.trim();
-    if (gps) base = `${base}\n\n${gps}`;
     return p.thinking ? `${THINK_TOKEN}\n${base}` : base;
 }

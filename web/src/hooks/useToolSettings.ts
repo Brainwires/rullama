@@ -8,7 +8,10 @@ import { defaultUnitsFromLocale, type Units as ToolUnits } from "@/lib/tools";
  *                       base model emits `<tool_call>` blocks (no adapter).
  *   - `weatherApiKey` / `weatherUnits` — the executable weather tool
  *                       (`lib/tools`).
- *   - `useGps`        — let location-aware tools consult `navigator.geolocation`.
+ *
+ *   Location (GPS) has no toggle: location tools resolve `navigator.geolocation`
+ *   on demand when called without a place, and the OS permission prompt is the
+ *   user's control.
  */
 // Computed once at module load (navigator is available by then in the browser).
 const LOCALE_DEFAULT_UNITS = defaultUnitsFromLocale();
@@ -25,7 +28,6 @@ export function useToolSettings() {
     // Only used on first run — an explicit choice in the Tools tab persists and
     // wins thereafter.
     const [weatherUnits, setWeatherUnits]   = usePersistedState<ToolUnits>("rullama:weatherUnits", LOCALE_DEFAULT_UNITS);
-    const [useGps, setUseGps]               = usePersistedState<boolean>("rullama:useGps", false);
     // Programmatic tool calling: the model writes ONE Rhai script orchestrating
     // many tools (Brainwires/tool-orchestrator), instead of the sequential JSON
     // loop. Experimental, opt-in; failures fall back to the JSON loop.
@@ -36,7 +38,6 @@ export function useToolSettings() {
         weatherApiKey, setWeatherApiKey,
         newsApiKey, setNewsApiKey,
         weatherUnits, setWeatherUnits,
-        useGps, setUseGps,
         orchestratorMode, setOrchestratorMode,
     };
 }

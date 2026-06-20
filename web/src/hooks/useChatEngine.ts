@@ -58,7 +58,6 @@ export interface UseChatEngineParams {
     weatherApiKey: string;
     newsApiKey: string;
     weatherUnits: ToolUnits;
-    useGps: boolean;
     /** Active LoRA adapter name (or null). Part of the system pre-warm key —
      *  the adapter changes the cached K/V, so warms are per-adapter. */
     activeAdapter: string | null;
@@ -122,7 +121,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
     const {
         modelStatus, loadedIsDiffusion, statusText, lastLoadedDigest,
         hasVision, hasAudio, systemPrompt, sampling, maxTokens, thinking,
-        toolMode, orchestratorMode, weatherApiKey, newsApiKey, weatherUnits, useGps, activeAdapter,
+        toolMode, orchestratorMode, weatherApiKey, newsApiKey, weatherUnits, activeAdapter,
     } = opts;
     const { showToast } = useToast();
 
@@ -924,7 +923,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
             convId, modelMsgId, userText: text, createdAt: nowMs,
             images: turnImages, audio: turnAudio, sysContent,
             sampling, maxTokens, thinking, toolMode, orchestratorMode,
-            weatherApiKey, newsApiKey, weatherUnits, useGps, diffusion: diffusionTurn,
+            weatherApiKey, newsApiKey, weatherUnits, diffusion: diffusionTurn,
         } = job;
 
         // Prior-turn history. For a same-conversation queued send (or any job
@@ -1446,11 +1445,12 @@ export function useChatEngine(opts: UseChatEngineParams) {
                 if (script) {
                     setStatusLine("orchestrating tools…");
                     // Resolve GPS once, only if the script names a location tool
-                    // (don't prompt for coords the script never uses).
+                    // (don't prompt for coords the script never uses). The OS
+                    // permission prompt is the user's control.
                     const usesLoc = /\b(get_weather|get_weather_forecast|get_air_quality|get_astronomy)\b/.test(script);
-                    const geo = useGps && usesLoc ? await resolveGeo() : null;
+                    const geo = usesLoc ? await resolveGeo() : null;
                     const res = await runOrchestration(script, {
-                        weatherApiKey, newsApiKey, units: weatherUnits, useGps, geo,
+                        weatherApiKey, newsApiKey, units: weatherUnits, geo,
                         conversationId: convId ?? null,
                     });
                     setStatusLine(undefined);
@@ -1515,9 +1515,10 @@ export function useChatEngine(opts: UseChatEngineParams) {
 
                 // Resolve GPS once (shared by all calls) — only if at least one
                 // location-aware call gave no place (or said "here"). Never
-                // prompt when every call already named a city. Cached across
+                // prompt when every call already named a city. The OS permission
+                // prompt is the user's control (no enable toggle). Cached across
                 // rounds by resolveGeo, so a later round won't re-prompt.
-                const anyNeedsGeo = useGps && execCalls.some((c) => {
+                const anyNeedsGeo = execCalls.some((c) => {
                     if (!toolUsesLocation(c.name)) return false;
                     const loc = typeof c.arguments.location === "string" ? c.arguments.location.trim() : "";
                     return loc === "" || /\b(current|my location|here|nearby)\b/i.test(loc);
@@ -1533,7 +1534,6 @@ export function useChatEngine(opts: UseChatEngineParams) {
                             weatherApiKey,
                             newsApiKey,
                             units: weatherUnits,
-                            useGps,
                             geo,
                             conversationId: convId ?? null,
                         })),
@@ -1744,26 +1744,11 @@ export function useChatEngine(opts: UseChatEngineParams) {
             }
         }
 
-        // Per-turn dynamic system add-on (resolved at ENQUEUE time so the job is
-        // self-contained and runs with the settings in effect now). The static
-        // part stays byte-identical to the pre-warmed system block so KV reuse
-        // keeps the cached system prefix. GPS is per-turn and not part of the
-        // warm. (RAG is no longer injected here — it's the on-demand
-        // `search_knowledge` tool now, so retrieval never bloats the prefix.)
-        let gpsLine = "";
-        if (toolMode && useGps) {
-            try {
-                const coords = await resolveGeo();
-                if (coords) {
-                    gpsLine =
-                        `The user's current location is approximately ${coords} ` +
-                        `(latitude,longitude). For weather or other location-aware ` +
-                        `tools, when the user does not name a specific place, use ` +
-                        `exactly "${coords}" as the location argument.\n\n`;
-                }
-            } catch { /* geolocation denied / unavailable — proceed without it */ }
-        }
-        const sysContent = buildSysContent({ systemPrompt, thinking, toolMode, orchestratorMode, gpsLine });
+        // The system block is FULLY STATIC and byte-identical to the pre-warmed
+        // one, so KV reuse keeps the cached prefix every turn. (RAG is the
+        // on-demand `search_knowledge` tool; GPS is resolved per location tool
+        // call at run time — neither is injected here.)
+        const sysContent = buildSysContent({ systemPrompt, thinking, toolMode, orchestratorMode });
 
         // Snapshot the prior turns NOW (for the in-memory fast path). If this
         // conversation already has a pending/running job, chain off the DB
@@ -1814,7 +1799,6 @@ export function useChatEngine(opts: UseChatEngineParams) {
             weatherApiKey,
             newsApiKey,
             weatherUnits,
-            useGps,
             diffusion: loadedIsDiffusion,
             modelDigest: lastLoadedDigest,
             images: turnImages,
@@ -1854,7 +1838,7 @@ export function useChatEngine(opts: UseChatEngineParams) {
         activeConvId, commitQueue, kickPump, lastLoadedDigest, loadedIsDiffusion,
         maxTokens, messages, modelStatus, pendingAudio, pendingImages, prompt,
         sampling, statusText, systemPrompt, thinking, toolMode, orchestratorMode,
-        useGps, weatherApiKey, newsApiKey, weatherUnits, showToast,
+        weatherApiKey, newsApiKey, weatherUnits, showToast,
     ]);
 
     // Boot-resume the persisted queue: once the model is ready, rebuild any
