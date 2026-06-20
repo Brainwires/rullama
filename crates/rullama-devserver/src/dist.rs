@@ -169,7 +169,10 @@ fn mime_for(path: &std::path::Path) -> &'static str {
         "js" | "mjs" => "application/javascript",
         "css" => "text/css; charset=utf-8",
         "html" => "text/html; charset=utf-8",
-        "json" | "map" | "webmanifest" => "application/json",
+        "json" | "map" => "application/json",
+        // Spec-correct type so iOS/Safari unambiguously treats it as a PWA
+        // manifest (it accepts application/json too, but this removes all doubt).
+        "webmanifest" => "application/manifest+json",
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
