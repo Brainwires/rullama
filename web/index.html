@@ -411,6 +411,44 @@
             });
             mo.observe(document.documentElement, { childList: true, subtree: true });
 
+            // Exception-driven recovery. The stale-service-worker failure mode
+            // is a chunk/module LOAD error — the fresh index.html references
+            // asset hashes the old SW's precache can't serve — which crashes
+            // boot long before BOOT_TIMEOUT_MS, so the timeout path never fires.
+            // Catch those load errors and run the SAME recovery immediately,
+            // reusing the once-then-escalate guard so we self-heal but never
+            // loop. Only acts on script/stylesheet/module load failures while
+            // the app is still UNMOUNTED — a post-mount error is a normal app
+            // error, not a boot problem, and must not nuke the SW.
+            var recovering = false;
+            function recoverNow() {
+                if (recovering || !armed) return;
+                var root = document.getElementById('root');
+                if (root && root.children.length > 0) return; // mounted → runtime error, ignore
+                recovering = true;
+                armed = false;
+                clearTimeout(watchdog);
+                if (wasAutoRecoveryAttempt) { showRecoveryUI(); } else { attemptAutoRecovery(); }
+            }
+            function looksLikeChunkError(msg) {
+                return /dynamically imported module|module script|Loading chunk|importScripts|Failed to fetch/i.test(msg || '');
+            }
+            window.addEventListener('error', function (e) {
+                // Resource-load failures fire on the element with no message and
+                // don't bubble — hence capture. Restrict to JS/CSS/module assets
+                // so a failed icon/img can't trigger a reset.
+                var t = e && e.target;
+                var isAsset = t && (
+                    t.tagName === 'SCRIPT' ||
+                    (t.tagName === 'LINK' && /stylesheet|modulepreload|preload/i.test(t.rel || ''))
+                );
+                if (isAsset || looksLikeChunkError(e && e.message)) recoverNow();
+            }, true);
+            window.addEventListener('unhandledrejection', function (e) {
+                var r = e && e.reason;
+                if (looksLikeChunkError(r && (r.message || r) + '')) recoverNow();
+            });
+
             btn.addEventListener('click', function () {
                 btn.disabled = true;
                 btn.textContent = 'Resetting…';
