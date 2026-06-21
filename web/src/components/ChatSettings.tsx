@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Loader2, Pencil, Sparkles, Undo2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,8 @@ import { type ModelEntry } from "@/lib/api";
 import { type SamplingOptions } from "@/lib/types";
 import { type VoiceOptions } from "@/lib/voice";
 import { usePersistedState } from "@/lib/persisted";
+import { putCloudKey, hasCloudKey } from "@/lib/cloud/keyvault";
+import { providerLabel, type CloudProvider } from "@/lib/cloud/types";
 import { cn, clampInt, clampNum } from "@/lib/utils";
 
 interface Props {
@@ -68,13 +70,17 @@ interface Props {
     weatherUnits: Units;
     onWeatherUnitsChange: (u: Units) => void;
     onResetDefaults: () => void;
+    // Cloud tab — BYOK proxy chat (Ollama Cloud + OpenAI). API keys are managed
+    // in-tab via the encrypted vault; only the proxy override is a prop.
+    cloudBaseOverride: string;
+    onCloudBaseOverrideChange: (s: string) => void;
     // Speech input (chat mic → transcription) VAD config.
     voice: VoiceOptions;
     onVoiceChange: (v: VoiceOptions) => void;
     canRecord: boolean;
 }
 
-type TabKey = "model" | "generation" | "tools" | "speech";
+type TabKey = "model" | "generation" | "tools" | "cloud" | "speech";
 
 /** Chat-tab right sidebar, tabbed because it carries a lot now:
  *  - **Model**: load/eject the inference model + the Fine-tune launcher.
@@ -132,6 +138,7 @@ export function ChatSettings(props: Props) {
                 <TabButton label="Model" active={tab === "model"} onClick={() => setTab("model")} />
                 <TabButton label="Generation" active={tab === "generation"} onClick={() => setTab("generation")} />
                 <TabButton label="Tools" active={tab === "tools"} onClick={() => setTab("tools")} />
+                <TabButton label="Cloud" active={tab === "cloud"} onClick={() => setTab("cloud")} />
                 <TabButton label="Speech" active={tab === "speech"} onClick={() => setTab("speech")} />
             </nav>
 
@@ -424,6 +431,49 @@ export function ChatSettings(props: Props) {
                     </>
                 )}
 
+                {tab === "cloud" && (
+                    <>
+                        <section className="flex flex-col gap-2">
+                            <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">Cloud chat (BYOK)</span>
+                            <p className="text-[11px] leading-tight text-muted-foreground">
+                                Run chat on a provider's servers when a model is too big for this
+                                device. Pick a cloud model from the <strong>Model</strong> tab to use it.
+                                Your messages and key are sent off-device via the rullama proxy —
+                                keys are stored <strong>encrypted on this device</strong> and never
+                                saved on the server. RAG still uses the on-device embedder, so your
+                                documents stay local.
+                            </p>
+                        </section>
+                        <section className="flex flex-col gap-2 border-t border-border pt-3">
+                            <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">Ollama Cloud</span>
+                            <CloudKeyInput provider="ollama" />
+                        </section>
+                        <section className="flex flex-col gap-2 border-t border-border pt-3">
+                            <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">OpenAI</span>
+                            <CloudKeyInput provider="openai" />
+                        </section>
+                        <section className="flex flex-col gap-2 border-t border-border pt-3">
+                            <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">Advanced</span>
+                            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                                <span>Proxy override (optional)</span>
+                                <Input
+                                    type="text"
+                                    autoComplete="off"
+                                    spellCheck={false}
+                                    value={props.cloudBaseOverride}
+                                    onChange={(e) => props.onCloudBaseOverrideChange(e.target.value)}
+                                    placeholder="https://your-worker.workers.dev"
+                                    className="h-8 text-xs"
+                                />
+                                <span className="text-[10px] leading-tight text-muted-foreground">
+                                    Point cloud calls at your OWN Cloudflare Worker instead of the
+                                    built-in proxy. Leave blank to use the default.
+                                </span>
+                            </label>
+                        </section>
+                    </>
+                )}
+
                 {tab === "speech" && (
                     <section className="flex flex-col gap-2">
                         <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">Speech input</span>
@@ -482,6 +532,91 @@ function ConfirmToggleButton({
                 </AlertDialogFooter>
             </AlertDialogContent>
         </AlertDialog>
+    );
+}
+
+/** Where each provider issues API keys. */
+const CLOUD_KEY_LINK: Record<CloudProvider, string> = {
+    ollama: "https://ollama.com/settings/keys",
+    openai: "https://platform.openai.com/api-keys",
+};
+
+/** A per-provider BYOK key input backed by the encrypted vault. The stored key
+ *  is never read back into the field (it's encrypted); we only show whether one
+ *  is set, let the user paste a new one (Save), or Clear it. */
+function CloudKeyInput({ provider }: { provider: CloudProvider }) {
+    const [value, setValue] = useState("");
+    const [saved, setSaved] = useState<boolean | null>(null); // null = loading
+    const [busy, setBusy] = useState(false);
+
+    useEffect(() => {
+        let stop = false;
+        void hasCloudKey(provider).then((p) => { if (!stop) setSaved(p); });
+        return () => { stop = true; };
+    }, [provider]);
+
+    const save = async () => {
+        const v = value.trim();
+        if (!v) return;
+        setBusy(true);
+        try { await putCloudKey(provider, v); setSaved(true); setValue(""); }
+        finally { setBusy(false); }
+    };
+    const clear = async () => {
+        setBusy(true);
+        try { await putCloudKey(provider, ""); setSaved(false); setValue(""); }
+        finally { setBusy(false); }
+    };
+
+    return (
+        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+            <span className="flex items-center justify-between">
+                <span>{providerLabel(provider)} API key</span>
+                <a
+                    href={CLOUD_KEY_LINK[provider]}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary hover:underline"
+                >
+                    Get a key
+                </a>
+            </span>
+            <div className="flex items-center gap-1">
+                <Input
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={value}
+                    onChange={(e) => setValue(e.target.value)}
+                    placeholder={saved ? "•••••• saved — type to replace" : "Paste your API key"}
+                    className="h-8 flex-1 text-xs"
+                    disabled={busy}
+                />
+                <Button
+                    size="sm"
+                    className="h-8 px-2 text-xs"
+                    onClick={() => void save()}
+                    disabled={busy || !value.trim()}
+                >
+                    Save
+                </Button>
+            </div>
+            <span className="flex items-center justify-between text-[10px] leading-tight">
+                <span className={saved ? "text-emerald-600 dark:text-emerald-500" : "text-muted-foreground"}>
+                    {saved === null ? "…" : saved ? "✓ Key stored (encrypted on this device)" : "No key set"}
+                </span>
+                {saved && (
+                    <button
+                        type="button"
+                        className="text-destructive hover:underline disabled:opacity-50"
+                        onClick={() => void clear()}
+                        disabled={busy}
+                    >
+                        Clear
+                    </button>
+                )}
+            </span>
+        </label>
     );
 }
 

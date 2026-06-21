@@ -67,6 +67,11 @@ struct Args {
     allow_log_write: bool,
     #[arg(long)]
     allow_dev_ws: bool,
+
+    /// Disable the BYOK cloud proxy at `/api/cloud/*` (it is ON by default
+    /// in both local-dev and `--public`).
+    #[arg(long)]
+    no_cloud: bool,
 }
 
 #[tokio::main]
@@ -124,6 +129,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.allow_dev_ws {
         cfg.allow_dev_ws = true;
     }
+    if args.no_cloud {
+        cfg.allow_cloud = false;
+    }
     if !args.cors_origins.is_empty() {
         cfg.cors_origins = args.cors_origins.clone();
     }
@@ -132,6 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("allow_models   = {}", cfg.allow_models);
     tracing::info!("allow_log      = {}", cfg.allow_log_write);
     tracing::info!("allow_dev_ws   = {}", cfg.allow_dev_ws);
+    tracing::info!("allow_cloud    = {}", cfg.allow_cloud);
     tracing::info!("cors_origins   = {:?}", cfg.cors_origins);
 
     let (tx, _rx0) = broadcast::channel::<DevEvent>(64);

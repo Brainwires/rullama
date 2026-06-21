@@ -26,6 +26,9 @@ import { UpdateBanner } from "@/components/UpdateBanner";
 import { ApplyingOverlay } from "@/components/ApplyingOverlay";
 import { useChatTunables } from "@/hooks/useChatTunables";
 import { useToolSettings } from "@/hooks/useToolSettings";
+import { useCloudSettings } from "@/hooks/useCloudSettings";
+import { useConfirm } from "@/lib/confirm";
+import { type ModelEntry } from "@/lib/api";
 import { useSidebars } from "@/hooks/useSidebars";
 import { usePwaUpdate } from "@/hooks/usePwaUpdate";
 import { useWaitInfo } from "@/hooks/useWaitInfo";
@@ -108,6 +111,14 @@ export function App() {
         orchestratorMode, setOrchestratorMode,
     } = useToolSettings();
 
+    // Opt-in cloud chat (BYOK proxy) settings — the proxy override + one-time
+    // off-device consent. The API keys live in the encrypted vault, not here.
+    const {
+        cloudBaseOverride, setCloudBaseOverride,
+        cloudConsented, setCloudConsented,
+    } = useCloudSettings();
+    const confirm = useConfirm();
+
     // Sidebar visibility (persisted per sidebar, defaulting open when
     // docked) + the portal-host elements — see useSidebars.
     const {
@@ -156,6 +167,7 @@ export function App() {
     const {
         modelStatus, setModelStatus,
         loadedIsDiffusion,
+        loadedCloud,
         statusText, setStatusText,
         hasVision, setHasVision,
         hasAudio, setHasAudio,
@@ -190,10 +202,29 @@ export function App() {
         onAttachFiles, onRemoveImage, onCaptureAudio, onRemoveAudio, onAudioError,
         onSend, onStop, resetForUnload, warmSystemPrompt,
     } = useChatEngine({
-        modelStatus, loadedIsDiffusion, statusText, lastLoadedDigest,
+        modelStatus, loadedIsDiffusion, loadedCloud, cloudBaseOverride, statusText, lastLoadedDigest,
         hasVision, hasAudio, systemPrompt, sampling, maxTokens, thinking,
         toolMode, orchestratorMode, weatherApiKey, newsApiKey, weatherUnits, activeAdapter,
     });
+
+    // Consent-gated model load: a cloud model sends data off-device, so the
+    // FIRST cloud load requires a one-time acknowledgement. Local/diffusion
+    // models load straight through. Used by both the picker instances.
+    const onLoadGated = useCallback(async (m: ModelEntry) => {
+        if (m.cloud && !cloudConsented) {
+            const ok = await confirm({
+                title: `Use ${m.cloud.provider === "ollama" ? "Ollama Cloud" : "OpenAI"}?`,
+                description:
+                    `"${m.name}" runs on the provider's servers. Your messages and API key are sent ` +
+                    `off this device through the rullama proxy. Local models keep everything on-device.`,
+                okLabel: "I understand",
+                cancelLabel: "Cancel",
+            });
+            if (!ok) return;
+            setCloudConsented(true);
+        }
+        onLoad(m);
+    }, [confirm, cloudConsented, setCloudConsented, onLoad]);
 
     // Keep the cycle-break refs current for the model loader.
     useEffect(() => {
@@ -213,7 +244,7 @@ export function App() {
     // warmed, re-warm so new chats keep hot-starting (kvReusePlan reuses the
     // resident system prefix). Deduped + debounced; skipped while busy.
     useEffect(() => {
-        if (modelStatus !== "ready" || loadedIsDiffusion || busy) return;
+        if (modelStatus !== "ready" || loadedIsDiffusion || loadedCloud || busy) return;
         if (warmedSigRef.current === sysWarmSig) return;
         const t = setTimeout(() => {
             void (async () => {
@@ -222,7 +253,7 @@ export function App() {
             })();
         }, 350);
         return () => clearTimeout(t);
-    }, [sysWarmSig, modelStatus, loadedIsDiffusion, busy, warmSystemPrompt]);
+    }, [sysWarmSig, modelStatus, loadedIsDiffusion, loadedCloud, busy, warmSystemPrompt]);
 
     // Save a new system prompt, then re-warm the KV cache with it so the
     // next new chat hot-starts (and the current conversation's next turn
@@ -231,11 +262,11 @@ export function App() {
     // first chat prefills the new system once.
     const onSaveSystemPrompt = useCallback(async (value: string) => {
         setSystemPrompt(value);
-        if (modelStatus === "ready") {
+        if (modelStatus === "ready" && !loadedCloud) {
             try { await warmSystemPrompt(undefined, { systemPrompt: value }); }
             catch { /* non-fatal */ }
         }
-    }, [setSystemPrompt, warmSystemPrompt, modelStatus]);
+    }, [setSystemPrompt, warmSystemPrompt, modelStatus, loadedCloud]);
 
     // Page/session lifecycle: env probe, crash-detect, pagehide marker.
     useSessionLifecycle(setView);
@@ -271,6 +302,7 @@ export function App() {
     useEffect(() => {
         if (adapterRestoredRef.current) return;
         if (modelStatus !== "ready") return;
+        if (loadedCloud) return; // cloud has no worker Model to apply an adapter to
         if (!activeAdapter) return;
         adapterRestoredRef.current = true;
         (async () => {
@@ -298,7 +330,7 @@ export function App() {
                 setActiveAdapter(null);
             }
         })();
-    }, [modelStatus, activeAdapter, setActiveAdapter, warmSystemPrompt]);
+    }, [modelStatus, loadedCloud, activeAdapter, setActiveAdapter, warmSystemPrompt]);
 
     // **One engine resident at a time (except Premium).** Inference (Gemma) and the TTS/clone
     // engines can't share a phone GPU, and on iOS WebKit only a worker's DEATH reclaims its GPU
@@ -428,7 +460,7 @@ export function App() {
                             loadingPercent={loadingPercent}
                             loadingLabel={waitInfo?.message ?? loadingLabel}
                             statusText={statusText}
-                            onLoadModel={onLoad}
+                            onLoadModel={onLoadGated}
                             onDeleteModel={onDeleteModel}
                             onEjectModel={onEjectModel}
                             selectedModelName={selectedModelName}
@@ -463,6 +495,8 @@ export function App() {
                             weatherUnits={weatherUnits}
                             onWeatherUnitsChange={setWeatherUnits}
                             onResetDefaults={onResetDefaults}
+                            cloudBaseOverride={cloudBaseOverride}
+                            onCloudBaseOverrideChange={setCloudBaseOverride}
                             voice={voice}
                             onVoiceChange={setVoice}
                             canRecord={modelStatus === "ready" && hasAudio}
@@ -538,7 +572,7 @@ export function App() {
                                             loadingPercent={loadingPercent}
                                             loadingLabel={waitInfo?.message ?? loadingLabel}
                                             statusText={statusText}
-                                            onLoad={onLoad}
+                                            onLoad={onLoadGated}
                                             onDelete={onDeleteModel}
                                             onCancel={onCancelDownload}
                                             onCancelDelete={onCancelAndDeleteDownload}

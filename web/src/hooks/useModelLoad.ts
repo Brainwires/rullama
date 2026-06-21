@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { type ModelStatus } from "@/components/ModelLoader";
 import { type ModelEntry, blobUrl, beacon, listModels, isDiffusion } from "@/lib/api";
+import { getCloudKey } from "@/lib/cloud/keyvault";
+import { providerLabel, type CloudModel } from "@/lib/cloud/types";
 import { ensureModel, existingSize, opfsSupported, requestPersistent, wipeModel, deleteSysWarmSnapshot } from "@/lib/opfs";
 import { getNetworkHint } from "@/lib/network";
 import { getClient } from "@/lib/inference";
@@ -45,6 +47,9 @@ export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy, onPrepare }
     // True when the loaded model is the DiffusionGemma engine (block-diffusion
     // denoise loop in onSend instead of the AR token stream).
     const [loadedIsDiffusion, setLoadedIsDiffusion] = useState(false);
+    // Set when the active backend is an opt-in CLOUD model (BYOK proxy chat).
+    // null for local/diffusion. Drives the cloud generation path in onSend.
+    const [loadedCloud, setLoadedCloud] = useState<CloudModel | null>(null);
     // Model-picker selection, lifted out of ModelLoader so the main panel and
     // the sidebar dropdown stay in sync. Seeded from the last-used model below.
     const [selectedModelName, setSelectedModelName] = useState<string>("");
@@ -135,6 +140,37 @@ export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy, onPrepare }
         setPendingLoadDigest(m.digest);
 
         try {
+            // CLOUD MODEL: no OPFS, no download, no wasm, no KV warm. Verify the
+            // BYOK key exists, record the backend, and go ready immediately. The
+            // cloud generation path lives in useChatEngine (the job.cloud branch).
+            if (m.cloud) {
+                const key = await getCloudKey(m.cloud.provider);
+                if (!key) {
+                    setModelStatus("idle");
+                    setStatusText("no model");
+                    setLoadingLabel("");
+                    setPendingLoadDigest("");
+                    showToast({
+                        level: "warn", title: "API key needed",
+                        message: `Add your ${providerLabel(m.cloud.provider)} key in Settings → Cloud.`,
+                    });
+                    return;
+                }
+                setLoadedCloud({ provider: m.cloud.provider, model: m.name });
+                setLoadedIsDiffusion(false);
+                setHasVision(false);
+                setHasAudio(false);
+                setModelStatus("ready");
+                setStatusText(`${m.name} ☁`);
+                setLoadingLabel("");
+                setLastLoadedDigest(m.digest);
+                setPendingLoadDigest("");
+                beacon("chat", `cloud backend ready: ${m.name} (${m.cloud.provider})`);
+                return;
+            }
+            // Local model from here down — clear any prior cloud backend.
+            setLoadedCloud(null);
+
             if (!(await opfsSupported())) throw new Error("OPFS not supported in this browser");
             await requestPersistent();
 
@@ -451,6 +487,11 @@ export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy, onPrepare }
 
     const onDeleteModel = useCallback(async (m: ModelEntry) => {
         if (isBusy()) return;
+        // Cloud models aren't downloaded — nothing on disk to delete.
+        if (m.cloud) {
+            showToast({ level: "info", title: "Cloud models aren't downloaded", message: "Nothing to delete." });
+            return;
+        }
         const sizeLabel = fmtBytes(m.size);
         const ok = window.confirm(
             `Delete cached "${m.name}" (${sizeLabel})?\n\n` +
@@ -526,9 +567,11 @@ export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy, onPrepare }
     const onEjectModel = useCallback(async () => {
         if (isBusy()) return;
         if (modelStatus !== "ready") return;
-        // DiffusionGemma lives on its own handle (no AR Model session); unload
-        // it directly. Otherwise free the shared Model.
-        if (loadedIsDiffusion) {
+        // Cloud backend has no worker/GPU handle — nothing to free. DiffusionGemma
+        // lives on its own handle; unload it directly. Otherwise free the Model.
+        if (loadedCloud) {
+            /* no-op — cloud is just a proxy target */
+        } else if (loadedIsDiffusion) {
             try { await getClient().diffusion.unload(); } catch { /* */ }
         } else {
             try { await getClient().free(); } catch { /* */ }
@@ -539,17 +582,19 @@ export function useModelLoad({ tier, waitInfo, onUnloadChat, isBusy, onPrepare }
         setHasVision(false);
         setHasAudio(false);
         setLoadedIsDiffusion(false);
+        setLoadedCloud(null);
         onUnloadChat();
         setLastLoadedDigest("");
         // Eject is a deliberate user gesture — they don't want the
         // boot-time auto-resume to refire either.
         setPendingLoadDigest("");
         showToast({ level: "info", title: `Ejected ${name}` });
-    }, [modelStatus, loadedIsDiffusion, setLastLoadedDigest, setPendingLoadDigest, statusText, showToast, onUnloadChat, isBusy]);
+    }, [modelStatus, loadedIsDiffusion, loadedCloud, setLastLoadedDigest, setPendingLoadDigest, statusText, showToast, onUnloadChat, isBusy]);
 
     return {
         modelStatus, setModelStatus,
         loadedIsDiffusion,
+        loadedCloud,
         selectedModelName, setSelectedModelName,
         loadingPercent,
         loadingLabel,

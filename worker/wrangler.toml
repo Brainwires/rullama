@@ -1,0 +1,12 @@
+# Cloudflare Worker config for the rullama BYOK cloud proxy.
+# Deploy out-of-band (NOT built by `cargo docker:*`):  cd worker && npx wrangler deploy
+name = "rullama-cloud-proxy"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+
+[vars]
+# Comma-separated browser origins allowed to call this Worker DIRECTLY (the
+# power-user "point the app's proxy-base-URL override at your own Worker"
+# path). The normal production path is nginx → Worker, which is server-side
+# and needs no entry here. Add the deployed PWA origin(s).
+CORS_ORIGINS = "https://rullama.brainwires.net"

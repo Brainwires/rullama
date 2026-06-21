@@ -4,6 +4,7 @@
 //! See `src/bin/server.rs` for the binary entry point.
 
 pub mod api;
+pub mod cloud;
 pub mod config;
 pub mod dist;
 pub mod pkg;
@@ -49,6 +50,11 @@ pub fn build_app(state: Arc<AppState>, cfg: SecurityConfig) -> Router {
     // The bandwidth-amplification concern is addressed via
     // Cloudflare-side rate limiting (see CLAUDE.md), not in code.
     app = app.merge(api::blob_router());
+    // BYOK cloud proxy. Mounted in BOTH modes (low-end devices on the tunnel
+    // depend on it); the route never persists the user's key.
+    if cfg.allow_cloud {
+        app = app.merge(cloud::cloud_router());
+    }
     app = app.merge(pkg::router());
     if cfg.allow_dev_ws {
         app = app.merge(ws::router());

@@ -6,7 +6,9 @@ import {
     Select, SelectContent, SelectItem, SelectTrigger,
 } from "@/components/ui/select";
 import { fmtBytes } from "@/lib/utils";
-import { type ModelEntry, isSupported, listModels } from "@/lib/api";
+import { type ModelEntry, isCloud, isSupported, listModels } from "@/lib/api";
+import { hasCloudKey } from "@/lib/cloud/keyvault";
+import { providerLabel } from "@/lib/cloud/types";
 import { existingSize } from "@/lib/opfs";
 import {
     AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
@@ -16,7 +18,7 @@ import {
 import { AlertTriangle, Clock, Cloud, Download, HardDrive, Loader2, Square, Trash2, Unplug } from "lucide-react";
 
 /** Download state of a catalog model, shown as an icon in the picker. */
-type CacheState = "cached" | "downloading" | "available";
+type CacheState = "cached" | "downloading" | "available" | "cloud";
 
 function StatusIcon({ state }: { state: CacheState }) {
     const base = "size-3.5 shrink-0";
@@ -24,6 +26,8 @@ function StatusIcon({ state }: { state: CacheState }) {
         return <HardDrive className={`${base} text-emerald-500`} aria-label="Downloaded (in this browser)" />;
     if (state === "downloading")
         return <Clock className={`${base} text-amber-500`} aria-label="Downloading" />;
+    if (state === "cloud")
+        return <Cloud className={`${base} text-sky-500`} aria-label="Cloud model (runs on the provider's servers)" />;
     return <Cloud className={`${base} text-muted-foreground`} aria-label="Available to download" />;
 }
 
@@ -67,6 +71,9 @@ export function ModelLoader(props: Props) {
     };
     const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    // True when the selected model is a cloud model whose provider API key
+    // isn't set yet — Load stays blocked with an inline "set key" hint.
+    const [cloudKeyMissing, setCloudKeyMissing] = useState(false);
 
     const refresh = async () => {
         setRefreshing(true);
@@ -100,6 +107,7 @@ export function ModelLoader(props: Props) {
         let stop = false;
         void (async () => {
             const entries = await Promise.all(models.map(async (m) => {
+                if (isCloud(m)) return [m.name, false] as const; // never OPFS-cached
                 const modelKey = m.digest.replace(/[^A-Za-z0-9_.-]/g, "_");
                 const filename = m.name.replace(/[^A-Za-z0-9_.-]/g, "_") + ".gguf";
                 try {
@@ -113,12 +121,28 @@ export function ModelLoader(props: Props) {
     }, [models, props.status]);
 
     const stateFor = (m: ModelEntry): CacheState => {
+        if (isCloud(m)) return "cloud";
         if (props.status === "loading" && m.name === selected) return "downloading";
         return cached[m.name] ? "cached" : "available";
     };
 
     const selectedModel = models.find((m) => m.name === selected);
-    const canLoad = !!selectedModel && props.status !== "loading";
+
+    // When a cloud model is selected, check whether its provider key is set so
+    // we can block Load + show a hint. Local models clear the flag.
+    useEffect(() => {
+        let stop = false;
+        const cloud = selectedModel?.cloud;
+        if (!cloud) { setCloudKeyMissing(false); return; }
+        void hasCloudKey(cloud.provider).then((present) => {
+            if (!stop) setCloudKeyMissing(!present);
+        });
+        return () => { stop = true; };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selected, models, props.status]);
+
+    const cloudBlocked = !!selectedModel?.cloud && cloudKeyMissing;
+    const canLoad = !!selectedModel && props.status !== "loading" && !cloudBlocked;
 
     // Compact loading badge — "% done · ETA Xm Ys". The full
     // byte-counter + rate string lives in the progress bar that sits
@@ -164,7 +188,7 @@ export function ModelLoader(props: Props) {
                             <SelectItem key={m.name} value={m.name} disabled={!isSupported(m)}>
                                 <span className="flex items-center gap-1.5">
                                     <StatusIcon state={stateFor(m)} />
-                                    <span>{m.name} — {fmtBytes(m.size)}</span>
+                                    <span>{m.name} — {m.cloud ? providerLabel(m.cloud.provider) : fmtBytes(m.size)}</span>
                                     {m.heavy && <AlertTriangle className="size-3 shrink-0 text-amber-500" />}
                                 </span>
                             </SelectItem>
@@ -243,6 +267,22 @@ export function ModelLoader(props: Props) {
                         Very heavy model — a large download, slow on modest hardware. The 26B
                         sparse-MoE streams its experts to fit low-VRAM GPUs (a few seconds per
                         token); dense models like 12B want more VRAM.
+                    </span>
+                </p>
+            )}
+
+            {/* Cloud privacy note + key-missing hint. The model runs on the
+                provider's servers, so flag that data leaves the device; if the
+                BYOK key isn't set, point the user at Settings and block Load. */}
+            {selectedModel?.cloud && (
+                <p className={`flex items-start gap-1 text-[11px] leading-tight ${
+                    cloudKeyMissing ? "text-amber-600 dark:text-amber-500" : "text-sky-600 dark:text-sky-400"
+                }`}>
+                    <Cloud className="mt-px size-3 shrink-0" />
+                    <span>
+                        Runs on {providerLabel(selectedModel.cloud.provider)}'s servers — your
+                        messages leave this device.
+                        {cloudKeyMissing && <> Add your API key in <strong>Settings → Cloud</strong> to use it.</>}
                     </span>
                 </p>
             )}

@@ -22,6 +22,7 @@
 import type { ChatMessage, ImageAttachment, SamplingOptions } from "@/lib/types";
 import type { Units as ToolUnits } from "@/lib/tools";
 import type { GenJob } from "@/lib/app-helpers";
+import type { CloudProvider } from "@/lib/cloud/types";
 
 const QUEUE_DIR = "rullama-queue";
 const MANIFEST = "manifest.json";
@@ -45,6 +46,9 @@ interface PersistedJob {
     weatherUnits: ToolUnits;
     orchestratorMode: boolean;
     diffusion: boolean;
+    /** Cloud turn descriptor (provider + model). The API key is NEVER persisted
+     *  — it's resolved from the encrypted vault at run time. */
+    cloud?: { provider: CloudProvider; model: string };
     modelDigest: string;
     nImages: number;
     nAudio: number;
@@ -112,6 +116,7 @@ function toPersisted(j: GenJob): PersistedJob {
         toolMode: j.toolMode, weatherApiKey: j.weatherApiKey, newsApiKey: j.newsApiKey,
         weatherUnits: j.weatherUnits,
         orchestratorMode: j.orchestratorMode, diffusion: j.diffusion,
+        cloud: j.cloud,
         modelDigest: j.modelDigest,
         nImages: j.images.filter((im) => im.pixels).length,
         nAudio: j.audio.length,
@@ -202,7 +207,8 @@ export async function loadQueue(): Promise<GenJob[]> {
             maxTokens: p.maxTokens, thinking: p.thinking, toolMode: p.toolMode,
             weatherApiKey: p.weatherApiKey, newsApiKey: p.newsApiKey ?? "", weatherUnits: p.weatherUnits,
             orchestratorMode: p.orchestratorMode ?? false,
-            diffusion: p.diffusion, modelDigest: p.modelDigest,
+            diffusion: p.diffusion, cloud: p.cloud,
+            modelDigest: p.modelDigest,
             images, audio, status: "queued",
         });
     }

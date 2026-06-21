@@ -21,6 +21,11 @@ pub struct SecurityConfig {
     pub allow_models: bool,
     pub allow_log_write: bool,
     pub allow_dev_ws: bool,
+    /// Mount the BYOK cloud proxy at `/api/cloud/*`. Default ON in BOTH
+    /// local-dev and public mode — low-end devices hitting the tunnel rely
+    /// on it, so (unlike `/api/log`/`/api/models`) it is NOT disabled by
+    /// `--public`. Flip off with `--no-cloud`.
+    pub allow_cloud: bool,
     pub serve_dist: bool,
     /// Allowed `Origin` values for CORS. Empty list = no cross-origin
     /// access. `*` is NEVER allowed (we never wildcard).
@@ -41,6 +46,7 @@ impl Default for SecurityConfig {
             allow_models: true,
             allow_log_write: true,
             allow_dev_ws: true,
+            allow_cloud: true,
             serve_dist: false,
             cors_origins: vec![],
             api_log_max_bytes: 8 * 1024,
@@ -58,6 +64,9 @@ impl SecurityConfig {
             allow_models: false,
             allow_log_write: false,
             allow_dev_ws: false,
+            // Stays ON in public mode — this is the whole point of the
+            // feature (serve cloud chat to devices behind the tunnel).
+            allow_cloud: true,
             serve_dist: true,
             cors_origins: vec![],
             api_log_max_bytes: 4 * 1024,

@@ -3,6 +3,7 @@
 
 import type { ChatMessage, ImageAttachment, SamplingOptions } from "@/lib/types";
 import type { Units as ToolUnits } from "@/lib/tools";
+import type { CloudProvider } from "@/lib/cloud/types";
 import { getClient } from "@/lib/inference";
 
 export const isMobileUA = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -191,6 +192,10 @@ export interface GenJob {
     orchestratorMode: boolean;
     /** Block-diffusion (DiffusionGemma) turn — denoise loop, not AR stream. */
     diffusion: boolean;
+    /** Set for an opt-in CLOUD turn — streams via the BYOK proxy instead of the
+     *  local engine. The API key is NOT stored here (resolved from the vault at
+     *  run time); only the provider + upstream model id persist. */
+    cloud?: { provider: CloudProvider; model: string };
     modelDigest: string;
     /** Raw pixels/PCM carried in-memory while queued; persisted to OPFS so a
      *  reload can re-encode them through the vision/audio towers. */

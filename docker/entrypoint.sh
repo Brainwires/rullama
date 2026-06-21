@@ -262,4 +262,40 @@ rm -f "$ITEMS_TMP" "$MANIFEST_LIST"
 
 echo "rullama: indexed $total model(s) [$mode mode]" >&2
 
+# ───── BYOK cloud proxy snippet ────────────────────────────────────────
+# nginx `include`s /tmp/rullama/cloud.conf (the root FS is read-only, so we
+# can't template the main conf — we write into the tmpfs instead). When
+# CLOUD_WORKER_HOST is set we reverse-proxy /api/cloud/* to that Cloudflare
+# Worker, stripping the prefix (trailing slash on proxy_pass) so the Worker
+# sees /{provider}/{action}. The user's BYOK key rides in X-Cloud-Key (never
+# logged/stored here). proxy_buffering off keeps SSE tokens flowing. When
+# unset, the include must still exist (nginx fails on a missing include), so
+# we emit a 503 stub.
+CLOUD_WORKER_HOST="${CLOUD_WORKER_HOST:-}"
+CLOUD_CONF="$WORK_DIR/cloud.conf"
+if [ -n "$CLOUD_WORKER_HOST" ]; then
+    cat > "$CLOUD_CONF" <<EOF
+location ^~ /api/cloud/ {
+    proxy_pass https://$CLOUD_WORKER_HOST/;
+    proxy_ssl_server_name on;
+    proxy_http_version 1.1;
+    proxy_set_header Host $CLOUD_WORKER_HOST;
+    proxy_set_header X-Cloud-Key \$http_x_cloud_key;
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 300s;
+    add_header Cross-Origin-Resource-Policy "same-origin" always;
+}
+EOF
+    echo "rullama: cloud proxy → https://$CLOUD_WORKER_HOST/" >&2
+else
+    cat > "$CLOUD_CONF" <<'EOF'
+location ^~ /api/cloud/ {
+    return 503;
+}
+EOF
+    echo "rullama: cloud proxy disabled (set CLOUD_WORKER_HOST to enable)" >&2
+fi
+
 exec nginx -g 'daemon off;'

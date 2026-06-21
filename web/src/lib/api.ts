@@ -11,6 +11,8 @@
 // Keep this in sync with `web/server/ollama.ts:huggingfaceModels()`
 // and `docker/entrypoint.sh:emit_hf_entries()`.
 
+import type { CloudProvider } from "./cloud/types";
+
 export interface ModelEntry {
     name:   string;
     family: string;
@@ -29,6 +31,10 @@ export interface ModelEntry {
      *  caution marker + tooltip; Load is NOT blocked (the user can try it
      *  on any tier). Set for the large models (e.g. gemma4:12b). */
     heavy?: boolean;
+    /** When set, this is an OPT-IN CLOUD model — chat runs on the provider's
+     *  servers via the BYOK proxy (no GPU/worker/OPFS). Mutually exclusive
+     *  with `url`/blob loading. See lib/cloud/. */
+    cloud?: { provider: CloudProvider };
 }
 
 const R2_HOST = "models.brainwires.dev";
@@ -195,6 +201,49 @@ export const BAKED_IN_MODELS: readonly ModelEntry[] = [
     },
 ];
 
+/**
+ * Opt-in CLOUD chat models (BYOK). These run on the provider's servers via the
+ * same-origin `/api/cloud/*` proxy — no GGUF, no OPFS, no GPU. They are merged
+ * into `listModels()` so they appear in the picker alongside the local models;
+ * `isCloud()` gates the cloud generation/load path.
+ *
+ *  - Ollama Cloud: `gemma4:31b` is the only cloud Gemma 4 tag (verified live
+ *    against `/v1/models`). Ollama Cloud has no embeddings — RAG stays on the
+ *    local EmbeddingGemma.
+ *  - OpenAI: the mid/standard chat models. pro/nano tiers are intentionally
+ *    excluded.
+ */
+const OPENAI_CHAT_MODELS = [
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.2",
+    "gpt-5.1",
+    "gpt-5",
+    "gpt-5-mini",
+] as const;
+
+export const CLOUD_MODELS: readonly ModelEntry[] = [
+    {
+        name:   "gemma4:31b",
+        family: "ollama-cloud",
+        tag:    "31b",
+        size:   0,
+        digest: "cloud-ollama-gemma4-31b",
+        cloud:  { provider: "ollama" },
+    },
+    ...OPENAI_CHAT_MODELS.map(
+        (id): ModelEntry => ({
+            name:   id,
+            family: "openai",
+            tag:    id,
+            size:   0,
+            digest: `cloud-openai-${id}`,
+            cloud:  { provider: "openai" },
+        }),
+    ),
+];
+
 /** The Z-Image-Turbo text-to-image model — the Image tab's engine. SEPARATE
  *  from the chat catalog (it's the ImageModel wasm class, not a Gemma chat
  *  model) and loaded from a CDN base URL via HTTP Range, never OPFS. */
@@ -289,7 +338,14 @@ export function styletts2BlobUrl(variant: CloneVariant = "f32"): string {
 
 /** Whether this entry is something we'll actually run. */
 export function isSupported(m: ModelEntry): boolean {
-    return m.family === "gemma4" || m.family === "diffusion-gemma";
+    return m.family === "gemma4" || m.family === "diffusion-gemma" || isCloud(m);
+}
+
+/** Whether this entry is an opt-in CLOUD model (BYOK proxy chat), as opposed
+ *  to a local GGUF run on-device. Cloud models skip the worker/OPFS/KV path
+ *  entirely — see lib/cloud/ and the cloud branch in useChatEngine. */
+export function isCloud(m: ModelEntry): boolean {
+    return !!m.cloud;
 }
 
 /** Whether this entry is the (non-autoregressive) DiffusionGemma engine, which
@@ -319,6 +375,13 @@ export function isImage(m: ModelEntry): boolean {
  * with a service-worker network-error 30 seconds later.
  */
 export async function listModels(signal?: AbortSignal): Promise<ModelEntry[]> {
+    // Cloud models are always appended (they're baked, not server-listed) so
+    // they show in the picker regardless of the local-model source.
+    const base = await listLocalModels(signal);
+    return base.concat(CLOUD_MODELS);
+}
+
+async function listLocalModels(signal?: AbortSignal): Promise<ModelEntry[]> {
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
         return BAKED_IN_MODELS.slice();
     }
