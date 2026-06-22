@@ -7,7 +7,7 @@ import {
 } from "@/components/ui/select";
 import { fmtBytes } from "@/lib/utils";
 import { type ModelEntry, isCloud, isSupported, listModels } from "@/lib/api";
-import { hasCloudKey } from "@/lib/cloud/keyvault";
+import { hasCloudKey, CLOUD_KEY_CHANGE_EVENT } from "@/lib/cloud/keyvault";
 import { providerLabel } from "@/lib/cloud/types";
 import { existingSize } from "@/lib/opfs";
 import {
@@ -74,6 +74,14 @@ export function ModelLoader(props: Props) {
     // True when the selected model is a cloud model whose provider API key
     // isn't set yet — Load stays blocked with an inline "set key" hint.
     const [cloudKeyMissing, setCloudKeyMissing] = useState(false);
+    // Bumped when a key is saved/cleared (in the Settings Cloud tab) so the
+    // key-presence check below re-runs without a picker re-render.
+    const [keyTick, setKeyTick] = useState(0);
+    useEffect(() => {
+        const h = () => setKeyTick((n) => n + 1);
+        window.addEventListener(CLOUD_KEY_CHANGE_EVENT, h);
+        return () => window.removeEventListener(CLOUD_KEY_CHANGE_EVENT, h);
+    }, []);
 
     const refresh = async () => {
         setRefreshing(true);
@@ -139,7 +147,7 @@ export function ModelLoader(props: Props) {
         });
         return () => { stop = true; };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [selected, models, props.status]);
+    }, [selected, models, props.status, keyTick]);
 
     const cloudBlocked = !!selectedModel?.cloud && cloudKeyMissing;
     const canLoad = !!selectedModel && props.status !== "loading" && !cloudBlocked;

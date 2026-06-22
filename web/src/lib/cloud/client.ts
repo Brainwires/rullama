@@ -99,6 +99,17 @@ export async function* streamCloudChat(a: CloudChatArgs): AsyncGenerator<string>
     if (!resp.ok || !resp.body) {
         throw new CloudError(resp.status, await errorMessage(resp));
     }
+    // Guard against a 200 that ISN'T the proxy — e.g. on `cargo dev` the request
+    // falling through to the Vite SPA fallback returns index.html (200, HTML).
+    // Without this the SSE reader would block forever with no error. The proxy
+    // always relays the provider's text/event-stream (or application/json error).
+    const ct = (resp.headers.get("content-type") || "").toLowerCase();
+    if (ct.includes("text/html")) {
+        throw new CloudError(
+            resp.status,
+            "Cloud proxy not reachable (got an HTML page). If you're running `cargo dev`, restart it so the /api/cloud/* route is served.",
+        );
+    }
 
     const reader = resp.body.getReader();
     const dec = new TextDecoder();

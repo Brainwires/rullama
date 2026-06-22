@@ -73,12 +73,22 @@ async function vaultDir(): Promise<FileSystemDirectoryHandle> {
 
 const fileName = (provider: CloudProvider) => `${provider}.bin`;
 
+/** Event name fired whenever a provider key is saved/cleared, so UI that gates
+ *  on "is a key set?" (e.g. the model picker's Load button) can re-check. */
+export const CLOUD_KEY_CHANGE_EVENT = "rullama:cloudkeychange";
+
+function notifyKeyChange(provider: CloudProvider): void {
+    try { window.dispatchEvent(new CustomEvent(CLOUD_KEY_CHANGE_EVENT, { detail: { provider } })); }
+    catch { /* non-browser / no window */ }
+}
+
 /** Encrypt + store the key for a provider. An empty string clears it. */
 export async function putCloudKey(provider: CloudProvider, plaintext: string): Promise<void> {
     const dir = await vaultDir();
     const name = fileName(provider);
     if (!plaintext) {
         try { await dir.removeEntry(name); } catch { /* already absent */ }
+        notifyKeyChange(provider);
         return;
     }
     const cryptoKey = await getOrCreateVaultKey();
@@ -99,6 +109,7 @@ export async function putCloudKey(provider: CloudProvider, plaintext: string): P
     await w.truncate(0);
     await w.write(out);
     await w.close();
+    notifyKeyChange(provider);
 }
 
 /** Read + decrypt the key for a provider. Returns "" when absent or
