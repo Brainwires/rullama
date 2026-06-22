@@ -16,11 +16,19 @@ import { defaultUnitsFromLocale, type Units as ToolUnits } from "@/lib/tools";
 // Computed once at module load (navigator is available by then in the browser).
 const LOCALE_DEFAULT_UNITS = defaultUnitsFromLocale();
 
+// Tool calling defaults ON for desktops, OFF for phones/tablets: small/cloud
+// models on constrained devices fare better without the always-injected tool
+// schema, while desktop users get tools (+ RAG) out of the box. Only the
+// first-run default — an explicit toggle persists and wins thereafter.
+const TOOLS_DEFAULT_ON =
+    typeof navigator !== "undefined" &&
+    !/iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
 export function useToolSettings() {
     // Keys keep the original (double-namespaced) form so existing
     // persisted values survive the extraction — usePersistedState
     // prefixes `rullama:` again on top of these.
-    const [toolMode, setToolMode]           = usePersistedState<boolean>("rullama:toolMode", false);
+    const [toolMode, setToolMode]           = usePersistedState<boolean>("rullama:toolMode", TOOLS_DEFAULT_ON);
     const [weatherApiKey, setWeatherApiKey] = usePersistedState<string>("rullama:weatherApiKey", "");
     const [newsApiKey, setNewsApiKey]       = usePersistedState<string>("rullama:newsApiKey", "");
     // Default the temperature scale from the user's OS/browser locale (°F for

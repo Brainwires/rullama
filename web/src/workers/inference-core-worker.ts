@@ -1602,7 +1602,11 @@ const RPC: Record<string, Handler> = {
         if (!embedder) throw new Error("no embedder loaded — call loadEmbedder() first");
         const db = await ensureDb();
         const targetDim = Number(a.targetDim ?? 0);
-        const k = Number(a.k ?? 5);
+        // This rsqlite-wasm build rejects a bound `?` in LIMIT ("LIMIT/OFFSET
+        // must be a number, got: ?"), so inline a SANITIZED integer instead of
+        // binding it. k is clamped to a small positive int — no injection risk.
+        const kRaw = Number(a.k ?? 5);
+        const k = Number.isFinite(kRaw) ? Math.min(100, Math.max(1, Math.floor(kRaw))) : 5;
         const conversationId = (a.conversationId as string | null | undefined) ?? null;
         const qv = await embedder.embed(String(a.query), targetDim);
         // Copy exactly byteLength bytes — `qv` may be a wasm-memory view.
@@ -1616,8 +1620,8 @@ const RPC: Record<string, Handler> = {
              WHERE chunks.vector_dim = ?
                AND (? IS NULL OR documents.conversation_id = ? OR documents.conversation_id IS NULL)
              ORDER BY distance ASC
-             LIMIT ?`,
-            [qblob, dim, conversationId, conversationId, k],
+             LIMIT ${k}`,
+            [qblob, dim, conversationId, conversationId],
         );
     },
 
