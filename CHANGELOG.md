@@ -76,6 +76,28 @@ Not yet validated in-browser end-to-end (the model is ~31 GB), and the
 bf16 weights re-stream per denoise step — fp8 (~12 GB) + resident per-layer
 weights are the follow-up perf lever. FLUX.2 Klein is a planned second config.
 
+### Fixed — Kokoro TTS garbled any utterance longer than a few words
+
+Generated speech was clean for short phrases but garbled from start to finish
+on anything longer. The cause was not in the TTS path but in the shared GPU
+vector-scale dispatcher `scale_chained`: for buffers past the
+`65_535 × 64 = 4_194_240`-element workgroup-dispatch cap it chunked the work
+across several dispatches carrying a per-call `offset` uniform. All chunks
+share one bind-cache key (same pipeline + buffer) and therefore one cached
+uniform buffer; recorded into a single command encoder and submitted once,
+every chunk read the **last** chunk's offset, so only that chunk's slice got
+scaled and the rest kept its unscaled value. In the ISTFTNet generator the
+resblock average (`÷ num_kernels = ÷3`) runs over audio-resolution buffers
+(~6.2M elements for ~10 s of audio), leaving ~2/3 of the waveform at 3×
+amplitude → garble. Short clips (< 4.19M elements = one chunk) were unaffected.
+
+Fixed by replacing the offset-chunking loop with a single `wg_grid(n)` dispatch
+(offset 0) that spills the workgroup count into the y dimension like every
+other chained elementwise kernel. Long-phrase GPU-vs-CPU correlation goes
+0.45 → 0.998 (peak 13.7 → 0.50); short unchanged. Added a regression test that
+scales a 5M-element buffer and asserts every element is touched. The same
+scale path is used by the lm_head / embed_tokens LoRA targets.
+
 ## [0.5.0] — 2026-06-17
 
 A broad surface expansion since 0.4.0. The Gemma 4 family grows from two
