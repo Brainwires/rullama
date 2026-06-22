@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Loader2, Pencil, Sparkles, Undo2 } from "lucide-react";
+import { Database, Loader2, Pencil, Sparkles, Undo2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -74,6 +74,10 @@ interface Props {
     // in-tab via the encrypted vault; only the proxy override is a prop.
     cloudBaseOverride: string;
     onCloudBaseOverrideChange: (s: string) => void;
+    // Tools tab — Knowledge Base (RAG over the user's own documents).
+    onOpenKnowledge: () => void;
+    autoLoadEmbedder: boolean;
+    onAutoLoadEmbedderChange: (b: boolean) => void;
     // Speech input (chat mic → transcription) VAD config.
     voice: VoiceOptions;
     onVoiceChange: (v: VoiceOptions) => void;
@@ -347,6 +351,36 @@ export function ChatSettings(props: Props) {
                                     />
                                 </div>
                             )}
+                        </section>
+
+                        <section className="flex flex-col gap-2 border-t border-border pt-3">
+                            <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">Knowledge Base</span>
+                            <p className="text-[11px] leading-tight text-muted-foreground">
+                                Index your own documents and let the model ground answers in them via the
+                                <code className="mx-1 rounded bg-muted px-1">search_knowledge</code>tool
+                                (needs tool calling on). All in-browser, nothing uploaded.
+                            </p>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-8 justify-start gap-2 text-xs"
+                                onClick={props.onOpenKnowledge}
+                            >
+                                <Database className="size-3.5" />
+                                Open Knowledge Base…
+                            </Button>
+                            <label className="flex items-start gap-2 text-xs text-muted-foreground">
+                                <input
+                                    type="checkbox"
+                                    checked={props.autoLoadEmbedder}
+                                    onChange={(e) => props.onAutoLoadEmbedderChange(e.target.checked)}
+                                    className="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer"
+                                />
+                                <span>
+                                    Load the embedding model at startup (with the chat model). Off ⇒ it
+                                    loads on first use — a knowledge search or opening the Knowledge Base.
+                                </span>
+                            </label>
                         </section>
 
                         <section className="flex flex-col gap-2 border-t border-border pt-3">

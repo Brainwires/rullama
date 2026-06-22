@@ -40,6 +40,10 @@ export function useToolSettings() {
     // many tools (Brainwires/tool-orchestrator), instead of the sequential JSON
     // loop. Experimental, opt-in; failures fall back to the JSON loop.
     const [orchestratorMode, setOrchestratorMode] = usePersistedState<boolean>("rullama:orchestratorMode", false);
+    // When ON, the embedding model loads alongside the chat model at startup.
+    // When OFF (default), it loads lazily — on the first knowledge-search tool
+    // call or when the Knowledge Base modal opens. Either way, no manual button.
+    const [autoLoadEmbedder, setAutoLoadEmbedder] = usePersistedState<boolean>("rullama:autoLoadEmbedder", false);
 
     return {
         toolMode, setToolMode,
@@ -47,5 +51,6 @@ export function useToolSettings() {
         newsApiKey, setNewsApiKey,
         weatherUnits, setWeatherUnits,
         orchestratorMode, setOrchestratorMode,
+        autoLoadEmbedder, setAutoLoadEmbedder,
     };
 }

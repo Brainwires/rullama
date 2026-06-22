@@ -2,12 +2,12 @@
 /// badge, and the Chat · Voice · Settings segmented tab switcher. Purely
 /// presentational — extracted from App.tsx.
 
-import { History, MessageSquare, AudioLines, Library, Image as ImageIcon, Settings } from "lucide-react";
+import { History, MessageSquare, AudioLines, Image as ImageIcon, Settings } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-type View = "chat" | "voice" | "knowledge" | "image" | "settings";
+type View = "chat" | "voice" | "image" | "settings";
 
 interface AppHeaderProps {
     view: View;
@@ -86,21 +86,6 @@ export function AppHeader({
                     >
                         <AudioLines className="size-3.5" />
                         <span className="hidden sm:inline">Voice</span>
-                    </button>
-                    <button
-                        type="button"
-                        onClick={() => onSelectView("knowledge")}
-                        aria-pressed={view === "knowledge"}
-                        className={cn(
-                            "flex h-7 items-center gap-1 rounded px-2 text-xs transition-colors",
-                            view === "knowledge"
-                                ? "bg-background text-foreground shadow-sm"
-                                : "text-muted-foreground hover:bg-background/50",
-                        )}
-                        title="Knowledge"
-                    >
-                        <Library className="size-3.5" />
-                        <span className="hidden sm:inline">Knowledge</span>
                     </button>
                     <button
                         type="button"

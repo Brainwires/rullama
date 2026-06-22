@@ -3,8 +3,47 @@
 // tab + the chat RAG path both call into here.
 
 import { getClient } from "@/lib/inference";
+import { blobUrl, EMBEDDING_MODEL } from "@/lib/api";
+import { ensureModel } from "@/lib/opfs";
 import { splitText, splitPages } from "@/lib/text_split";
 import { extractPdfText } from "@/lib/pdf_extract";
+
+// ── Lazy embedder load ─────────────────────────────────────────────────────
+// The embedding model is NOT loaded eagerly. It loads on first need: the first
+// knowledge-search tool call, when the Knowledge Base modal opens, or at
+// startup if the user enabled auto-load. There is no manual "load" button.
+let embedderReady = false;
+let embedderLoading: Promise<void> | null = null;
+
+/** True once the embedder is loaded in the worker this session. */
+export function isEmbedderReady(): boolean {
+    return embedderReady;
+}
+
+/** Ensure the embedding model is loaded — idempotent + concurrency-safe (dedupes
+ *  overlapping callers, no-ops once ready or if another tab already loaded it).
+ *  `onProgress(pct)` reports DOWNLOAD progress (0–100) on a first-time load. */
+export async function ensureEmbedder(onProgress?: (pct: number) => void): Promise<void> {
+    if (embedderReady) return;
+    if (embedderLoading) return embedderLoading;
+    const client = getClient();
+    embedderLoading = (async () => {
+        // Already resident in the worker (e.g. another tab)? Skip the download.
+        const s = await client.embeddings.status().catch(() => null);
+        if (s) { embedderReady = true; return; }
+        // Download (or resume) the GGUF to OPFS, then stream-load it in the
+        // worker — the file never fully enters wasm memory (iPhone-safe).
+        const url = blobUrl(EMBEDDING_MODEL as unknown as Parameters<typeof blobUrl>[0]);
+        const modelKey = EMBEDDING_MODEL.digest.replace(/[^A-Za-z0-9_.-]/g, "_");
+        const filename = EMBEDDING_MODEL.name.replace(/[^A-Za-z0-9_.-]/g, "_") + ".gguf";
+        await ensureModel(url, modelKey, filename, EMBEDDING_MODEL.size, ({ bytesWritten, totalBytes }) => {
+            if (totalBytes && onProgress) onProgress((bytesWritten / totalBytes) * 100);
+        });
+        await client.embeddings.load(modelKey, filename, EMBEDDING_MODEL.name);
+        embedderReady = true;
+    })().finally(() => { embedderLoading = null; });
+    return embedderLoading;
+}
 
 export interface IndexedDocument {
     id: number;

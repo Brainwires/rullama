@@ -1,22 +1,23 @@
-// Knowledge tab — load the embedder, drop/paste documents into the vector
-// store, search them, and toggle RAG for the active conversation. The
-// embedding model loads independently of the chat model.
+// Knowledge base — drop/paste documents into the vector store and search them
+// semantically; chat RAG reads the same store via the search_knowledge tool.
+// Rendered inside the Chat → Tools → Knowledge Base modal. The embedding model
+// loads automatically when this mounts (no manual button) — independent of the
+// chat model.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Upload, Search, Trash2, FileText, Download, Loader2, Database } from "lucide-react";
+import { Upload, Search, Trash2, FileText, Loader2, Database } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { cn, fmtBytes } from "@/lib/utils";
 import { getClient } from "@/lib/inference";
-import { blobUrl } from "@/lib/api";
-import { EMBEDDING_MODEL } from "@/lib/api";
-import { ensureModel } from "@/lib/opfs";
 import {
     indexDocument,
     listDocuments,
     deleteDocument,
     searchKnowledge,
+    ensureEmbedder,
+    isEmbedderReady,
     type IndexedDocument,
     type SearchHit,
     type IndexProgress,
@@ -45,39 +46,29 @@ export function KnowledgeTab({ activeConvId }: Props) {
         try { setDocs(await listDocuments(null)); } catch { /* */ }
     }, []);
 
-    // Reflect existing embedder status on mount + subscribe to load progress.
+    // Auto-load the embedder on mount — opening this modal IS the "load when
+    // needed" trigger, so there's no manual button. Idempotent (instant if
+    // already loaded). Subscribes to the worker's load-progress for the bar.
     useEffect(() => {
         let alive = true;
-        (async () => {
-            const s = await client.embeddings.status().catch(() => null);
-            if (alive && s) { setStatus("ready"); void refreshDocs(); }
-        })();
         const unsub = client.subscribe("embedderLoading", (p) => {
             const total = Number((p as { total?: number }).total ?? 0);
             const recv = Number((p as { received?: number }).received ?? 0);
             if (total) setLoadPct((recv / total) * 100);
         });
+        (async () => {
+            if (isEmbedderReady()) { setStatus("ready"); void refreshDocs(); return; }
+            setStatus("loading"); setErr(null); setLoadPct(0);
+            try {
+                await ensureEmbedder((pct) => { if (alive) setLoadPct(pct); });
+                if (!alive) return;
+                setStatus("ready");
+                void refreshDocs();
+            } catch (e) {
+                if (alive) { setStatus("error"); setErr((e as Error).message); }
+            }
+        })();
         return () => { alive = false; unsub(); };
-    }, [client, refreshDocs]);
-
-    const loadEmbedder = useCallback(async () => {
-        setStatus("loading"); setErr(null); setLoadPct(0);
-        try {
-            // Download (or resume) the GGUF to OPFS, then stream-load it in the
-            // worker — the file never fully enters wasm memory (iPhone-safe).
-            const url = blobUrl(EMBEDDING_MODEL as unknown as Parameters<typeof blobUrl>[0]);
-            const modelKey = EMBEDDING_MODEL.digest.replace(/[^A-Za-z0-9_.-]/g, "_");
-            const filename = EMBEDDING_MODEL.name.replace(/[^A-Za-z0-9_.-]/g, "_") + ".gguf";
-            await ensureModel(url, modelKey, filename, EMBEDDING_MODEL.size, ({ bytesWritten, totalBytes }) => {
-                if (totalBytes) setLoadPct((bytesWritten / totalBytes) * 100);
-            });
-            await client.embeddings.load(modelKey, filename, EMBEDDING_MODEL.name);
-            setStatus("ready");
-            void refreshDocs();
-        } catch (e) {
-            setStatus("error");
-            setErr((e as Error).message);
-        }
     }, [client, refreshDocs]);
 
     const onFiles = useCallback(async (files: FileList | null) => {
@@ -129,12 +120,12 @@ export function KnowledgeTab({ activeConvId }: Props) {
                 <div>
                     <h2 className="text-lg font-semibold">Knowledge base</h2>
                     <p className="mt-1 max-w-md text-sm text-muted-foreground">
-                        Load EmbeddingGemma to index documents and search them
-                        semantically — and ground chat answers in your own files
-                        (all in-browser, nothing uploaded).
+                        {status === "error"
+                            ? "Couldn't load the embedding model."
+                            : "Loading EmbeddingGemma (621 MB) to index and search your documents — all in-browser, nothing uploaded."}
                     </p>
                 </div>
-                {status === "loading" ? (
+                {status === "loading" && (
                     <div className="flex w-64 flex-col items-center gap-2">
                         <Loader2 className="size-5 animate-spin text-primary" />
                         <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
@@ -142,10 +133,6 @@ export function KnowledgeTab({ activeConvId }: Props) {
                         </div>
                         <span className="text-xs text-muted-foreground">{loadPct.toFixed(0)}% — 621 MB</span>
                     </div>
-                ) : (
-                    <Button onClick={loadEmbedder} className="gap-1">
-                        <Download className="size-4" /> Load EmbeddingGemma (621 MB)
-                    </Button>
                 )}
                 {err && <p className="max-w-md text-xs text-destructive">{err}</p>}
             </div>

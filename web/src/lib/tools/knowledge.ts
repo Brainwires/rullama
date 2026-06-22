@@ -4,7 +4,7 @@
 // model decides it needs the user's docs. Fully local / private.
 
 import type { ToolDef, ToolRunResult } from "@/lib/tools/types";
-import { searchKnowledge, buildRagPreamble } from "@/lib/embedding";
+import { searchKnowledge, buildRagPreamble, ensureEmbedder } from "@/lib/embedding";
 
 export const knowledgeTool: ToolDef = {
     names: ["search_knowledge", "search_notes", "search_documents", "search_docs"],
@@ -16,6 +16,8 @@ export const knowledgeTool: ToolDef = {
         if (!query) return { ok: false, summary: "No search query was given for the knowledge base." };
 
         try {
+            // Lazy-load the embedder on first use (no manual load step).
+            await ensureEmbedder();
             const hits = await searchKnowledge(query, { k: 5, conversationId: ctx.conversationId });
             if (!hits.length) {
                 return {

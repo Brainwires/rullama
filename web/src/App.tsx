@@ -13,7 +13,8 @@ import { disposeSharedClone } from "@/lib/clone-client";
 import { disposeSharedTts } from "@/lib/tts-client";
 import { ChatSettings } from "@/components/ChatSettings";
 import { AppHeader } from "@/components/AppHeader";
-import { KnowledgeTab } from "@/components/KnowledgeTab";
+import { KnowledgeModal } from "@/components/KnowledgeModal";
+import { ensureEmbedder } from "@/lib/embedding";
 import { ImageTab } from "@/components/ImageTab";
 import { TrainingOverlay } from "@/components/TrainingOverlay";
 import { UnsupportedScreen } from "@/components/UnsupportedScreen";
@@ -51,14 +52,17 @@ export function App() {
     // learning likewise from Voice's sidebar. Keeping training in the same
     // engine context as its tab is what removed the cross-engine reload that
     // used to fail with "model load failed".)
-    const [view, setView] = usePersistedState<"chat" | "voice" | "knowledge" | "image" | "settings">("rullama:view", "chat");
-    // Migrate any persisted legacy "finetune" view to "chat".
+    const [view, setView] = usePersistedState<"chat" | "voice" | "image" | "settings">("rullama:view", "chat");
+    // Migrate persisted legacy views ("finetune", and "knowledge" now that the
+    // Knowledge Base is a Chat → Tools modal) back to "chat".
     useEffect(() => {
-        if ((view as string) === "finetune") setView("chat");
+        if ((view as string) === "finetune" || (view as string) === "knowledge") setView("chat");
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
     // Full-screen training overlay: which one is open (null = none).
     const [training, setTraining] = useState<null | "finetune" | "voicelearn">(null);
+    // Full-screen Knowledge Base modal (opened from Chat → Tools).
+    const [knowledgeOpen, setKnowledgeOpen] = useState(false);
     // Device-capability tier (gates the boot, engine co-residency, model markers).
     const { tier, probe } = useDeviceTier();
     const premium = tier === "premium";
@@ -110,6 +114,7 @@ export function App() {
         newsApiKey, setNewsApiKey,
         weatherUnits, setWeatherUnits,
         orchestratorMode, setOrchestratorMode,
+        autoLoadEmbedder, setAutoLoadEmbedder,
     } = useToolSettings();
 
     // Opt-in cloud chat (BYOK proxy) settings — the proxy override + one-time
@@ -286,6 +291,14 @@ export function App() {
             action: { label: "Restart", onClick: onApplyUpdate },
         });
     }, [updateVersion, applyingUpdate, showToast, onApplyUpdate]);
+
+    // Auto-load the embedder alongside the chat model when the user opted in
+    // (Chat → Tools → Knowledge Base). Otherwise it loads lazily on the first
+    // knowledge search or when the Knowledge Base modal opens. Idempotent.
+    useEffect(() => {
+        if (!autoLoadEmbedder || modelStatus !== "ready") return;
+        void ensureEmbedder().catch(() => { /* best-effort; surfaced in the modal */ });
+    }, [autoLoadEmbedder, modelStatus]);
 
     // Page/session lifecycle: env probe, crash-detect, pagehide marker.
     useSessionLifecycle(setView);
@@ -507,6 +520,9 @@ export function App() {
                             onResetDefaults={onResetDefaults}
                             cloudBaseOverride={cloudBaseOverride}
                             onCloudBaseOverrideChange={setCloudBaseOverride}
+                            onOpenKnowledge={() => setKnowledgeOpen(true)}
+                            autoLoadEmbedder={autoLoadEmbedder}
+                            onAutoLoadEmbedderChange={setAutoLoadEmbedder}
                             voice={voice}
                             onVoiceChange={setVoice}
                             canRecord={modelStatus === "ready" && hasAudio}
@@ -519,8 +535,6 @@ export function App() {
             >
                 {view === "voice" ? (
                     <VoicePanel settingsHostEl={voiceTabSettingsEl} clipsHostEl={voiceClipsEl} onOpenVoiceLearn={() => setTraining("voicelearn")} />
-                ) : view === "knowledge" ? (
-                    <KnowledgeTab activeConvId={activeConvId} />
                 ) : view === "image" ? (
                     <ImageTab />
                 ) : view === "settings" ? (
@@ -633,6 +647,13 @@ export function App() {
                 />
                 )}
             </DualSidebarLayout>
+
+            {/* Full-screen Knowledge Base modal — opened from Chat → Tools. The
+                chat view stays mounted underneath; the embedder auto-loads on
+                mount (independent of the chat model). */}
+            {knowledgeOpen && (
+                <KnowledgeModal activeConvId={activeConvId} onClose={() => setKnowledgeOpen(false)} />
+            )}
 
             {/* Full-screen training overlay. Launched from a tab's sidebar button;
                 Chat/Voice stay mounted underneath so the engine stays GPU-resident
