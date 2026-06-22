@@ -1400,9 +1400,9 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "rsqlite-core"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "600be26eed1499266cac8add2a9d18032a5eb08698f049fc44554f90ef6499a2"
+checksum = "79dde3e30e97e352b5db674e11eaf232d1892bf20ffac4f75134dec8e9ecb488"
 dependencies = [
  "lru",
  "rsqlite-parser",
@@ -1416,9 +1416,9 @@ dependencies = [
 
 [[package]]
 name = "rsqlite-parser"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60743d38439640939556eab9561c06db50c24ffc6a49159dd1e8df401e62767b"
+checksum = "616a5c2ec483ad50f1531dcdad21de948c89f6fcc89717d547762e602a6c87d8"
 dependencies = [
  "sqlparser",
  "thiserror",
@@ -1426,9 +1426,9 @@ dependencies = [
 
 [[package]]
 name = "rsqlite-storage"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ced7fde48411c8e3255d29509a1678a6a22341d69421c74340c082580afb7ed"
+checksum = "b5178b5fa9d5d904a85f11060a2342e7612eca64ae7b218894576504f861f2d4"
 dependencies = [
  "lru",
  "rsqlite-wasm-vfs",
@@ -1437,9 +1437,9 @@ dependencies = [
 
 [[package]]
 name = "rsqlite-wasm"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "882958e760ebe555538b41d62abe3923b11383d5d7ff54b6fd43b5d858cb9f3c"
+checksum = "2eb35c9acfd8f64a433f2c7e04584a5264dd7e1870fb0c407bf661399603aaf6"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
@@ -1455,9 +1455,9 @@ dependencies = [
 
 [[package]]
 name = "rsqlite-wasm-vfs"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "086e999ef9cf6de7ef90baa40e8f81f7c0da26699ee8560bca7cfad6eb29225a"
+checksum = "a67679c0ad6d6ea956215c73db168f2dfb56352113c237a2759077e0c60b1bb0"
 dependencies = [
  "thiserror",
 ]

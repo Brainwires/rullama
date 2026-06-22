@@ -53,7 +53,7 @@ js-sys = "0.3.98"
 web-sys = "0.3.98"
 console_error_panic_hook = "0.1.7"
 console_log = "1.0.0"
-rsqlite-wasm = "0.1"
+rsqlite-wasm = "0.1.1"
 
 # --- shared with rullama-finetune (native LoRA, native-only) ---
 # The Burn-* / safetensors / anyhow / uuid / chrono / tokio entries that

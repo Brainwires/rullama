@@ -268,6 +268,30 @@ export function App() {
         }
     }, [setSystemPrompt, warmSystemPrompt, modelStatus, loadedCloud]);
 
+    // **Auto-apply a ready update when idle.** A new build is detected via the
+    // service worker (Workbox onNeedRefresh) or the boot version.json check;
+    // once nothing is generating, activate the new SW (skipWaiting) + reload
+    // automatically — so updates land without a manual cache clear. Gated on
+    // `!busy` so a generation is never interrupted (the effect re-runs and
+    // applies once busy clears); the brief banner + ApplyingOverlay give
+    // feedback. The short delay lets a just-finished turn settle.
+    useEffect(() => {
+        if (!updateVersion || busy || applyingUpdate) return;
+        // Reload-storm guard: if an apply ever fails to "take" (e.g. a deploy
+        // race serving a version.json newer than any cached bundle), auto-apply
+        // at most once per 30 s and otherwise leave the manual banner — so we
+        // never loop reloading.
+        try {
+            const last = Number(sessionStorage.getItem("rullama:lastAutoUpdate") || 0);
+            if (Date.now() - last < 30_000) return;
+        } catch { /* sessionStorage unavailable — proceed */ }
+        const t = setTimeout(() => {
+            try { sessionStorage.setItem("rullama:lastAutoUpdate", String(Date.now())); } catch { /* */ }
+            onApplyUpdate();
+        }, 2500);
+        return () => clearTimeout(t);
+    }, [updateVersion, busy, applyingUpdate, onApplyUpdate]);
+
     // Page/session lifecycle: env probe, crash-detect, pagehide marker.
     useSessionLifecycle(setView);
 

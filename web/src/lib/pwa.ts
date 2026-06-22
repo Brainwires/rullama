@@ -25,11 +25,53 @@ declare global {
     }
 }
 
-/** Register the service worker. Returns immediately; never blocks
- *  React mount on SW lifecycle events. With prompt mode + NetworkFirst
- *  navigation, the new SW just stays in `installed` until the user's
- *  banner click triggers a coordinated reload — there's nothing
- *  per-boot for us to await. */
+// The vite-plugin-pwa updater. `registerSW(...)` returns a function that, when
+// called as `updateSW(true)`, posts SKIP_WAITING to the *waiting* worker and
+// reloads the page once it activates (controllerchange). This is the ONLY way
+// to adopt a new build with `registerType: "prompt"` — a plain reload just
+// re-serves the old, still-controlling worker's precache. Captured here so the
+// update flow can actually apply (previously it was discarded → stale forever).
+let updateSW: ((reloadPage?: boolean) => Promise<void>) | undefined;
+let swUpdatePending = false;
+const updateReadyListeners = new Set<() => void>();
+
+/** Subscribe to "a new service worker (new build) is installed and waiting".
+ *  Driven by Workbox's `onNeedRefresh`, so it fires whenever the precache
+ *  manifest changes — i.e. every new commit/deploy, even while the app is open.
+ *  Fires immediately if an update is already pending when you subscribe.
+ *  Returns an unsubscribe. */
+export function onServiceWorkerUpdateReady(cb: () => void): () => void {
+    updateReadyListeners.add(cb);
+    if (swUpdatePending) {
+        try { cb(); } catch { /* */ }
+    }
+    return () => { updateReadyListeners.delete(cb); };
+}
+
+/** Whether a new build is installed and waiting to activate. */
+export function isServiceWorkerUpdatePending(): boolean {
+    return swUpdatePending;
+}
+
+/** Activate the waiting service worker (skipWaiting) and reload, so the new
+ *  precached bundle is adopted. Falls back to a hard reload if the updater
+ *  isn't available (registration failed). */
+export async function applyServiceWorkerUpdate(): Promise<void> {
+    if (updateSW) {
+        try {
+            await updateSW(true); // skipWaiting + reload on controllerchange
+            return;
+        } catch (e) {
+            console.warn("[rullama] updateSW(true) failed; hard-reloading:", e);
+        }
+    }
+    window.location.reload();
+}
+
+/** Register the service worker and wire update detection. Returns immediately;
+ *  never blocks React mount on SW lifecycle events. A new build is detected via
+ *  `onNeedRefresh` (Workbox) and surfaced through `onServiceWorkerUpdateReady`;
+ *  the app then applies it via `applyServiceWorkerUpdate()` (auto when idle). */
 export async function ensureFreshServiceWorker(): Promise<void> {
     if (typeof window === "undefined") return;
     if (!("serviceWorker" in navigator)) return;
@@ -39,7 +81,15 @@ export async function ensureFreshServiceWorker(): Promise<void> {
     // Boot continues with whatever SW (if any) is already controlling;
     // the watchdog in index.html catches the truly broken case.
     try {
-        registerSW({ immediate: true });
+        updateSW = registerSW({
+            immediate: true,
+            onNeedRefresh() {
+                swUpdatePending = true;
+                for (const cb of updateReadyListeners) {
+                    try { cb(); } catch { /* */ }
+                }
+            },
+        });
     } catch (e) {
         console.warn("[rullama] registerSW threw:", e);
     }

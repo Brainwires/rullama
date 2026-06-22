@@ -1602,9 +1602,7 @@ const RPC: Record<string, Handler> = {
         if (!embedder) throw new Error("no embedder loaded — call loadEmbedder() first");
         const db = await ensureDb();
         const targetDim = Number(a.targetDim ?? 0);
-        // This rsqlite-wasm build rejects a bound `?` in LIMIT ("LIMIT/OFFSET
-        // must be a number, got: ?"), so inline a SANITIZED integer instead of
-        // binding it. k is clamped to a small positive int — no injection risk.
+        // Clamp k to a small positive int before binding it into LIMIT.
         const kRaw = Number(a.k ?? 5);
         const k = Number.isFinite(kRaw) ? Math.min(100, Math.max(1, Math.floor(kRaw))) : 5;
         const conversationId = (a.conversationId as string | null | undefined) ?? null;
@@ -1612,23 +1610,19 @@ const RPC: Record<string, Handler> = {
         // Copy exactly byteLength bytes — `qv` may be a wasm-memory view.
         const qblob = new Uint8Array(qv.buffer.slice(qv.byteOffset, qv.byteOffset + qv.byteLength));
         const dim = qv.length;
-        // Use EXPLICIT positional params (?1..?4), not bare `?`. The published
-        // rsqlite-wasm auto-indexes a bare `?` in the SELECT list AFTER the
-        // WHERE `?`s (planning order, not SQL text order), so the bound values
-        // cross and the scope filter matches nothing — RAG returns []. Explicit
-        // indices bind directly and sidestep it. (Fixed upstream on
-        // rsqlite-wasm feat/limit-offset-placeholders; revert to bare `?` once
-        // that's published and the dep is bumped.)
+        // Bare `?` placeholders bind in SQL text order (SELECT list → WHERE →
+        // LIMIT), and LIMIT accepts a bound `?`. Both were fixed in
+        // rsqlite-wasm 0.1.1 (rsqlite-core param_binding regression tests).
         return db.queryParams(
             `SELECT chunks.id AS chunk_id, chunks.text AS text, chunks.page AS page,
                     documents.id AS document_id, documents.name AS document_name,
-                    vec_distance_cosine(chunks.vector, ?1) AS distance
+                    vec_distance_cosine(chunks.vector, ?) AS distance
              FROM chunks JOIN documents ON documents.id = chunks.document_id
-             WHERE chunks.vector_dim = ?2
-               AND (?3 IS NULL OR documents.conversation_id = ?4 OR documents.conversation_id IS NULL)
+             WHERE chunks.vector_dim = ?
+               AND (? IS NULL OR documents.conversation_id = ? OR documents.conversation_id IS NULL)
              ORDER BY distance ASC
-             LIMIT ${k}`,
-            [qblob, dim, conversationId, conversationId],
+             LIMIT ?`,
+            [qblob, dim, conversationId, conversationId, k],
         );
     },
 

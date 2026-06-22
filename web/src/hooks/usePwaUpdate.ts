@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { getClient } from "@/lib/inference";
+import { applyServiceWorkerUpdate, onServiceWorkerUpdateReady } from "@/lib/pwa";
 import {
     fetchServerVersion,
     isUpdateAvailable,
@@ -45,6 +46,20 @@ export function usePwaUpdate() {
         })();
     }, []);
 
+    // Live update detection via Workbox `onNeedRefresh`: fires whenever a new
+    // build's service worker installs and waits — including while the app is
+    // open, and more reliably than the boot-only version.json check (it's the
+    // actual "new precache is ready" signal). Surface it as an available update;
+    // App auto-applies when idle. Best-effort version label for the banner.
+    useEffect(() => {
+        return onServiceWorkerUpdateReady(() => {
+            void (async () => {
+                const server = await fetchServerVersion().catch(() => null);
+                setUpdateVersion((prev) => prev ?? server?.version ?? "latest");
+            })();
+        });
+    }, []);
+
     // Apply / dismiss handlers for the UpdateBanner.
     const onApplyUpdate = useCallback(() => {
         const v = updateVersion ?? "";
@@ -52,16 +67,16 @@ export function usePwaUpdate() {
         // back `applyingUpdate` — keeps the UI feeling responsive.
         setApplyingUpdate(true);
         (async () => {
+            // Best-effort: tell other tabs to reload too (cross-tab coordination).
             try {
                 await getClient().applyUpdate(v);
             } catch (e) {
-                console.warn("[rullama] applyUpdate RPC failed; reloading this tab only:", e);
-                // The router never fanned out `applyingUpdate` to other
-                // tabs. Reload solo as a fallback — at least this tab
-                // gets the new bundle, the other tabs will catch up on
-                // their next reload.
-                setTimeout(() => window.location.reload(), 200);
+                console.warn("[rullama] applyUpdate cross-tab RPC failed (continuing solo):", e);
             }
+            // THE actual update: activate the waiting service worker (skipWaiting)
+            // and reload. A plain reload would re-serve the OLD precached bundle —
+            // this is what was missing and why updates needed a manual cache clear.
+            await applyServiceWorkerUpdate();
         })();
     }, [updateVersion]);
 
