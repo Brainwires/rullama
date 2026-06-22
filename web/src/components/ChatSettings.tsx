@@ -385,32 +385,20 @@ export function ChatSettings(props: Props) {
 
                         <section className="flex flex-col gap-2 border-t border-border pt-3">
                             <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">Weather</span>
-                            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                                <span className="flex items-center justify-between">
-                                    <span>WeatherAPI.com key</span>
-                                    <a
-                                        href="https://www.weatherapi.com/my/"
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="text-primary hover:underline"
-                                    >
-                                        Get a free key
-                                    </a>
-                                </span>
-                                <Input
-                                    type="password"
-                                    autoComplete="off"
-                                    spellCheck={false}
-                                    value={props.weatherApiKey}
-                                    onChange={(e) => props.onWeatherApiKeyChange(e.target.value)}
-                                    placeholder="Optional — leave blank to use free Open-Meteo"
-                                    className="h-8 text-xs"
-                                />
-                                <span className="text-[10px] leading-tight text-muted-foreground">
-                                    With a key, weather comes from WeatherAPI.com (richer data). Without one,
-                                    it falls back to the free, keyless Open-Meteo — so weather works either way.
-                                </span>
-                            </label>
+                            <SecretKeyInput
+                                label="WeatherAPI.com key"
+                                linkHref="https://www.weatherapi.com/my/"
+                                linkText="Get a free key"
+                                present={props.weatherApiKey.trim().length > 0}
+                                storedNote="✓ Key saved"
+                                placeholder="Optional — leave blank to use free Open-Meteo"
+                                onSave={(v) => props.onWeatherApiKeyChange(v)}
+                                onClear={() => props.onWeatherApiKeyChange("")}
+                            />
+                            <p className="text-[10px] leading-tight text-muted-foreground">
+                                With a key, weather comes from WeatherAPI.com (richer data). Without one,
+                                it falls back to the free, keyless Open-Meteo — so weather works either way.
+                            </p>
 
                             <div className="flex items-center justify-between pt-1">
                                 <span className="text-xs text-muted-foreground">Units</span>
@@ -436,31 +424,19 @@ export function ChatSettings(props: Props) {
 
                         <section className="flex flex-col gap-2 border-t border-border pt-3">
                             <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">News</span>
-                            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                                <span className="flex items-center justify-between">
-                                    <span>GNews API key</span>
-                                    <a
-                                        href="https://gnews.io/"
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="text-primary hover:underline"
-                                    >
-                                        Get a free key
-                                    </a>
-                                </span>
-                                <Input
-                                    type="password"
-                                    autoComplete="off"
-                                    spellCheck={false}
-                                    value={props.newsApiKey}
-                                    onChange={(e) => props.onNewsApiKeyChange(e.target.value)}
-                                    placeholder="Optional — required for the news tool"
-                                    className="h-8 text-xs"
-                                />
-                                <span className="text-[10px] leading-tight text-muted-foreground">
-                                    Enables the get_news tool (gnews.io). Without a key, the model answers from its own knowledge.
-                                </span>
-                            </label>
+                            <SecretKeyInput
+                                label="GNews API key"
+                                linkHref="https://gnews.io/"
+                                linkText="Get a free key"
+                                present={props.newsApiKey.trim().length > 0}
+                                storedNote="✓ Key saved"
+                                placeholder="Optional — required for the news tool"
+                                onSave={(v) => props.onNewsApiKeyChange(v)}
+                                onClear={() => props.onNewsApiKeyChange("")}
+                            />
+                            <p className="text-[10px] leading-tight text-muted-foreground">
+                                Enables the get_news tool (gnews.io). Without a key, the model answers from its own knowledge.
+                            </p>
                         </section>
                     </>
                 )}
@@ -575,54 +551,61 @@ const CLOUD_KEY_LINK: Record<CloudProvider, string> = {
     openai: "https://platform.openai.com/api-keys",
 };
 
-/** A per-provider BYOK key input backed by the encrypted vault. The stored key
- *  is never read back into the field (it's encrypted); we only show whether one
- *  is set, let the user paste a new one (Save), or Clear it. */
-function CloudKeyInput({ provider }: { provider: CloudProvider }) {
+/** Shared secret-key field UX: a password input with a Save button, a "key
+ *  saved / no key set" status line, and a Clear action. The stored value is
+ *  never shown back — `present` only reflects whether one is set. Used by both
+ *  the Cloud BYOK keys (vault-backed) and the Tools API keys (localStorage). */
+function SecretKeyInput({
+    label, linkHref, linkText, present, storedNote, placeholder, onSave, onClear,
+}: {
+    label: string;
+    linkHref?: string;
+    linkText?: string;
+    /** Whether a key is currently stored. null = still checking. */
+    present: boolean | null;
+    /** Status text shown when a key is stored, e.g. "✓ Key saved". */
+    storedNote: string;
+    placeholder?: string;
+    onSave: (value: string) => void | Promise<void>;
+    onClear: () => void | Promise<void>;
+}) {
     const [value, setValue] = useState("");
-    const [saved, setSaved] = useState<boolean | null>(null); // null = loading
     const [busy, setBusy] = useState(false);
-
-    useEffect(() => {
-        let stop = false;
-        void hasCloudKey(provider).then((p) => { if (!stop) setSaved(p); });
-        return () => { stop = true; };
-    }, [provider]);
 
     const save = async () => {
         const v = value.trim();
         if (!v) return;
         setBusy(true);
-        try { await putCloudKey(provider, v); setSaved(true); setValue(""); }
-        finally { setBusy(false); }
+        try { await onSave(v); setValue(""); } finally { setBusy(false); }
     };
     const clear = async () => {
         setBusy(true);
-        try { await putCloudKey(provider, ""); setSaved(false); setValue(""); }
-        finally { setBusy(false); }
+        try { await onClear(); setValue(""); } finally { setBusy(false); }
     };
 
     return (
         <label className="flex flex-col gap-1 text-xs text-muted-foreground">
             <span className="flex items-center justify-between">
-                <span>{providerLabel(provider)} API key</span>
-                <a
-                    href={CLOUD_KEY_LINK[provider]}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-primary hover:underline"
-                >
-                    Get a key
-                </a>
+                <span>{label}</span>
+                {linkHref && (
+                    <a href={linkHref} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                        {linkText ?? "Get a key"}
+                    </a>
+                )}
             </span>
             <div className="flex items-center gap-1">
                 <Input
                     type="password"
+                    name="rullama-secret-key"
                     autoComplete="off"
+                    autoCorrect="off"
                     spellCheck={false}
+                    data-1p-ignore
+                    data-lpignore="true"
+                    data-form-type="other"
                     value={value}
                     onChange={(e) => setValue(e.target.value)}
-                    placeholder={saved ? "•••••• saved — type to replace" : "Paste your API key"}
+                    placeholder={present ? "•••••• saved — type to replace" : (placeholder ?? "Paste your key")}
                     className="h-8 flex-1 text-xs"
                     disabled={busy}
                 />
@@ -636,10 +619,10 @@ function CloudKeyInput({ provider }: { provider: CloudProvider }) {
                 </Button>
             </div>
             <span className="flex items-center justify-between text-[10px] leading-tight">
-                <span className={saved ? "text-emerald-600 dark:text-emerald-500" : "text-muted-foreground"}>
-                    {saved === null ? "…" : saved ? "✓ Key stored (encrypted on this device)" : "No key set"}
+                <span className={present ? "text-emerald-600 dark:text-emerald-500" : "text-muted-foreground"}>
+                    {present === null ? "…" : present ? storedNote : "No key set"}
                 </span>
-                {saved && (
+                {present && (
                     <button
                         type="button"
                         className="text-destructive hover:underline disabled:opacity-50"
@@ -651,6 +634,27 @@ function CloudKeyInput({ provider }: { provider: CloudProvider }) {
                 )}
             </span>
         </label>
+    );
+}
+
+/** Per-provider BYOK key, backed by the encrypted vault. */
+function CloudKeyInput({ provider }: { provider: CloudProvider }) {
+    const [present, setPresent] = useState<boolean | null>(null);
+    useEffect(() => {
+        let stop = false;
+        void hasCloudKey(provider).then((p) => { if (!stop) setPresent(p); });
+        return () => { stop = true; };
+    }, [provider]);
+    return (
+        <SecretKeyInput
+            label={`${providerLabel(provider)} API key`}
+            linkHref={CLOUD_KEY_LINK[provider]}
+            present={present}
+            storedNote="✓ Key stored (encrypted on this device)"
+            placeholder="Paste your API key"
+            onSave={async (v) => { await putCloudKey(provider, v); setPresent(true); }}
+            onClear={async () => { await putCloudKey(provider, ""); setPresent(false); }}
+        />
     );
 }
 
