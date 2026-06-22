@@ -1612,13 +1612,20 @@ const RPC: Record<string, Handler> = {
         // Copy exactly byteLength bytes — `qv` may be a wasm-memory view.
         const qblob = new Uint8Array(qv.buffer.slice(qv.byteOffset, qv.byteOffset + qv.byteLength));
         const dim = qv.length;
+        // Use EXPLICIT positional params (?1..?4), not bare `?`. The published
+        // rsqlite-wasm auto-indexes a bare `?` in the SELECT list AFTER the
+        // WHERE `?`s (planning order, not SQL text order), so the bound values
+        // cross and the scope filter matches nothing — RAG returns []. Explicit
+        // indices bind directly and sidestep it. (Fixed upstream on
+        // rsqlite-wasm feat/limit-offset-placeholders; revert to bare `?` once
+        // that's published and the dep is bumped.)
         return db.queryParams(
             `SELECT chunks.id AS chunk_id, chunks.text AS text, chunks.page AS page,
                     documents.id AS document_id, documents.name AS document_name,
-                    vec_distance_cosine(chunks.vector, ?) AS distance
+                    vec_distance_cosine(chunks.vector, ?1) AS distance
              FROM chunks JOIN documents ON documents.id = chunks.document_id
-             WHERE chunks.vector_dim = ?
-               AND (? IS NULL OR documents.conversation_id = ? OR documents.conversation_id IS NULL)
+             WHERE chunks.vector_dim = ?2
+               AND (?3 IS NULL OR documents.conversation_id = ?4 OR documents.conversation_id IS NULL)
              ORDER BY distance ASC
              LIMIT ${k}`,
             [qblob, dim, conversationId, conversationId],
