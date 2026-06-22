@@ -55,14 +55,16 @@ export function Toaster() {
                                 </button>
                             )}
                         </div>
-                        <button
-                            type="button"
-                            onClick={() => dismissToast(t.id)}
-                            className="text-muted-foreground hover:text-foreground"
-                            aria-label="Dismiss"
-                        >
-                            <X className="h-3.5 w-3.5" />
-                        </button>
+                        {!t.noDismiss && (
+                            <button
+                                type="button"
+                                onClick={() => dismissToast(t.id)}
+                                className="text-muted-foreground hover:text-foreground"
+                                aria-label="Dismiss"
+                            >
+                                <X className="h-3.5 w-3.5" />
+                            </button>
+                        )}
                     </div>
                 );
             })}

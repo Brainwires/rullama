@@ -22,8 +22,8 @@ import { usePersistedState } from "@/lib/persisted";
 import { useIOSKeyboard } from "@/lib/useIOSKeyboard";
 import { useWakeLock } from "@/lib/wakeLock";
 import { useTrainingCapability } from "@/components/FineTunePanel";
-import { UpdateBanner } from "@/components/UpdateBanner";
 import { ApplyingOverlay } from "@/components/ApplyingOverlay";
+import { useToast } from "@/lib/toast";
 import { useChatTunables } from "@/hooks/useChatTunables";
 import { useToolSettings } from "@/hooks/useToolSettings";
 import { useCloudSettings } from "@/hooks/useCloudSettings";
@@ -92,8 +92,9 @@ export function App() {
     const {
         updateVersion, setUpdateVersion,
         applyingUpdate, setApplyingUpdate,
-        onApplyUpdate, onDismissUpdate,
+        onApplyUpdate,
     } = usePwaUpdate();
+    const { showToast } = useToast();
 
     // Wait-reason coordination for the model loader (see useWaitInfo).
     // useCrossTabSync pushes the most-recent wait reason via setWaitInfo;
@@ -268,29 +269,23 @@ export function App() {
         }
     }, [setSystemPrompt, warmSystemPrompt, modelStatus, loadedCloud]);
 
-    // **Auto-apply a ready update when idle.** A new build is detected via the
-    // service worker (Workbox onNeedRefresh) or the boot version.json check;
-    // once nothing is generating, activate the new SW (skipWaiting) + reload
-    // automatically — so updates land without a manual cache clear. Gated on
-    // `!busy` so a generation is never interrupted (the effect re-runs and
-    // applies once busy clears); the brief banner + ApplyingOverlay give
-    // feedback. The short delay lets a just-finished turn settle.
+    // **"App updated — restart?" prompt.** A new build is detected via the
+    // service worker (Workbox onNeedRefresh) or the boot version.json check. We
+    // do NOT auto-reload (that's a jarring UX) — instead show a persistent,
+    // non-dismissable toast whose ONLY action is "Restart" (skipWaiting +
+    // reload). The user restarts when they choose; ApplyingOverlay covers the
+    // actual reload. Stable id so repeated detections update one toast, not stack.
     useEffect(() => {
-        if (!updateVersion || busy || applyingUpdate) return;
-        // Reload-storm guard: if an apply ever fails to "take" (e.g. a deploy
-        // race serving a version.json newer than any cached bundle), auto-apply
-        // at most once per 30 s and otherwise leave the manual banner — so we
-        // never loop reloading.
-        try {
-            const last = Number(sessionStorage.getItem("rullama:lastAutoUpdate") || 0);
-            if (Date.now() - last < 30_000) return;
-        } catch { /* sessionStorage unavailable — proceed */ }
-        const t = setTimeout(() => {
-            try { sessionStorage.setItem("rullama:lastAutoUpdate", String(Date.now())); } catch { /* */ }
-            onApplyUpdate();
-        }, 2500);
-        return () => clearTimeout(t);
-    }, [updateVersion, busy, applyingUpdate, onApplyUpdate]);
+        if (!updateVersion || applyingUpdate) return;
+        showToast({
+            id: "app-update",
+            level: "info",
+            title: "Update available",
+            message: "A new version is ready. Restart to update.",
+            noDismiss: true,
+            action: { label: "Restart", onClick: onApplyUpdate },
+        });
+    }, [updateVersion, applyingUpdate, showToast, onApplyUpdate]);
 
     // Page/session lifecycle: env probe, crash-detect, pagehide marker.
     useSessionLifecycle(setView);
@@ -413,17 +408,8 @@ export function App() {
 
     return (
         <div className="flex h-[100dvh] flex-col overflow-hidden bg-background text-foreground">
-            {/* PWA update banner. Detected via boot-time /version.json
-                fetch (lib/version.ts) and broadcast across tabs via
-                the SharedWorker. Deferred while mid-generation so an
-                in-flight chat reply is never interrupted. */}
-            {updateVersion && !busy && !applyingUpdate && (
-                <UpdateBanner
-                    version={updateVersion}
-                    onApply={onApplyUpdate}
-                    onDismiss={onDismissUpdate}
-                />
-            )}
+            {/* PWA update is surfaced as a persistent "Restart" toast (see the
+                showToast effect above) instead of a banner or an auto-reload. */}
             {/* ─── top header (3rem / 48px tall — matches DualSidebarLayout offset) ─── */}
             <AppHeader
                 view={view}

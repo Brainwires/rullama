@@ -8,6 +8,10 @@ export interface Toast {
     title:   string;
     message?: string;
     persist?: boolean;   // if true, stays until user dismisses
+    /** If true, no dismiss (X) button is rendered and the toast never
+     *  auto-dismisses — the ONLY way to close it is its action button.
+     *  Used for the "app updated — restart?" prompt (no ignore/dismiss). */
+    noDismiss?: boolean;
     /** Optional inline action button. When clicked, `action.onClick`
      *  fires AND the toast is auto-dismissed. Used e.g. for the
      *  crash-detect "Open Logs" deep-link on next page load. */
@@ -46,7 +50,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             return [...filtered, { ...t, id }];
         });
         // Auto-dismiss for non-persistent, non-error/warn levels.
-        const isSticky = t.persist || t.level === "error" || t.level === "warn";
+        // `noDismiss` toasts never time out (closed only via their action).
+        const isSticky = t.persist || t.noDismiss || t.level === "error" || t.level === "warn";
         if (!isSticky) {
             const handle = setTimeout(() => dismissToast(id), AUTO_DISMISS_MS);
             const prev = timers.current.get(id);
