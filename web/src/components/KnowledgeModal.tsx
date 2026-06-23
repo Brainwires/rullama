@@ -27,7 +27,7 @@ export function KnowledgeModal({ activeConvId, onClose }: Props) {
             aria-modal="true"
             aria-label="Knowledge base"
         >
-            <header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-2">
+            <header className="flex min-h-12 shrink-0 items-center justify-between border-b border-border px-4 safe-top">
                 <span className="text-sm font-semibold">Knowledge base</span>
                 <Button
                     variant="ghost"
@@ -40,7 +40,7 @@ export function KnowledgeModal({ activeConvId, onClose }: Props) {
                     <X className="size-4" />
                 </Button>
             </header>
-            <div className="min-h-0 flex-1 overflow-hidden">
+            <div className="min-h-0 flex-1 overflow-hidden safe-bottom">
                 <KnowledgeTab activeConvId={activeConvId} />
             </div>
         </div>

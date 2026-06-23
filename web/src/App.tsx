@@ -14,7 +14,7 @@ import { disposeSharedTts } from "@/lib/tts-client";
 import { ChatSettings } from "@/components/ChatSettings";
 import { AppHeader } from "@/components/AppHeader";
 import { KnowledgeModal } from "@/components/KnowledgeModal";
-import { ensureEmbedder } from "@/lib/embedding";
+import { ensureEmbedder, subscribeEmbedderLoading } from "@/lib/embedding";
 import { ImageTab } from "@/components/ImageTab";
 import { TrainingOverlay } from "@/components/TrainingOverlay";
 import { UnsupportedScreen } from "@/components/UnsupportedScreen";
@@ -316,11 +316,16 @@ export function App() {
     // a few px above the layout viewport (a classic iOS-Safari quirk).
     useIOSKeyboard(true);
 
-    // Hold the screen awake during the two long-running operations a
-    // user actually waits on — model download/load and token generation.
-    // No-op on platforms without `navigator.wakeLock` (older iOS, private
-    // mode). See `lib/wakeLock.ts` for the iOS hide-release dance.
-    useWakeLock(modelStatus === "loading" || modelStatus === "preparing" || busy);
+    // Hold the screen awake during the long-running operations a user actually
+    // waits on — chat-model download/load, the (large) embedding-model
+    // download/load, and token generation. No-op on platforms without
+    // `navigator.wakeLock` (older iOS, private mode). See `lib/wakeLock.ts` for
+    // the iOS hide-release dance.
+    const [embedderBusy, setEmbedderBusy] = useState(false);
+    useEffect(() => subscribeEmbedderLoading(setEmbedderBusy), []);
+    useWakeLock(
+        modelStatus === "loading" || modelStatus === "preparing" || busy || embedderBusy,
+    );
 
     // **D1 — restore active adapter on reload.** The adapter bytes
     // survive in OPFS but the "this one is loaded into Model" state

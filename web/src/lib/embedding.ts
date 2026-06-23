@@ -15,9 +15,37 @@ import { extractPdfText } from "@/lib/pdf_extract";
 let embedderReady = false;
 let embedderLoading: Promise<void> | null = null;
 
+// Activity flag for the screen wake-lock. True while the embedding model is
+// downloading/stream-loading so the App can hold the screen awake through the
+// large GGUF download — exactly like the inference-model download path. Pushed
+// to subscribers (rather than polled) because the load can start from three
+// places (auto-load, the Knowledge modal, or a tool call) and the wake-lock
+// lives in App, away from all of them.
+let embedderBusy = false;
+const busyListeners = new Set<(busy: boolean) => void>();
+
+function setEmbedderBusy(busy: boolean): void {
+    if (embedderBusy === busy) return;
+    embedderBusy = busy;
+    for (const cb of busyListeners) cb(busy);
+}
+
 /** True once the embedder is loaded in the worker this session. */
 export function isEmbedderReady(): boolean {
     return embedderReady;
+}
+
+/** True while the embedding model is downloading / stream-loading. */
+export function isEmbedderLoading(): boolean {
+    return embedderBusy;
+}
+
+/** Subscribe to embedder download/load activity. Fires immediately with the
+ *  current state, then on every change. Returns an unsubscribe fn. */
+export function subscribeEmbedderLoading(cb: (busy: boolean) => void): () => void {
+    busyListeners.add(cb);
+    cb(embedderBusy);
+    return () => { busyListeners.delete(cb); };
 }
 
 /** Ensure the embedding model is loaded — idempotent + concurrency-safe (dedupes
@@ -27,6 +55,7 @@ export async function ensureEmbedder(onProgress?: (pct: number) => void): Promis
     if (embedderReady) return;
     if (embedderLoading) return embedderLoading;
     const client = getClient();
+    setEmbedderBusy(true);
     embedderLoading = (async () => {
         // Already resident in the worker (e.g. another tab)? Skip the download.
         const s = await client.embeddings.status().catch(() => null);
@@ -41,7 +70,7 @@ export async function ensureEmbedder(onProgress?: (pct: number) => void): Promis
         });
         await client.embeddings.load(modelKey, filename, EMBEDDING_MODEL.name);
         embedderReady = true;
-    })().finally(() => { embedderLoading = null; });
+    })().finally(() => { embedderLoading = null; setEmbedderBusy(false); });
     return embedderLoading;
 }
 

@@ -101,24 +101,52 @@ export function useSessionLifecycle(setView: (v: "settings") => void) {
         })();
     }, [showToast, setView]);
 
-    // pagehide is the reliable "tab is going away" signal across
-    // browsers — fires before iOS suspends, before unload would on
-    // desktop, and iOS Safari does NOT fire `beforeunload`. We write
-    // a localStorage marker with the current session id; the next
-    // mount's crash-detect treats a matching marker as proof of a
-    // clean exit even if the worker's manifest shutdown didn't
-    // complete.
+    // Clean-exit marker. We write a localStorage marker with the current
+    // session id; the next mount's crash-detect treats a matching marker
+    // as proof of a clean exit even if the worker's manifest shutdown
+    // didn't complete.
+    //
+    // The marker is driven primarily by **`visibilitychange → hidden`**,
+    // NOT `pagehide`. On iOS standalone PWAs `pagehide` is unreliable:
+    // when the user backgrounds the app (home / app switcher) and then
+    // swipe-kills it — or iOS reclaims it while suspended — `pagehide`
+    // frequently never fires, so a deliberate close looked identical to
+    // a jetsam/OOM kill. `visibilitychange → hidden` is the last event
+    // reliably observed before iOS suspends/terminates, and a manual
+    // close ALWAYS passes through it first (you can't swipe-kill a
+    // foreground app — backgrounding fires `hidden`). So:
+    //
+    //   - on `hidden`  → write the marker. A subsequent kill while
+    //     backgrounded (user swipe-kill or OS reclaim of a suspended
+    //     app) is then treated as a clean exit, no crash toast.
+    //   - on `visible` → CLEAR the marker. The session is resuming, so
+    //     a *later* crash in the foreground (e.g. jetsam mid-inference)
+    //     must NOT be masked by the stale marker from when it was
+    //     backgrounded — re-arm crash detection.
+    //
+    // `pagehide` still writes the marker as a belt-and-suspenders for
+    // desktop reload/navigation (where `visibilitychange` may not flip
+    // to hidden before teardown).
     //
     // Critical: `client.logs.currentId()` is an async RPC over
-    // postMessage, and pagehide CANNOT await. By the time the worker
-    // responds, the tab is gone and `localStorage.setItem` never
-    // runs. Cache the id synchronously on mount, then read the cached
-    // value inside the listener so the marker is written without an
-    // RPC round-trip.
+    // postMessage, and these teardown events CANNOT await. By the time
+    // the worker responds, the tab may be gone and `localStorage.setItem`
+    // never runs. Cache the id synchronously on mount, then read the
+    // cached value inside the listeners so the marker is written without
+    // an RPC round-trip.
     const currentSessionIdRef = useRef<string>("");
     useEffect(() => {
         let cancelled = false;
         const client = getClient();
+        const MARKER = "rullama:session:clean";
+        const writeMarker = () => {
+            const id = currentSessionIdRef.current;
+            if (!id) return;
+            try { localStorage.setItem(MARKER, id); } catch { /* */ }
+        };
+        const clearMarker = () => {
+            try { localStorage.removeItem(MARKER); } catch { /* */ }
+        };
         // Cache the worker's session id once on mount. Re-cache when
         // visibility flips back to "visible" — the SharedWorker may
         // have rotated session ids while the tab was hidden.
@@ -129,20 +157,24 @@ export function useSessionLifecycle(setView: (v: "settings") => void) {
             } catch { /* */ }
         };
         void refresh();
-        const onVis = () => { if (document.visibilityState === "visible") void refresh(); };
+        const onVis = () => {
+            if (document.visibilityState === "hidden") {
+                // Last reliable signal before iOS suspends/terminates.
+                writeMarker();
+            } else {
+                // Session resumed — re-arm crash detection, then refresh
+                // the (possibly rotated) session id.
+                clearMarker();
+                void refresh();
+            }
+        };
+        const onHide = () => writeMarker();
         document.addEventListener("visibilitychange", onVis);
+        window.addEventListener("pagehide", onHide);
         return () => {
             cancelled = true;
             document.removeEventListener("visibilitychange", onVis);
+            window.removeEventListener("pagehide", onHide);
         };
-    }, []);
-    useEffect(() => {
-        const onHide = () => {
-            const id = currentSessionIdRef.current;
-            if (!id) return;
-            try { localStorage.setItem("rullama:session:clean", id); } catch { /* */ }
-        };
-        window.addEventListener("pagehide", onHide);
-        return () => window.removeEventListener("pagehide", onHide);
     }, []);
 }
