@@ -58,6 +58,8 @@ export function VoicePanel(
     const [dlPct, setDlPct] = useState(0);
     const [procPct, setProcPct] = useState(0);
     const [procStage, setProcStage] = useState("");
+    // Running list of synthesis stages, shown live under the progress bar.
+    const [procLog, setProcLog] = useState<string[]>([]);
     // Clips are persisted to OPFS; we keep only metadata in memory (no PCM) and
     // lazy-load each clip's samples from OPFS when it is played or exported.
     const [clips, setClips] = useState<ClipMeta[]>([]);
@@ -114,6 +116,14 @@ export function VoicePanel(
     const isClone = sel.startsWith("c:");
     const cloneVoice = isClone ? voices.find((v) => v.id === sel.slice(2)) : undefined;
 
+    /** Stage-progress sink: drives the % + current stage + the running stage log. */
+    const onProc = useCallback((f: number, s?: string) => {
+        setProcPct(Math.round(f * 100));
+        const stage = s ?? "";
+        setProcStage(stage);
+        if (stage) setProcLog((L) => (L[L.length - 1] === stage ? L : [...L, stage]));
+    }, []);
+
     const generate = useCallback(async () => {
         if (busy || !text.trim()) return;
         // Unlock audio inside the click gesture so the clip can auto-play once
@@ -124,6 +134,7 @@ export function VoicePanel(
         setDlPct(0);
         setProcPct(0);
         setProcStage("");
+        setProcLog([]);
         try {
             let pcm: Float32Array;
             let sr: number;
@@ -131,19 +142,13 @@ export function VoicePanel(
             if (isClone) {
                 if (!cloneVoice) throw new Error("voice not found");
                 const cc = await getSharedClone(styletts2BlobUrl(cloneVariant), styletts2Model(cloneVariant).size, cloneVariant, (f) => setDlPct(Math.round(f * 100)));
-                pcm = await cc.synthesize(text.trim(), voiceVec(cloneVoice), (f, s) => {
-                    setProcPct(Math.round(f * 100));
-                    setProcStage(s);
-                });
+                pcm = await cc.synthesize(text.trim(), voiceVec(cloneVoice), onProc);
                 sr = cc.sampleRate;
                 label = cloneVoice.name;
             } else {
                 if (!tts.current) tts.current = await getSharedTts(kokoroBlobUrl(), (f) => setDlPct(Math.round(f * 100)));
                 const preset = sel.slice(2);
-                pcm = await tts.current.synthesize(text.trim(), preset, (f, s) => {
-                    setProcPct(Math.round(f * 100));
-                    setProcStage(s ?? "");
-                });
+                pcm = await tts.current.synthesize(text.trim(), preset, onProc);
                 sr = tts.current.sampleRate;
                 label = preset;
             }
@@ -169,7 +174,7 @@ export function VoicePanel(
         } finally {
             setBusy(false);
         }
-    }, [busy, text, isClone, cloneVoice, sel, cloneVariant, playClip]);
+    }, [busy, text, isClone, cloneVoice, sel, cloneVariant, playClip, onProc]);
 
     /** Stop the in-flight synthesis cooperatively (does NOT kill the worker — the
      *  model stays loaded). The running synth aborts at its next stage boundary and
@@ -382,6 +387,20 @@ export function VoicePanel(
                             <span className="tabular-nums">{procPct}%</span>
                         </div>
                         <Progress value={procPct} className="h-1" />
+                        {/* Live stage log — the sequence of steps the synth has run. */}
+                        {procLog.length > 0 && (
+                            <ul className="mt-0.5 space-y-0.5 text-[10px] leading-tight text-muted-foreground">
+                                {procLog.map((s, i) => {
+                                    const current = i === procLog.length - 1;
+                                    return (
+                                        <li key={`${i}-${s}`} className="flex items-center gap-1.5">
+                                            <span className={cn("inline-block size-1 shrink-0 rounded-full", current ? "animate-pulse bg-primary" : "bg-muted-foreground/40")} />
+                                            <span className={cn("truncate", current && "text-foreground")}>{s}</span>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        )}
                     </div>
                 )}
                 {err && <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">{err}</div>}

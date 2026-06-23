@@ -123,12 +123,19 @@ scale path is used by the lm_head / embed_tokens LoRA targets.
   buffer. The synth yields to the worker event loop at every GPU readback, so a
   cancel posted mid-run takes effect at the next stage. The worker and loaded
   model stay resident, so the next Generate is immediate (no re-download / no
-  re-init). Covers both engines (Kokoro + the StyleTTS2 clone); for Kokoro the
-  last checkpoint is right before the expensive ISTFTNet vocoder pass.
-- **More detailed progress.** Stage labels now name what's actually running —
-  *analyzing text (G2P + PL-BERT)* → *predicting durations & prosody* →
-  *encoding phonemes* → *vocoding waveform (ISTFTNet)* (and, for the clone,
-  *imagining delivery (style diffusion)* → *vocoding waveform (GPU decoder)*).
+  re-init). Covers both engines (Kokoro + the StyleTTS2 clone).
+- **Mid-vocoder cancellation.** The ISTFTNet vocoder — the longest phase for long
+  audio — used to run as one GPU submit, so a Stop during it only landed after it
+  finished. It now submits once per upsample stage and yields (`setTimeout(0)`
+  macrotask, so the queued `cancel` message is actually dispatched) + polls
+  cancellation between stages, bailing immediately. Same per-stage cancellation in
+  the clone's GPU decoder (it already submitted per stage).
+- **More detailed progress + a live stage log.** Stage labels name what's actually
+  running — *analyzing text (G2P + PL-BERT)* → *predicting durations & prosody* →
+  *encoding phonemes* → *vocoding waveform (upsample 1/2 … 2/2)* → *finishing
+  (iSTFT)* (clone: *imagining delivery (style diffusion)* → *vocoding waveform (GPU
+  decoder)*). The progress area now shows the running sequence of these stages, not
+  just the current one.
 
 ## [0.5.0] — 2026-06-17
 
