@@ -98,6 +98,20 @@ other chained elementwise kernel. Long-phrase GPU-vs-CPU correlation goes
 scales a 5M-element buffer and asserts every element is touched. The same
 scale path is used by the lm_head / embed_tokens LoRA targets.
 
+### Voice tab — generated clips and prompt survive a reload
+
+- **Generated clips persist across reloads.** Synthesized speech is now written
+  to OPFS (`tts-clips-store.ts`: per-clip `<id>.f32` PCM files + a
+  `manifest.json` of metadata) instead of living only in React state. The clip
+  list rebuilds from the manifest on mount. Only metadata (text, voice, sample
+  rate, length, timestamp) is kept in memory — each clip's PCM is lazily loaded
+  from OPFS when it is played or exported and released afterward, so a long
+  backlog of clips never sits in RAM. Delete removes both the file and the
+  manifest entry.
+- **The prompt survives a reload.** The Voice tab's text input is persisted to
+  `localStorage` (`usePersistedState`), so a half-typed prompt isn't lost on a
+  refresh.
+
 ## [0.5.0] — 2026-06-17
 
 A broad surface expansion since 0.4.0. The Gemma 4 family grows from two

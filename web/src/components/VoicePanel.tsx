@@ -10,8 +10,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { kokoroBlobUrl, styletts2BlobUrl, styletts2Model } from "@/lib/api";
 import { useDeviceTier } from "@/lib/capability";
 import { getSharedClone } from "@/lib/clone-client";
-import { getSharedTts, type TtsClient, type TtsClip } from "@/lib/tts-client";
+import { getSharedTts, type TtsClient } from "@/lib/tts-client";
 import { usePersistedState } from "@/lib/persisted";
+import { listClips, saveClip, loadClipPcm, deleteClip, type ClipMeta } from "@/lib/tts-clips-store";
 import { cn } from "@/lib/utils";
 import { addVoice, importVoiceFile, listVoices, onVoicesChanged, removeVoice, voiceVec, type SavedVoice } from "@/lib/voice-library";
 import { downloadWav, playPcm, unlockAudio } from "@/lib/wav";
@@ -49,14 +50,17 @@ export function VoicePanel(
     const cloneVariant: "f32" | "f16" = cloneVariantPref ?? (tier === "mobile" ? "f16" : "f32");
     const tts = useRef<TtsClient | null>(null);
     const [err, setErr] = useState<string | null>(null);
-    const [text, setText] = useState("Hello, this is text to speech running entirely in your browser.");
+    // Persisted across reloads so a half-typed prompt survives a refresh.
+    const [text, setText] = usePersistedState("voice:inputText", "Hello, this is text to speech running entirely in your browser.");
     const [sel, setSel] = useState("k:af_heart"); // "k:<preset>" (Kokoro) or "c:<id>" (cloned)
     const [voices, setVoices] = useState<SavedVoice[]>(() => listVoices());
     const [busy, setBusy] = useState(false);
     const [dlPct, setDlPct] = useState(0);
     const [procPct, setProcPct] = useState(0);
     const [procStage, setProcStage] = useState("");
-    const [clips, setClips] = useState<TtsClip[]>([]);
+    // Clips are persisted to OPFS; we keep only metadata in memory (no PCM) and
+    // lazy-load each clip's samples from OPFS when it is played or exported.
+    const [clips, setClips] = useState<ClipMeta[]>([]);
     const [active, setActive] = useState<number>(-1);
     // Current playback source so the Play button can toggle to Stop.
     const playingRef = useRef<AudioBufferSourceNode | null>(null);
@@ -81,6 +85,29 @@ export function VoicePanel(
             if (playingRef.current === src) { playingRef.current = null; setPlaying(false); }
         };
     }, [stopPlayback]);
+
+    // Restore the persisted clip list (metadata only) on mount.
+    useEffect(() => { listClips().then(setClips).catch(() => {}); }, []);
+
+    /** Lazy-load a persisted clip's PCM from OPFS and play it (PCM is GC'd after). */
+    const playStored = useCallback(async (meta: ClipMeta) => {
+        unlockAudio();
+        const pcm = await loadClipPcm(meta.id);
+        if (pcm) playClip(pcm, meta.sampleRate);
+    }, [playClip]);
+
+    /** Lazy-load a persisted clip's PCM and save it as a WAV. */
+    const exportStored = useCallback(async (meta: ClipMeta) => {
+        const pcm = await loadClipPcm(meta.id);
+        if (pcm) downloadWav(pcm, meta.sampleRate, `tts-${meta.ts}`);
+    }, []);
+
+    /** Delete a persisted clip from OPFS + the in-memory list. */
+    const removeClip = useCallback(async (meta: ClipMeta) => {
+        await deleteClip(meta.id);
+        setClips((cs) => cs.filter((x) => x.id !== meta.id));
+        setActive((a) => (clips[a]?.id === meta.id ? -1 : a));
+    }, [clips]);
 
     useEffect(() => onVoicesChanged(() => setVoices(listVoices())), []);
 
@@ -120,8 +147,18 @@ export function VoicePanel(
                 sr = tts.current.sampleRate;
                 label = preset;
             }
-            const clip: TtsClip = { pcm, sampleRate: sr, text: text.trim(), voice: label, ts: Date.now() };
-            setClips((cs) => [clip, ...cs]);
+            const meta: ClipMeta = {
+                id: crypto.randomUUID(),
+                text: text.trim(),
+                voice: label,
+                sampleRate: sr,
+                samples: pcm.length,
+                ts: Date.now(),
+            };
+            // Persist to OPFS so the clip survives a reload; keep only metadata in
+            // memory and play the just-generated PCM directly (then let it be GC'd).
+            await saveClip(meta, pcm);
+            setClips((cs) => [meta, ...cs]);
             setActive(0);
             playClip(pcm, sr);
         } catch (e) {
@@ -240,7 +277,7 @@ export function VoicePanel(
             <ul className="flex-1 overflow-y-auto">
                 {clips.map((c, i) => (
                     <li
-                        key={c.ts}
+                        key={c.id}
                         onClick={() => setActive(i)}
                         className={cn(
                             "group cursor-pointer border-b border-border/50 px-3 py-2 text-xs hover:bg-background/60",
@@ -249,15 +286,15 @@ export function VoicePanel(
                     >
                         <div className="line-clamp-2 text-foreground">{c.text}</div>
                         <div className="mt-1 flex items-center justify-between text-[10px] text-muted-foreground">
-                            <span>{(c.pcm.length / c.sampleRate).toFixed(1)}s · {c.voice}</span>
+                            <span>{(c.samples / c.sampleRate).toFixed(1)}s · {c.voice}</span>
                             <span className="flex gap-1 opacity-0 group-hover:opacity-100">
-                                <button title="Play" onClick={(e) => { e.stopPropagation(); playClip(c.pcm, c.sampleRate); }}>
+                                <button title="Play" onClick={(e) => { e.stopPropagation(); playStored(c); }}>
                                     <Play className="size-3" />
                                 </button>
-                                <button title="Save WAV" onClick={(e) => { e.stopPropagation(); downloadWav(c.pcm, c.sampleRate, `tts-${c.ts}`); }}>
+                                <button title="Save WAV" onClick={(e) => { e.stopPropagation(); exportStored(c); }}>
                                     <Download className="size-3" />
                                 </button>
-                                <button title="Delete" onClick={(e) => { e.stopPropagation(); setClips((cs) => cs.filter((x) => x.ts !== c.ts)); }}>
+                                <button title="Delete" onClick={(e) => { e.stopPropagation(); removeClip(c); }}>
                                     <Trash2 className="size-3" />
                                 </button>
                             </span>
@@ -307,11 +344,11 @@ export function VoicePanel(
                                     <Square className="size-3.5" /> Stop
                                 </Button>
                             ) : (
-                                <Button size="sm" variant="outline" onClick={() => playClip(clips[active].pcm, clips[active].sampleRate)}>
+                                <Button size="sm" variant="outline" onClick={() => playStored(clips[active])}>
                                     <Play className="size-3.5" /> Play
                                 </Button>
                             )}
-                            <Button size="sm" variant="outline" onClick={() => downloadWav(clips[active].pcm, clips[active].sampleRate, `tts-${clips[active].ts}`)}>
+                            <Button size="sm" variant="outline" onClick={() => exportStored(clips[active])}>
                                 <Download className="size-3.5" /> Save WAV
                             </Button>
                         </>
