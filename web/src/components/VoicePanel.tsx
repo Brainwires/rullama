@@ -9,8 +9,8 @@ import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
 import { kokoroBlobUrl, styletts2BlobUrl, styletts2Model } from "@/lib/api";
 import { useDeviceTier } from "@/lib/capability";
-import { getSharedClone } from "@/lib/clone-client";
-import { getSharedTts, type TtsClient } from "@/lib/tts-client";
+import { getSharedClone, cancelSharedClone } from "@/lib/clone-client";
+import { getSharedTts, cancelSharedTts, type TtsClient } from "@/lib/tts-client";
 import { usePersistedState } from "@/lib/persisted";
 import { listClips, saveClip, loadClipPcm, deleteClip, type ClipMeta } from "@/lib/tts-clips-store";
 import { cn } from "@/lib/utils";
@@ -155,6 +155,9 @@ export function VoicePanel(
                 samples: pcm.length,
                 ts: Date.now(),
             };
+            // Cancelled mid-synthesis → the worker returns an empty buffer. Drop it
+            // (the worker + model stay loaded, so the next Generate is immediate).
+            if (pcm.length === 0) return;
             // Persist to OPFS so the clip survives a reload; keep only metadata in
             // memory and play the just-generated PCM directly (then let it be GC'd).
             await saveClip(meta, pcm);
@@ -167,6 +170,15 @@ export function VoicePanel(
             setBusy(false);
         }
     }, [busy, text, isClone, cloneVoice, sel, cloneVariant, playClip]);
+
+    /** Stop the in-flight synthesis cooperatively (does NOT kill the worker — the
+     *  model stays loaded). The running synth aborts at its next stage boundary and
+     *  resolves empty, which `generate()` discards. */
+    const cancelGenerate = useCallback(() => {
+        if (isClone) cancelSharedClone();
+        else cancelSharedTts();
+        setProcStage("stopping…");
+    }, [isClone]);
 
     const onImport = useCallback(async (f: File | undefined) => {
         if (!f) return;
@@ -336,6 +348,13 @@ export function VoicePanel(
                     <Button size="sm" onClick={generate} disabled={busy || !text.trim()}>
                         {busy ? <><Loader2 className="size-3.5 animate-spin" /> {dlPct > 0 && dlPct < 100 ? `Loading… ${dlPct}%` : "Generating…"}</> : "Generate speech"}
                     </Button>
+
+                    {/* Stop GENERATION — only while synthesizing; distinct (destructive) from the playback Stop. */}
+                    {busy && (
+                        <Button size="sm" variant="destructive" onClick={cancelGenerate} title="Stop generating">
+                            <Square className="size-3.5" /> Stop
+                        </Button>
+                    )}
 
                     {active >= 0 && clips[active] && (
                         <>

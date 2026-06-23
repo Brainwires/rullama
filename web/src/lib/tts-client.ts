@@ -80,6 +80,13 @@ export class TtsClient {
         return r.pcm;
     }
 
+    /** Cooperatively cancel the in-flight synthesis (the worker flips a wasm flag
+     *  that the running synth polls at its next stage boundary). The pending
+     *  `synthesize` then resolves with an EMPTY buffer — the worker stays loaded. */
+    cancel(): void {
+        this.worker.postMessage({ type: "cancel" });
+    }
+
     dispose(): void {
         this.worker.terminate();
         this.pending.clear();
@@ -107,6 +114,11 @@ export function getSharedTts(url: string, onProgress?: (frac: number) => void): 
 /** Whether the shared client is loaded and ready. */
 export function ttsReady(): boolean {
     return loaded;
+}
+
+/** Cancel the shared Kokoro client's in-flight synthesis (no-op if not running). */
+export function cancelSharedTts(): void {
+    shared?.cancel();
 }
 
 /** Terminate the shared Kokoro TTS worker and reset state, freeing its GPU device. Called when the

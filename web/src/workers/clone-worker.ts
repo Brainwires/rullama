@@ -3,14 +3,14 @@
 /// synthesizes text in that voice. Separate from the Kokoro tts-worker (different engine).
 
 // @ts-expect-error — generated bundle, no .d.ts
-import init, { StyleTtsClone } from "/pkg/rullama.js";
+import init, { StyleTtsClone, ttsRequestCancel } from "/pkg/rullama.js";
 import { downloadToOpfs, openOpfsReadFn } from "./opfs-download";
 
 let clone: StyleTtsClone | null = null;
 
 interface Req {
     id: number;
-    type: "load" | "encodeVoice" | "synthesize";
+    type: "load" | "encodeVoice" | "synthesize" | "cancel";
     url?: string;
     size?: number;
     variant?: "f32" | "f16";
@@ -56,6 +56,12 @@ async function openGgufStreaming(url: string, expectedSize: number, variant: "f3
 
 self.onmessage = async (e: MessageEvent<Req>) => {
     const { id, type } = e.data;
+    // Cancel is a free wasm call (no model borrow), so it lands even while a
+    // synthesize is mid-flight — the running synth aborts at its next stage.
+    if (type === "cancel") {
+        try { ttsRequestCancel(); } catch { /* not loaded yet */ }
+        return;
+    }
     try {
         if (type === "load") {
             await init();

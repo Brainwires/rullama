@@ -57,6 +57,13 @@ export class CloneClient {
         return r.pcm;
     }
 
+    /** Cooperatively cancel the in-flight synthesis (the worker flips a wasm flag
+     *  the running synth polls at its next stage boundary). The pending call then
+     *  resolves with an EMPTY buffer — the worker + model stay loaded. */
+    cancel(): void {
+        this.worker.postMessage({ type: "cancel" });
+    }
+
     dispose(): void {
         this.worker.terminate();
         this.pending.clear();
@@ -88,6 +95,11 @@ export function getSharedClone(url: string, size: number, variant: "f32" | "f16"
 
 export function cloneReady(): boolean {
     return loaded;
+}
+
+/** Cancel the shared clone client's in-flight synthesis (no-op if not running). */
+export function cancelSharedClone(): void {
+    shared?.cancel();
 }
 
 /** Terminate the shared cloning worker and reset state, freeing its GPU device. Called when the

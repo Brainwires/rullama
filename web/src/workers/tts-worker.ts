@@ -3,13 +3,13 @@
 /// inference-core-worker so it stays simple and the TTS model has its own handle.
 
 // @ts-expect-error — generated bundle, no .d.ts
-import init, { KokoroTts } from "/pkg/rullama.js";
+import init, { KokoroTts, ttsRequestCancel } from "/pkg/rullama.js";
 
 let tts: KokoroTts | null = null;
 
 interface Req {
     id: number;
-    type: "load" | "synthesize" | "synthesizePhonemes" | "trainBegin" | "trainStep" | "trainedVoice" | "synthesizeWithVoice";
+    type: "load" | "synthesize" | "synthesizePhonemes" | "trainBegin" | "trainStep" | "trainedVoice" | "synthesizeWithVoice" | "cancel";
     url?: string;
     text?: string;
     voice?: string;
@@ -25,6 +25,12 @@ function post(msg: Record<string, unknown>, transfer?: Transferable[]) {
 
 self.onmessage = async (e: MessageEvent<Req>) => {
     const { id, type } = e.data;
+    // Cancel is a free wasm call (no model borrow), so it lands even while a
+    // synthesize is mid-flight — the running synth aborts at its next stage.
+    if (type === "cancel") {
+        try { ttsRequestCancel(); } catch { /* not loaded yet */ }
+        return;
+    }
     try {
         if (type === "load") {
             await init();

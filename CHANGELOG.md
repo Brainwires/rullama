@@ -112,6 +112,24 @@ scale path is used by the lm_head / embed_tokens LoRA targets.
   `localStorage` (`usePersistedState`), so a half-typed prompt isn't lost on a
   refresh.
 
+### Voice tab — interruptible synthesis + finer progress
+
+- **Stop generation mid-synthesis** (a distinct, destructive Stop button shown
+  only while generating — separate from the playback Stop). Cancellation is
+  cooperative, not a worker teardown: a module-global flag is flipped by a
+  wasm-bindgen *free* function (`ttsRequestCancel`) — which touches no model
+  object, so it lands even while the borrowed `&mut self` async synth is running
+  — and the forward polls it at each stage boundary, bailing out with an empty
+  buffer. The synth yields to the worker event loop at every GPU readback, so a
+  cancel posted mid-run takes effect at the next stage. The worker and loaded
+  model stay resident, so the next Generate is immediate (no re-download / no
+  re-init). Covers both engines (Kokoro + the StyleTTS2 clone); for Kokoro the
+  last checkpoint is right before the expensive ISTFTNet vocoder pass.
+- **More detailed progress.** Stage labels now name what's actually running —
+  *analyzing text (G2P + PL-BERT)* → *predicting durations & prosody* →
+  *encoding phonemes* → *vocoding waveform (ISTFTNet)* (and, for the clone,
+  *imagining delivery (style diffusion)* → *vocoding waveform (GPU decoder)*).
+
 ## [0.5.0] — 2026-06-17
 
 A broad surface expansion since 0.4.0. The Gemma 4 family grows from two
