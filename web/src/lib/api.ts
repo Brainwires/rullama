@@ -184,17 +184,17 @@ export const BAKED_IN_MODELS: readonly ModelEntry[] = [
     {
         // Z-Image-Turbo — text-to-IMAGE generation (the 4th engine, ImageModel
         // wasm class). NOT a GGUF: three per-tensor safetensors components
-        // (text_encoder/ Qwen3 + transformer/ DiT + vae/) live under the CDN
-        // base `url` and stream per-tensor via HTTP Range — nothing downloads
-        // to OPFS, so this entry never enters the model-picker / ensureModel
-        // path. The Image tab loads it directly through `client.image.load`.
-        // ~31 GB across the three components; desktop-only → heavy advisory ⚠
-        // (and never appears in the chat model picker, which filters on
-        // isSupported()). `size` here is advisory only.
+        // (text_encoder/ Qwen3 bf16 + transformer/ DiT fp8 + vae/ bf16). The
+        // Image tab downloads them ONCE to OPFS (`client.image.ensure`) then
+        // reads per-tensor from local disk (`client.image.load`) — no network
+        // during generation. The DiT uses a reputable pre-quantized fp8 build
+        // (~6 GB vs ~24 GB bf16), so the one-time download is ~14 GB. Desktop-
+        // only → heavy advisory ⚠; never appears in the chat model picker
+        // (filtered by isSupported()). `size` here is advisory only.
         name:       "z-image-turbo",
         family:     "z-image",
         tag:        "turbo",
-        size:       31000000000,
+        size:       14300000000,
         digest:     "z-image-turbo",
         url:        `https://${R2_HOST}/z-image-turbo`,
         heavy:      true,

@@ -289,31 +289,24 @@ const ImageModelClass = ImageModel as unknown as {
 // The image model is three safetensors components under the CDN base, each
 // cached into its own flat OPFS dir (`rullama-models/<key>/<file>`). `index`
 // names the shard map (sharded components); `single` is the lone file (VAE).
-const IMAGE_COMPONENTS = [
-    { sub: "text_encoder", key: "z-image-turbo-text_encoder", index: "model.safetensors.index.json" as string | null, single: null as string | null },
-    { sub: "transformer",  key: "z-image-turbo-transformer",  index: "diffusion_pytorch_model.safetensors.index.json" as string | null, single: null as string | null },
-    { sub: "vae",          key: "z-image-turbo-vae",          index: null as string | null, single: "diffusion_pytorch_model.safetensors" as string | null },
-] as const;
+// OPFS dir keys per component (`rullama-models/<key>/<file>`).
+const IMAGE_KEYS = {
+    enc: "z-image-turbo-text_encoder",
+    dit: "z-image-turbo-transformer",
+    vae: "z-image-turbo-vae",
+} as const;
+
+// The DiT denoiser is loaded as a reputable pre-quantized fp8 build (lightx2v's
+// `fp8_e4m3` scaled — same native key names as the original, per-output-row
+// `weight_scale`), hotlinked from Hugging Face (CORS + Range OK). ~6 GB vs the
+// ~24 GB bf16 original → smaller one-time download + ~4× less per-step disk I/O,
+// at the publisher's quality. The text encoder + VAE stay bf16 (run once each).
+const FP8_DIT_URL =
+    "https://huggingface.co/lightx2v/Z-Image-Turbo-Quantized/resolve/main/z_image_turbo_scaled_fp8_e4m3fn.safetensors";
 
 // OPFS read handles held open per component for the model's lifetime (closed on
-// unloadImage). Keyed by component `sub`; each value maps file name → handle.
+// unloadImage). Keyed by component label; each value maps file name → handle.
 let imageReadHandles: Map<string, Map<string, FileSystemSyncAccessHandle>> | null = null;
-
-/** The list of files in a component dir: config.json + (index + its shards) or
- *  the single file. Fetches the index JSON over the network to enumerate shards
- *  (small; happens once at download time). */
-async function imageComponentFiles(baseUrl: string, comp: (typeof IMAGE_COMPONENTS)[number]): Promise<string[]> {
-    const files = ["config.json"];
-    if (comp.index) {
-        const idxUrl = `${baseUrl.replace(/\/+$/, "")}/${comp.sub}/${comp.index}`;
-        const idx = await (await fetch(idxUrl)).json() as { weight_map?: Record<string, string> };
-        const shards = [...new Set(Object.values(idx.weight_map ?? {}))];
-        files.push(comp.index, ...shards);
-    } else if (comp.single) {
-        files.push(comp.single);
-    }
-    return files;
-}
 
 /** Content-length of a remote file via HEAD (for expectedSize + progress). */
 async function remoteSize(url: string): Promise<number> {
@@ -323,28 +316,48 @@ async function remoteSize(url: string): Promise<number> {
     } catch { return 0; }
 }
 
-/** Download all three components to OPFS (resumable, cached). Emits an
- *  aggregate `imageDownload` notify ({ label, done, total }) so the UI shows one
- *  progress bar across every shard. Idempotent: complete files short-circuit. */
-async function ensureImageModel(baseUrl: string): Promise<void> {
-    const base = baseUrl.replace(/\/+$/, "");
-    // Build the (component, file, url, size) work list + grand total.
-    const work: { comp: (typeof IMAGE_COMPONENTS)[number]; file: string; url: string; size: number }[] = [];
-    for (const comp of IMAGE_COMPONENTS) {
-        const files = await imageComponentFiles(base, comp);
-        for (const file of files) {
-            const url = `${base}/${comp.sub}/${file}`;
-            work.push({ comp, file, url, size: await remoteSize(url) });
-        }
+/** Build the full (label, key, file, url) download work list. The text encoder
+ *  is sharded bf16 (enumerated from its index); the DiT is the single fp8 file
+ *  (config from R2, weights from HF); the VAE is a single bf16 file. */
+async function imageWorkList(base: string): Promise<{ label: string; key: string; file: string; url: string }[]> {
+    const b = base.replace(/\/+$/, "");
+    const work: { label: string; key: string; file: string; url: string }[] = [];
+
+    // text_encoder (Qwen3, sharded bf16)
+    work.push({ label: "text encoder", key: IMAGE_KEYS.enc, file: "config.json", url: `${b}/text_encoder/config.json` });
+    const encIdxName = "model.safetensors.index.json";
+    work.push({ label: "text encoder", key: IMAGE_KEYS.enc, file: encIdxName, url: `${b}/text_encoder/${encIdxName}` });
+    const encIdx = await (await fetch(`${b}/text_encoder/${encIdxName}`)).json() as { weight_map?: Record<string, string> };
+    for (const shard of new Set(Object.values(encIdx.weight_map ?? {}))) {
+        work.push({ label: "text encoder", key: IMAGE_KEYS.enc, file: shard, url: `${b}/text_encoder/${shard}` });
     }
-    const grandTotal = work.reduce((s, w) => s + w.size, 0);
+
+    // transformer (DiT) — fp8 single file from HF; config from the R2 bf16 dir
+    // (same architecture). No shard index ⇒ the loader opens it single-file.
+    work.push({ label: "denoiser", key: IMAGE_KEYS.dit, file: "config.json", url: `${b}/transformer/config.json` });
+    work.push({ label: "denoiser (fp8)", key: IMAGE_KEYS.dit, file: "diffusion_pytorch_model.safetensors", url: FP8_DIT_URL });
+
+    // vae (single bf16 file)
+    work.push({ label: "vae", key: IMAGE_KEYS.vae, file: "config.json", url: `${b}/vae/config.json` });
+    work.push({ label: "vae", key: IMAGE_KEYS.vae, file: "diffusion_pytorch_model.safetensors", url: `${b}/vae/diffusion_pytorch_model.safetensors` });
+    return work;
+}
+
+/** Download every component file to OPFS (resumable, cached). Emits an aggregate
+ *  `imageDownload` notify ({ label, done, total } bytes) so the UI shows one
+ *  progress bar across all files. Idempotent: complete files short-circuit. */
+async function ensureImageModel(baseUrl: string): Promise<void> {
+    const work = await imageWorkList(baseUrl);
+    // Size each file (HEAD) for an aggregate byte total + smooth progress.
+    const sized = await Promise.all(work.map(async (w) => ({ ...w, size: await remoteSize(w.url) })));
+    const grandTotal = sized.reduce((s, w) => s + w.size, 0);
     let prior = 0;
-    for (const w of work) {
-        notify("imageDownload", { label: w.comp.sub, done: prior, total: grandTotal });
+    for (const w of sized) {
+        notify("imageDownload", { label: w.label, done: prior, total: grandTotal });
         await doDownload({
-            url: w.url, modelKey: w.comp.key, filename: w.file,
+            url: w.url, modelKey: w.key, filename: w.file,
             expectedSize: w.size, skipMagic: true,
-            onChunk: (written) => notify("imageDownload", { label: w.comp.sub, done: prior + written, total: grandTotal }),
+            onChunk: (written) => notify("imageDownload", { label: w.label, done: prior + written, total: grandTotal }),
         });
         prior += w.size;
     }
