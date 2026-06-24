@@ -1,8 +1,9 @@
 // Image tab — text-to-image generation with Z-Image-Turbo (the 4th engine,
 // the `ImageModel` wasm class). Unlike the chat models this loads from a CDN
 // base URL via HTTP Range (nothing touches OPFS) and runs the whole pipeline
-// in one async call (no per-step canvas in this version), so the progress UI
-// is a busy state, not a live denoise preview.
+// in one async call. The engine reports fine-grained progress (per encoder/DiT
+// layer + per VAE stage) via an `imageStep` notify, so the UI shows a live
+// phase label + progress bar rather than an opaque busy state.
 //
 // Lifecycle is tab-owned: the component loads the engine via
 // `client.image.load` (probing existing status on mount) and unloads it on
@@ -41,7 +42,16 @@ export function ImageTab() {
 
     const [busy, setBusy] = useState(false);
     const [haveImage, setHaveImage] = useState(false);
+    // Live progress relayed from the engine (per encoder/DiT layer, per VAE
+    // stage) so the user sees constant movement, not a silent multi-minute hang.
+    const [progress, setProgress] = useState<{ label: string; done: number; total: number } | null>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
+
+    // Subscribe to fine-grained generation progress while mounted.
+    useEffect(() => {
+        const unsub = client.image.onStep((p) => setProgress(p));
+        return () => { unsub(); };
+    }, [client]);
 
     // Reflect existing engine status on mount; the worker is the source of
     // truth (another tab may have loaded it already).
@@ -81,6 +91,7 @@ export function ImageTab() {
         if (status !== "ready" || busy || !prompt.trim()) return;
         setBusy(true);
         setErr(null);
+        setProgress({ label: "Starting…", done: 0, total: 1 });
         try {
             const latent = Math.round(sizePx / 8);
             const { rgba, width, height } = await client.image.generate({
@@ -110,6 +121,7 @@ export function ImageTab() {
             setErr((e as Error).message ?? String(e));
         } finally {
             setBusy(false);
+            setProgress(null);
         }
     }, [client, status, busy, prompt, negPrompt, sizePx, steps, cfg, seed]);
 
@@ -249,14 +261,36 @@ export function ImageTab() {
                                 </Button>
                             </div>
                             {err && <p className="text-sm text-destructive">{err}</p>}
-                            {/* No per-step callback in this version — the whole
-                                pipeline (encode → denoise → VAE decode) runs in
-                                one async call, so we can only show a busy state. */}
+                            {/* Live progress: the engine reports per encoder/DiT
+                                layer + per VAE stage. Generation is network-bound
+                                (each DiT step re-streams ~10 GB of weights), so
+                                this moves steadily but the whole run is slow. */}
                             {busy && (
-                                <p className="flex items-center gap-2 text-xs text-muted-foreground">
-                                    <Loader2 className="size-3 animate-spin" />
-                                    Running pipeline — this can take a while on the GPU…
-                                </p>
+                                <div className="flex flex-col gap-1.5">
+                                    <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                                        <Loader2 className="size-3 animate-spin" />
+                                        {progress?.label ?? "Running pipeline…"}
+                                        {progress && progress.total > 1 && (
+                                            <span className="tabular-nums">
+                                                {progress.done + 1}/{progress.total}
+                                            </span>
+                                        )}
+                                    </p>
+                                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                                        <div
+                                            className="h-full bg-primary transition-[width] duration-200"
+                                            style={{
+                                                width: progress && progress.total > 0
+                                                    ? `${Math.min(100, ((progress.done + 1) / progress.total) * 100)}%`
+                                                    : "10%",
+                                            }}
+                                        />
+                                    </div>
+                                    <p className="text-[10px] text-muted-foreground">
+                                        Weights stream from the CDN per step — this is network-bound, so
+                                        expect minutes per step on a slow connection.
+                                    </p>
+                                </div>
                             )}
                         </CardContent>
                     </Card>

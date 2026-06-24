@@ -268,6 +268,7 @@ interface ImageModelHandle {
     generate(
         tokens: Uint32Array, negTokens: Uint32Array,
         cfgScale: number, lh: number, lw: number, steps: number, seed: number,
+        onProgress?: ((label: string, done: number, total: number) => void) | null,
     ): Promise<Uint8Array>;
     readonly defaultSteps: number;
     readonly stepIndex: number;
@@ -1522,8 +1523,10 @@ const RPC: Record<string, Handler> = {
 
     // Run the whole text→image pipeline in one async call. Tokenize the prompt
     // (+ optional negative) JS-side with the Qwen2 tokenizer, then `generate`.
-    // No per-step callback in this version, so there's no `imageStep` notify —
-    // the UI just shows a busy state until this resolves with the RGBA8 bytes.
+    // Generation is network-bound (each DiT step re-streams ~10 GB of weights
+    // over HTTP Range), so the engine reports fine-grained progress — per
+    // encoder/DiT layer, per VAE stage — via a callback; we relay each as an
+    // `imageStep` notify so the UI shows constant movement, not a silent hang.
     imageGenerate: async (a) => {
         if (!imageModel) throw new Error("no image model loaded — call loadImage() first");
         const prompt    = String(a.prompt ?? "");
@@ -1537,7 +1540,10 @@ const RPC: Record<string, Handler> = {
         const tokens    = await tokenizeImagePrompt(baseUrl, prompt);
         const negTokens = await tokenizeImagePrompt(baseUrl, negPrompt);
         log(`image: generate ${lw * 8}x${lh * 8} steps=${steps || "default"} cfg=${cfgScale || "default"} tok=${tokens.length} neg=${negTokens.length}`);
-        const rgba = await imageModel.generate(tokens, negTokens, cfgScale, lh, lw, steps, seed);
+        const onProgress = (label: string, done: number, total: number) => {
+            notify("imageStep", { label, done, total });
+        };
+        const rgba = await imageModel.generate(tokens, negTokens, cfgScale, lh, lw, steps, seed, onProgress);
         return { rgba, width: lw * 8, height: lh * 8 };
     },
 

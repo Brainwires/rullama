@@ -479,8 +479,10 @@ export class WorkerClient {
      *  wasm handle (`ImageModel`) in the worker, loaded from a CDN base URL
      *  via HTTP Range (never OPFS). `generate` runs the entire pipeline
      *  (encode → denoise → VAE decode) in one async call and resolves with
-     *  the RGBA8 pixels + dimensions — there is NO per-step callback in this
-     *  version, so the UI shows a busy state, not per-step canvas updates. */
+     *  the RGBA8 pixels + dimensions. Generation is network-bound (each DiT
+     *  step re-streams ~10 GB of weights over HTTP Range), so an `imageStep`
+     *  notify fires frequently with a phase label + progress fraction —
+     *  subscribe via `onStep` so the UI shows constant movement. */
     readonly image = {
         /** Stream-load all three components from the CDN base URL. */
         load: (baseUrl: string, name?: string) =>
@@ -497,6 +499,12 @@ export class WorkerClient {
         }) => this.rpc<{ rgba: Uint8Array; width: number; height: number }>(
             "imageGenerate", args as unknown as Record<string, unknown>,
         ),
+        /** Subscribe to fine-grained progress (phase label + in-phase
+         *  fraction). Fires per encoder/DiT layer + per VAE stage. Returns
+         *  an unsubscribe fn. */
+        onStep: (
+            handler: (p: { label: string; done: number; total: number }) => void,
+        ) => this.subscribe("imageStep", handler as unknown as NotifyHandler),
     };
 
     // ── Diagnostic logs (OPFS-backed, see workers/opfs_logger.ts) ──────
