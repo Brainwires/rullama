@@ -279,7 +279,105 @@ let imageModel: ImageModelHandle | null = null;
 let imageInfo: { name: string; baseUrl: string } | null = null;
 const ImageModelClass = ImageModel as unknown as {
     loadFromUrl(baseUrl: string): Promise<ImageModelHandle>;
+    loadFromOpfs(
+        encReadFn: (name: string, offset: number, len: number) => Uint8Array,
+        ditReadFn: (name: string, offset: number, len: number) => Uint8Array,
+        vaeReadFn: (name: string, offset: number, len: number) => Uint8Array,
+    ): Promise<ImageModelHandle>;
 };
+
+// The image model is three safetensors components under the CDN base, each
+// cached into its own flat OPFS dir (`rullama-models/<key>/<file>`). `index`
+// names the shard map (sharded components); `single` is the lone file (VAE).
+const IMAGE_COMPONENTS = [
+    { sub: "text_encoder", key: "z-image-turbo-text_encoder", index: "model.safetensors.index.json" as string | null, single: null as string | null },
+    { sub: "transformer",  key: "z-image-turbo-transformer",  index: "diffusion_pytorch_model.safetensors.index.json" as string | null, single: null as string | null },
+    { sub: "vae",          key: "z-image-turbo-vae",          index: null as string | null, single: "diffusion_pytorch_model.safetensors" as string | null },
+] as const;
+
+// OPFS read handles held open per component for the model's lifetime (closed on
+// unloadImage). Keyed by component `sub`; each value maps file name → handle.
+let imageReadHandles: Map<string, Map<string, FileSystemSyncAccessHandle>> | null = null;
+
+/** The list of files in a component dir: config.json + (index + its shards) or
+ *  the single file. Fetches the index JSON over the network to enumerate shards
+ *  (small; happens once at download time). */
+async function imageComponentFiles(baseUrl: string, comp: (typeof IMAGE_COMPONENTS)[number]): Promise<string[]> {
+    const files = ["config.json"];
+    if (comp.index) {
+        const idxUrl = `${baseUrl.replace(/\/+$/, "")}/${comp.sub}/${comp.index}`;
+        const idx = await (await fetch(idxUrl)).json() as { weight_map?: Record<string, string> };
+        const shards = [...new Set(Object.values(idx.weight_map ?? {}))];
+        files.push(comp.index, ...shards);
+    } else if (comp.single) {
+        files.push(comp.single);
+    }
+    return files;
+}
+
+/** Content-length of a remote file via HEAD (for expectedSize + progress). */
+async function remoteSize(url: string): Promise<number> {
+    try {
+        const r = await fetch(url, { method: "HEAD" });
+        return Number(r.headers.get("content-length") || "0") || 0;
+    } catch { return 0; }
+}
+
+/** Download all three components to OPFS (resumable, cached). Emits an
+ *  aggregate `imageDownload` notify ({ label, done, total }) so the UI shows one
+ *  progress bar across every shard. Idempotent: complete files short-circuit. */
+async function ensureImageModel(baseUrl: string): Promise<void> {
+    const base = baseUrl.replace(/\/+$/, "");
+    // Build the (component, file, url, size) work list + grand total.
+    const work: { comp: (typeof IMAGE_COMPONENTS)[number]; file: string; url: string; size: number }[] = [];
+    for (const comp of IMAGE_COMPONENTS) {
+        const files = await imageComponentFiles(base, comp);
+        for (const file of files) {
+            const url = `${base}/${comp.sub}/${file}`;
+            work.push({ comp, file, url, size: await remoteSize(url) });
+        }
+    }
+    const grandTotal = work.reduce((s, w) => s + w.size, 0);
+    let prior = 0;
+    for (const w of work) {
+        notify("imageDownload", { label: w.comp.sub, done: prior, total: grandTotal });
+        await doDownload({
+            url: w.url, modelKey: w.comp.key, filename: w.file,
+            expectedSize: w.size, skipMagic: true,
+            onChunk: (written) => notify("imageDownload", { label: w.comp.sub, done: prior + written, total: grandTotal }),
+        });
+        prior += w.size;
+    }
+    notify("imageDownload", { label: "done", done: grandTotal, total: grandTotal });
+}
+
+/** Open sync read handles for every file in a component's OPFS dir and return a
+ *  name-dispatching readFn for `OpfsBlobSource`. `len < 0` ⇒ read to EOF. */
+async function openImageComponentReadFn(
+    modelKey: string,
+): Promise<{ handles: Map<string, FileSystemSyncAccessHandle>; readFn: (name: string, offset: number, len: number) => Uint8Array }> {
+    const root  = await navigator.storage.getDirectory();
+    const dlDir = await root.getDirectoryHandle(OPFS_DIR, { create: false });
+    const md    = await dlDir.getDirectoryHandle(modelKey, { create: false });
+    const handles = new Map<string, FileSystemSyncAccessHandle>();
+    // FileSystemDirectoryHandle async-iterates [name, handle] entries.
+    for await (const [name, h] of (md as unknown as { entries(): AsyncIterableIterator<[string, FileSystemHandle]> }).entries()) {
+        if (h.kind === "file") {
+            handles.set(name, await createSyncAccessHandleWithRetry(h as FileSystemFileHandle, `${modelKey}/${name} (read)`, { notifyKind: "imageLoadWaiting" }));
+        }
+    }
+    const readFn = (name: string, offset: number, len: number): Uint8Array => {
+        const handle = handles.get(name);
+        if (!handle) throw new Error(`OPFS image read: ${modelKey}/${name} not found`);
+        const size = handle.getSize();
+        const start = offset;
+        const end = len < 0 ? size : Math.min(size, offset + len);
+        const out = new Uint8Array(Math.max(0, end - start));
+        if (out.length) handle.read(out, { at: start });
+        return out;
+    };
+    return { handles, readFn };
+}
 
 // Qwen2 tokenizer for the image prompt. Lazily loaded from the CDN
 // (`<base>/tokenizer/tokenizer.json`) the first time we generate, then cached.
@@ -798,7 +896,11 @@ async function listAdapterEntries(): Promise<Array<{name: string; size: number; 
 
 const FLUSH_INTERVAL = 64 * 1024 * 1024;
 
-async function existingOpfsSize(modelKey: string, filename: string): Promise<number> {
+async function existingOpfsSize(
+    modelKey: string,
+    filename: string,
+    opts?: { skipMagic?: boolean },
+): Promise<number> {
     try {
         const root  = await navigator.storage.getDirectory();
         const dlDir = await root.getDirectoryHandle(OPFS_DIR, { create: false });
@@ -806,6 +908,11 @@ async function existingOpfsSize(modelKey: string, filename: string): Promise<num
         const fh    = await md.getFileHandle(filename, { create: false });
         const f     = await fh.getFile();
         if (f.size < 4) return 0;
+        // Non-GGUF files (image-model safetensors) have no GGUF magic — trust
+        // the size and let the caller's `have >= expectedSize` guard decide
+        // cache-hit vs resume. (Without this the magic check below would zero
+        // every safetensors file and re-download forever.)
+        if (opts?.skipMagic) return f.size;
         // First-4-bytes magic check. On iOS Safari this can THROW transiently
         // when a previous core worker's FileSystemSyncAccessHandle hasn't
         // been GC'd yet (post-PWA-update reload race). The old behaviour
@@ -845,13 +952,17 @@ interface EnsureArgs {
     modelKey:     string;
     filename:     string;
     expectedSize: number;
+    /** Skip the GGUF-magic validity check (for non-GGUF safetensors files). */
+    skipMagic?:   boolean;
+    /** Per-chunk progress hook (for aggregating multi-file image downloads). */
+    onChunk?:     (bytesWritten: number, totalBytes: number) => void;
 }
 
 async function doDownload(args: EnsureArgs): Promise<{ totalBytes: number; fromCache: boolean }> {
-    const { url, modelKey, filename, expectedSize } = args;
+    const { url, modelKey, filename, expectedSize, skipMagic, onChunk } = args;
     downloadCancelled = false;
 
-    let have = await existingOpfsSize(modelKey, filename);
+    let have = await existingOpfsSize(modelKey, filename, { skipMagic });
     // A partial LARGER than the known full size is impossible — it means a
     // prior resume corrupted the file (e.g. a write at a runaway/sparse
     // offset, which then surfaces as a 48 TB progress counter). Discard it and
@@ -966,6 +1077,7 @@ async function doDownload(args: EnsureArgs): Promise<{ totalBytes: number; fromC
                         totalBytes,
                         chunkBytes: written,
                     });
+                    onChunk?.(currentOffset, totalBytes);
                 }
                 // Drained cleanly — exit fetch-retry loop.
                 break;
@@ -1494,18 +1606,37 @@ const RPC: Record<string, Handler> = {
     },
 
     // ── Z-Image-Turbo (text-to-image) ───────────────────────────────────────
-    // Stream-load all three components from the CDN base URL (per-tensor HTTP
-    // Range — nothing touches OPFS). `imageInfo` mirrors the diffuser/embedder
-    // status shape so the Image tab can probe load state on mount.
+    // The model is downloaded ONCE to OPFS (three components, resumable) and
+    // then read per-tensor from local disk — so generation does no network I/O
+    // and the per-step weight reads come from the SSD, not the CDN. `imageInfo`
+    // mirrors the diffuser/embedder status shape so the tab can probe on mount.
+
+    // Download the three components to OPFS (idempotent; resumable). The Image
+    // tab calls this before loadImage; progress comes via `imageDownload`.
+    ensureImageModel: async (a) => {
+        const baseUrl = String(a.baseUrl);
+        await ensureImageModel(baseUrl);
+        return { ok: true };
+    },
+
     loadImage: async (a) => {
         await ensureWasm();
         if (imageModel) return imageInfo;
         const baseUrl = String(a.baseUrl);
         const name = String(a.name ?? "z-image-turbo");
-        log(`image: streaming ${name} from ${baseUrl} (HTTP Range, no OPFS)`);
-        imageModel = await ImageModelClass.loadFromUrl(baseUrl);
+        // Open OPFS read handles for each component, then load from local disk.
+        log(`image: opening OPFS handles for ${name} (local disk, no network)`);
+        const enc = await openImageComponentReadFn("z-image-turbo-text_encoder");
+        const dit = await openImageComponentReadFn("z-image-turbo-transformer");
+        const vae = await openImageComponentReadFn("z-image-turbo-vae");
+        imageReadHandles = new Map([
+            ["text_encoder", enc.handles],
+            ["transformer", dit.handles],
+            ["vae", vae.handles],
+        ]);
+        imageModel = await ImageModelClass.loadFromOpfs(enc.readFn, dit.readFn, vae.readFn);
         imageInfo = { name, baseUrl };
-        log(`image: ready defaultSteps=${imageModel.defaultSteps} (${baseUrl})`);
+        log(`image: ready defaultSteps=${imageModel.defaultSteps} (OPFS-local)`);
         notify("imageReady", imageInfo);
         return imageInfo;
     },
@@ -1514,6 +1645,14 @@ const RPC: Record<string, Handler> = {
 
     unloadImage: () => {
         if (imageModel) { try { imageModel.free?.(); } catch { /* */ } imageModel = null; imageInfo = null; }
+        // Release the OPFS sync read handles so a future load (or download
+        // resume) can reacquire the exclusive locks.
+        if (imageReadHandles) {
+            for (const m of imageReadHandles.values()) {
+                for (const h of m.values()) { try { h.close(); } catch { /* */ } }
+            }
+            imageReadHandles = null;
+        }
         // Drop the cached tokenizer too so a later load re-resolves it (CDN may
         // have rotated, and it's cheap to refetch).
         imageTokenizer = null;

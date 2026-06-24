@@ -45,12 +45,15 @@ export function ImageTab() {
     // Live progress relayed from the engine (per encoder/DiT layer, per VAE
     // stage) so the user sees constant movement, not a silent multi-minute hang.
     const [progress, setProgress] = useState<{ label: string; done: number; total: number } | null>(null);
+    // One-time OPFS download progress (aggregate bytes across all components).
+    const [dl, setDl] = useState<{ label: string; done: number; total: number } | null>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
 
-    // Subscribe to fine-grained generation progress while mounted.
+    // Subscribe to fine-grained generation progress + the one-time download.
     useEffect(() => {
-        const unsub = client.image.onStep((p) => setProgress(p));
-        return () => { unsub(); };
+        const unStep = client.image.onStep((p) => setProgress(p));
+        const unDl = client.image.onDownload((p) => setDl(p));
+        return () => { unStep(); unDl(); };
     }, [client]);
 
     // Reflect existing engine status on mount; the worker is the source of
@@ -68,6 +71,9 @@ export function ImageTab() {
         setErr(null);
         setStatus("loading");
         try {
+            // Download once to OPFS (resumable; cached), then open from disk.
+            await client.image.ensure(IMAGE_MODEL.baseUrl);
+            setDl(null);
             await client.image.load(IMAGE_MODEL.baseUrl, IMAGE_MODEL.name);
             setStatus("ready");
         } catch (e) {
@@ -154,19 +160,36 @@ export function ImageTab() {
                 <Card>
                     <CardContent className="flex flex-col gap-3 p-4">
                         <p className="text-sm text-muted-foreground">
-                            The image engine streams ~31 GB of weights from the CDN per-tensor
-                            (nothing is cached to disk). Desktop GPU only — generation is slow
-                            on integrated graphics.
+                            The image engine downloads its weights to local disk <strong>once</strong>,
+                            then reads them from disk during generation (no re-downloading). The
+                            first load is a large one-time download; after that it loads instantly.
+                            Desktop GPU only — generation takes minutes on older hardware.
                         </p>
                         <div className="flex items-center gap-2">
                             <Button onClick={() => void onLoad()} disabled={status === "loading"}>
                                 {status === "loading" ? (
-                                    <><Loader2 className="mr-1 size-4 animate-spin" /> Loading engine…</>
+                                    <><Loader2 className="mr-1 size-4 animate-spin" /> {dl ? "Downloading…" : "Loading engine…"}</>
                                 ) : (
                                     <>Load image engine</>
                                 )}
                             </Button>
                         </div>
+                        {status === "loading" && dl && dl.total > 0 && (
+                            <div className="flex flex-col gap-1.5">
+                                <p className="flex items-center justify-between text-xs text-muted-foreground">
+                                    <span>Downloading {dl.label} (one-time)</span>
+                                    <span className="tabular-nums">
+                                        {(dl.done / 1e9).toFixed(1)} / {(dl.total / 1e9).toFixed(1)} GB
+                                    </span>
+                                </p>
+                                <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                                    <div
+                                        className="h-full bg-primary transition-[width] duration-200"
+                                        style={{ width: `${Math.min(100, (dl.done / dl.total) * 100)}%` }}
+                                    />
+                                </div>
+                            </div>
+                        )}
                         {err && <p className="text-sm text-destructive">{err}</p>}
                     </CardContent>
                 </Card>

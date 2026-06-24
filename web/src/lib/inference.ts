@@ -476,15 +476,25 @@ export class WorkerClient {
 
     // ── Z-Image-Turbo (text-to-image) ──────────────────────────────────
     /** Lifecycle + generation for the Z-Image-Turbo engine — a separate
-     *  wasm handle (`ImageModel`) in the worker, loaded from a CDN base URL
-     *  via HTTP Range (never OPFS). `generate` runs the entire pipeline
-     *  (encode → denoise → VAE decode) in one async call and resolves with
-     *  the RGBA8 pixels + dimensions. Generation is network-bound (each DiT
-     *  step re-streams ~10 GB of weights over HTTP Range), so an `imageStep`
-     *  notify fires frequently with a phase label + progress fraction —
-     *  subscribe via `onStep` so the UI shows constant movement. */
+     *  wasm handle (`ImageModel`) in the worker. The model is downloaded ONCE
+     *  to OPFS (`ensure`) and then read per-tensor from local disk (`load`), so
+     *  generation does no network I/O and per-step weight reads come from the
+     *  SSD. `generate` runs the whole pipeline (encode → denoise → VAE decode)
+     *  in one async call and resolves with RGBA8 pixels + dims; an `imageStep`
+     *  notify fires per encoder/DiT layer + VAE stage — subscribe via `onStep`
+     *  so the UI shows constant movement. */
     readonly image = {
-        /** Stream-load all three components from the CDN base URL. */
+        /** Download all three components to OPFS once (resumable, cached).
+         *  Subscribe to `onDownload` for aggregate progress. */
+        ensure: (baseUrl: string) =>
+            this.rpc<{ ok: boolean }>("ensureImageModel", { baseUrl }),
+        /** Subscribe to the one-time download's aggregate progress
+         *  ({ label, done, total } bytes). Returns an unsubscribe fn. */
+        onDownload: (
+            handler: (p: { label: string; done: number; total: number }) => void,
+        ) => this.subscribe("imageDownload", handler as unknown as NotifyHandler),
+        /** Open the OPFS-cached components and load from local disk (call
+         *  `ensure` first). `baseUrl` is still used for the tokenizer + status. */
         load: (baseUrl: string, name?: string) =>
             this.rpc<{ name: string; baseUrl: string } | null>("loadImage", { baseUrl, name }),
         status: () =>
