@@ -22,10 +22,15 @@ This leaves two names to remember instead of five, and renames only the
 both run on.**
 
 ```
-rullama (rullama.com)        ──▶  brainwires
-  ├─ rullama      the PWA / native apps   ├─ engine  (brainwires-engine — was crates/rullama)
-  └─ rullama-cli  the agentic CLI         └─ harness (agents, tools, memory, providers, RAG, MCP)
+rullama (rullama.com)                                 ──▶  brainwires
+  ├─ rullama         the PWA (web)                          ├─ engine  (brainwires-engine — was crates/rullama)
+  ├─ rullama-native  desktop + mobile (.NET; paid)          └─ harness (agents, tools, memory, providers, RAG, MCP)
+  └─ rullama-cli     the agentic CLI
 ```
+
+`rullama-native` already exists as its own repo (a paid, closed-source
+.NET/Avalonia app that links the engine via a C-ABI shim). The platform
+(engine + harness) is open source; rullama-native is the paid product.
 
 - **This repo becomes the rullama app:** keep `web/` (the PWA) and the
   PWA-serving parts of `rullama-devserver` (Vite proxy, `/api/blob`,

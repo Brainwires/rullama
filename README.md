@@ -10,9 +10,10 @@ conversion tooling, multimodal pipelines — almost none of which apply to a
 browser library. What survives the scope cut is the *core inference path* over
 Ollama's storage format.
 
-> **rullama is the app; [brainwires](../brainwires-framework) is the platform.**
-> The downloadable product (this repo: the PWA + native apps, `rullama.com`) runs
-> on the brainwires platform — its inference **engine** (`brainwires-engine`) and
+> **rullama is the product family; [brainwires](../brainwires-framework) is the
+> platform.** The rullama brand spans this repo (the PWA), `rullama-native` (the
+> paid .NET/Avalonia desktop + mobile app, already shipping), and `rullama-cli`
+> (the agentic CLI) — all at `rullama.com`. They run on the brainwires platform — its inference **engine** (`brainwires-engine`) and
 > agent **harness** (agents, tools, memory, RAG, providers). The app consumes the
 > platform in-browser via the engine's wasm bundle and natively via an
 > OpenAI-compatible `/v1/chat/completions` endpoint. The engine is moving out of
