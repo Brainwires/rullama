@@ -19,7 +19,7 @@ engine's own CLAUDE.md, not here.
 > The engine handles **tokens**; the harness handles **turns**; this app sits
 > **on top**. Two brands: **rullama** = the consumer product family (this app +
 > `rullama-cli` + the paid `rullama-native`), **brainwires** = the OSS platform
-> (engine + harness). See `docs/adr/0001-rullama-is-the-app.md` and the canonical
+> (engine + harness). See the canonical topology doc
 > `brainwires-framework/docs/ARCHITECTURE-engine-harness.md`.
 
 ### How the app consumes the engine

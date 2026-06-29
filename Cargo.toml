@@ -11,7 +11,8 @@ members = [
 # The inference engine moved out: crates/rullama + crates/rullama-finetune now
 # live in the brainwires platform repo as brainwires-engine + brainwires-lora
 # (engine/ sub-workspace). This repo is the rullama app — the PWA in web/ plus
-# the serve/proxy devserver. See README.md and docs/adr/0001-rullama-is-the-app.md.
+# the serve/proxy devserver. See README.md and
+# brainwires-framework/docs/ARCHITECTURE-engine-harness.md.
 exclude = [
     "crates/rullama-devserver",
 ]

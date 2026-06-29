@@ -19,10 +19,9 @@ The inference **engine moved out of this repo** into the brainwires platform
 > (the agentic CLI) — all at `rullama.com`. They run on the brainwires platform — its inference **engine** (`brainwires-engine`) and
 > agent **harness** (agents, tools, memory, RAG, providers). The app consumes the
 > platform in-browser via the engine's wasm bundle and natively via an
-> OpenAI-compatible `/v1/chat/completions` endpoint. The engine is moving out of
-> this repo into brainwires; what stays here is the app. See
-> [`docs/adr/0001-rullama-is-the-app.md`](docs/adr/0001-rullama-is-the-app.md) and
-> the canonical `brainwires-framework/docs/ARCHITECTURE-engine-harness.md`.
+> OpenAI-compatible `/v1/chat/completions` endpoint. The engine moved out of
+> this repo into brainwires; what stays here is the app. See the canonical
+> topology doc: `brainwires-framework/docs/ARCHITECTURE-engine-harness.md`.
 
 ## Layout
 
