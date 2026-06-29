@@ -18,12 +18,13 @@ This leaves two names to remember instead of five, and renames only the
 
 ## Decision
 
-**rullama is the app. brainwires is the platform it runs on.**
+**rullama is the consumer product family (app + CLI). brainwires is the platform
+both run on.**
 
 ```
-rullama (this repo)  ──▶  brainwires
-  the PWA + native        ├─ engine  (brainwires-engine — was crates/rullama)
-  apps · rullama.com      └─ harness (agents, tools, memory, providers, RAG, MCP)
+rullama (rullama.com)        ──▶  brainwires
+  ├─ rullama      the PWA / native apps   ├─ engine  (brainwires-engine — was crates/rullama)
+  └─ rullama-cli  the agentic CLI         └─ harness (agents, tools, memory, providers, RAG, MCP)
 ```
 
 - **This repo becomes the rullama app:** keep `web/` (the PWA) and the
@@ -36,8 +37,9 @@ rullama (this repo)  ──▶  brainwires
 - **The app consumes the platform** two ways: in-browser via the engine's wasm
   bundle (a JS provider over the engine `Model`), and natively/elsewhere via an
   OpenAI-compatible `/v1/chat/completions` endpoint.
-- **brainclaw** and **brainwires-cli** extract to their own product repos,
-  depending on published `brainwires` crates.
+- **brainwires-cli** extracts to its own repo, renamed **`rullama-cli`** — the
+  second rullama-branded product. **brainclaw** extracts to its own brainwires
+  sub-product repo. Both depend on published `brainwires` crates.
 
 ## Consequences
 
