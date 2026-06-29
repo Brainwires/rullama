@@ -56,16 +56,23 @@ else
     echo "[pm2-start] devserver up-to-date ✓"
 fi
 
-# 2. WASM bundle (pkg/) — rebuilt when any engine source, a crate Cargo.toml, or
-#    the workspace Cargo.lock (a dep bump!) is newer than the built wasm.
+# 2. WASM bundle (pkg/) — built from the sibling brainwires engine checkout
+#    (the engine moved out of this repo). Rebuilt when any engine source or
+#    manifest is newer than the built wasm. --out-name rullama keeps the PWA's
+#    /pkg/rullama.js import stable. With no engine checkout, serve prebuilt pkg/.
+ENGINE_DIR="${BRAINWIRES_ENGINE_DIR:-$REPO_ROOT/../brainwires-framework/engine}"
 PKG_WASM="$REPO_ROOT/pkg/rullama_bg.wasm"
-if [ -n "$(stale "$PKG_WASM" crates/rullama/src crates/rullama-finetune/src crates/rullama/Cargo.toml crates/rullama-finetune/Cargo.toml Cargo.lock Cargo.toml)" ]; then
-    echo "[pm2-start] wasm stale — rebuilding (wasm-pack)…"
-    wasm-pack build crates/rullama-finetune --target web --release --out-dir ../../pkg --out-name rullama \
-        && echo "[pm2-start] wasm rebuilt ✓" \
-        || echo "[pm2-start] ⚠ wasm-pack build FAILED — serving the previous pkg/. Fix and restart." >&2
+if [ -d "$ENGINE_DIR" ]; then
+    if [ -n "$(stale "$PKG_WASM" "$ENGINE_DIR/brainwires-engine/src" "$ENGINE_DIR/brainwires-lora/src" "$ENGINE_DIR/brainwires-engine/Cargo.toml" "$ENGINE_DIR/brainwires-lora/Cargo.toml" "$ENGINE_DIR/Cargo.toml")" ]; then
+        echo "[pm2-start] wasm stale — rebuilding from engine ($ENGINE_DIR)…"
+        ( cd "$ENGINE_DIR" && wasm-pack build brainwires-lora --target web --release --out-dir "$REPO_ROOT/pkg" --out-name rullama ) \
+            && echo "[pm2-start] wasm rebuilt ✓" \
+            || echo "[pm2-start] ⚠ wasm-pack build FAILED — serving the previous pkg/. Fix and restart." >&2
+    else
+        echo "[pm2-start] wasm up-to-date ✓"
+    fi
 else
-    echo "[pm2-start] wasm up-to-date ✓"
+    echo "[pm2-start] no engine checkout at $ENGINE_DIR — serving prebuilt pkg/ as-is."
 fi
 
 echo "[pm2-start] rebuilding web/dist (vite)…"

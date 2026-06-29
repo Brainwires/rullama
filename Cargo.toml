@@ -1,17 +1,18 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/rullama",
-    "crates/rullama-finetune",
     "xtask",
 ]
-# Excluded from the workspace so `cargo build --workspace --target
-# wasm32-unknown-unknown` doesn't try to build host-only crates for wasm:
-#   - ios-bench: staticlib for Xcode (wgpu native staticlib build)
-#   - rullama-devserver: native dev HTTP server (axum/tokio/notify);
-#     invoked by xtask via `--manifest-path` rather than `-p`.
+# Excluded from the workspace so `cargo build --workspace` stays clean:
+#   - rullama-devserver: native dev HTTP server (axum/tokio/notify); invoked by
+#     xtask via `--manifest-path` rather than `-p`. It has its own deps and is
+#     not part of the (now tiny) workspace.
+#
+# The inference engine moved out: crates/rullama + crates/rullama-finetune now
+# live in the brainwires platform repo as brainwires-engine + brainwires-lora
+# (engine/ sub-workspace). This repo is the rullama app — the PWA in web/ plus
+# the serve/proxy devserver. See README.md and docs/adr/0001-rullama-is-the-app.md.
 exclude = [
-    "tools/ios-bench",
     "crates/rullama-devserver",
 ]
 
@@ -22,47 +23,6 @@ license      = "MIT OR Apache-2.0"
 repository   = "https://github.com/Brainwires/rullama"
 homepage     = "https://github.com/Brainwires/rullama"
 authors      = ["Brainwires <brainwires.net@gmail.com>"]
-# Flipped to `true` so member crates inherit a publishable default once
-# their per-crate blockers are cleared. `rullama` currently stays at
-# `publish = false` in its own manifest because it has a git-sourced
-# `rsqlite-wasm` dependency (crates.io rejects non-crates.io deps).
-publish      = true
-
-[workspace.dependencies]
-# --- shared with rullama (the wgpu inference engine) ---
-wgpu = "29.0.3"
-bytemuck = { version = "1.25", features = ["derive"] }
-half = { version = "2.7", features = ["bytemuck"] }
-thiserror = "2.0.18"
-log = "0.4.29"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
-futures-channel = { version = "0.3.32", default-features = false, features = ["alloc"] }
-futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
-async-trait = "0.1.89"
-
-# native-only (cfg-gated in member crates)
-pollster = "0.4.0"
-env_logger = "0.11.10"
-
-# wasm-only (cfg-gated in member crates)
-wasm-bindgen = "0.2.121"
-wasm-bindgen-futures = "0.4.71"
-serde-wasm-bindgen = "0.6.5"
-js-sys = "0.3.98"
-web-sys = "0.3.98"
-console_error_panic_hook = "0.1.7"
-console_log = "1.0.0"
-rsqlite-wasm = "0.1.1"
-
-# --- shared with rullama-finetune (native LoRA, native-only) ---
-# The Burn-* / safetensors / anyhow / uuid / chrono / tokio entries that
-# lived here pre-teardown supported the broken Burn-backed trainer. They
-# are gone with it. `tokenizers` survives because the dataset loader
-# still parses HF tokenizer.json files for vocab-aligned token IDs.
-tracing = "0.1"
-tokenizers = "0.22"
-tempfile = "3"
 
 [profile.release]
 opt-level = 3
@@ -73,11 +33,6 @@ strip = "debuginfo"
 [profile.dev]
 opt-level = 1
 
-# Workspace-wide lint config. Most of these silence categories where the lint's
-# recommendation doesn't fit the codebase, with a one-line reason each.
+# Kept because xtask's `[lints] workspace = true` references it.
 [workspace.lints.clippy]
-# Many of our Arc<T> are `Arc<GgufReader>` / `Arc<WeightCache>` containing trait
-# objects that aren't Send+Sync because their TensorFetcher impls (OPFS,
-# HttpRange) are intentionally single-threaded. Rc isn't a drop-in because some
-# call sites later hand the Arc into wgpu APIs that take `Arc<T>` by convention.
 arc_with_non_send_sync = "allow"

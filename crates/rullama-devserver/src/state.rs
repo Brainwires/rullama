@@ -11,6 +11,12 @@ pub struct Paths {
     pub repo_root: PathBuf,
     pub pkg_dir: PathBuf,
     pub ollama_models: PathBuf,
+    /// The brainwires engine sub-workspace (sibling checkout). The inference
+    /// engine lives in a separate repo now; for local dev we build its wasm
+    /// bundle from here into `pkg_dir`. `None` when no engine checkout is
+    /// present — then the devserver serves a prebuilt `pkg/` (CI/prod, sourced
+    /// from npm/CDN) and the watcher does not rebuild.
+    pub engine_dir: Option<PathBuf>,
 }
 
 impl Paths {
@@ -30,10 +36,20 @@ impl Paths {
                     .map(|h| h.join(".ollama").join("models"))
                     .unwrap_or_else(|| PathBuf::from("/Users/nightness/.ollama/models"))
             });
+        // BRAINWIRES_ENGINE_DIR overrides; otherwise default to the sibling
+        // `../brainwires-framework/engine` checkout. Only used when it exists.
+        let engine_dir = std::env::var_os("BRAINWIRES_ENGINE_DIR")
+            .map(PathBuf::from)
+            .or_else(|| {
+                let sibling = repo_root.join("../brainwires-framework/engine");
+                sibling.is_dir().then_some(sibling)
+            })
+            .filter(|p| p.is_dir());
         Ok(Paths {
             repo_root,
             pkg_dir,
             ollama_models,
+            engine_dir,
         })
     }
 
@@ -46,11 +62,16 @@ impl Paths {
     pub fn blobs_dir(&self) -> PathBuf {
         self.ollama_models.join("blobs")
     }
+    /// Engine source dirs to watch for cross-repo dev rebuilds. Empty when no
+    /// engine checkout is present (prebuilt `pkg/` mode).
     pub fn rust_watch_dirs(&self) -> Vec<PathBuf> {
-        vec![
-            self.repo_root.join("crates/rullama/src"),
-            self.repo_root.join("crates/rullama-finetune/src"),
-        ]
+        match &self.engine_dir {
+            Some(engine) => vec![
+                engine.join("brainwires-engine/src"),
+                engine.join("brainwires-lora/src"),
+            ],
+            None => Vec::new(),
+        }
     }
 }
 
