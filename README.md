@@ -1,4 +1,11 @@
-# Brainwires CLI
+# rullama-cli
+
+> The agentic CLI of the **rullama** product family (installed binary: `rullama`).
+> Extracted from the `brainwires-framework` monorepo into its own repo. It builds
+> on the **brainwires** platform crates, resolved via path to a sibling
+> `../brainwires-framework` checkout (these flip to crates.io version pins once
+> the harness is published). Deeper rebrand of internal "brainwires" strings is a
+> follow-up; the crate + binary are renamed.
 
 An AI-powered agentic CLI tool for autonomous coding assistance, built in Rust.
 
