@@ -37,8 +37,9 @@ rullama (rullama.com)                                 ──▶  brainwires
   `/api/models`). It supersedes the old `brainwires-studio` and the Candle
   `brainwires-chat-pwa`.
 - **The engine leaves:** `crates/rullama` + `crates/rullama-finetune` move into
-  the brainwires repo, renamed `brainwires-engine{,-finetune}`, in an isolated
-  wasm32 sub-workspace.
+  the brainwires repo, renamed `brainwires-engine` (the engine) and
+  `brainwires-lora` (the local LoRA trainer), in an isolated wasm32
+  sub-workspace.
 - **The app consumes the platform** two ways: in-browser via the engine's wasm
   bundle (a JS provider over the engine `Model`), and natively/elsewhere via an
   OpenAI-compatible `/v1/chat/completions` endpoint.

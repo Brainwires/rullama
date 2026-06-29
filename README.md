@@ -1,14 +1,17 @@
 # rullama
 
-Browser-resident **Gemma 4 inference** in pure Rust → WebAssembly + WebGPU.
-Loads the same GGUF blobs Ollama already has on disk, runs the forward pass on
-your local GPU through hand-written WGSL, never touches a remote server.
+The **rullama app** — a browser-resident AI PWA (React + Vite + Tailwind +
+Workbox) that runs **Gemma 4 inference in the browser** on your local GPU, with
+optional cloud providers. Chat (text / vision / audio-input), a Knowledge tab
+(drop docs → embed → RAG), a Fine-tune tab (in-browser LoRA), and a Voice tab,
+all over the brainwires engine's wasm bundle — your data never has to leave the
+device.
 
-The intent is a **PWA-pluggable inference engine**, not a port of Ollama-the-server.
-Ollama has 275K LOC of Go that wraps llama.cpp via CGO plus model registry, CLI,
-conversion tooling, multimodal pipelines — almost none of which apply to a
-browser library. What survives the scope cut is the *core inference path* over
-Ollama's storage format.
+The inference **engine moved out of this repo** into the brainwires platform
+(`brainwires-engine` + `brainwires-lora`). This repo is the app: the PWA in
+`web/` and the serve/proxy devserver. The app loads the engine's wasm bundle at
+`/pkg/rullama.js` and can also reach it natively over an OpenAI-compatible
+`/v1` endpoint.
 
 > **rullama is the product family; [brainwires](../brainwires-framework) is the
 > platform.** The rullama brand spans this repo (the PWA), `rullama-native` (the
@@ -21,18 +24,21 @@ Ollama's storage format.
 > [`docs/adr/0001-rullama-is-the-app.md`](docs/adr/0001-rullama-is-the-app.md) and
 > the canonical `brainwires-framework/docs/ARCHITECTURE-engine-harness.md`.
 
-## Workspace
+## Layout
 
-A two-crate Cargo workspace:
+The app repo is small — the engine moved to brainwires.
 
-| Crate              | Path                       | Target       | Status   |
-|--------------------|----------------------------|--------------|----------|
-| `rullama`          | `crates/rullama`           | wasm + native | release-track |
-| `rullama-finetune` | `crates/rullama-finetune`  | wasm + native | LoRA SGD over the same wgpu kernels; PWA exposes `TrainingSession` in the Fine-tune tab |
+| Path                       | What it is |
+|----------------------------|------------|
+| `web/`                     | The PWA (React + Vite + Tailwind + Workbox SW). Imports the engine wasm bundle from `/pkg/rullama.js`. |
+| `crates/rullama-devserver` | The dev/serve HTTP server (Vite proxy, `/api/blob`, `/api/models`, `/api/cloud/*`, `/pkg/*`, cross-repo wasm-bundle watcher). Excluded from the workspace; run via `--manifest-path`. |
+| `xtask`                    | `cargo dev` + `cargo docker:*` dispatcher (std-only). |
+| `pkg/`                     | The engine wasm bundle (built artifact, `--out-name rullama`; gitignored). |
 
-The iOS bench harness (`tools/ios-bench`) is a sibling crate excluded from the
-workspace so `cargo build --workspace --target wasm32-unknown-unknown` doesn't
-try to compile its staticlib for wasm.
+The inference engine + LoRA trainer live in the
+[brainwires](../brainwires-framework) repo as `brainwires-engine` /
+`brainwires-lora` (an isolated `engine/` wasm32 sub-workspace). The iOS bench
+harness moved there too (`engine/tools/ios-bench`).
 
 ## What works today
 
@@ -80,22 +86,24 @@ You need:
   Safari 17.4+ for phones)
 - Ollama installed locally with `gemma4:e2b` pulled (`ollama pull gemma4:e2b`)
 
-### Build the wasm bundle
+### Get the wasm bundle (from the engine)
+
+The engine bundle is built from a **sibling brainwires engine checkout**. With
+`../brainwires-framework/engine` present, `cargo dev` rebuilds it automatically
+when engine source changes; otherwise build it once:
 
 ```sh
-# Unified bundle — exposes both inference (`Model`) and training
-# (`TrainingSession`) wasm-bindgen surfaces. Built from `rullama-finetune`
-# because that's the crate that re-exports both. `--out-name rullama` keeps
-# the JS entry at `pkg/rullama.js` for PWA import compatibility.
-wasm-pack build crates/rullama-finetune --target web --release \
-    --out-dir ../../pkg --out-name rullama
-
-# Inference-only variant (smaller bundle, no TrainingSession). Use when
-# shipping a chat-only deployment.
-wasm-pack build crates/rullama --target web --release --out-dir ../../pkg
+# Unified bundle — inference (`Model`) + training (`TrainingSession`) surfaces.
+# Run inside the engine checkout. --out-name rullama keeps pkg/rullama.js stable.
+# Override the location with BRAINWIRES_ENGINE_DIR.
+cd ../brainwires-framework/engine
+wasm-pack build brainwires-lora --target web --release \
+    --out-dir ../../rullama/pkg --out-name rullama
 ```
 
-This emits `pkg/rullama.js` + `pkg/rullama_bg.wasm` + TypeScript typings.
+This emits `pkg/rullama.js` + `pkg/rullama_bg.wasm` + TypeScript typings into
+the app's `pkg/`. (Engine internals — kernels, GGUF, towers, parity — are
+documented in the brainwires engine repo.)
 
 ### Two example PWAs
 
@@ -189,32 +197,18 @@ L2 grad clipping, gradient accumulation, mixed precision, gradient
 checkpointing. PerPosition CE is a single-forward variant with a ~C/2 speedup
 vs. the multi-forward path.
 
-**In the browser:** the unified wasm bundle (see [Build](#build-the-wasm-bundle))
+**In the browser:** the unified wasm bundle (see [Get the wasm bundle](#get-the-wasm-bundle-from-the-engine))
 exposes `TrainingSession` to JS alongside `Model`. The Fine-tune tab in
 `web/` drives a full session — dataset upload, hyperparam UI, live
 loss chart, save adapter to OPFS as safetensors. The same `Model` that's
 loaded for inference accepts the trained adapter via `Model.loadAdapter(bytes)`
 (re-runs in the chat tab against the adapted weights).
 
-**Native:**
-
-```sh
-# Overfit a single (prompt, target) pair — acceptance test that the
-# backward path and Adam are wired correctly.
-cargo run -p rullama-finetune --release --example overfit_one -- \
-    ~/.ollama/models/blobs/sha256-<digest>
-
-# Train on a JSONL dataset. See `crates/rullama-finetune/examples/data/echo.jsonl`
-# for the format; env knobs documented in the example's docstring.
-cargo run -p rullama-finetune --release --example train_jsonl -- \
-    ~/.ollama/models/blobs/sha256-<digest> \
-    crates/rullama-finetune/examples/data/echo.jsonl
-
-# End-to-end smoke: train an adapter, save safetensors, reload via the
-# public Model API, run a generation against the adapted weights.
-cargo run -p rullama-finetune --release --example eval_adapter -- \
-    ~/.ollama/models/blobs/sha256-<digest> /path/to/adapter.safetensors
-```
+**Native:** the native trainer examples (`overfit_one`, `train_jsonl`,
+`eval_adapter`) live with the engine now — run them from the brainwires engine
+repo against `brainwires-lora` (e.g.
+`cargo run -p brainwires-lora --release --example overfit_one -- <gguf>`). See
+the engine repo's README.
 
 ## Architecture
 
