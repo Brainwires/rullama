@@ -10,6 +10,15 @@ conversion tooling, multimodal pipelines — almost none of which apply to a
 browser library. What survives the scope cut is the *core inference path* over
 Ollama's storage format.
 
+> **rullama is the engine; [brainwires-framework](../brainwires-framework) is the
+> harness that consumes it.** The engine handles *tokens*; the harness handles
+> *turns* (agents, tools, memory, RAG, multi-provider routing). The harness plugs
+> in two ways — a JS `RullamaProvider` over the wasm `Model` in-browser, and an
+> OpenAI-compatible `/v1/chat/completions` endpoint natively. See
+> [`docs/adr/0001-rullama-is-an-engine.md`](docs/adr/0001-rullama-is-an-engine.md)
+> and the canonical
+> `brainwires-framework/docs/ARCHITECTURE-engine-harness.md`.
+
 ## Workspace
 
 A two-crate Cargo workspace:
