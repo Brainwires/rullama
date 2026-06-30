@@ -2,7 +2,7 @@
  * rullama cloud proxy — Cloudflare Worker.
  *
  * The production counterpart of the devserver's `/api/cloud/*` route
- * (crates/rullama-devserver/src/cloud.rs). Both Ollama Cloud and OpenAI send
+ * (dev-server/src/cloud.rs). Both Ollama Cloud and OpenAI send
  * NO CORS headers and OpenAI forbids browser-side keys, so a server-side hop
  * is mandatory; this Worker is that hop in Docker/production. nginx
  * reverse-proxies `/api/cloud/*` here (stripping the prefix), so the Worker

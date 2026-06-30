@@ -35,7 +35,7 @@ fi
 
 echo "==> building rullama-devserver (release)"
 cargo build \
-    --manifest-path crates/rullama-devserver/Cargo.toml \
+    --manifest-path dev-server/Cargo.toml \
     --release
 
 if [ ! -f "web/dist/index.html" ]; then

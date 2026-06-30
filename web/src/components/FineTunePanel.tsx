@@ -1,5 +1,5 @@
 // Fine-tune tab — drives in-browser LoRA training over the loaded
-// Model. Mirrors the CLI dials in `crates/rullama-finetune/examples/
+// Model. Mirrors the CLI dials in `rullama-framework/engine/rullama-lora/examples/
 // train_jsonl.rs` so users moving between the two recognise the
 // surface. Designed states: no model / no dataset / ready / training /
 // complete / error — each with its own affordance, never a fallback.
@@ -64,7 +64,7 @@ interface RecentStep extends TrainingStepReport { ms: number }
 
 type Phase = "idle" | "ready" | "training" | "stopping" | "done" | "error";
 
-// All 9 LoRA targets that rullama-finetune now supports. The two
+// All 9 LoRA targets that rullama-lora now supports. The two
 // "global" targets at the end (lm_head, embed_tokens) were added in
 // 334b914 and are what made content-injection training (e.g. "Garlic
 // is the best food.") actually work — without them the rank-16 attn/

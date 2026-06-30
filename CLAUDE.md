@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **rullama is the app** — the consumer-facing PWA (React + Vite + Tailwind +
 Workbox SW in `web/`) plus the native dev/serve server that hosts it
-(`crates/rullama-devserver`). It runs AI **in the browser** on the local GPU and
+(`dev-server`). It runs AI **in the browser** on the local GPU and
 also talks to optional cloud providers.
 
 The **inference engine moved out of this repo.** It now lives in the
@@ -42,7 +42,7 @@ This repo is now small — the engine left. Two-crate-ish layout:
 | Path | Target | Notes |
 |------|--------|-------|
 | `web/` | PWA (TS) | React + Vite + Tailwind + Workbox SW. Imports the engine wasm bundle from `/pkg/rullama.js` over HTTP at runtime. |
-| `crates/rullama-devserver` | native | The dev/serve HTTP server: Vite proxy, `/api/blob`, `/api/models`, `/api/cloud/*`, `/pkg/*`, and the cross-repo wasm-bundle watcher. **Excluded** from the workspace (axum/tokio/notify); run via `--manifest-path`. |
+| `dev-server` | native | The dev/serve HTTP server: Vite proxy, `/api/blob`, `/api/models`, `/api/cloud/*`, `/pkg/*`, and the cross-repo wasm-bundle watcher. **Excluded** from the workspace (axum/tokio/notify); run via `--manifest-path`. |
 | `xtask` | native | Tiny std-only dispatcher for `cargo dev` + `cargo docker:*`. Keep it dependency-free. |
 | `pkg/` | wasm bundle | Built artifact from the engine (`--out-name rullama`). Gitignored; sourced at dev/build time. |
 
@@ -61,7 +61,7 @@ wasm-pack build rullama-lora --target web --release \
 ```
 
 - `cargo dev` (local): the devserver watcher rebuilds the bundle from the engine
-  checkout when its source changes (`crates/rullama-devserver/src/watcher.rs` +
+  checkout when its source changes (`dev-server/src/watcher.rs` +
   `state.rs::engine_dir`). No engine checkout → it serves a prebuilt `pkg/` as-is.
 - `ops/pm2/start.sh` (prod): stale-checks the engine source and rebuilds `pkg/`
   on `pm2 restart`, else serves the prebuilt bundle.
@@ -84,7 +84,7 @@ pnpm -C web build
 pnpm -C web dev          # (cargo dev wraps this via the Vite proxy)
 
 # devserver standalone (it's excluded from the workspace)
-cargo build --manifest-path crates/rullama-devserver/Cargo.toml --release
+cargo build --manifest-path dev-server/Cargo.toml --release
 
 cargo build              # workspace = just xtask now
 cargo clippy --workspace --all-targets
@@ -120,7 +120,7 @@ Add a task by appending a match arm in `xtask/src/main.rs` and the alias line in
 
 ## Dev server modes
 
-`cargo dev` runs the native Rust devserver at `crates/rullama-devserver/`. Two modes:
+`cargo dev` runs the native Rust devserver at `dev-server/`. Two modes:
 
 | Mode | Command | Vite proxy? | `/api/log` writeable? | `/api/models` listed? | Use when |
 |------|---------|-------------|-----------------------|-----------------------|----------|

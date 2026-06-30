@@ -46,7 +46,7 @@ fn dev() -> ExitCode {
     // rullama-devserver is excluded from the workspace (see Cargo.toml
     // exclude list — keeps it out of `cargo build --workspace --target
     // wasm32-unknown-unknown`). Run it via --manifest-path.
-    let manifest = Path::new("crates/rullama-devserver/Cargo.toml");
+    let manifest = Path::new("dev-server/Cargo.toml");
     if !manifest.is_file() {
         eprintln!(
             "xtask: {} not found; are you in the repo root?",

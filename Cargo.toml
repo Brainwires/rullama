@@ -4,17 +4,16 @@ members = [
     "xtask",
 ]
 # Excluded from the workspace so `cargo build --workspace` stays clean:
-#   - rullama-devserver: native dev HTTP server (axum/tokio/notify); invoked by
+#   - dev-server: native dev HTTP server (axum/tokio/notify); invoked by
 #     xtask via `--manifest-path` rather than `-p`. It has its own deps and is
 #     not part of the (now tiny) workspace.
 #
-# The inference engine moved out: crates/rullama + crates/rullama-finetune now
-# live in the rullama-framework platform repo as rullama-engine + rullama-lora
-# (engine/ sub-workspace). This repo is the rullama app — the PWA in web/ plus
-# the serve/proxy devserver. See README.md and
-# rullama-framework/docs/ARCHITECTURE-engine-harness.md.
+# The inference engine moved out into the rullama-framework platform repo as
+# rullama-engine + rullama-lora (its engine/ sub-workspace). This repo is the
+# rullama app — the PWA in web/ plus the serve/proxy dev-server. See README.md
+# and rullama-framework/docs/ARCHITECTURE-engine-harness.md.
 exclude = [
-    "crates/rullama-devserver",
+    "dev-server",
 ]
 
 [workspace.package]

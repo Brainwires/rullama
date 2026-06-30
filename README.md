@@ -31,7 +31,7 @@ The app repo is small — the engine moved to rullama-framework.
 | Path                       | What it is |
 |----------------------------|------------|
 | `web/`                     | The PWA (React + Vite + Tailwind + Workbox SW). Imports the engine wasm bundle from `/pkg/rullama.js`. |
-| `crates/rullama-devserver` | The dev/serve HTTP server (Vite proxy, `/api/blob`, `/api/models`, `/api/cloud/*`, `/pkg/*`, cross-repo wasm-bundle watcher). Excluded from the workspace; run via `--manifest-path`. |
+| `dev-server` | The dev/serve HTTP server (Vite proxy, `/api/blob`, `/api/models`, `/api/cloud/*`, `/pkg/*`, cross-repo wasm-bundle watcher). Excluded from the workspace; run via `--manifest-path`. |
 | `xtask`                    | `cargo dev` + `cargo docker:*` dispatcher (std-only). |
 | `pkg/`                     | The engine wasm bundle (built artifact, `--out-name rullama`; gitignored). |
 
@@ -65,7 +65,7 @@ harness moved there too (`engine/tools/ios-bench`).
 - ✅ **Encoder chained + per-layer submits** (M7 + M15) — one CommandEncoder
   spans each transformer layer, submitted incrementally so the GPU drains
   smoothly even on tight-RAM phones.
-- ✅ **In-browser LoRA fine-tuning (`rullama-finetune`, wasm + native).**
+- ✅ **In-browser LoRA fine-tuning (`rullama-lora`, wasm + native).**
   Backward kernels for matmul Q4_K / Q6_K, rmsnorm, rope, geglu, attention,
   cross-entropy; Adam optimizer over GPU buffers; rank-r LoRA on attention
   + FFN projections. 200-step overfit-one drops loss from ~17.7 → 0 on the
@@ -105,7 +105,7 @@ This emits `pkg/rullama.js` + `pkg/rullama_bg.wasm` + TypeScript typings into
 the app's `pkg/`. (Engine internals — kernels, GGUF, towers, parity — are
 documented in the rullama-framework engine repo.)
 
-### Two example PWAs
+### The PWA
 
 The user-facing browser app lives in `web/` — a production-quality React + Vite
 + Tailwind + Workbox chat PWA (service-worker offline shell, restart dialog on
@@ -168,29 +168,23 @@ a corresponding line in `.cargo/config.toml`. The compose file's
 
 ## Native sanity checks
 
-The same code paths run natively against host wgpu (Metal on macOS, Vulkan on
-Linux). Useful for parity testing without a browser:
+The engine's native parity examples (`greedy_parity`, `model_api`,
+`chained_smoke`, …) run the same code paths against host wgpu (Metal on macOS,
+Vulkan on Linux) without a browser. **They live with the engine now** — run them
+from the sibling [`rullama-framework`](../rullama-framework) engine checkout
+against `rullama-engine`, e.g.:
 
 ```sh
-# Greedy parity vs Ollama (CPU oracle)
-cargo run -p rullama --release --features cpu-reference --example greedy_parity -- \
+cd ../rullama-framework/engine
+cargo run -p rullama-engine --release --example greedy_parity -- \
     ~/.ollama/models/blobs/sha256-<digest> "Hi" 5
-
-# Full-stack chat through the public Model API
-cargo run -p rullama --release --features cpu-reference --example model_api -- \
-    ~/.ollama/models/blobs/sha256-<digest> "Hi" --greedy --max=16
-
-# Standalone chained forward (M7 perf path)
-cargo run -p rullama --release --features cpu-reference --example chained_smoke -- \
-    ~/.ollama/models/blobs/sha256-<digest> "Hi" --max=8
 ```
 
-`--features cpu-reference` is now a no-op (the f32 oracle is always built); the
-flag is kept so existing scripts keep working.
+See the engine repo's README for the full list.
 
 ## Fine-tuning
 
-`rullama-finetune` runs LoRA SGD against the live wgpu kernels — no Burn, no
+`rullama-lora` runs LoRA SGD against the live wgpu kernels — no Burn, no
 PyTorch, no separate runtime. Scope: rank-r LoRAs on
 `attn_q` / `attn_k` / `attn_v` / `attn_o` and the FFN projections, Adam, global
 L2 grad clipping, gradient accumulation, mixed precision, gradient
@@ -220,7 +214,7 @@ PWA (host page) ──┐
   │   ▶ owns FileSystemSyncAccessHandle for the GGUF                │
   │   ▶ owns the wasm Model handle                                  │
   │     ┌──────────────────────────────────────────────────────┐    │
-  │     │ wasm32 (Rust, the rullama crate)                     │    │
+  │     │ wasm32 (Rust, the rullama-engine bundle)             │    │
   │     │   Model.loadFromOpfs(read_fn, total)                 │    │
   │     │           │                                          │    │
   │     │           ▼                                          │    │
@@ -257,9 +251,10 @@ exposes `FileSystemSyncAccessHandle` in Worker contexts, and the Worker
 isolates inference from main-thread page-watchdog reapers.
 
 The reference Go implementation lives in Ollama's tree under
-`model/models/gemma4/`. Every op in `crates/rullama/src/reference/forward.rs`
+`model/models/gemma4/`. Every op in the engine's `reference/forward.rs`
 (CPU oracle), `forward_chained.rs` (production GPU forward),
-`multimodal/vision.rs`, and `multimodal/audio.rs` corresponds 1:1.
+`multimodal/vision.rs`, and `multimodal/audio.rs` corresponds 1:1 — see the
+`rullama-engine` crate in the [`rullama-framework`](../rullama-framework) repo.
 
 ## Performance
 
@@ -290,76 +285,29 @@ Other capability notes captured during iPhone validation:
 
 ## Layout
 
+This repo (the app) is just three things plus ops — see the table at the top:
+`web/` (the PWA), `dev-server/` (the native serve/proxy server), and `xtask/`.
+
 ```
-crates/rullama/
-├── src/
-│   ├── api.rs                    # JS-facing Model: load / loadFromUrl / loadFromOpfs[TextOnly] / loadAdapter / clearAdapter
-│   ├── lora.rs                   # InferenceAdapter — parses the safetensors blob TrainingSession writes
-│   ├── backend/
-│   │   ├── context.rs            # WgpuCtx (device, queue, adapter limits)
-│   │   ├── dispatch.rs           # cached + chained kernel dispatchers (incl. backward + Adam)
-│   │   ├── pipelines.rs          # one ComputePipeline per kernel (built once)
-│   │   ├── weight_cache.rs       # lazy GPU upload, per-tile range fetch on big tensors
-│   │   ├── matmul.rs / elementwise.rs / spike.rs    # one-shot dispatchers (parity tests)
-│   ├── gguf/
-│   │   ├── reader.rs             # GGUF v3 parser (header + tensor descriptors)
-│   │   ├── fetcher.rs            # TensorFetcher trait + In-memory / HttpRange / Opfs impls
-│   │   ├── tensor.rs             # dequant_tensor_to_f32 / dequant_row_to_f32 (sync + async)
-│   │   ├── quant.rs / dtype.rs / value.rs
-│   ├── kernels/wgsl/             # 70+ hand-written compute shaders (text + vision + audio + backward)
-│   ├── model/config.rs           # Gemma4Config: parses gemma4.* metadata keys
-│   ├── multimodal/
-│   │   ├── vision.rs             # ViT forward (16 blocks, 768d, ClippableLinear)
-│   │   ├── audio.rs              # Conformer forward (12 blocks, 1024d, block-local attention)
-│   │   └── audio_features.rs     # WAV → 128-bin log-mel (realfft)
-│   ├── reference/
-│   │   ├── forward.rs            # CPU f32 forward (parity oracle)
-│   │   ├── forward_gpu.rs        # M3-era GPU forward with per-kernel readbacks (oracle)
-│   │   ├── forward_chained.rs    # M7 production GPU forward, per-layer submits (M15)
-│   │   ├── ops.rs / weights.rs
-│   ├── sampling.rs               # temperature, top-k, top-p, rep penalty
-│   ├── template/gemma4_small.rs  # chat-template renderer (matches Ollama)
-│   └── tokenizer/                # GGUF BPE tokenizer (Ollama-bit-exact)
-└── examples/
-    ├── greedy_parity.rs          # CPU forward greedy vs Ollama
-    ├── chained_smoke.rs          # standalone Forward driver
-    ├── model_api.rs              # public Model API end-to-end
-    ├── vision_parity.rs          # vision tower vs Ollama (M11)
-    ├── audio_parity.rs           # audio tower vs Ollama (M13)
-    ├── matmul_bench.rs           # native wgpu matmul microbench
-    └── inspect.rs / decode_ids.rs / encode_check.rs / list_tensors.rs / …
-
-crates/rullama-finetune/
-├── src/
-│   ├── shared/                   # vendored config / error / progress types
-│   ├── dataset_loader.rs         # JSONL parser + Tokenizer trait
-│   ├── lr_schedule.rs            # warmup + linear / cosine / cosine-warm-restarts
-│   ├── lora.rs                   # per-LoRA GPU state (A / B), grad buffers
-│   ├── scratch.rs                # per-step GPU scratch buffers for backward
-│   ├── wasm_bindgen_api.rs       # JS-facing TrainingSession (wasm32 only)
-│   └── session.rs                # TrainingSession — forward → loss → backward → Adam
-└── examples/
-    ├── overfit_one.rs            # single-pair acceptance test
-    ├── train_jsonl.rs            # JSONL dataset trainer
-    ├── eval_adapter.rs           # load a trained safetensors blob and generate
-    └── data/echo.jsonl
-
-examples/
-├── web/                          # React + Vite + Tailwind + Workbox SW production demo
-│   └── src/components/FineTunePanel.tsx  # in-browser LoRA training tab over the loaded Model
-└── pwa/                          # Vanilla JS bench harness + safaridriver scripts
-    ├── index.html / bench.html
-    ├── inference-worker.js       # Dedicated Worker — owns Model + sync OPFS handle
-    ├── opfs-store.js             # OPFS download + read API (main-thread)
-    ├── opfs-writer-worker.js     # streams GGUF → OPFS via SyncAccessHandle.write
-    ├── serve.sh                  # dev HTTPS server + /api/log /api/blob endpoints
-    ├── run-on-iphone.sh / iphone-session-keeper.sh / clean-iphone.sh
-    └── bench-on-iphone.sh
-
-tools/ios-bench/                  # staticlib for Xcode — C-ABI rullama_run_bench
+web/                              # React + Vite + Tailwind + Workbox SW PWA
+├── src/                          #   chat / knowledge / fine-tune / voice UIs
+│   ├── lib/inference.ts          #   worker ↔ main-thread RPC client (the engine seam)
+│   └── lib/cloud/                #   BYOK cloud passthrough (OpenAI / Ollama Cloud)
+├── serve-iphone.sh / serve-tunnel.sh / test/   # safaridriver harness
+dev-server/                       # native Rust dev/serve server (excluded from workspace)
+├── src/{state,watcher,api,cloud,proxy,dist,pkg,ws}.rs
+xtask/                            # `cargo dev` + `cargo docker:*` dispatcher (std-only)
 docker/                           # nginx + R2 mirror configs
+ops/pm2/                          # PM2 supervision scripts
+worker/                           # Cloudflare Worker BYOK proxy
 scripts/                          # ops scripts (model upload, etc.)
 ```
+
+The inference **engine** (`rullama-engine`), the **LoRA trainer**
+(`rullama-lora`), their WGSL kernels / GGUF / towers / examples, and the iOS
+bench staticlib all live in the sibling
+[`rullama-framework`](../rullama-framework) repo (`engine/` sub-workspace) — see
+its README for that layout.
 
 ## License
 

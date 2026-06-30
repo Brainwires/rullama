@@ -1,8 +1,8 @@
 /target
 # rullama-devserver is excluded from the workspace (see top-level Cargo.toml)
 # so it builds into its own target/ + Cargo.lock under its crate dir.
-/crates/rullama-devserver/target
-/crates/rullama-devserver/Cargo.lock
+/dev-server/target
+/dev-server/Cargo.lock
 **/*.rs.bk
 Cargo.lock.bak
 

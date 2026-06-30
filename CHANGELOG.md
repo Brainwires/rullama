@@ -4,10 +4,10 @@ All notable changes to **rullama** are tracked here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-While the version stays in the 0.x series, only the modules listed in the
-[stability section of `lib.rs`](crates/rullama/src/lib.rs) (`api`, `error`,
-`sampling`, `lora`) are covered by semver. Everything else is `#[doc(hidden)]`
-and may move in any patch release.
+This changelog now tracks the **rullama app** (the PWA in `web/` + the
+`dev-server`). The inference engine moved to the sibling
+[`rullama-framework`](../rullama-framework) repo — its API stability / semver is
+documented there (`rullama-engine`), not here.
 
 ## [Unreleased]
 

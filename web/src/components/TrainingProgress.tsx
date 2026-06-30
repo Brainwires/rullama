@@ -3,7 +3,7 @@ import { Loader2 } from "lucide-react";
 /** Phase markers the worker forwards from the wasm trainer via
  *  `notify("trainingProgress", …)`. Matches the strings emitted by
  *  `TrainingSession::step_with_progress` in
- *  `crates/rullama-finetune/src/session.rs`.
+ *  `rullama-framework/engine/rullama-lora/src/session.rs`.
  *
  *  - `starting`   — synthetic, set by the UI between `trainingStart`
  *                   request and the first beacon back. Covers the

@@ -79,19 +79,17 @@ fn find_repo_root() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let mut cur: &Path = &cwd;
     loop {
-        // Workspace root has Cargo.toml AND a `crates/` subdir AND the
-        // `web/` PWA project we serve.
-        if cur.join("Cargo.toml").is_file()
-            && cur.join("crates").is_dir()
-            && cur.join("web").is_dir()
-        {
+        // Repo root has the workspace Cargo.toml AND the `web/` PWA project we
+        // serve. (The devserver itself now lives at `dev-server/`, a sibling of
+        // `web/`; the old `crates/` dir is gone after the engine moved out.)
+        if cur.join("Cargo.toml").is_file() && cur.join("web").is_dir() {
             return Ok(cur.to_path_buf());
         }
         match cur.parent() {
             Some(p) => cur = p,
             None => {
                 return Err(format!(
-                    "could not find repo root by walking up from {} (expected Cargo.toml + crates/ + web/)",
+                    "could not find repo root by walking up from {} (expected Cargo.toml + web/)",
                     cwd.display()
                 )
                 .into());

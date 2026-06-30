@@ -41,9 +41,10 @@ read the "Gotchas" section before you start.
   libimobiledevice`. Used to read the UDID and disk space.
 - A self-signed **CA** cert + key at `~/.local/share/rullama/{cert.pem,key.pem}`
   (see §3 for regenerating).
-- Built PWA + wasm bundle: `pnpm -C web build` and
-  `wasm-pack build crates/rullama-finetune --target web --release
-  --out-dir ../../pkg --out-name rullama`.
+- Built PWA + wasm bundle: `pnpm -C web build`, and the engine bundle built
+  from the sibling engine checkout:
+  `cd ../rullama-framework/engine && wasm-pack build rullama-lora --target web
+  --release --out-dir ../../rullama/pkg --out-name rullama`.
 
 ### On the iPhone (one-time)
 - **Settings → Safari → Advanced → Remote Automation → ON.**
@@ -281,7 +282,7 @@ session can't read a *dead* session's logs.
   on-device memory **trajectory** (`forward 1/35 … 35/35 … backward …`)
   and the exact MiB at the kill. This is the debugger-equivalent for a
   memory-ceiling crash (there's no exception to break on).
-- Backing counter: `crates/rullama/src/backend/gpu_mem.rs`
+- Backing counter: the engine's `backend/gpu_mem.rs` in `rullama-engine`
   (`record_alloc`/`record_free`, native `RULLAMA_TRACE_MEM=1` dumps the
   full per-buffer ledger; the native run is the reference peak).
 
@@ -296,12 +297,14 @@ session can't read a *dead* session's logs.
 
 The crash is iOS-ceiling-specific and does **not** reproduce natively
 (the Mac has no jetsam). But config/logic bugs do — verify those with
-the native examples, which need no download cycle:
+the native examples (run from the sibling `rullama-framework` engine checkout,
+they need no download cycle):
 ```sh
+cd ../rullama-framework/engine
 # canonical regression
-cargo run -p rullama-finetune --release --example overfit_one -- <gguf>
+cargo run -p rullama-lora --release --example overfit_one -- <gguf>
 # the iPhone "Memory-tight" preset config, multi-step + GPU ledger
-RULLAMA_TRACE_MEM=1 cargo run -p rullama-finetune --release --example mem_tight_repro -- <gguf>
+RULLAMA_TRACE_MEM=1 cargo run -p rullama-lora --release --example mem_tight_repro -- <gguf>
 ```
 `mem_tight_repro` runs the EXACT Memory-tight preset (rank 1,
 attn_q+attn_v, PerPosition, ckpt, floor=25) across multiple steps —

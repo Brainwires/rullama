@@ -1,7 +1,7 @@
 // Dev-only WebSocket client for the Rust devserver's wasm-rebuild
 // notifications. Imports a no-op tree-shaken module in production.
 //
-// Wire: devserver's `crates/rullama-devserver/src/watcher.rs` writes
+// Wire: devserver's `dev-server/src/watcher.rs` writes
 // to a tokio broadcast channel whenever `wasm-pack build` finishes;
 // `ws.rs` fans that out over `/__rullama-dev-ws`. On
 //   - `wasm-building` → show a small toast so the user knows a build

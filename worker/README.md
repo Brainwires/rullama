@@ -7,7 +7,7 @@ as `Authorization: Bearer`. The key is never logged or stored.
 
 This exists because both upstreams send **no CORS headers** (and OpenAI forbids
 browser-side keys), so a server-side hop is mandatory. In local dev the Rust
-devserver plays this role (`crates/rullama-devserver/src/cloud.rs`); in
+devserver plays this role (`dev-server/src/cloud.rs`); in
 Docker/production nginx reverse-proxies `/api/cloud/*` here.
 
 ## Routes

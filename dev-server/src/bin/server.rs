@@ -1,6 +1,6 @@
 //! rullama-devserver binary entry — single-command local dev server.
 //!
-//! See `crates/rullama-devserver/src/lib.rs` for the router builder; this
+//! See `dev-server/src/lib.rs` for the router builder; this
 //! file is just orchestration: arg parsing, fail-fast port check, Vite
 //! child spawn, watcher spawn, axum bind, signal handling.
 
@@ -36,7 +36,7 @@ struct Args {
     #[arg(long)]
     repo_root: Option<PathBuf>,
 
-    // --- security knobs (see crates/rullama-devserver/src/config.rs) ---
+    // --- security knobs (see dev-server/src/config.rs) ---
     /// Apply tunnel-safe defaults: serve dist/ instead of Vite proxy,
     /// disable /api/log, /api/models, /__rullama-dev-ws. Use this when
     /// cloudflared is up and the devserver is exposed at a public URL.

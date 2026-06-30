@@ -108,7 +108,7 @@ interface ModelHandle {
     clearAdapter(): void;
 }
 
-// Wasm-bindgen `TrainingSession` (from rullama-finetune). All async
+// Wasm-bindgen `TrainingSession` (from rullama-lora). All async
 // methods return a Promise. The session *consumes* the Model on
 // construction (move semantics from JS' perspective): no Model RPC
 // can run while training is live. `finish()` returns the Model back
