@@ -32,7 +32,6 @@ impl ProviderModelCache {
 fn cache_ttl(provider: ProviderType) -> Duration {
     match provider {
         ProviderType::Ollama => Duration::minutes(5),
-        ProviderType::Brainwires => Duration::hours(24),
         _ => Duration::hours(12), // cloud providers
     }
 }
@@ -138,12 +137,6 @@ impl ModelService {
         let config_manager = crate::config::ConfigManager::new()?;
         let config = config_manager.get();
         let provider_type = config.provider_type;
-
-        if provider_type == ProviderType::Brainwires {
-            return Err(anyhow::anyhow!(
-                "Use 'rullama models list' without --provider for Brainwires SaaS models"
-            ));
-        }
 
         let api_key = config_manager
             .get_provider_api_key()?
@@ -257,7 +250,6 @@ mod tests {
         assert_eq!(cache_ttl(ProviderType::Ollama), Duration::minutes(5));
         assert_eq!(cache_ttl(ProviderType::Anthropic), Duration::hours(12));
         assert_eq!(cache_ttl(ProviderType::OpenAI), Duration::hours(12));
-        assert_eq!(cache_ttl(ProviderType::Brainwires), Duration::hours(24));
     }
 
     #[test]
@@ -275,13 +267,6 @@ mod tests {
         };
         assert!(!old.is_valid(ProviderType::Anthropic));
         assert!(!old.is_valid(ProviderType::Ollama));
-
-        // 24h provider still valid at 13h
-        let rullama_cache = ProviderModelCache {
-            models: vec![],
-            cached_at: Utc::now() - Duration::hours(13),
-        };
-        assert!(rullama_cache.is_valid(ProviderType::Brainwires));
     }
 
     #[test]

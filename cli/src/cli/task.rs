@@ -66,7 +66,7 @@ pub async fn handle_task(
     };
 
     // Print header
-    println!("\n{}", RichOutput::header("Brainwires Task", "blue"));
+    println!("\n{}", RichOutput::header("rullama Task", "blue"));
     println!(
         "Model: {} (provider: {})",
         model_id,

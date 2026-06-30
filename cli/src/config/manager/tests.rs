@@ -194,7 +194,7 @@ fn test_config_manager_save() {
 #[test]
 fn test_config_provider_type_default() {
     let config = Config::default();
-    assert_eq!(config.provider_type, ProviderType::Brainwires);
+    assert_eq!(config.provider_type, ProviderType::Ollama);
     assert!(config.provider_base_url.is_none());
 }
 
@@ -648,7 +648,7 @@ fn test_stale_model_migrated_on_load() {
 
     // Write a config fixture that pins a stale/phantom model name.
     let stale_config = Config {
-        provider_type: ProviderType::Brainwires,
+        provider_type: ProviderType::Ollama,
         model: "openai-gpt-5.2".to_string(),
         permission_mode: PermissionMode::Auto,
         backend_url: "https://api.brainwires.net".to_string(),

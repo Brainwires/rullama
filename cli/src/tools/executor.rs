@@ -81,7 +81,9 @@ pub struct ToolExecutor {
     session_approvals: std::collections::HashMap<String, crate::approval::ApprovalResponse>,
     /// Sudo password channel for interactive sudo password requests
     sudo_password_tx: Option<tokio::sync::mpsc::Sender<crate::sudo::SudoPasswordRequest>>,
-    /// Remote bridge for permission relay (dangerous tool approval via web UI)
+    /// Remote bridge for permission relay (dangerous tool approval via web UI).
+    /// LEGACY: discontinued Studio remote-bridge, gated behind `remote-bridge`.
+    #[cfg(feature = "remote-bridge")]
     remote_bridge: Option<
         std::sync::Arc<tokio::sync::RwLock<rullama::agent_network::remote::RemoteBridge>>,
     >,
@@ -128,6 +130,7 @@ impl ToolExecutor {
             approval_tx: None,
             session_approvals: std::collections::HashMap::new(),
             sudo_password_tx: None,
+            #[cfg(feature = "remote-bridge")]
             remote_bridge: None,
             org_blocked_tools: Vec::new(),
             org_permission_relay_required: false,
@@ -164,6 +167,7 @@ impl ToolExecutor {
             approval_tx: None,
             session_approvals: std::collections::HashMap::new(),
             sudo_password_tx: None,
+            #[cfg(feature = "remote-bridge")]
             remote_bridge: None,
             org_blocked_tools: Vec::new(),
             org_permission_relay_required: false,
@@ -174,7 +178,9 @@ impl ToolExecutor {
         }
     }
 
-    /// Set the remote bridge for permission relay (dangerous tool approval via web UI)
+    /// Set the remote bridge for permission relay (dangerous tool approval via web UI).
+    /// LEGACY: discontinued Studio remote-bridge, gated behind `remote-bridge`.
+    #[cfg(feature = "remote-bridge")]
     pub fn set_remote_bridge(
         &mut self,
         bridge: std::sync::Arc<
@@ -424,7 +430,9 @@ impl ToolExecutor {
             return Ok(*decision);
         }
 
-        // Try remote bridge first (if active and capable)
+        // Try remote bridge first (if active and capable).
+        // LEGACY: discontinued Studio remote-bridge, gated behind `remote-bridge`.
+        #[cfg(feature = "remote-bridge")]
         if let Some(ref bridge_arc) = self.remote_bridge {
             let bridge = bridge_arc.read().await;
             if bridge.is_ready().await
@@ -2401,6 +2409,7 @@ impl Default for ToolExecutor {
             approval_tx: None,
             session_approvals: std::collections::HashMap::new(),
             sudo_password_tx: None,
+            #[cfg(feature = "remote-bridge")]
             remote_bridge: None,
             org_blocked_tools: Vec::new(),
             org_permission_relay_required: false,

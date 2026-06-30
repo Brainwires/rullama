@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Platform-specific paths for Brainwires CLI (XDG-compliant)
+/// Platform-specific paths for rullama CLI (XDG-compliant)
 pub struct PlatformPaths;
 
 impl PlatformPaths {

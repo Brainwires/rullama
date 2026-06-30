@@ -14,7 +14,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Authenticate with Brainwires Studio
+    /// Authenticate with an AI provider (BYOK)
     #[command(subcommand)]
     Auth(super::auth::AuthCommands),
 
@@ -203,6 +203,8 @@ enum Commands {
     Analytics(super::analytics::AnalyticsCommands),
 
     /// Manage remote bridge connection to rullama-studio
+    /// LEGACY: discontinued Studio remote-bridge, gated behind `remote-bridge`.
+    #[cfg(feature = "remote-bridge")]
     #[command(subcommand)]
     Remote(super::remote::RemoteCommands),
 
@@ -571,6 +573,7 @@ impl App {
                 )
                 .await
             }
+            #[cfg(feature = "remote-bridge")]
             Some(Commands::Remote(cmd)) => super::remote::handle_remote(cmd).await,
             Some(Commands::LocalModels(cmd)) => {
                 super::local_models::handle_local_models(Some(cmd)).await

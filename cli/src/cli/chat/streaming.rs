@@ -219,7 +219,7 @@ pub async fn process_chat_stream(
 ///
 /// This is the plumbing that makes `rullama cost` non-empty after running
 /// `rullama chat --prompt ...`. The data file lives alongside other
-/// Brainwires data (`~/.local/share/rullama/cost_tracker.json` on Linux).
+/// rullama data (`~/.local/share/rullama/cost_tracker.json` on Linux).
 async fn record_usage_event(
     provider: &str,
     model: &str,

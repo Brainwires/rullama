@@ -1564,7 +1564,7 @@ impl App {
 
         let current = match crate::config::ConfigManager::new() {
             Ok(mgr) => mgr.get().provider_type,
-            Err(_) => ProviderType::Brainwires,
+            Err(_) => ProviderType::Ollama,
         };
 
         let mut lines = vec![format!("Current provider: {}", current.as_str())];

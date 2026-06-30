@@ -163,7 +163,7 @@ pub async fn handle_chat_with_conversation(
 
     // Print welcome message (unless quiet)
     if !quiet {
-        println!("{}", RichOutput::header("Brainwires Chat", "cyan"));
+        println!("{}", RichOutput::header("rullama Chat", "cyan"));
         println!("Model: {} (rullama)", model_id);
         println!(
             "Conversation ID: {}",

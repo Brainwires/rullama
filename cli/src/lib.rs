@@ -1,8 +1,8 @@
-//! Brainwires CLI - An AI-powered agentic CLI tool for autonomous coding assistance
+//! rullama CLI - An AI-powered agentic CLI tool for autonomous coding assistance
 //!
 //! This crate provides a command-line interface for interacting with AI agents,
-//! managing authentication with Brainwires Studio, executing tools, and
-//! integrating with Model Context Protocol (MCP) servers.
+//! managing provider authentication (BYOK), executing tools, and integrating
+//! with Model Context Protocol (MCP) servers.
 
 // Increase recursion limit for complex async types
 #![recursion_limit = "512"]
@@ -28,6 +28,9 @@ pub mod plan_mode_store;
 pub mod providers;
 // RAG functionality is now provided by project-rag crate (git submodule)
 // pub mod rag;
+// LEGACY: Studio remote-bridge (web access to CLI agents) — discontinued,
+// disabled by default, likely to return.
+#[cfg(feature = "remote-bridge")]
 pub mod remote;
 pub mod self_improve;
 #[cfg(unix)]

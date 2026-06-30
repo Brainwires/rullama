@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use super::local_llm::{LocalLlmConfig, LocalLlmProvider, LocalModelRegistry};
 use super::{Provider, ProviderType};
-use crate::auth::SessionManager;
 use crate::config::ConfigManager;
 use rullama::providers::ChatProviderFactory;
 use rullama::providers::ProviderConfig;
@@ -59,9 +58,9 @@ impl ProviderFactory {
 
     /// Create a provider based on the active config.
     ///
-    /// - `Brainwires` → uses SessionManager for API key
     /// - `Ollama` → no key needed, uses config base URL
-    /// - Others → reads API key from system keyring
+    /// - Bedrock / Vertex AI → use their native credential chains
+    /// - Others → reads API key from system keyring (or provider env var)
     pub async fn create(&self, model: String) -> Result<Arc<dyn Provider>> {
         self.create_with_backend(model, None).await
     }
@@ -95,10 +94,6 @@ impl ProviderFactory {
         let active = provider_type_override.unwrap_or(config.provider_type);
 
         match active {
-            ProviderType::Brainwires => {
-                self.create_rullama_provider(model, backend_url_override)
-                    .await
-            }
             ProviderType::Ollama => {
                 let base_url = backend_url_override.or_else(|| config.provider_base_url.clone());
                 let mut provider_config = ProviderConfig::new(ProviderType::Ollama, model)
@@ -185,55 +180,6 @@ impl ProviderFactory {
         if let Some(collector) = crate::utils::logger::analytics_collector() {
             config.analytics_collector = Some(std::sync::Arc::new(collector));
         }
-    }
-
-    /// Create a Brainwires SaaS provider (existing flow).
-    async fn create_rullama_provider(
-        &self,
-        model: String,
-        backend_url_override: Option<String>,
-    ) -> Result<Arc<dyn Provider>> {
-        // Env-var fallback: RULLAMA_API_KEY lets users run Brainwires SaaS
-        // without a persisted session (useful for CI / ephemeral shells).
-        if let Ok(env_key) = std::env::var("RULLAMA_API_KEY")
-            && !env_key.is_empty()
-        {
-            let backend_url = backend_url_override.clone().unwrap_or_else(|| {
-                crate::config::constants::get_backend_from_api_key(&env_key).to_string()
-            });
-            tracing::info!(
-                "Using RULLAMA_API_KEY from environment (backend: {})",
-                backend_url
-            );
-            let provider_config = ProviderConfig::new(ProviderType::Brainwires, model)
-                .with_api_key(env_key)
-                .with_base_url(backend_url);
-            return ChatProviderFactory::create(&provider_config);
-        }
-
-        if let Ok(Some(session)) = SessionManager::get_session() {
-            let api_key = SessionManager::get_api_key()?.ok_or_else(|| {
-                anyhow!("No API key found. Please re-authenticate with: rullama auth login")
-            })?;
-
-            let backend_url = backend_url_override.unwrap_or_else(|| session.backend.clone());
-
-            tracing::info!(
-                "Active Brainwires session found, using HTTP provider (backend: {})",
-                backend_url
-            );
-
-            let provider_config = ProviderConfig::new(ProviderType::Brainwires, model)
-                .with_api_key(api_key.to_string())
-                .with_base_url(backend_url);
-
-            return ChatProviderFactory::create(&provider_config);
-        }
-
-        Err(anyhow!(
-            "No active Brainwires session. {}",
-            crate::types::provider_ext::credential_hint(ProviderType::Brainwires)
-        ))
     }
 
     /// Create a provider from session (alias for create)
@@ -381,27 +327,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_without_session() {
+    async fn test_create_default_provider_needs_no_key() {
         let _env = TestEnv::new();
         let factory = ProviderFactory::new();
-        let result = factory
-            .create("claude-3-5-sonnet-20241022".to_string())
-            .await;
-
-        // Should fail when no session exists (default provider is Brainwires)
-        assert!(result.is_err());
+        // The default (BYOK) provider is Ollama, which requires no API key —
+        // provider construction is lazy, so this succeeds without a server.
+        let result = factory.create("llama3.3".to_string()).await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn test_create_from_session_without_session() {
+    async fn test_create_from_session_default_provider() {
         let _env = TestEnv::new();
         let factory = ProviderFactory::new();
-        let result = factory
-            .create_from_session("claude-3-5-sonnet-20241022".to_string())
-            .await;
-
-        // Should fail when no session exists
-        assert!(result.is_err());
+        // `create_from_session` is an alias for `create`; with the Ollama
+        // default it no longer depends on a hosted session.
+        let result = factory.create_from_session("llama3.3".to_string()).await;
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -450,7 +392,7 @@ mod tests {
 
     #[test]
     fn effective_provider_flag_beats_config() {
-        let p = ProviderFactory::effective_provider(Some("anthropic"), ProviderType::Brainwires)
+        let p = ProviderFactory::effective_provider(Some("anthropic"), ProviderType::Ollama)
             .unwrap();
         assert_eq!(p, ProviderType::Anthropic);
     }

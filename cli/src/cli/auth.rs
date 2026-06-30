@@ -3,14 +3,14 @@ use clap::Subcommand;
 use dialoguer::Password;
 
 use crate::auth::{AuthClient, SessionManager};
-use crate::config::{ConfigManager, ConfigUpdates, ModelService, constants};
+use crate::config::{ConfigManager, ConfigUpdates, ModelService};
 use crate::providers::ProviderType;
 use crate::utils::logger::Logger;
 use crate::utils::rich_output::RichOutput;
 
 #[derive(Subcommand)]
 pub enum AuthCommands {
-    /// Login with API key (Brainwires SaaS) or connect to a direct provider
+    /// Connect to an AI provider (BYOK): stores credentials and sets defaults
     Login {
         #[arg(short, long)]
         key: Option<String>,
@@ -19,7 +19,7 @@ pub enum AuthCommands {
         #[arg(short, long)]
         backend: Option<String>,
 
-        /// Connect directly to a provider instead of Brainwires SaaS
+        /// Provider to connect to (required)
         /// Supported: anthropic, openai, google, groq, ollama, bedrock, vertex-ai
         #[arg(short, long)]
         provider: Option<String>,
@@ -68,18 +68,26 @@ pub async fn handle_auth(cmd: AuthCommands) -> Result<()> {
             region,
             project_id,
         } => {
-            if let Some(provider_name) = provider {
-                handle_direct_provider_login(
-                    provider_name,
-                    key,
-                    base_url,
-                    model,
-                    region,
-                    project_id,
-                )
-                .await
-            } else {
-                handle_rullama_login(key, backend).await
+            // `backend` was the hosted-SaaS backend override; retained as a
+            // flag for compatibility but unused now that the CLI is BYOK-only.
+            let _ = backend;
+            match provider {
+                Some(provider_name) => {
+                    handle_direct_provider_login(
+                        provider_name,
+                        key,
+                        base_url,
+                        model,
+                        region,
+                        project_id,
+                    )
+                    .await
+                }
+                None => Err(anyhow!(
+                    "Specify a provider, e.g. `rullama auth login --provider anthropic` \
+                     (also: openai, google, groq, ollama, bedrock, vertex-ai). \
+                     Or set the provider's API key env var (ANTHROPIC_API_KEY, …)."
+                )),
             }
         }
 
@@ -88,13 +96,6 @@ pub async fn handle_auth(cmd: AuthCommands) -> Result<()> {
             let provider_type = config_manager.get().provider_type;
 
             match provider_type {
-                ProviderType::Brainwires => {
-                    if !SessionManager::is_authenticated()? {
-                        Logger::warn("Not currently logged in");
-                        return Ok(());
-                    }
-                    AuthClient::logout()?;
-                }
                 ProviderType::Ollama | ProviderType::Bedrock | ProviderType::VertexAI => {
                     // No key to clear — these use credential chains
                 }
@@ -106,21 +107,11 @@ pub async fn handle_auth(cmd: AuthCommands) -> Result<()> {
                 }
             }
 
-            // Reset to Brainwires default
-            let mut config_manager = config_manager;
-            config_manager.update(ConfigUpdates {
-                provider_type: Some(ProviderType::Brainwires),
-                model: Some(ProviderType::Brainwires.default_model().to_string()),
-                provider_base_url: Some(None),
-                ..Default::default()
-            });
-            config_manager.save()?;
-
             println!();
             println!(
                 "{}",
                 RichOutput::boxed(
-                    "You have been logged out successfully.\nProvider reset to Brainwires (default).",
+                    "You have been logged out successfully.",
                     Some("Logout"),
                     "cyan",
                 )
@@ -131,11 +122,9 @@ pub async fn handle_auth(cmd: AuthCommands) -> Result<()> {
         AuthCommands::Status { verbose } => {
             let config_manager = ConfigManager::new()?;
             let config = config_manager.get();
+            let _ = verbose;
 
             match config.provider_type {
-                ProviderType::Brainwires => {
-                    show_rullama_status(verbose)?;
-                }
                 ProviderType::Ollama => {
                     let base_url = config
                         .provider_base_url
@@ -242,9 +231,6 @@ pub async fn handle_auth(cmd: AuthCommands) -> Result<()> {
             let config = config_manager.get();
 
             match config.provider_type {
-                ProviderType::Brainwires => {
-                    validate_rullama_session().await?;
-                }
                 ProviderType::Ollama => {
                     let base_url = config
                         .provider_base_url
@@ -336,58 +322,6 @@ pub async fn handle_auth(cmd: AuthCommands) -> Result<()> {
     }
 }
 
-/// Handle Brainwires SaaS login (existing flow).
-async fn handle_rullama_login(key: Option<String>, backend: Option<String>) -> Result<()> {
-    let api_key = if let Some(k) = key {
-        k
-    } else {
-        Password::new()
-            .with_prompt("Enter your Brainwires API key")
-            .interact()?
-    };
-
-    let backend_url =
-        backend.unwrap_or_else(|| constants::get_backend_from_api_key(&api_key).to_string());
-
-    Logger::info(format!("Authenticating with {}...", backend_url));
-
-    let client = AuthClient::new(backend_url.clone());
-    match client.authenticate(&api_key).await {
-        Ok(session) => {
-            // Ensure config reflects Brainwires provider
-            let mut config_manager = ConfigManager::new()?;
-            config_manager.update(ConfigUpdates {
-                provider_type: Some(ProviderType::Brainwires),
-                provider_base_url: Some(None),
-                ..Default::default()
-            });
-            config_manager.save()?;
-
-            println!();
-            println!(
-                "{}",
-                RichOutput::boxed(
-                    format!(
-                        "Welcome, {}!\n\nUsername: {}\nRole: {}\nAPI Key: {}\nBackend: {}",
-                        session.user.display_name,
-                        session.user.username,
-                        session.user.role,
-                        session.key_name,
-                        session.backend
-                    ),
-                    Some("Authentication Success"),
-                    "green"
-                )
-            );
-            Ok(())
-        }
-        Err(e) => {
-            Logger::error(format!("Login failed: {}", e));
-            Err(e)
-        }
-    }
-}
-
 /// Handle direct provider login (new flow).
 async fn handle_direct_provider_login(
     provider_name: String,
@@ -402,12 +336,6 @@ async fn handle_direct_provider_login(
             "Unknown provider: '{}'. Supported: anthropic, openai, google, groq, ollama, bedrock, vertex-ai",
             provider_name
         ))?;
-
-    if provider_type == ProviderType::Brainwires {
-        return Err(anyhow!(
-            "Use 'rullama auth login' (without --provider) for Brainwires SaaS login"
-        ));
-    }
 
     let model_name = model.unwrap_or_else(|| provider_type.default_model().to_string());
     let mut config_manager = ConfigManager::new()?;
@@ -620,71 +548,4 @@ async fn validate_selected_model(
             );
         }
     }
-}
-
-/// Show Brainwires SaaS authentication status.
-fn show_rullama_status(verbose: bool) -> Result<()> {
-    match SessionManager::get_session()? {
-        Some(session) => {
-            if session.is_expired() {
-                Logger::warn("Session may be expired. Consider re-authenticating.");
-            }
-
-            let mut status_text = format!(
-                "Provider: Brainwires (SaaS)\nUser: {} (@{})\nRole: {}\nAPI Key: {}\nBackend: {}\nAuthenticated: {}",
-                session.user.display_name,
-                session.user.username,
-                session.user.role,
-                session.key_name,
-                session.backend,
-                session.authenticated_at.format("%Y-%m-%d %H:%M:%S")
-            );
-
-            if verbose {
-                status_text.push_str("\n\n--- Supabase ---\n");
-                status_text.push_str(&format!("URL: {}\n", session.supabase.url));
-                status_text.push_str("Anon Key: <hidden for security>");
-            }
-
-            println!();
-            println!(
-                "{}",
-                RichOutput::boxed(&status_text, Some("Authentication Status"), "green")
-            );
-        }
-        None => {
-            println!();
-            println!(
-                "{}",
-                RichOutput::boxed(
-                    "Provider: Brainwires (SaaS)\nStatus: Not authenticated\n\nRun \"rullama auth login\" to authenticate",
-                    Some("Authentication Status"),
-                    "yellow"
-                )
-            );
-        }
-    }
-    Ok(())
-}
-
-/// Validate Brainwires SaaS session.
-async fn validate_rullama_session() -> Result<()> {
-    if !SessionManager::is_authenticated()? {
-        Logger::error("Not authenticated");
-        return Ok(());
-    }
-
-    Logger::info("Validating session with backend...");
-
-    let config = ConfigManager::new()?;
-    let client = AuthClient::new(config.get().backend_url.clone());
-
-    match client.validate_session().await {
-        Ok(true) => Logger::success("Session is valid"),
-        Ok(false) | Err(_) => {
-            Logger::error("Session is invalid or expired. Please login again.");
-        }
-    }
-
-    Ok(())
 }

@@ -5,7 +5,6 @@ pub use rullama::core::provider::Provider;
 pub use rullama::providers::{
     // Model listing
     AvailableModel,
-    BrainwiresHttpProvider,
     ModelCapability,
     ModelLister,
     OllamaProvider,

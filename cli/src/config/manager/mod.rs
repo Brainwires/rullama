@@ -18,7 +18,7 @@ use rullama_seal::SealConfig;
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Active provider type (default: Brainwires SaaS)
+    /// Active provider type (default: Ollama — local, no API key)
     /// Use `rullama auth login --provider <name>` to change
     #[serde(default = "default_provider_type", alias = "provider")]
     pub provider_type: ProviderType,
@@ -667,18 +667,16 @@ fn get_remote_url_for_api_key(api_key: &str) -> String {
 }
 
 fn default_provider_type() -> ProviderType {
-    ProviderType::Brainwires
+    // BYOK default: Ollama needs no API key and runs locally. The first-run
+    // picker prompts for a provider; this is only the fallback when a config
+    // omits the field.
+    ProviderType::Ollama
 }
 
 pub(crate) fn default_model() -> String {
-    // A first-run default must be a model the backend actually advertises in
-    // `rullama models list`. The previous default "gpt-5-mini" did not
-    // appear in that list (the closest real model is "openai-gpt-5-mini"),
-    // which produced silent request failures for fresh installs.
-    //
-    // Claude Haiku 4.5 is small, cheap, supported on the Brainwires SaaS
-    // relay, and widely available to users who are just exploring the CLI.
-    "claude-haiku-4-5-20251001".to_string()
+    // Coherent with `default_provider_type()` (Ollama). The first-run picker
+    // overwrites both provider and model with the user's choice.
+    ProviderType::Ollama.default_model().to_string()
 }
 
 pub(crate) fn default_backend_url() -> String {
@@ -846,15 +844,11 @@ impl ConfigManager {
 
     /// Get API key for the current provider from the system keyring.
     ///
-    /// - `Brainwires` → delegates to `SessionManager::get_api_key()`
-    /// - `Ollama` → returns `Ok(None)` (no key needed)
+    /// - `Ollama` / `Bedrock` / `VertexAI` → returns `Ok(None)` (no API key;
+    ///   they use their own credential chains)
     /// - Others → reads from keyring account `provider:{name}`
     pub fn get_provider_api_key(&self) -> Result<Option<Zeroizing<String>>> {
         match self.config.provider_type {
-            ProviderType::Brainwires => {
-                // Delegate to session manager
-                crate::auth::SessionManager::get_api_key()
-            }
             // These providers use their own credential chains, not API keys
             ProviderType::Ollama | ProviderType::Bedrock | ProviderType::VertexAI => Ok(None),
             _ => {
@@ -874,7 +868,6 @@ impl ConfigManager {
         provider: ProviderType,
     ) -> Result<Option<Zeroizing<String>>> {
         match provider {
-            ProviderType::Brainwires => crate::auth::SessionManager::get_api_key(),
             ProviderType::Ollama | ProviderType::Bedrock | ProviderType::VertexAI => Ok(None),
             _ => {
                 let account = format!("provider:{}", provider.as_str());

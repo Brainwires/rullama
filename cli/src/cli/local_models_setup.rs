@@ -50,7 +50,7 @@ pub async fn show_setup_dialog() -> Result<bool> {
     // Explain the benefits
     println!(
         "{}",
-        style("  Brainwires can use local AI models to improve your experience:").white()
+        style("  rullama can use local AI models to improve your experience:").white()
     );
     println!();
     println!(
@@ -255,7 +255,7 @@ pub async fn show_setup_dialog() -> Result<bool> {
         );
         println!();
         println!(
-            "  {} Local inference is now enabled. Brainwires will automatically",
+            "  {} Local inference is now enabled. rullama will automatically",
             style("ℹ").blue()
         );
         println!("      use local models for routing, validation, and summarization.");

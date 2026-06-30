@@ -13,12 +13,12 @@ use rullama::providers::ProviderType;
 /// excluded — they're real providers in the framework, just not useful for
 /// an interactive coding CLI.
 pub const CHAT_PROVIDERS: &[ProviderType] = &[
-    ProviderType::Brainwires,
+    // Ollama first: the no-API-key local default offered on first run.
+    ProviderType::Ollama,
     ProviderType::Anthropic,
     ProviderType::OpenAI,
     ProviderType::Google,
     ProviderType::Groq,
-    ProviderType::Ollama,
     ProviderType::Bedrock,
     ProviderType::VertexAI,
     ProviderType::Together,
@@ -39,7 +39,6 @@ pub fn env_var_name(p: ProviderType) -> Option<&'static str> {
         ProviderType::OpenAI | ProviderType::OpenAiResponses => Some("OPENAI_API_KEY"),
         ProviderType::Google => Some("GEMINI_API_KEY"),
         ProviderType::Groq => Some("GROQ_API_KEY"),
-        ProviderType::Brainwires => Some("RULLAMA_API_KEY"),
         ProviderType::Together => Some("TOGETHER_API_KEY"),
         ProviderType::Fireworks => Some("FIREWORKS_API_KEY"),
         ProviderType::Anyscale => Some("ANYSCALE_API_KEY"),
@@ -60,7 +59,6 @@ pub fn env_var_name(p: ProviderType) -> Option<&'static str> {
 /// Human-readable one-line summary of a provider for pickers and help text.
 pub fn summary(p: ProviderType) -> &'static str {
     match p {
-        ProviderType::Brainwires => "Brainwires SaaS — managed backend with built-in routing",
         ProviderType::Anthropic => "Anthropic — Claude (Sonnet, Opus, Haiku)",
         ProviderType::OpenAI => "OpenAI — GPT-5, GPT-4o, o-series",
         ProviderType::OpenAiResponses => "OpenAI Responses API — newer tool-calling surface",
@@ -97,11 +95,9 @@ pub fn detect_provider_from_env() -> Option<(ProviderType, &'static str)> {
         return Some((p, "RULLAMA_PROVIDER"));
     }
 
-    // Stable priority: Brainwires SaaS first (if the user has a Brainwires
-    // key in env they presumably want it), then direct providers in
-    // order of popularity for coding tasks.
+    // Stable priority: direct (BYOK) providers in order of popularity for
+    // coding tasks. The first env-var hit wins.
     let candidates: &[(ProviderType, &'static str)] = &[
-        (ProviderType::Brainwires, "RULLAMA_API_KEY"),
         (ProviderType::Anthropic, "ANTHROPIC_API_KEY"),
         (ProviderType::OpenAI, "OPENAI_API_KEY"),
         (ProviderType::Google, "GEMINI_API_KEY"),
@@ -131,9 +127,6 @@ pub fn detect_provider_from_env() -> Option<(ProviderType, &'static str)> {
 /// Used in error messages when the active provider has no credentials.
 pub fn credential_hint(p: ProviderType) -> String {
     match p {
-        ProviderType::Brainwires => {
-            "Run: rullama auth login  (or set RULLAMA_API_KEY)".to_string()
-        }
         ProviderType::Ollama => {
             "Start Ollama locally (default http://localhost:11434) or set OLLAMA_HOST.".to_string()
         }
@@ -176,11 +169,6 @@ mod tests {
         for p in CHAT_PROVIDERS {
             assert!(!summary(*p).is_empty(), "missing summary for {:?}", p);
         }
-    }
-
-    #[test]
-    fn credential_hint_mentions_rullama_login_for_rullama() {
-        assert!(credential_hint(ProviderType::Brainwires).contains("rullama auth login"));
     }
 
     #[test]

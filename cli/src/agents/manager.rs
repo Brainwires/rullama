@@ -207,15 +207,10 @@ impl AgentManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::constants::DEFAULT_BACKEND_URL;
-    use crate::providers::BrainwiresHttpProvider;
+    use crate::providers::OllamaProvider;
 
     async fn create_test_manager() -> AgentManager {
-        let provider = Arc::new(BrainwiresHttpProvider::new(
-            "bw_test_12345678901234567890123456789012".to_string(),
-            DEFAULT_BACKEND_URL.to_string(),
-            "claude-3-5-sonnet-20241022".to_string(),
-        ));
+        let provider = Arc::new(OllamaProvider::new("llama3.3".to_string(), None));
         AgentManager::new(provider, PermissionMode::Auto, 5)
             .await
             .unwrap()
@@ -230,11 +225,7 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_worker() {
         let manager = create_test_manager().await;
-        let provider = Arc::new(BrainwiresHttpProvider::new(
-            "bw_test_12345678901234567890123456789012".to_string(),
-            DEFAULT_BACKEND_URL.to_string(),
-            "claude-3-5-sonnet-20241022".to_string(),
-        ));
+        let provider = Arc::new(OllamaProvider::new("llama3.3".to_string(), None));
 
         let worker_id = manager
             .spawn_worker("worker-1".to_string(), provider, PermissionMode::Auto)
@@ -254,11 +245,7 @@ mod tests {
     #[tokio::test]
     async fn test_max_workers_limit() {
         let manager = create_test_manager().await;
-        let provider = Arc::new(BrainwiresHttpProvider::new(
-            "bw_test_12345678901234567890123456789012".to_string(),
-            DEFAULT_BACKEND_URL.to_string(),
-            "claude-3-5-sonnet-20241022".to_string(),
-        ));
+        let provider = Arc::new(OllamaProvider::new("llama3.3".to_string(), None));
 
         // Spawn max workers (5)
         for i in 0..5 {
@@ -284,11 +271,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_worker() {
         let manager = create_test_manager().await;
-        let provider = Arc::new(BrainwiresHttpProvider::new(
-            "bw_test_12345678901234567890123456789012".to_string(),
-            DEFAULT_BACKEND_URL.to_string(),
-            "claude-3-5-sonnet-20241022".to_string(),
-        ));
+        let provider = Arc::new(OllamaProvider::new("llama3.3".to_string(), None));
 
         manager
             .spawn_worker("worker-1".to_string(), provider, PermissionMode::Auto)
@@ -359,11 +342,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_workers() {
         let manager = create_test_manager().await;
-        let provider = Arc::new(BrainwiresHttpProvider::new(
-            "bw_test_12345678901234567890123456789012".to_string(),
-            DEFAULT_BACKEND_URL.to_string(),
-            "claude-3-5-sonnet-20241022".to_string(),
-        ));
+        let provider = Arc::new(OllamaProvider::new("llama3.3".to_string(), None));
 
         manager
             .spawn_worker(

@@ -1,9 +1,8 @@
 use anyhow::Result;
 use clap::Subcommand;
 use console::style;
-use std::collections::BTreeMap;
 
-use crate::config::{ConfigManager, ModelRegistry, ModelService};
+use crate::config::{ConfigManager, ModelService};
 use crate::providers::{AvailableModel, ProviderType};
 
 #[derive(Subcommand)]
@@ -99,11 +98,6 @@ fn resolve_provider(
 async fn handle_models_list(provider: Option<String>, show_all: bool, refresh: bool) -> Result<()> {
     let (provider_type, api_key, base_url) = resolve_provider(provider.as_deref())?;
 
-    // Brainwires SaaS → existing ModelRegistry flow
-    if provider_type == ProviderType::Brainwires {
-        return handle_rullama_models_list().await;
-    }
-
     println!(
         "\n{} ({})\n",
         style("Available Models:").cyan().bold(),
@@ -198,58 +192,8 @@ fn display_provider_models(models: &[AvailableModel], active_model: &str) {
     println!();
 }
 
-/// Original Brainwires SaaS model listing.
-async fn handle_rullama_models_list() -> Result<()> {
-    println!("\n{}\n", style("Available Models:").cyan().bold());
-
-    let models = ModelRegistry::get_all_models().await?;
-
-    if models.is_empty() {
-        eprintln!("{}", style("No models available").red());
-        return Ok(());
-    }
-
-    let mut vendor_groups: BTreeMap<String, Vec<_>> = BTreeMap::new();
-    for model in models {
-        vendor_groups
-            .entry(model.ai_vendor.clone())
-            .or_insert_with(Vec::new)
-            .push(model);
-    }
-
-    for (vendor, mut models) in vendor_groups {
-        models.sort_by(|a, b| a.id.cmp(&b.id));
-
-        println!("{}:", style(&vendor).bold().yellow());
-        for model in models {
-            let default_marker = if model.is_default { " (default)" } else { "" };
-            let context = format!("{}K", model.context_window / 1000);
-            println!(
-                "  {} - {} [context: {}]{}",
-                style(&model.id).cyan(),
-                model.name,
-                context,
-                style(default_marker).green()
-            );
-        }
-        println!();
-    }
-
-    println!(
-        "{}",
-        style("Tip: use 'rullama models stats' to see model statistics").dim()
-    );
-
-    Ok(())
-}
-
 async fn handle_models_stats(provider: Option<String>, refresh: bool) -> Result<()> {
     let (provider_type, api_key, base_url) = resolve_provider(provider.as_deref())?;
-
-    // Brainwires SaaS → existing flow
-    if provider_type == ProviderType::Brainwires {
-        return handle_rullama_models_stats().await;
-    }
 
     println!(
         "\n{} ({})\n",
@@ -311,60 +255,6 @@ async fn handle_models_stats(provider: Option<String>, refresh: bool) -> Result<
         println!("  Average: {}K", style(avg / 1000).cyan());
         println!("  Maximum: {}K", style(max / 1000).cyan());
         println!("  Minimum: {}K", style(min / 1000).cyan());
-    }
-
-    Ok(())
-}
-
-/// Original Brainwires SaaS model stats.
-async fn handle_rullama_models_stats() -> Result<()> {
-    println!("\n{}\n", style("Model Statistics:").cyan().bold());
-
-    let models = ModelRegistry::get_all_models().await?;
-
-    if models.is_empty() {
-        eprintln!("{}", style("No models available").red());
-        return Ok(());
-    }
-
-    let mut vendor_groups: BTreeMap<String, Vec<_>> = BTreeMap::new();
-    for model in &models {
-        vendor_groups
-            .entry(model.ai_vendor.clone())
-            .or_insert_with(Vec::new)
-            .push(model);
-    }
-
-    println!("{}:", style("Overall").bold());
-    println!("  Total models: {}", style(models.len()).cyan());
-    println!("  AI vendors: {}", style(vendor_groups.len()).cyan());
-    println!();
-
-    println!("{}:", style("By AI Vendor").bold());
-    for (vendor, models) in &vendor_groups {
-        println!("  {}: {} models", style(vendor).yellow(), models.len());
-    }
-    println!();
-
-    let total_context: u64 = models.iter().map(|m| m.context_window as u64).sum();
-    let avg_context = total_context / models.len() as u64;
-    let max_context = models.iter().map(|m| m.context_window).max().unwrap_or(0);
-    let min_context = models.iter().map(|m| m.context_window).min().unwrap_or(0);
-
-    println!("{}:", style("Context Windows").bold());
-    println!("  Average: {}K", style(avg_context / 1000).cyan());
-    println!("  Maximum: {}K", style(max_context / 1000).cyan());
-    println!("  Minimum: {}K", style(min_context / 1000).cyan());
-    println!();
-
-    if let Some(default_model) = models.iter().find(|m| m.is_default) {
-        println!("{}:", style("Default Model").bold());
-        println!(
-            "  {} - {} ({})",
-            style(&default_model.id).cyan(),
-            default_model.name,
-            style(&default_model.ai_vendor).yellow()
-        );
     }
 
     Ok(())

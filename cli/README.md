@@ -45,7 +45,7 @@ Download the latest release from the releases page.
 
 ## Providers
 
-Brainwires CLI is provider-agnostic — point it at Anthropic, OpenAI, Google, Groq, Ollama (local), Amazon Bedrock, Google Vertex AI, Together, Fireworks, MiniMax, or the Brainwires SaaS relay. Three ways to configure a provider:
+rullama CLI is provider-agnostic — point it at Anthropic, OpenAI, Google, Groq, Ollama (local), Amazon Bedrock, Google Vertex AI, Together, Fireworks, MiniMax. Three ways to configure a provider:
 
 **1. First-run picker (interactive).** The very first time you run `rullama chat` or `rullama task` with no config, you'll see a picker listing the chat-capable providers. The choice is persisted to `~/.rullama/config.json`.
 
@@ -58,7 +58,6 @@ Brainwires CLI is provider-agnostic — point it at Anthropic, OpenAI, Google, G
 | Google (Gemini) | `GEMINI_API_KEY` *or* `GOOGLE_API_KEY` |
 | Groq | `GROQ_API_KEY` |
 | Ollama (local) | `OLLAMA_HOST` (just presence detected) |
-| Brainwires SaaS | `RULLAMA_API_KEY` |
 | Together / Fireworks / MiniMax | `TOGETHER_API_KEY` / `FIREWORKS_API_KEY` / `MINIMAX_API_KEY` |
 | Bedrock | AWS credential chain (`AWS_ACCESS_KEY_ID`, …) |
 | Vertex AI | `GOOGLE_APPLICATION_CREDENTIALS` + project ID |
@@ -68,10 +67,7 @@ You can also override per-invocation with `RULLAMA_PROVIDER=anthropic` or `--pro
 **3. Explicit login.** Store credentials in your system keyring so they persist across shells:
 
 ```bash
-# Brainwires SaaS (default)
-rullama auth login
-
-# Any direct provider
+# Connect to any provider (BYOK)
 rullama auth login --provider anthropic
 rullama auth login --provider openai --model gpt-5-mini
 rullama auth login --provider ollama --base-url http://localhost:11434
@@ -103,8 +99,8 @@ rullama task --provider ollama "summarize src/main.rs"
 First, pick a provider — either run `rullama chat` and use the first-run picker, or explicitly:
 
 ```bash
-rullama auth login                             # Brainwires SaaS
 rullama auth login --provider anthropic        # Claude
+rullama auth login --provider ollama           # local, no API key
 ```
 
 Or just export an API key and the CLI picks it up:
@@ -117,7 +113,7 @@ export GEMINI_API_KEY=your_key_here
 
 ### Chat Modes
 
-Brainwires CLI offers multiple chat modes for different use cases:
+rullama CLI offers multiple chat modes for different use cases:
 
 #### Interactive Mode (Default)
 
@@ -328,7 +324,7 @@ rullama cost --period week
 
 ### Slash Commands
 
-Brainwires CLI includes powerful slash commands for codebase exploration and semantic search:
+rullama CLI includes powerful slash commands for codebase exploration and semantic search:
 
 #### Project RAG Commands
 
@@ -367,7 +363,7 @@ For detailed documentation, see [docs/SLASH_COMMANDS_RAG.md](docs/SLASH_COMMANDS
 
 ### Task Management Commands
 
-Brainwires CLI includes a comprehensive task management system with dependency tracking and time estimates:
+rullama CLI includes a comprehensive task management system with dependency tracking and time estimates:
 
 ```bash
 # List all tasks
@@ -497,7 +493,7 @@ Save and reuse plan templates with variable substitution:
 
 ### Infinite Context Memory
 
-Brainwires CLI features an advanced context management system that provides effectively unlimited conversation memory:
+rullama CLI features an advanced context management system that provides effectively unlimited conversation memory:
 
 #### How It Works
 
@@ -589,9 +585,9 @@ cargo run -- chat
 
 ## Architecture
 
-Brainwires CLI is built on the **Brainwires Framework**, a submodule of 32 crates exposed through a feature-gated facade.
+rullama CLI is built on the **rullama framework**, a submodule of 32 crates exposed through a feature-gated facade.
 
-### Brainwires Framework (`crates/rullama-framework/`)
+### rullama framework (`crates/rullama-framework/`)
 
 The framework provides all core capabilities. The CLI depends on a single facade crate:
 
@@ -615,9 +611,8 @@ The framework crates, grouped by function:
 The CLI adds application-specific code on top of the framework:
 
 - **Commands** (`src/cli/`): `clap`-based CLI commands and chat modes (interactive, single-shot, batch, TUI, MCP server)
-- **Auth** (`src/auth/`): Session management and Brainwires Studio authentication
-- **BrainwiresHttpProvider**: Studio backend provider (routes requests through the Studio API)
-- **Config**: User configuration, MCP server registry, API key storage
+- **Providers** (`src/providers/`): BYOK provider factory over the framework's `ChatProviderFactory` (Anthropic, OpenAI, Google, Groq, Ollama, Bedrock, Vertex AI, Together, Fireworks, MiniMax)
+- **Config**: User configuration, MCP server registry, API key storage (system keyring)
 
 ## License
 

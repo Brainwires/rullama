@@ -112,7 +112,7 @@ pub async fn handle_plan(
     let _config_manager = ConfigManager::new()?;
     let session = SessionManager::load()?;
 
-    // Resolve model (provider is always Brainwires)
+    // Resolve model (provider/model come from config — BYOK)
     let model_id = match model {
         Some(m) => m,
         None => ModelRegistry::default_model().await,
@@ -158,7 +158,7 @@ pub async fn handle_plan(
     };
 
     // Print header
-    println!("\n{}", RichOutput::header("Brainwires Plan", "magenta"));
+    println!("\n{}", RichOutput::header("rullama Plan", "magenta"));
     println!("Model: {} (rullama)", model_id);
     println!("Task: {}\n", console::style(&task).cyan());
 

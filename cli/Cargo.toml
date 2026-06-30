@@ -163,10 +163,10 @@ bincode.workspace = true
 # Rhai scripting engine
 rhai = { version = "1.23", features = ["sync", "serde"] }
 
-# ── Brainwires Framework facade ──
+# ── rullama framework facade ──
 rullama = { path = "../../rullama-framework/crates/rullama", features = ["full"] }
 
-# ── Brainwires Framework crates (custom feature flags) ──
+# ── rullama framework crates (custom feature flags) ──
 rullama-agent = { workspace = true }
 rullama-mdap = { workspace = true }
 rullama-skills = { workspace = true, features = ["registry"] }
@@ -205,6 +205,10 @@ proptest = "1.5"
 
 [features]
 default = []
+# LEGACY: Studio remote-bridge (web access to CLI agents) — discontinued,
+# disabled by default, likely to return. Gates the bridge surface in
+# `src/remote.rs`, `src/cli/remote.rs`, and the executor permission relay.
+remote-bridge = ["rullama/remote-bridge"]
 interpreter-javascript = []
 interpreter-python = []
 interpreter-all = ["interpreter-javascript", "interpreter-python"]

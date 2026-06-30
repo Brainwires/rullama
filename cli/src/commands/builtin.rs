@@ -1013,7 +1013,7 @@ pub fn register_builtin_commands(registry: &mut CommandRegistry) {
     // /knowledge:sync - Force sync with server
     registry.register(Command::builtin(
         "knowledge:sync".to_string(),
-        "Force synchronization with the Brainwires server".to_string(),
+        "Force synchronization with the remote knowledge server".to_string(),
         "".to_string(),
     ));
 

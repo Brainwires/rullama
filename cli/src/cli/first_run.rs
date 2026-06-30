@@ -14,7 +14,6 @@ use console::style;
 use dialoguer::{Select, theme::ColorfulTheme};
 use std::io::IsTerminal;
 
-use crate::auth::SessionManager;
 use crate::config::{ConfigManager, ConfigUpdates};
 use crate::providers::ProviderType;
 use crate::types::provider_ext::{
@@ -62,7 +61,6 @@ pub fn print_unconfigured_help() {
     eprintln!("      # …or run Ollama locally (OLLAMA_HOST)");
     eprintln!();
     eprintln!("  {} Log in explicitly:", style("·").cyan());
-    eprintln!("      rullama auth login                     # Brainwires SaaS");
     eprintln!("      rullama auth login --provider anthropic");
     eprintln!();
     eprintln!("  {} Pass a provider per-invocation:", style("·").cyan());
@@ -83,7 +81,7 @@ pub async fn prompt_and_save(config: &mut ConfigManager) -> Result<ProviderType>
     println!(
         "  {} {}",
         style("✱").bold(),
-        style("Welcome to Brainwires CLI").bold().cyan()
+        style("Welcome to rullama CLI").bold().cyan()
     );
     println!();
     println!(
@@ -103,15 +101,9 @@ pub async fn prompt_and_save(config: &mut ConfigManager) -> Result<ProviderType>
         .map(|p| format!("{:<14}  {}", p.as_str(), style(summary(*p)).dim()))
         .collect();
 
-    // Default selection: Brainwires if the user already has a saved SaaS
-    // session (they previously ran `auth login`), otherwise Anthropic as
-    // the most common coding target.
-    let prefer_rullama = SessionManager::is_authenticated().unwrap_or(false);
-    let preferred = if prefer_rullama {
-        ProviderType::Brainwires
-    } else {
-        ProviderType::Anthropic
-    };
+    // Default selection: Ollama — the no-API-key local provider. It's first
+    // in CHAT_PROVIDERS; users can arrow down to a BYOK cloud provider.
+    let preferred = ProviderType::Ollama;
     let default_idx = CHAT_PROVIDERS
         .iter()
         .position(|p| *p == preferred)
@@ -146,8 +138,7 @@ pub async fn prompt_and_save(config: &mut ConfigManager) -> Result<ProviderType>
     // rely on env vars being set later).
     let needs_login = matches!(
         chosen,
-        ProviderType::Brainwires
-            | ProviderType::Anthropic
+        ProviderType::Anthropic
             | ProviderType::OpenAI
             | ProviderType::OpenAiResponses
             | ProviderType::Google

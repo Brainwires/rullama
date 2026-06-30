@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Brainwires CLI** is an AI-powered agentic CLI tool for autonomous coding assistance, built in Rust. It features multi-agent task orchestration, MCP server capabilities, infinite context memory, and extensive tool integration.
+**rullama CLI** is an AI-powered agentic CLI tool for autonomous coding assistance, built in Rust. It features multi-agent task orchestration, MCP server capabilities, infinite context memory, and extensive tool integration.
 
 ---
 

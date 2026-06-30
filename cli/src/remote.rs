@@ -1,5 +1,9 @@
 //! Remote Control Bridge - CLI adapter
 //!
+//! LEGACY: Studio remote-bridge (web access to CLI agents) — discontinued,
+//! disabled by default, likely to return. This whole module is gated behind
+//! the off-by-default `remote-bridge` feature.
+//!
 //! Thin adapter over `rullama::agent_network::remote`. All types are re-exported
 //! from the bridge crate; this module adds CLI-specific trait implementations
 //! (`CliAgentSpawner`, `CliBridgeConfigProvider`) and convenience functions.

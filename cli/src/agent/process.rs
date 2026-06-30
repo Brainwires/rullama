@@ -10,7 +10,6 @@ use anyhow::{Context, Result, bail};
 use tokio::net::UnixListener;
 use tokio::sync::{RwLock, broadcast};
 
-use crate::auth::SessionManager;
 use crate::commands::executor::{CommandAction, CommandResult};
 use crate::config::ConfigManager;
 use crate::ipc::get_agent_socket_path;
@@ -20,9 +19,6 @@ use rullama::agent_network::ipc::{
     AgentMessage, Handshake, HandshakeResponse, IpcConnection, LockChangeType, LockInfo,
     ResourceLockType, ViewerMessage,
 };
-use futures::StreamExt as FuturesStreamExt;
-use serde_json::json;
-
 use super::AgentState;
 
 /// Agent process that manages a single session
@@ -1755,7 +1751,7 @@ async fn stream_with_tool_execution(
             Ok(StreamChunk::ToolCall {
                 call_id,
                 response_id: _,
-                chat_id,
+                chat_id: _,
                 tool_name,
                 server,
                 parameters,
@@ -1891,10 +1887,10 @@ async fn stream_with_tool_execution(
 
                 // Stream the continuation response
                 let continuation_result = stream_continuation_with_tool_result(
+                    provider.clone(),
                     &conversation_history,
                     &tools,
                     &model,
-                    chat_id.clone(),
                     &call_id,
                     &tool_name,
                     &parameters,
@@ -1973,18 +1969,19 @@ async fn stream_with_tool_execution(
     Ok(full_response)
 }
 
-/// Stream continuation response with tool result - with real-time streaming to TUI
+/// Continue the conversation after a tool executed, routing the follow-up
+/// turn through the normal provider abstraction.
 ///
-/// This function:
-/// 1. Sends a continuation request to the backend with the tool result
-/// 2. Streams the response text in real-time to the TUI
-/// 3. Handles chained tool calls recursively
+/// Previously this POSTed to the discontinued hosted `/api/chat/stream`
+/// relay; it now appends the tool call + result to the history and re-streams
+/// via `provider`, which transparently executes any further chained tool calls
+/// the model emits.
 #[allow(clippy::too_many_arguments)]
 async fn stream_continuation_with_tool_result(
+    provider: Arc<dyn crate::providers::Provider>,
     conversation_history: &[crate::types::message::Message],
     tools: &[crate::types::tool::Tool],
     model: &str,
-    chat_id: Option<String>,
     call_id: &str,
     tool_name: &str,
     tool_parameters: &serde_json::Value,
@@ -1994,369 +1991,34 @@ async fn stream_continuation_with_tool_result(
     update_tx: &broadcast::Sender<AgentMessage>,
     state: &Arc<RwLock<AgentState>>,
 ) -> Result<String> {
-    use crate::types::message::Role;
+    use crate::types::message::{ContentBlock, Message, MessageContent, Role};
 
-    // Get session for backend URL
-    let session = SessionManager::load()?.context("No active session found")?;
-
-    // Get API key from secure storage (keyring or fallback)
-    let api_key = SessionManager::get_api_key()?
-        .context("No API key found. Please re-authenticate with: rullama auth")?;
-
-    let http_client = reqwest::Client::new();
-    let url = format!("{}/api/chat/stream", session.backend);
-
-    // Build conversation history using shared helper that properly serializes
-    // tool calls and tool results (not just text content)
-    let mut conv_history =
-        crate::types::message::serialize_messages_to_stateless_history(conversation_history);
-
-    // Add the function_call (AI's request to call the tool)
-    conv_history.push(json!({
-        "role": "function_call",
-        "call_id": call_id,
-        "name": tool_name,
-        "arguments": tool_parameters.to_string()
-    }));
-
-    // Add the tool result
-    conv_history.push(json!({
-        "role": "tool",
-        "call_id": call_id,
-        "name": tool_name,
-        "content": tool_output
-    }));
-
-    // Convert tools to MCP format
-    let mcp_tools: Vec<serde_json::Value> = tools
-        .iter()
-        .map(|tool| {
-            json!({
-                "name": tool.name,
-                "server": "cli-local",
-                "description": tool.description,
-                "inputSchema": tool.input_schema,
-            })
-        })
-        .collect();
-
-    // Extract system prompt from conversation history
-    let system_prompt = conversation_history
-        .iter()
-        .find(|m| m.role == Role::System)
-        .and_then(|m| m.text().map(|s| s.to_string()));
-
-    // Build request
-    let mut request_body = json!({
-        "chatId": chat_id,
-        "content": "",
-        "model": model,
-        "timezone": "UTC",
-        "conversationHistory": conv_history
+    // Append the assistant's tool call and the tool result, then re-run the
+    // provider stream loop (which handles any further chained tool calls).
+    let mut updated_history = conversation_history.to_vec();
+    updated_history.push(Message {
+        role: Role::Assistant,
+        content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+            id: call_id.to_string(),
+            name: tool_name.to_string(),
+            input: tool_parameters.clone(),
+        }]),
+        name: None,
+        metadata: None,
     });
+    updated_history.push(Message::tool_result(call_id, tool_output));
 
-    // Add system prompt if present
-    if let Some(ref prompt) = system_prompt {
-        request_body["systemPrompt"] = json!(prompt);
-    }
-
-    if !mcp_tools.is_empty() {
-        request_body["selectedMCPTools"] = json!(mcp_tools);
-    }
-
-    tracing::info!(
-        "🔧 Continuation request: {} tools, {} history msgs, system_prompt: {}",
-        mcp_tools.len(),
-        conv_history.len(),
-        system_prompt.as_ref().map(|s| s.len()).unwrap_or(0)
-    );
-
-    // Send request
-    let response = http_client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key.as_str()))
-        .header("Content-Type", "application/json")
-        .json(&request_body)
-        .send()
-        .await
-        .context("Failed to send continuation request")?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(anyhow::anyhow!(
-            "Continuation request failed ({}): {}",
-            status,
-            error_text
-        ));
-    }
-
-    // Stream the SSE response with real-time output
-    let mut full_text = String::new();
-    let mut byte_stream = response.bytes_stream();
-    let mut buffer = String::new();
-
-    while let Some(chunk_result) = byte_stream.next().await {
-        let chunk = chunk_result.context("Failed to read stream chunk")?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        // Process complete SSE events (delimited by \n\n)
-        while let Some(pos) = buffer.find("\n\n") {
-            let event_block = buffer[..pos].to_string();
-            buffer = buffer[pos + 2..].to_string();
-
-            // Parse SSE event block
-            let mut event_type = None;
-            let mut event_data = None;
-
-            for line in event_block.lines() {
-                if let Some(evt) = line.strip_prefix("event: ") {
-                    event_type = Some(evt.to_string());
-                } else if let Some(data) = line.strip_prefix("data: ") {
-                    event_data = Some(data.to_string());
-                }
-            }
-
-            if let (Some(evt_type), Some(data)) = (event_type, event_data) {
-                tracing::debug!(
-                    "🔧 Continuation SSE event: type={}, data_len={}",
-                    evt_type,
-                    data.len()
-                );
-                match evt_type.as_str() {
-                    "delta" => {
-                        if let Ok(delta_data) = serde_json::from_str::<serde_json::Value>(&data)
-                            && let Some(text) = delta_data.get("delta").and_then(|t| t.as_str())
-                        {
-                            // Stream each chunk in real-time!
-                            full_text.push_str(text);
-                            let _ = update_tx.send(AgentMessage::StreamChunk {
-                                text: text.to_string(),
-                            });
-                        }
-                    }
-                    "toolCall" => {
-                        tracing::info!("🔧 Continuation received chained toolCall event: {}", data);
-                        // Handle chained tool calls
-                        if let Ok(tool_data) = serde_json::from_str::<serde_json::Value>(&data) {
-                            let next_call_id = tool_data
-                                .get("callId")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let next_tool_name = tool_data
-                                .get("toolName")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let next_server = tool_data
-                                .get("server")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("cli-local")
-                                .to_string();
-                            let next_parameters = tool_data
-                                .get("parameters")
-                                .cloned()
-                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                            let next_chat_id = tool_data
-                                .get("chatId")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string());
-
-                            // Only execute cli-local tools
-                            if next_server != "cli-local" {
-                                tracing::warn!(
-                                    "Ignoring chained tool from non-local server: {}",
-                                    next_server
-                                );
-                                continue;
-                            }
-
-                            tracing::info!(
-                                "Chained tool call: {} (call_id: {})",
-                                next_tool_name,
-                                next_call_id
-                            );
-
-                            // Notify TUI about tool call start
-                            let _ = update_tx.send(AgentMessage::ToolCallStart {
-                                id: next_call_id.clone(),
-                                name: next_tool_name.clone(),
-                                server: Some(next_server.clone()),
-                                input: next_parameters.clone(),
-                            });
-                            let _ = update_tx.send(AgentMessage::StatusUpdate {
-                                status: format!("Executing chained tool: {}...", next_tool_name),
-                            });
-
-                            // Execute the chained tool
-                            let tool_use = ToolUse {
-                                id: next_call_id.clone(),
-                                name: next_tool_name.clone(),
-                                input: next_parameters.clone(),
-                            };
-
-                            let tool_context = ToolContext {
-                                working_directory: working_directory.to_string(),
-                                capabilities: serde_json::to_value(
-                                    rullama::permissions::AgentCapabilities::full_access(),
-                                )
-                                .ok(),
-                                ..Default::default()
-                            };
-
-                            let chained_result =
-                                match tool_executor.execute(&tool_use, &tool_context).await {
-                                    Ok(result) => result,
-                                    Err(e) => {
-                                        tracing::error!("Chained tool execution failed: {}", e);
-                                        // Record failed tool outcome for implicit learning
-                                        {
-                                            let mut state_guard = state.write().await;
-                                            state_guard.record_tool_outcome(
-                                                &next_tool_name,
-                                                &next_parameters.to_string(),
-                                                false,
-                                                Some(&format!("{}", e)),
-                                                0,
-                                            );
-                                        }
-                                        let _ = update_tx.send(AgentMessage::ToolResult {
-                                            id: next_call_id.clone(),
-                                            name: next_tool_name.clone(),
-                                            output: None,
-                                            error: Some(format!("Error: {}", e)),
-                                        });
-                                        continue;
-                                    }
-                                };
-
-                            // Truncate output
-                            const MAX_TOOL_OUTPUT_CHARS: usize = 10_000;
-                            let chained_output =
-                                if chained_result.content.len() > MAX_TOOL_OUTPUT_CHARS {
-                                    format!(
-                                        "{}\n\n[Output truncated: {} of {} characters]",
-                                        &chained_result.content[..MAX_TOOL_OUTPUT_CHARS],
-                                        MAX_TOOL_OUTPUT_CHARS,
-                                        chained_result.content.len()
-                                    )
-                                } else {
-                                    chained_result.content.clone()
-                                };
-
-                            // Notify TUI
-                            let _ = update_tx.send(AgentMessage::ToolResult {
-                                id: next_call_id.clone(),
-                                name: next_tool_name.clone(),
-                                output: if chained_result.is_error {
-                                    None
-                                } else {
-                                    Some(chained_output.clone())
-                                },
-                                error: if chained_result.is_error {
-                                    Some(chained_output.clone())
-                                } else {
-                                    None
-                                },
-                            });
-
-                            // Record tool outcome for implicit learning
-                            {
-                                let mut state_guard = state.write().await;
-                                state_guard.record_tool_outcome(
-                                    &next_tool_name,
-                                    &next_parameters.to_string(),
-                                    !chained_result.is_error,
-                                    if chained_result.is_error {
-                                        Some(&chained_output)
-                                    } else {
-                                        None
-                                    },
-                                    0,
-                                );
-                            }
-
-                            // Recursively continue with chained tool result
-                            // Build updated conversation history including ALL prior tool interactions
-                            let mut updated_history = conversation_history.to_vec();
-                            // Add the assistant text so far (before the tool call)
-                            if !full_text.is_empty() {
-                                updated_history
-                                    .push(crate::types::message::Message::assistant(&full_text));
-                            }
-                            // Add the previous tool call (the one that triggered this continuation) as a ToolUse block
-                            updated_history.push(crate::types::message::Message {
-                                role: crate::types::message::Role::Assistant,
-                                content: crate::types::message::MessageContent::Blocks(vec![
-                                    crate::types::message::ContentBlock::ToolUse {
-                                        id: call_id.to_string(),
-                                        name: tool_name.to_string(),
-                                        input: tool_parameters.clone(),
-                                    },
-                                ]),
-                                name: None,
-                                metadata: None,
-                            });
-                            // Add the previous tool result
-                            updated_history.push(crate::types::message::Message::tool_result(
-                                call_id,
-                                tool_output,
-                            ));
-
-                            let chained_text = Box::pin(stream_continuation_with_tool_result(
-                                &updated_history,
-                                tools,
-                                model,
-                                next_chat_id.or(chat_id.clone()),
-                                &next_call_id,
-                                &next_tool_name,
-                                &next_parameters,
-                                &chained_output,
-                                tool_executor,
-                                working_directory,
-                                update_tx,
-                                state,
-                            ))
-                            .await?;
-
-                            full_text.push_str(&chained_text);
-                            return Ok(full_text);
-                        }
-                    }
-                    "complete" => {
-                        tracing::info!(
-                            "🔧 Continuation stream completed with {} chars of text (no more tool calls)",
-                            full_text.len()
-                        );
-                        return Ok(full_text);
-                    }
-                    "error" => {
-                        let error_msg = if let Ok(error_data) =
-                            serde_json::from_str::<serde_json::Value>(&data)
-                        {
-                            error_data
-                                .get("message")
-                                .and_then(|m| m.as_str())
-                                .unwrap_or("Unknown error")
-                                .to_string()
-                        } else {
-                            "Unknown error".to_string()
-                        };
-                        return Err(anyhow::anyhow!("Continuation stream error: {}", error_msg));
-                    }
-                    _ => {
-                        // Ignore other event types
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(full_text)
+    Box::pin(stream_with_tool_execution(
+        provider,
+        updated_history,
+        tools.to_vec(),
+        model.to_string(),
+        tool_executor.clone(),
+        working_directory.to_string(),
+        update_tx.clone(),
+        state.clone(),
+    ))
+    .await
 }
 
 #[cfg(test)]
