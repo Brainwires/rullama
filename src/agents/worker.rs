@@ -179,6 +179,7 @@ impl WorkerAgent {
             ),
             model: None,
             cache_strategy: Default::default(),
+            ..Default::default()
         };
 
         self.provider
