@@ -1,0 +1,53 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Rullama.ViewModels"
+             x:Class="Rullama.Views.VoiceView"
+             x:DataType="vm:VoiceViewModel"
+             Background="{StaticResource Background}">
+  <Design.DataContext>
+    <vm:VoiceViewModel />
+  </Design.DataContext>
+
+  <ScrollViewer>
+    <StackPanel Margin="24" Spacing="12" MaxWidth="640" HorizontalAlignment="Center">
+      <TextBlock Classes="h1" Text="Voice" />
+      <TextBlock Classes="muted" Text="On-device text-to-speech (Kokoro). Mic / speech-to-text arrives in M4c." />
+
+      <TextBlock Classes="label" Text="TEXT" />
+      <TextBox Text="{Binding Text, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="96"
+               Watermark="Type text to speak…" />
+
+      <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+        <StackPanel Grid.Column="0" Spacing="2">
+          <TextBlock Classes="label" Text="VOICE" />
+          <ComboBox ItemsSource="{Binding Voices}" SelectedItem="{Binding SelectedVoice, Mode=TwoWay}" MinWidth="160" />
+        </StackPanel>
+      </Grid>
+
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <Button Classes="primary" Content="Generate speech"
+                Command="{Binding SpeakCommand}" IsVisible="{Binding !IsBusy}" />
+        <Button Classes="destructive" Content="Stop"
+                Command="{Binding StopCommand}" IsVisible="{Binding IsBusy}" />
+      </StackPanel>
+
+      <TextBlock Classes="muted" Text="{Binding Status}" TextWrapping="Wrap" />
+
+      <!-- Voice cloning (StyleTTS2) -->
+      <TextBlock Classes="label" Text="VOICE CLONING" Margin="0,12,0,0" />
+      <TextBlock Classes="muted" FontSize="11" TextWrapping="Wrap"
+                 Text="Clone a voice from a short 24 kHz WAV reference, then speak any text in it." />
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <Button Classes="outline" Content="Upload reference (.wav)" Click="UploadRef_Click"
+                IsEnabled="{Binding CloneAvailable}" />
+        <TextBlock Classes="muted" Text="{Binding ReferenceLabel}" VerticalAlignment="Center" />
+      </StackPanel>
+      <Button Classes="outline" Content="Create voice" Command="{Binding CreateVoiceCommand}"
+              IsEnabled="{Binding CloneAvailable}" HorizontalAlignment="Left" />
+      <TextBox Text="{Binding CloneText, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap"
+               MinHeight="56" Watermark="Text to speak in the cloned voice…" />
+      <Button Classes="primary" Content="Speak (cloned)" Command="{Binding CloneSpeakCommand}" HorizontalAlignment="Left" />
+      <TextBlock Classes="muted" Text="{Binding CloneStatus}" TextWrapping="Wrap" />
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

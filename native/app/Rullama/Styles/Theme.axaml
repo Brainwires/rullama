@@ -1,0 +1,58 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!--
+    Design tokens ported from the PWA (web/src/styles/globals.css), dark-only.
+    Each HSL token converted to hex. Opacity variants mirror Tailwind's /NN.
+  -->
+
+  <!-- Base colors -->
+  <Color x:Key="BackgroundColor">#13151B</Color>
+  <Color x:Key="ForegroundColor">#F3F5F7</Color>
+  <Color x:Key="CardColor">#191C24</Color>
+  <Color x:Key="MutedColor">#282C33</Color>
+  <Color x:Key="MutedForegroundColor">#9DA4AF</Color>
+  <Color x:Key="PrimaryColor">#3B83F7</Color>
+  <Color x:Key="PrimaryForegroundColor">#13151B</Color>
+  <Color x:Key="AccentColor">#23272F</Color>
+  <Color x:Key="DestructiveColor">#DF3A3A</Color>
+  <Color x:Key="BorderColor">#303540</Color>
+
+  <!-- Solid brushes (keys match the PWA token names) -->
+  <SolidColorBrush x:Key="Background" Color="{StaticResource BackgroundColor}" />
+  <SolidColorBrush x:Key="Foreground" Color="{StaticResource ForegroundColor}" />
+  <SolidColorBrush x:Key="Card" Color="{StaticResource CardColor}" />
+  <SolidColorBrush x:Key="Muted" Color="{StaticResource MutedColor}" />
+  <SolidColorBrush x:Key="MutedForeground" Color="{StaticResource MutedForegroundColor}" />
+  <SolidColorBrush x:Key="Primary" Color="{StaticResource PrimaryColor}" />
+  <SolidColorBrush x:Key="PrimaryForeground" Color="{StaticResource PrimaryForegroundColor}" />
+  <SolidColorBrush x:Key="Accent" Color="{StaticResource AccentColor}" />
+  <SolidColorBrush x:Key="Destructive" Color="{StaticResource DestructiveColor}" />
+  <SolidColorBrush x:Key="Border" Color="{StaticResource BorderColor}" />
+  <SolidColorBrush x:Key="Input" Color="{StaticResource BorderColor}" />
+  <SolidColorBrush x:Key="Ring" Color="{StaticResource PrimaryColor}" />
+
+  <!-- Translucent variants (Tailwind /NN equivalents) -->
+  <SolidColorBrush x:Key="PrimarySoft" Color="{StaticResource PrimaryColor}" Opacity="0.10" />
+  <SolidColorBrush x:Key="PrimaryActive" Color="{StaticResource PrimaryColor}" Opacity="0.15" />
+  <SolidColorBrush x:Key="PrimaryRing" Color="{StaticResource PrimaryColor}" Opacity="0.30" />
+  <SolidColorBrush x:Key="Muted50" Color="{StaticResource MutedColor}" Opacity="0.50" />
+  <SolidColorBrush x:Key="Muted30" Color="{StaticResource MutedColor}" Opacity="0.30" />
+  <SolidColorBrush x:Key="Card50" Color="{StaticResource CardColor}" Opacity="0.50" />
+  <SolidColorBrush x:Key="DestructiveSoft" Color="{StaticResource DestructiveColor}" Opacity="0.15" />
+
+  <!-- Status tones (badges/toasts) -->
+  <SolidColorBrush x:Key="Ok" Color="#34D399" />
+  <SolidColorBrush x:Key="Warn" Color="#FBBF24" />
+
+  <!-- Radii (PWA radius token = .5rem) -->
+  <CornerRadius x:Key="RadiusLg">8</CornerRadius>
+  <CornerRadius x:Key="RadiusMd">6</CornerRadius>
+  <CornerRadius x:Key="RadiusSm">4</CornerRadius>
+
+  <!-- Fonts -->
+  <FontFamily x:Key="MonoFont">SF Mono,Menlo,Consolas,Cascadia Code,monospace</FontFamily>
+
+  <!-- Make Fluent theme surfaces follow our palette -->
+  <SolidColorBrush x:Key="ThemeBackgroundBrush" Color="{StaticResource BackgroundColor}" />
+  <SolidColorBrush x:Key="SystemControlBackgroundAltHighBrush" Color="{StaticResource BackgroundColor}" />
+</ResourceDictionary>

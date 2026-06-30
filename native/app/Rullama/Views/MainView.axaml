@@ -1,0 +1,33 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:Rullama.ViewModels"
+             mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+             x:Class="Rullama.Views.MainView"
+             x:DataType="vm:MainViewModel"
+             Background="#0E1116">
+  <Design.DataContext>
+    <vm:MainViewModel />
+  </Design.DataContext>
+
+  <StackPanel Margin="32" Spacing="16" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="640">
+    <TextBlock Text="{Binding Greeting}"
+               FontSize="22" FontWeight="SemiBold" Foreground="#F2F5F9"
+               HorizontalAlignment="Center"/>
+
+    <Button Content="Probe GPU"
+            Command="{Binding ProbeCommand}"
+            IsEnabled="{Binding !IsBusy}"
+            HorizontalAlignment="Center"
+            Padding="20,10"
+            Background="#2F6BFF" Foreground="White"
+            CornerRadius="8"/>
+
+    <Border Background="#171B22" CornerRadius="8" Padding="16" BorderBrush="#252B36" BorderThickness="1">
+      <TextBlock Text="{Binding Status}"
+                 TextWrapping="Wrap" Foreground="#C7D0DC"
+                 FontFamily="Cascadia Code,Menlo,Consolas,monospace"/>
+    </Border>
+  </StackPanel>
+</UserControl>

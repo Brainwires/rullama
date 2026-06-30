@@ -1,0 +1,77 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Rullama.ViewModels"
+             xmlns:svc="using:Rullama.Services"
+             x:Class="Rullama.Views.KnowledgeView"
+             x:DataType="vm:KnowledgeViewModel"
+             Background="{StaticResource Background}">
+  <Design.DataContext>
+    <vm:KnowledgeViewModel />
+  </Design.DataContext>
+
+  <ScrollViewer>
+    <StackPanel Margin="24" Spacing="14" MaxWidth="760" HorizontalAlignment="Center">
+      <TextBlock Classes="h1" Text="Knowledge" />
+      <TextBlock Classes="muted" TextWrapping="Wrap"
+                 Text="Index documents and search them semantically. Enable “Use knowledge base” in Chat → Tools to ground answers." />
+
+      <!-- Search -->
+      <TextBlock Classes="label" Text="SEARCH" />
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBox Grid.Column="0" Margin="0,0,6,0" Text="{Binding Query, Mode=TwoWay}"
+                 Watermark="Search your knowledge…" />
+        <Button Grid.Column="1" Classes="primary" Content="Search"
+                Command="{Binding SearchCommand}" IsEnabled="{Binding !IsBusy}" />
+      </Grid>
+      <ItemsControl ItemsSource="{Binding Results}">
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="svc:SearchHit">
+            <Border Classes="card" Padding="10" Margin="0,0,0,6">
+              <StackPanel Spacing="2">
+                <Grid ColumnDefinitions="*,Auto">
+                  <TextBlock Classes="label" Text="{Binding DocName}" />
+                  <TextBlock Grid.Column="1" Classes="mono" FontSize="10"
+                             Foreground="{StaticResource MutedForeground}"
+                             Text="{Binding Score, StringFormat={}{0:0.000}}" />
+                </Grid>
+                <TextBlock Text="{Binding Text}" TextWrapping="Wrap" MaxLines="4"
+                           TextTrimming="CharacterEllipsis" FontSize="12"
+                           Foreground="{StaticResource Foreground}" />
+              </StackPanel>
+            </Border>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+
+      <!-- Add content -->
+      <TextBlock Classes="label" Text="ADD CONTENT" />
+      <TextBox Text="{Binding PasteText, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap"
+               MinHeight="80" Watermark="Paste text to index…" />
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <Button Classes="primary" Content="Index text" Command="{Binding IndexPasteCommand}"
+                IsEnabled="{Binding !IsBusy}" />
+        <Button Classes="outline" Content="Upload .txt/.md/.pdf" Click="Upload_Click" IsEnabled="{Binding !IsBusy}" />
+      </StackPanel>
+      <ProgressBar IsVisible="{Binding IsBusy}" Minimum="0" Maximum="1" Value="{Binding Progress}" />
+      <TextBlock Classes="muted" Text="{Binding Status}" TextWrapping="Wrap" />
+
+      <!-- Documents -->
+      <TextBlock Classes="label" Text="DOCUMENTS" />
+      <ItemsControl ItemsSource="{Binding Documents}">
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="svc:DocumentRow">
+            <Grid ColumnDefinitions="*,Auto,Auto" Margin="0,2">
+              <TextBlock Grid.Column="0" Text="{Binding Name}" TextTrimming="CharacterEllipsis"
+                         Foreground="{StaticResource Foreground}" FontSize="12" VerticalAlignment="Center" />
+              <TextBlock Grid.Column="1" Classes="muted" FontSize="11" Margin="8,0"
+                         Text="{Binding ChunkCount, StringFormat={}{0} chunks}" VerticalAlignment="Center" />
+              <Button Grid.Column="2" Classes="ghost iconsm" Content="✕"
+                      Command="{Binding $parent[ItemsControl].((vm:KnowledgeViewModel)DataContext).DeleteDocumentCommand}"
+                      CommandParameter="{Binding}" />
+            </Grid>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

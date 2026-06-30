@@ -1,0 +1,44 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Rullama.ViewModels"
+             x:Class="Rullama.Views.ShellView"
+             x:DataType="vm:ShellViewModel"
+             Background="{StaticResource Background}">
+  <Design.DataContext>
+    <vm:ShellViewModel />
+  </Design.DataContext>
+
+  <DockPanel LastChildFill="True">
+    <!-- Header -->
+    <Border DockPanel.Dock="Top" Height="48"
+            Background="{StaticResource Card50}"
+            BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1">
+      <Grid Margin="12,0" ColumnDefinitions="Auto,*,Auto" VerticalAlignment="Center">
+        <TextBlock Grid.Column="0" Text="rullama"
+                   FontWeight="SemiBold" FontSize="15"
+                   Foreground="{StaticResource Foreground}" VerticalAlignment="Center" />
+
+        <!-- Tab segmented control -->
+        <Border Grid.Column="2" Background="{StaticResource Muted30}"
+                BorderBrush="{StaticResource Border}" BorderThickness="1"
+                CornerRadius="{StaticResource RadiusMd}" Padding="2">
+          <StackPanel Orientation="Horizontal" Spacing="2">
+            <Button Classes="tab" Classes.selected="{Binding IsChat}"
+                    Command="{Binding ShowCommand}" CommandParameter="chat" Content="Chat" />
+            <Button Classes="tab" Classes.selected="{Binding IsVoice}"
+                    Command="{Binding ShowCommand}" CommandParameter="voice" Content="Voice" />
+            <Button Classes="tab" Classes.selected="{Binding IsKnowledge}"
+                    Command="{Binding ShowCommand}" CommandParameter="knowledge" Content="Knowledge" />
+            <Button Classes="tab" Classes.selected="{Binding IsTune}"
+                    Command="{Binding ShowCommand}" CommandParameter="tune" Content="Tune" />
+            <Button Classes="tab" Classes.selected="{Binding IsSettings}"
+                    Command="{Binding ShowCommand}" CommandParameter="settings" Content="Settings" />
+          </StackPanel>
+        </Border>
+      </Grid>
+    </Border>
+
+    <!-- Active screen (ViewLocator maps the VM to its View) -->
+    <ContentControl Content="{Binding Current}" />
+  </DockPanel>
+</UserControl>

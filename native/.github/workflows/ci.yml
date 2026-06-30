@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      # Build the native FFI shim first — the .NET projects link/copy its output.
+      # (Skip `cargo test`: the wgpu probe test needs a GPU the runners lack.)
+      - name: Build rust-core
+        run: cargo build --release --manifest-path rust-core/Cargo.toml
+
+      # Build the desktop app + console smokes. The mobile heads (Android/iOS)
+      # need extra workloads and are built separately, so we don't build the .sln.
+      - name: Build desktop app
+        run: |
+          dotnet build app/Rullama.Desktop/Rullama.Desktop.csproj -c Release
+          dotnet build app/Rullama.ProbeSmoke/Rullama.ProbeSmoke.csproj -c Release

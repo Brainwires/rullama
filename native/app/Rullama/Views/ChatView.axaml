@@ -1,0 +1,249 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Rullama.ViewModels"
+             xmlns:c="using:Rullama.Controls"
+             xmlns:md="https://github.com/whistyun/Markdown.Avalonia"
+             x:Class="Rullama.Views.ChatView"
+             x:DataType="vm:ChatViewModel"
+             Background="{StaticResource Background}">
+  <Design.DataContext>
+    <vm:ChatViewModel />
+  </Design.DataContext>
+
+  <Grid ColumnDefinitions="280,*,340">
+    <!-- Left: conversation list (static for M1) -->
+    <Border Grid.Column="0" Background="{StaticResource Card}"
+            BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0">
+      <DockPanel Margin="10">
+        <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,8">
+          <TextBlock Classes="label" Text="HISTORY" VerticalAlignment="Center" />
+          <Button Grid.Column="1" Classes="outline sm" Content="New"
+                  Command="{Binding NewChatCommand}" />
+        </Grid>
+        <ScrollViewer>
+          <ItemsControl ItemsSource="{Binding Conversations}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:ConversationViewModel">
+                <Border Classes="convitem" Classes.active="{Binding IsActive}" Margin="0,1">
+                  <Grid ColumnDefinitions="*,Auto">
+                    <Button Grid.Column="0" Classes="ghost" HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Left" Padding="6,4"
+                            Command="{Binding $parent[ItemsControl].((vm:ChatViewModel)DataContext).SelectConversationCommand}"
+                            CommandParameter="{Binding}">
+                      <StackPanel>
+                        <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis"
+                                   Foreground="{StaticResource Foreground}" FontSize="12" />
+                        <TextBlock Text="{Binding RelativeTime}" Classes="muted" FontSize="10" />
+                      </StackPanel>
+                    </Button>
+                    <Button Grid.Column="1" Classes="ghost iconsm" Content="✕"
+                            Command="{Binding $parent[ItemsControl].((vm:ChatViewModel)DataContext).DeleteConversationCommand}"
+                            CommandParameter="{Binding}" />
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
+      </DockPanel>
+    </Border>
+
+    <!-- Center: load panel (until a model is loaded) OR conversation -->
+    <Panel Grid.Column="1">
+      <!-- Load panel -->
+      <Border IsVisible="{Binding !IsModelLoaded}" Padding="24"
+              HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="520">
+        <StackPanel Spacing="12">
+          <TextBlock Classes="h1" Text="rullama" HorizontalAlignment="Center" />
+          <TextBlock Classes="muted" HorizontalAlignment="Center" TextWrapping="Wrap"
+                     Text="Gemma 4, fully on-device. Load a GGUF (or an Ollama blob) to begin." />
+          <!-- Download from catalog -->
+          <TextBlock Classes="label" Text="DOWNLOAD A MODEL" />
+          <Grid ColumnDefinitions="*,Auto,Auto">
+            <ComboBox Grid.Column="0" Margin="0,0,6,0" HorizontalAlignment="Stretch"
+                      ItemsSource="{Binding Catalog}"
+                      SelectedItem="{Binding SelectedCatalogModel, Mode=TwoWay}" />
+            <Button Grid.Column="1" Classes="outline" Content="Download"
+                    Command="{Binding DownloadModelCommand}" IsVisible="{Binding !IsDownloading}" />
+            <Button Grid.Column="2" Classes="destructive" Content="Cancel"
+                    Command="{Binding CancelDownloadCommand}" IsVisible="{Binding IsDownloading}" />
+          </Grid>
+          <ProgressBar IsVisible="{Binding IsDownloading}" Minimum="0" Maximum="1"
+                       Value="{Binding DownloadProgress}" />
+
+          <TextBlock Classes="label" Text="OR USE A LOCAL FILE" Margin="0,8,0,0" />
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBox Grid.Column="0" Margin="0,0,6,0"
+                     Watermark="/path/to/model.gguf or Ollama blob"
+                     Text="{Binding ModelPath, Mode=TwoWay}" />
+            <Button Grid.Column="1" Classes="outline" Content="Browse…"
+                    Click="Browse_Click" />
+          </Grid>
+          <Button Classes="primary" Content="Load model"
+                  Command="{Binding LoadModelCommand}" IsEnabled="{Binding !IsBusy}"
+                  HorizontalAlignment="Center" />
+          <TextBlock Classes="muted" Text="{Binding Status}" HorizontalAlignment="Center"
+                     TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <!-- Conversation -->
+      <DockPanel IsVisible="{Binding IsModelLoaded}">
+        <!-- Composer -->
+        <Border DockPanel.Dock="Bottom" Background="{StaticResource Background}"
+                BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0" Padding="8">
+          <StackPanel Spacing="6">
+            <!-- pending image preview -->
+            <Border IsVisible="{Binding PendingImagePreview, Converter={x:Static ObjectConverters.IsNotNull}}"
+                    HorizontalAlignment="Left">
+              <StackPanel Orientation="Horizontal" Spacing="6">
+                <Image Source="{Binding PendingImagePreview}" Height="48" Stretch="Uniform" />
+                <Button Classes="ghost iconsm" Content="✕" Command="{Binding ClearImageCommand}"
+                        VerticalAlignment="Top" />
+              </StackPanel>
+            </Border>
+            <!-- pending audio chip -->
+            <Border IsVisible="{Binding PendingAudioLabel, Converter={x:Static ObjectConverters.IsNotNull}}"
+                    HorizontalAlignment="Left">
+              <StackPanel Orientation="Horizontal" Spacing="6">
+                <TextBlock Classes="muted" Text="{Binding PendingAudioLabel}" VerticalAlignment="Center" />
+                <Button Classes="ghost iconsm" Content="✕" Command="{Binding ClearAudioCommand}" />
+              </StackPanel>
+            </Border>
+            <Grid ColumnDefinitions="Auto,Auto,*,Auto">
+              <Button Grid.Column="0" Classes="ghost icon" Content="🖼"
+                      Click="AttachImage_Click" IsEnabled="{Binding IsVisionAvailable}"
+                      ToolTip.Tip="Attach image" />
+              <Button Grid.Column="1" Classes="ghost icon" Content="🎵"
+                      Click="AttachAudio_Click" IsEnabled="{Binding IsAudioAvailable}"
+                      ToolTip.Tip="Attach audio (WAV)" />
+              <TextBox Grid.Column="2" Margin="6,0"
+                       Watermark="Say something…  (Shift+Enter for newline)"
+                       Text="{Binding Input, Mode=TwoWay}"
+                       AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="140"
+                       KeyDown="Composer_KeyDown" />
+              <Button Grid.Column="3" Classes="primary" Content="Send"
+                      Command="{Binding SendCommand}" IsVisible="{Binding !IsBusy}" />
+              <Button Grid.Column="3" Classes="destructive" Content="Stop"
+                      Command="{Binding StopCommand}" IsVisible="{Binding IsBusy}" />
+            </Grid>
+          </StackPanel>
+        </Border>
+
+        <!-- Messages -->
+        <ScrollViewer x:Name="MessagesScroll" Padding="16,12">
+          <ItemsControl ItemsSource="{Binding Messages}" HorizontalAlignment="Stretch">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <!-- Stretch + MaxWidth: bubbles fill the column up to 760px, centered. -->
+                <StackPanel Spacing="8" MaxWidth="760" HorizontalAlignment="Stretch" />
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:ChatMessageViewModel">
+                <Border Classes="bubble" Classes.user="{Binding IsUser}">
+                  <StackPanel Spacing="4">
+                    <TextBlock Classes="label" Text="{Binding RoleLabel}" />
+                    <Image Source="{Binding Image}" IsVisible="{Binding HasImage}"
+                           MaxHeight="180" Stretch="Uniform" HorizontalAlignment="Left" />
+                    <!-- user turns: plain text -->
+                    <TextBlock Text="{Binding Content}" TextWrapping="Wrap"
+                               IsVisible="{Binding IsUser}"
+                               Foreground="{StaticResource Foreground}" FontSize="14" />
+                    <!-- model turns: markdown (tool markers cleaned) -->
+                    <md:MarkdownScrollViewer Markdown="{Binding DisplayContent}"
+                                             IsVisible="{Binding !IsUser}" />
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
+      </DockPanel>
+    </Panel>
+
+    <!-- Right: chat settings -->
+    <Border Grid.Column="2" Background="{StaticResource Card}"
+            BorderBrush="{StaticResource Border}" BorderThickness="1,0,0,0">
+      <DockPanel Margin="10">
+        <TextBlock DockPanel.Dock="Top" Classes="label" Text="CHAT SETTINGS" Margin="0,0,0,8" />
+        <TabControl>
+          <TabItem Header="Generation">
+            <ScrollViewer>
+              <StackPanel Spacing="12" Margin="0,8,0,0">
+                <StackPanel Spacing="4">
+                  <TextBlock Classes="label" Text="SYSTEM PROMPT" />
+                  <TextBox Text="{Binding SystemPrompt, Mode=TwoWay}"
+                           AcceptsReturn="True" TextWrapping="Wrap" MinHeight="64"
+                           Watermark="No system prompt set." />
+                </StackPanel>
+                <c:LabeledSlider Label="TEMPERATURE" Minimum="0" Maximum="2" Step="0.05"
+                                 Format="0.00" Value="{Binding Temperature, Mode=TwoWay}" />
+                <c:LabeledSlider Label="TOP-P" Minimum="0" Maximum="1" Step="0.01"
+                                 Format="0.00" Value="{Binding TopP, Mode=TwoWay}" />
+                <c:LabeledSlider Label="TOP-K" Minimum="0" Maximum="200" Step="1"
+                                 Format="0" Value="{Binding TopK, Mode=TwoWay}" />
+                <c:LabeledSlider Label="REPETITION PENALTY" Minimum="0.5" Maximum="2" Step="0.05"
+                                 Format="0.00" Value="{Binding RepetitionPenalty, Mode=TwoWay}" />
+                <c:LabeledSlider Label="MAX TOKENS" Minimum="16" Maximum="4096" Step="16"
+                                 Format="0" Value="{Binding MaxTokens, Mode=TwoWay}" />
+                <CheckBox IsChecked="{Binding ThinkingMode, Mode=TwoWay}" Content="Thinking mode" />
+                <Button Classes="outline sm" Content="Reset to defaults"
+                        Command="{Binding ResetDefaultsCommand}" HorizontalAlignment="Left" />
+              </StackPanel>
+            </ScrollViewer>
+          </TabItem>
+          <TabItem Header="Model">
+            <StackPanel Spacing="10" Margin="0,8,0,0">
+              <TextBlock Classes="muted" TextWrapping="Wrap" Text="{Binding Status}" />
+              <TextBlock Classes="label" Text="LORA ADAPTER" />
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Classes="outline sm" Content="Load adapter…" Click="LoadAdapter_Click"
+                        IsEnabled="{Binding IsModelLoaded}" />
+                <Button Classes="outline sm" Content="Clear" Command="{Binding ClearAdapterCommand}"
+                        IsEnabled="{Binding IsModelLoaded}" />
+              </StackPanel>
+              <TextBlock Classes="muted" FontSize="11" TextWrapping="Wrap" Text="{Binding AdapterStatus}" />
+
+              <TextBlock Classes="label" Text="KNOWLEDGE EDIT (ROME)" Margin="0,8,0,0" />
+              <TextBlock Classes="muted" FontSize="11" TextWrapping="Wrap"
+                         Text="Rewrites a fact in-place. Slow on this GPU." />
+              <TextBox Watermark="Prompt" Text="{Binding EditPrompt, Mode=TwoWay}" />
+              <TextBox Watermark="Subject" Text="{Binding EditSubject, Mode=TwoWay}" />
+              <TextBox Watermark="New target" Text="{Binding EditTarget, Mode=TwoWay}" />
+              <Button Classes="outline sm" Content="Apply edit" Command="{Binding RomeEditCommand}"
+                      IsEnabled="{Binding !IsEditing}" />
+              <TextBlock Classes="muted" FontSize="11" TextWrapping="Wrap" Text="{Binding EditStatus}" />
+            </StackPanel>
+          </TabItem>
+          <TabItem Header="Tools">
+            <ScrollViewer>
+              <StackPanel Spacing="12" Margin="0,8,0,0">
+                <CheckBox IsChecked="{Binding ToolCallingEnabled, Mode=TwoWay}"
+                          Content="Enable tool calling" />
+                <TextBlock Classes="muted" TextWrapping="Wrap"
+                           Text="Lets the model call get_weather and other tools via &lt;tool_call&gt; blocks." />
+                <StackPanel Spacing="4">
+                  <TextBlock Classes="label" Text="WEATHERAPI.COM KEY (OPTIONAL)" />
+                  <TextBox Text="{Binding WeatherApiKey, Mode=TwoWay}" PasswordChar="•"
+                           Watermark="blank = free Open-Meteo" />
+                </StackPanel>
+                <CheckBox IsChecked="{Binding UseFahrenheit, Mode=TwoWay}" Content="Use °F (imperial)" />
+                <CheckBox IsChecked="{Binding UseLocation, Mode=TwoWay}"
+                          Content="Use my location (IP-based) when none is given" />
+                <TextBlock Classes="label" Text="KNOWLEDGE" Margin="0,8,0,0" />
+                <CheckBox IsChecked="{Binding UseKnowledge, Mode=TwoWay}" IsEnabled="{Binding RagAvailable}"
+                          Content="Use knowledge base (RAG)" />
+                <TextBlock Classes="muted" FontSize="11" TextWrapping="Wrap"
+                           Text="Retrieves relevant chunks from the Knowledge tab to ground answers." />
+              </StackPanel>
+            </ScrollViewer>
+          </TabItem>
+          <TabItem Header="Speech">
+            <TextBlock Classes="muted" Margin="0,8" Text="Voice settings — M4." />
+          </TabItem>
+        </TabControl>
+      </DockPanel>
+    </Border>
+  </Grid>
+</UserControl>

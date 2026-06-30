@@ -1,0 +1,23 @@
+[package]
+name = "rullama-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+description = "C-ABI FFI shim over the published rullama crate, consumed by the React Native JSI TurboModule."
+
+[lib]
+name = "rullama_core"
+# staticlib  -> desktop (macOS/Windows) + iOS static linking
+# cdylib     -> Android .so (later)
+# rlib       -> native unit/smoke tests in this crate
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+rullama = "0.5"
+rullama-finetune = "0.5"
+pollster = "0.4"
+
+[profile.release]
+# wgpu/inference want optimization even in "debug" iteration; keep release lean.
+opt-level = 3

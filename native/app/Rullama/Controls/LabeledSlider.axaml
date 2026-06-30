@@ -1,0 +1,18 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Rullama.Controls.LabeledSlider"
+             x:Name="Root">
+  <StackPanel Spacing="2">
+    <Grid ColumnDefinitions="*,Auto">
+      <TextBlock Classes="label" Text="{Binding Label, ElementName=Root}" VerticalAlignment="Center" />
+      <TextBlock Grid.Column="1" Classes="mono" FontSize="11"
+                 Foreground="{StaticResource Foreground}"
+                 Text="{Binding ValueText, ElementName=Root}" />
+    </Grid>
+    <Slider Minimum="{Binding Minimum, ElementName=Root}"
+            Maximum="{Binding Maximum, ElementName=Root}"
+            TickFrequency="{Binding Step, ElementName=Root}"
+            IsSnapToTickEnabled="True"
+            Value="{Binding Value, ElementName=Root, Mode=TwoWay}" />
+  </StackPanel>
+</UserControl>
