@@ -10,7 +10,7 @@
 # On each (re)start this wrapper rebuilds — ONLY when stale — the two artifacts
 # the workspace/pnpm does NOT build for you, then bundles them with vite:
 #   1. the devserver binary  (EXCLUDED from the workspace; built via
-#      `--manifest-path dev-server/Cargo.toml`, its own target/)
+#      `--manifest-path services/dev-server/Cargo.toml`, its own target/)
 #   2. the wasm bundle pkg/  (built via wasm-pack from rullama-lora)
 # So a `pm2 restart` always ships CURRENT artifacts; a no-op restart stays fast.
 # This guard exists because a bumped Rust dep (e.g. rsqlite-wasm) otherwise
@@ -46,10 +46,10 @@ stale() {
 
 # 1. Devserver binary — manual build, EXCLUDED from the workspace (so `-p` /
 #    `cargo build --workspace` won't build it). Rebuild via --manifest-path.
-DEVSERVER_BIN="$REPO_ROOT/dev-server/target/release/rullama-devserver"
-if [ -n "$(stale "$DEVSERVER_BIN" dev-server/src dev-server/Cargo.toml dev-server/Cargo.lock)" ]; then
+DEVSERVER_BIN="$REPO_ROOT/services/dev-server/target/release/rullama-devserver"
+if [ -n "$(stale "$DEVSERVER_BIN" services/dev-server/src services/dev-server/Cargo.toml services/dev-server/Cargo.lock)" ]; then
     echo "[pm2-start] devserver stale — rebuilding (manual, --manifest-path)…"
-    cargo build --release --manifest-path dev-server/Cargo.toml \
+    cargo build --release --manifest-path services/dev-server/Cargo.toml \
         && echo "[pm2-start] devserver rebuilt ✓" \
         || echo "[pm2-start] ⚠ devserver build FAILED — launching the previous binary." >&2
 else
@@ -76,7 +76,7 @@ else
 fi
 
 echo "[pm2-start] rebuilding web/dist (vite)…"
-if (cd web && pnpm exec vite build); then
+if (cd apps/web && pnpm exec vite build); then
     echo "[pm2-start] web/dist rebuilt ✓"
 else
     # Don't crash-loop the server on a TS error — serve the last good dist and

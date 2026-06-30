@@ -18,8 +18,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # the sibling engine sub-workspace; flip to crates.io version pins
 # (rullama-engine = "0.6", rullama-lora = "0.6") once the engine publishes.
 [dependencies]
-rullama-engine = { path = "../../../rullama-framework/engine/rullama-engine" }
-rullama-lora = { path = "../../../rullama-framework/engine/rullama-lora" }
+rullama-engine = { path = "../../../../rullama-framework/engine/rullama-engine" }
+rullama-lora = { path = "../../../../rullama-framework/engine/rullama-lora" }
 pollster = "0.4"
 # M12: agentic tool-calling orchestration — run model-authored Rhai scripts that
 # call tools, with results memoized/replayed across the FFI boundary.

@@ -1,6 +1,6 @@
 # rullama-cli — the agentic CLI (brand: rullama). Extracted from
 # rullama-framework into its own repo. Standalone workspace: rullama-*
-# deps resolve via path to a sibling ../../rullama-framework checkout (flip to
+# deps resolve via path to a sibling ../../../rullama-framework checkout (flip to
 # crates.io version pins when the harness is published).
 [workspace]
 resolver = "2"
@@ -164,7 +164,7 @@ bincode.workspace = true
 rhai = { version = "1.23", features = ["sync", "serde"] }
 
 # ── rullama framework facade ──
-rullama = { path = "../../rullama-framework/crates/rullama", features = ["full"] }
+rullama = { path = "../../../rullama-framework/crates/rullama", features = ["full"] }
 
 # ── rullama framework crates (custom feature flags) ──
 rullama-agent = { workspace = true }
@@ -223,38 +223,38 @@ chrono = "0.4"
 
 [workspace.dependencies]
 # Internal crates
-rullama-core = { path = "../../rullama-framework/crates/rullama-core", version = "0.12.0", default-features = false }
-rullama-tool-runtime = { path = "../../rullama-framework/crates/rullama-tool-runtime", version = "0.12.0", default-features = false }
-rullama-tool-builtins = { path = "../../rullama-framework/crates/rullama-tool-builtins", version = "0.12.0", default-features = false }
-rullama-agent = { path = "../../rullama-framework/crates/rullama-agent", version = "0.12.0", default-features = false }
-rullama-storage = { path = "../../rullama-framework/crates/rullama-storage", version = "0.12.0", default-features = false }
-rullama-stores = { path = "../../rullama-framework/crates/rullama-stores", version = "0.12.0", default-features = false }
-rullama-memory = { path = "../../rullama-framework/crates/rullama-memory", version = "0.12.0" }
-rullama-mdap = { path = "../../rullama-framework/crates/rullama-mdap", version = "0.12.0" }
-rullama-skills = { path = "../../rullama-framework/crates/rullama-skills", version = "0.12.0" }
-rullama-seal = { path = "../../rullama-framework/crates/rullama-seal", version = "0.12.0", default-features = false }
-rullama-eval = { path = "../../rullama-framework/crates/rullama-eval", version = "0.12.0" }
-rullama-inference = { path = "../../rullama-framework/crates/rullama-inference", version = "0.12.0", default-features = false }
-rullama-mcp-client = { path = "../../rullama-framework/crates/rullama-mcp-client", version = "0.12.0" }
-rullama-permission = { path = "../../rullama-framework/crates/rullama-permission", version = "0.12.0" }
-rullama-sandbox = { path = "../../rullama-framework/crates/rullama-sandbox", version = "0.12.0", default-features = false }
-rullama-network = { path = "../../rullama-framework/crates/rullama-network", version = "0.12.0" }
-rullama-mcp-server = { path = "../../rullama-framework/crates/rullama-mcp-server", version = "0.12.0" }
-rullama-a2a = { path = "../../rullama-framework/crates/rullama-a2a", version = "0.12.0", default-features = false }
-rullama-provider = { path = "../../rullama-framework/crates/rullama-provider", version = "0.12.0", default-features = false, features = ["native"] }
-rullama-provider-speech = { path = "../../rullama-framework/crates/rullama-provider-speech", version = "0.12.0", default-features = false }
-rullama-call-policy = { path = "../../rullama-framework/crates/rullama-call-policy", version = "0.12.0", default-features = false }
-rullama-hardware = { path = "../../rullama-framework/crates/rullama-hardware", version = "0.12.0" }
-rullama-finetune = { path = "../../rullama-framework/crates/rullama-finetune", version = "0.12.0" }
-rullama-datasets = { path = "../../rullama-framework/crates/rullama-datasets", version = "0.12.0", default-features = false }
+rullama-core = { path = "../../../rullama-framework/crates/rullama-core", version = "0.12.0", default-features = false }
+rullama-tool-runtime = { path = "../../../rullama-framework/crates/rullama-tool-runtime", version = "0.12.0", default-features = false }
+rullama-tool-builtins = { path = "../../../rullama-framework/crates/rullama-tool-builtins", version = "0.12.0", default-features = false }
+rullama-agent = { path = "../../../rullama-framework/crates/rullama-agent", version = "0.12.0", default-features = false }
+rullama-storage = { path = "../../../rullama-framework/crates/rullama-storage", version = "0.12.0", default-features = false }
+rullama-stores = { path = "../../../rullama-framework/crates/rullama-stores", version = "0.12.0", default-features = false }
+rullama-memory = { path = "../../../rullama-framework/crates/rullama-memory", version = "0.12.0" }
+rullama-mdap = { path = "../../../rullama-framework/crates/rullama-mdap", version = "0.12.0" }
+rullama-skills = { path = "../../../rullama-framework/crates/rullama-skills", version = "0.12.0" }
+rullama-seal = { path = "../../../rullama-framework/crates/rullama-seal", version = "0.12.0", default-features = false }
+rullama-eval = { path = "../../../rullama-framework/crates/rullama-eval", version = "0.12.0" }
+rullama-inference = { path = "../../../rullama-framework/crates/rullama-inference", version = "0.12.0", default-features = false }
+rullama-mcp-client = { path = "../../../rullama-framework/crates/rullama-mcp-client", version = "0.12.0" }
+rullama-permission = { path = "../../../rullama-framework/crates/rullama-permission", version = "0.12.0" }
+rullama-sandbox = { path = "../../../rullama-framework/crates/rullama-sandbox", version = "0.12.0", default-features = false }
+rullama-network = { path = "../../../rullama-framework/crates/rullama-network", version = "0.12.0" }
+rullama-mcp-server = { path = "../../../rullama-framework/crates/rullama-mcp-server", version = "0.12.0" }
+rullama-a2a = { path = "../../../rullama-framework/crates/rullama-a2a", version = "0.12.0", default-features = false }
+rullama-provider = { path = "../../../rullama-framework/crates/rullama-provider", version = "0.12.0", default-features = false, features = ["native"] }
+rullama-provider-speech = { path = "../../../rullama-framework/crates/rullama-provider-speech", version = "0.12.0", default-features = false }
+rullama-call-policy = { path = "../../../rullama-framework/crates/rullama-call-policy", version = "0.12.0", default-features = false }
+rullama-hardware = { path = "../../../rullama-framework/crates/rullama-hardware", version = "0.12.0" }
+rullama-finetune = { path = "../../../rullama-framework/crates/rullama-finetune", version = "0.12.0" }
+rullama-datasets = { path = "../../../rullama-framework/crates/rullama-datasets", version = "0.12.0", default-features = false }
 # `rullama-finetune-local` and `rullama-training` were moved out of this
 # framework into the `rullama` workspace (LoRA/QLoRA/DoRA + future
 # training-from-scratch live there now). See CHANGELOG [Unreleased].
-rullama-knowledge = { path = "../../rullama-framework/crates/rullama-knowledge", version = "0.12.0", default-features = false }
-rullama-rag = { path = "../../rullama-framework/crates/rullama-rag", version = "0.12.0", default-features = false }
-rullama-prompting = { path = "../../rullama-framework/crates/rullama-prompting", version = "0.12.0", default-features = false }
-rullama-reasoning = { path = "../../rullama-framework/crates/rullama-reasoning", version = "0.12.0" }
-rullama-telemetry  = { path = "../../rullama-framework/crates/rullama-telemetry",  version = "0.12.0", default-features = false }
+rullama-knowledge = { path = "../../../rullama-framework/crates/rullama-knowledge", version = "0.12.0", default-features = false }
+rullama-rag = { path = "../../../rullama-framework/crates/rullama-rag", version = "0.12.0", default-features = false }
+rullama-prompting = { path = "../../../rullama-framework/crates/rullama-prompting", version = "0.12.0", default-features = false }
+rullama-reasoning = { path = "../../../rullama-framework/crates/rullama-reasoning", version = "0.12.0" }
+rullama-telemetry  = { path = "../../../rullama-framework/crates/rullama-telemetry",  version = "0.12.0", default-features = false }
 # `rullama-autonomy` and `rullama-proxy` live in `extras/`. They are
 # workspace-only (publish = false) and no `crates/` member depends on them, so
 # they intentionally do NOT appear in [workspace.dependencies] — that table is

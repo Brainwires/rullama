@@ -36,7 +36,7 @@ struct Args {
     #[arg(long)]
     repo_root: Option<PathBuf>,
 
-    // --- security knobs (see dev-server/src/config.rs) ---
+    // --- security knobs (see services/dev-server/src/config.rs) ---
     /// Apply tunnel-safe defaults: serve dist/ instead of Vite proxy,
     /// disable /api/log, /api/models, /__rullama-dev-ws. Use this when
     /// cloudflared is up and the devserver is exposed at a public URL.

@@ -46,7 +46,7 @@ fn dev() -> ExitCode {
     // rullama-devserver is excluded from the workspace (see Cargo.toml
     // exclude list — keeps it out of `cargo build --workspace --target
     // wasm32-unknown-unknown`). Run it via --manifest-path.
-    let manifest = Path::new("dev-server/Cargo.toml");
+    let manifest = Path::new("services/dev-server/Cargo.toml");
     if !manifest.is_file() {
         eprintln!(
             "xtask: {} not found; are you in the repo root?",
@@ -61,15 +61,15 @@ fn dev() -> ExitCode {
     // so what's served always matches source. Local-dev mode reverse-proxies to
     // Vite (builds on the fly), so there's nothing to pre-build there.
     if forwarded.iter().any(|a| a == "--public") {
-        eprintln!("$ pnpm -C web build   (refreshing web/dist/ for the --public static serve)");
-        match Command::new("pnpm").args(["-C", "web", "build"]).status() {
+        eprintln!("$ pnpm -C apps/web build   (refreshing web/dist/ for the --public static serve)");
+        match Command::new("pnpm").args(["-C", "apps/web", "build"]).status() {
             Ok(s) if s.success() => {}
             Ok(s) => eprintln!(
                 "xtask: web build failed (exit {}); serving the existing web/dist/ as-is",
                 s.code().unwrap_or(-1)
             ),
             Err(e) => eprintln!(
-                "xtask: could not run `pnpm -C web build` ({e}); serving the existing web/dist/ as-is"
+                "xtask: could not run `pnpm -C apps/web build` ({e}); serving the existing web/dist/ as-is"
             ),
         }
     }

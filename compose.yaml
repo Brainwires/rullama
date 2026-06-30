@@ -40,7 +40,7 @@ services:
       OLLAMA_MODELS: "/ollama/models"
       # BYOK cloud proxy target (Cloudflare Worker host, no scheme). When set,
       # nginx reverse-proxies /api/cloud/* here; unset → /api/cloud/* returns
-      # 503. Deploy worker/ via `npx wrangler deploy`, then set this to its
+      # 503. Deploy services/worker/ via `npx wrangler deploy`, then set this to its
       # host, e.g. rullama-cloud-proxy.<subdomain>.workers.dev
       CLOUD_WORKER_HOST: "${CLOUD_WORKER_HOST:-}"
 

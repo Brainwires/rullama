@@ -3,13 +3,13 @@
 The **rullama apps** — the consumer product family, all running **Gemma 4 on your
 local GPU** (with optional cloud providers). This repo holds three front-ends:
 
-- **`web/`** — a browser-resident AI **PWA** (React + Vite + Tailwind + Workbox)
+- **`apps/web/`** — a browser-resident AI **PWA** (React + Vite + Tailwind + Workbox)
   that runs inference **in the browser** via WebGPU + WASM. Chat (text / vision /
   audio-input), a Knowledge tab (drop docs → embed → RAG), a Fine-tune tab
   (in-browser LoRA), and a Voice tab — your data never has to leave the device.
-- **`native/`** — the **desktop + mobile** app (.NET / Avalonia) with a Rust
+- **`apps/native/`** — the **desktop + mobile** app (.NET / Avalonia) with a Rust
   `rust-core` C-ABI shim. Ships to the app stores.
-- **`cli/`** — the **agentic CLI** (BYOK providers, tools, MCP, sessions).
+- **`apps/cli/`** — the **agentic CLI** (BYOK providers, tools, MCP, sessions).
 
 All three build on the **[rullama-framework](https://github.com/Brainwires/rullama-framework)**
 platform — the OSS inference **engine** (`rullama-engine` + the `rullama-lora`
@@ -25,9 +25,9 @@ providers, MCP). The engine + harness live in that sibling repo, not here.
 
 | App | Consumes the platform via |
 |-----|---------------------------|
-| `web/` | the engine's **wasm bundle** at `/pkg/rullama.js` (built from `rullama-framework/engine/rullama-lora`), driven in a Worker; cloud via the BYOK `/api/cloud/*` proxy. |
-| `native/` | the **C-ABI** `rust-core` shim linking `rullama-engine` + `rullama-lora` directly (P/Invoke — no HTTP, no wasm). |
-| `cli/` | **path-deps** the `rullama-framework` harness crates (its own Cargo workspace). |
+| `apps/web/` | the engine's **wasm bundle** at `/pkg/rullama.js` (built from `rullama-framework/engine/rullama-lora`), driven in a Worker; cloud via the BYOK `/api/cloud/*` proxy. |
+| `apps/native/` | the **C-ABI** `rust-core` shim linking `rullama-engine` + `rullama-lora` directly (P/Invoke — no HTTP, no wasm). |
+| `apps/cli/` | **path-deps** the `rullama-framework` harness crates (its own Cargo workspace). |
 
 The dev-server can also host the engine over an OpenAI-compatible
 `/v1/chat/completions` endpoint for any local client.
@@ -36,19 +36,20 @@ The dev-server can also host the engine over an OpenAI-compatible
 
 | Path | What it is |
 |------|------------|
-| `web/` | The PWA (React + Vite + Tailwind + Workbox SW). Imports the engine wasm bundle from `/pkg/rullama.js`. |
-| `native/` | Desktop + mobile app: `app/` (.NET / Avalonia) + `rust-core/` (C-ABI cdylib over the engine). Own build; excluded from the root workspace. |
-| `cli/` | The agentic CLI — its own Cargo workspace (own `Cargo.lock`), path-deps `../rullama-framework`. Excluded from the root workspace. |
-| `dev-server/` | The dev/serve HTTP server (Vite proxy, `/api/blob`, `/api/models`, `/api/cloud/*`, `/pkg/*`, cross-repo wasm-bundle watcher). Excluded from the workspace; run via `--manifest-path`. |
+| `apps/web/` | The PWA (React + Vite + Tailwind + Workbox SW). Imports the engine wasm bundle from `/pkg/rullama.js`. |
+| `apps/native/` | Desktop + mobile app: `app/` (.NET / Avalonia) + `rust-core/` (C-ABI cdylib over the engine). Own build; excluded from the root workspace. |
+| `apps/cli/` | The agentic CLI — its own Cargo workspace (own `Cargo.lock`), path-deps `../../../rullama-framework`. Excluded from the root workspace. |
+| `services/dev-server/` | The dev/serve HTTP server (Vite proxy, `/api/blob`, `/api/models`, `/api/cloud/*`, `/pkg/*`, cross-repo wasm-bundle watcher). Excluded from the workspace; run via `--manifest-path`. |
+| `services/worker/` | Cloudflare Worker — the production BYOK cloud proxy (deployed standalone via `wrangler`). |
 | `xtask/` | `cargo dev` + `cargo docker:*` dispatcher (std-only). The root workspace is just this. |
-| `pkg/` | The engine wasm bundle (built artifact, `--out-name rullama`; gitignored). |
+| `pkg/` | The engine wasm bundle (built artifact, `--out-name rullama`; gitignored, at the repo root). |
 
 The inference engine + LoRA trainer live in the
 [rullama-framework](https://github.com/Brainwires/rullama-framework) repo as
 `rullama-engine` / `rullama-lora` (an isolated `engine/` wasm32 sub-workspace).
 The iOS bench harness moved there too (`engine/tools/ios-bench`).
 
-## `web/` — what works today
+## `apps/web/` — what works today
 
 - ✅ **`gemma4:e2b` text inference on the desktop** loads end-to-end and
   generates greedy output bit-identical to Ollama. (`gemma4:e4b` is
@@ -86,7 +87,7 @@ The iOS bench harness moved there too (`engine/tools/ios-bench`).
   currently skips the vision/audio towers to fit in shared RAM. Lazy
   upload for those is a follow-up.
 
-## `web/` — running the browser PWA
+## `apps/web/` — running the browser PWA
 
 You need:
 - Rust ≥ 1.91 + `wasm-pack` (`cargo install wasm-pack --locked --version 0.13.1`)
@@ -115,14 +116,14 @@ documented in the rullama-framework engine repo.)
 
 ### The PWA
 
-The user-facing browser app lives in `web/` — a production-quality React + Vite
+The user-facing browser app lives in `apps/web/` — a production-quality React + Vite
 + Tailwind + Workbox chat PWA (service-worker offline shell, restart dialog on
 deploys, attachment UI, conversation history in OPFS + SQLite via
 `rsqlite-wasm`) built against the shared wasm bundle.
 
 ```sh
 # React / Vite PWA — auto-runs the wasm bundle build via `pnpm dev`.
-cd web
+cd apps/web
 pnpm install
 pnpm dev                 # https://localhost:5173/
 ```
@@ -144,18 +145,18 @@ The PWA is fully drivable from the Mac via Apple's `safaridriver`:
 #                                  Feature Flags → WebGPU = on
 # Then on the Mac:
 safaridriver -p 4444 &
-./web/serve-iphone.sh            # HTTPS serve reachable from the phone's Safari
-./web/test/iphone-test.sh        # navigate → Load → chat → log perf
+./apps/web/serve-iphone.sh            # HTTPS serve reachable from the phone's Safari
+./apps/web/test/iphone-test.sh        # navigate → Load → chat → log perf
 ```
 
 `/tmp/rullama-page.log` collects beacon traces from the page (`[chat]`,
 `[pe]`, `[tg]`, `[gen]`, `[wkr]`, `[rs]`) so any regression in a phone
 run leaves a server-side trail even after a WebContent crash.
 
-## `native/` — the desktop + mobile app
+## `apps/native/` — the desktop + mobile app
 
-A **.NET 9 / Avalonia 11** app (`native/app/`, `Rullama.sln`) over a Rust
-**C-ABI shim** (`native/rust-core/`, a `cdylib`/`staticlib`) that links the engine
+A **.NET 9 / Avalonia 11** app (`apps/native/app/`, `Rullama.sln`) over a Rust
+**C-ABI shim** (`apps/native/rust-core/`, a `cdylib`/`staticlib`) that links the engine
 crates directly — no HTTP, no wasm. Runs on macOS / Windows / Linux desktop
 (builds with the plain `dotnet` SDK, no Xcode) plus an Android head; iOS needs
 Xcode 16. The engine `Model` is `!Send`, so each handle owns one OS thread and
@@ -165,7 +166,7 @@ calls are marshalled to it inside Rust (`Avalonia → RustCore P/Invoke → rust
 ROME editing are wired. Shipped through the app stores.
 
 ```bash
-cd native
+cd apps/native
 cargo build --manifest-path rust-core/Cargo.toml --release   # build the C-ABI core
 ./scripts/build-rust.sh release                              # stage the native lib
 dotnet run --project app/Rullama.ProbeSmoke                  # verify the P/Invoke path
@@ -173,10 +174,10 @@ dotnet run --project app/Rullama.Desktop                     # run the desktop a
 ```
 
 `rust-core` is excluded from the root workspace (it links wgpu); it path-deps
-`../../rullama-framework/engine/{rullama-engine,rullama-lora}`. See
-[`native/README.md`](native/README.md) for the full toolchain + heads.
+`../../../../rullama-framework/engine/{rullama-engine,rullama-lora}`. See
+[`apps/native/README.md`](apps/native/README.md) for the full toolchain + heads.
 
-## `cli/` — the agentic CLI
+## `apps/cli/` — the agentic CLI
 
 An AI agentic coding CLI (installed binary: **`rullama`**) — multi-agent
 orchestrator/worker decomposition, a rich tool system (file/bash/git/web), an MCP
@@ -185,16 +186,16 @@ semantic conversation memory. **BYOK**: on first run it prompts you to pick a
 provider (Ollama-local / OpenAI / Anthropic / …) — no hosted account.
 
 ```bash
-cd cli
+cd apps/cli
 cargo build --release
 cargo install --path .        # installs the `rullama` binary
 rullama                       # first run: pick + configure a provider
 ```
 
-`cli/` is its own Cargo workspace (own `Cargo.lock`), excluded from the root and
-path-depping the `../../rullama-framework` harness crates. The legacy Studio
+`apps/cli/` is its own Cargo workspace (own `Cargo.lock`), excluded from the root and
+path-depping the `../../../rullama-framework` harness crates. The legacy Studio
 remote-bridge (web control of CLI agents) is kept behind the off-by-default
-`remote-bridge` feature. See [`cli/README.md`](cli/README.md).
+`remote-bridge` feature. See [`apps/cli/README.md`](apps/cli/README.md).
 
 ## Docker / deploy
 
@@ -246,7 +247,7 @@ vs. the multi-forward path.
 
 **In the browser:** the unified wasm bundle (see [Get the wasm bundle](#get-the-wasm-bundle-from-the-engine))
 exposes `TrainingSession` to JS alongside `Model`. The Fine-tune tab in
-`web/` drives a full session — dataset upload, hyperparam UI, live
+`apps/web/` drives a full session — dataset upload, hyperparam UI, live
 loss chart, save adapter to OPFS as safetensors. The same `Model` that's
 loaded for inference accepts the trained adapter via `Model.loadAdapter(bytes)`
 (re-runs in the chat tab against the adapted weights).
@@ -257,7 +258,7 @@ repo against `rullama-lora` (e.g.
 `cargo run -p rullama-lora --release --example overfit_one -- <gguf>`). See
 the engine repo's README.
 
-## Web app architecture (`web/`)
+## Web app architecture (`apps/web/`)
 
 ```
 PWA (host page) ──┐
@@ -309,7 +310,7 @@ The reference Go implementation lives in Ollama's tree under
 `multimodal/vision.rs`, and `multimodal/audio.rs` corresponds 1:1 — see the
 `rullama-engine` crate in the [`rullama-framework`](../rullama-framework) repo.
 
-## Web app performance (`web/`)
+## Web app performance (`apps/web/`)
 
 Measurements as of M15:
 

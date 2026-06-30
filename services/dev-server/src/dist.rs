@@ -29,7 +29,7 @@ pub async fn fallback_handler(State(state): State<Arc<AppState>>, req: Request) 
     // canonically use it as a space.
     let decoded = percent_decode(raw);
     let path: &str = &decoded;
-    let dist_dir = state.paths.repo_root.join("web/dist");
+    let dist_dir = state.paths.repo_root.join("apps/web/dist");
     // Canonicalize the base ONCE and reject any path that escapes it.
     let base = match tokio::fs::canonicalize(&dist_dir).await {
         Ok(b) => b,

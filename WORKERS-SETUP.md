@@ -1,7 +1,7 @@
 # Cloudflare Worker setup — rullama cloud proxy
 
 This guide sets up the **Cloudflare Worker** that proxies rullama's opt-in cloud
-chat (Ollama Cloud + OpenAI) in production. The Worker lives in [`worker/`](worker/).
+chat (Ollama Cloud + OpenAI) in production. The Worker lives in [`services/worker/`](services/worker/).
 
 ## Why a Worker at all
 
@@ -48,7 +48,7 @@ prefix via the trailing slash on `proxy_pass`). `{provider}` ∈ `ollama | opena
 
 ## 1. Configure allowed origins
 
-Edit [`worker/wrangler.toml`](worker/wrangler.toml) → `[vars] CORS_ORIGINS` to
+Edit [`services/worker/wrangler.toml`](services/worker/wrangler.toml) → `[vars] CORS_ORIGINS` to
 the PWA origin(s) that may call the Worker **directly** (the override path).
 The normal nginx→Worker path is server-side and ignores CORS, so this is only
 for the power-user/override case. Comma-separated; `*` allowed but discouraged.
@@ -152,7 +152,7 @@ The proxy uses ~1–3 ms CPU/request and 1 subrequest — comfortably inside the
 
 ## Updating the Worker
 
-Edit `worker/src/index.ts`, then `cd worker && npx wrangler deploy`. It's
+Edit `services/worker/src/index.ts`, then `cd services/worker && npx wrangler deploy`. It's
 deployed **out-of-band** — `cargo docker:*` does NOT build or deploy it.
 
 ## Troubleshooting

@@ -44,7 +44,7 @@ RUN corepack enable && corepack prepare pnpm@10.13.1 --activate
 # Bring in the source + the prebuilt wasm bundle from the build context. The
 # Vite alias for `/pkg` points at the project root, so `pkg/` must live at
 # /build/pkg/. (Build `pkg/` on the host before `docker build` — see the header.)
-COPY              web                 ./web
+COPY              apps/web            ./web
 COPY              pkg                 ./pkg
 
 WORKDIR /build/web

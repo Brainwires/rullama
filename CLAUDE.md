@@ -61,7 +61,7 @@ wasm-pack build rullama-lora --target web --release \
 ```
 
 - `cargo dev` (local): the devserver watcher rebuilds the bundle from the engine
-  checkout when its source changes (`dev-server/src/watcher.rs` +
+  checkout when its source changes (`services/dev-server/src/watcher.rs` +
   `state.rs::engine_dir`). No engine checkout → it serves a prebuilt `pkg/` as-is.
 - `ops/pm2/start.sh` (prod): stale-checks the engine source and rebuilds `pkg/`
   on `pm2 restart`, else serves the prebuilt bundle.
@@ -80,11 +80,11 @@ cargo dev -- --public    # tunnel-safe (dist/ static serve, hardened defaults)
 cargo dev -- --help      # all flags
 
 # PWA build / typecheck
-pnpm -C web build
-pnpm -C web dev          # (cargo dev wraps this via the Vite proxy)
+pnpm -C apps/web build
+pnpm -C apps/web dev          # (cargo dev wraps this via the Vite proxy)
 
 # devserver standalone (it's excluded from the workspace)
-cargo build --manifest-path dev-server/Cargo.toml --release
+cargo build --manifest-path services/dev-server/Cargo.toml --release
 
 cargo build              # workspace = just xtask now
 cargo clippy --workspace --all-targets
@@ -97,8 +97,8 @@ The user-facing PWA lives in `web/` (React + Vite + Tailwind + Workbox SW),
 built against the shared `pkg/` wasm bundle. `cargo dev` runs the devserver and
 (when an engine checkout is present) keeps the bundle fresh.
 
-iPhone / safaridriver runs go through `web/serve-iphone.sh` / `web/serve-tunnel.sh`
-and `web/test/iphone-test.sh`. Logs land at `/tmp/rullama-page.log` (beacons:
+iPhone / safaridriver runs go through `apps/web/serve-iphone.sh` / `apps/web/serve-tunnel.sh`
+and `apps/web/test/iphone-test.sh`. Logs land at `/tmp/rullama-page.log` (beacons:
 `[chat]`, `[pe]`, `[tg]`, `[gen]`, `[wkr]`, `[rs]`). Engine/kernel parity is the
 engine repo's concern — verify there before touching the iPhone path.
 
@@ -120,7 +120,7 @@ Add a task by appending a match arm in `xtask/src/main.rs` and the alias line in
 
 ## Dev server modes
 
-`cargo dev` runs the native Rust devserver at `dev-server/`. Two modes:
+`cargo dev` runs the native Rust devserver at `services/dev-server/`. Two modes:
 
 | Mode | Command | Vite proxy? | `/api/log` writeable? | `/api/models` listed? | Use when |
 |------|---------|-------------|-----------------------|-----------------------|----------|

@@ -15,9 +15,9 @@ members = [
 # The inference engine + harness live in the sibling rullama-framework repo. See
 # README.md and rullama-framework/docs/ARCHITECTURE-engine-harness.md.
 exclude = [
-    "dev-server",
-    "cli",
-    "native/rust-core",
+    "services/dev-server",
+    "apps/cli",
+    "apps/native/rust-core",
 ]
 
 [workspace.package]
