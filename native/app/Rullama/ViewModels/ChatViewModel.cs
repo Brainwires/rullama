@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -11,18 +12,34 @@ using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Rullama.Services;
+using Rullama.Services.Tools;
 
 namespace Rullama.ViewModels;
 
-/// <summary>Chat screen: model load + streaming conversation + SQLite history (M1).</summary>
+/// <summary>Chat screen: model load + background-queued streaming conversation +
+/// SQLite history (M1, extended for the M11 generation queue).</summary>
 public partial class ChatViewModel : ViewModelBase
 {
+    private const string NewChatTitle = "New chat";
+
     private readonly InferenceClient _engine = new();
     private readonly ConversationStore _store = new();
     private readonly SettingsStore _settings = new();
     private readonly RagService _rag;
-    private CancellationTokenSource? _cts;
+    private readonly QueueStore _queueStore = new();
+    private readonly GenerationQueue _queue;
     private string? _activeConvId;
+
+    // M11: per-conversation live partial reply (lets a user switch away from a
+    // generating conversation and back without losing tokens past the last DB
+    // flush). Touched from the native worker thread (content) + UI thread (Vm).
+    private sealed class LiveBuffer
+    {
+        public long ModelRowId;
+        public string Content = string.Empty;
+        public ChatMessageViewModel? Vm;
+    }
+    private readonly ConcurrentDictionary<string, LiveBuffer> _live = new();
 
     [ObservableProperty] private bool _useKnowledge;
     public bool RagAvailable => RagService.Available;
@@ -83,11 +100,15 @@ public partial class ChatViewModel : ViewModelBase
     [NotifyCanExecuteChangedFor(nameof(LoadModelCommand))]
     private bool _isModelLoaded;
 
+    /// <summary>True while a model is being loaded (gates Load).</summary>
     [ObservableProperty]
-    [NotifyCanExecuteChangedFor(nameof(SendCommand))]
-    [NotifyCanExecuteChangedFor(nameof(StopCommand))]
     [NotifyCanExecuteChangedFor(nameof(LoadModelCommand))]
-    private bool _isBusy;
+    private bool _isLoadingModel;
+
+    /// <summary>True while the generation pump is doing work anywhere (M11).</summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(LoadModelCommand))]
+    private bool _genActive;
 
     [ObservableProperty]
     private string _modelPath = string.Empty;
@@ -170,9 +191,36 @@ public partial class ChatViewModel : ViewModelBase
 
     // ---- tool calling (Tools tab) ----
     [ObservableProperty] private bool _toolCallingEnabled;
+    [ObservableProperty] private bool _orchestratorMode; // M12: Rhai orchestration
     [ObservableProperty] private string _weatherApiKey = string.Empty;
+    [ObservableProperty] private string _gnewsApiKey = string.Empty;
     [ObservableProperty] private bool _useFahrenheit;
     [ObservableProperty] private bool _useLocation;
+
+    /// <summary>Build the tool registry from the current tool settings (M12).</summary>
+    private ToolRegistry BuildToolRegistry()
+    {
+        var reg = new ToolRegistry()
+            .Add(new WeatherTool(UseFahrenheit, string.IsNullOrWhiteSpace(WeatherApiKey) ? null : WeatherApiKey.Trim(), UseLocation))
+            .Add(new WikipediaTool());
+        if (RagService.Available) reg.Add(new KnowledgeTool(_rag));
+        if (!string.IsNullOrWhiteSpace(GnewsApiKey)) reg.Add(new NewsTool(GnewsApiKey.Trim()));
+        return reg;
+    }
+
+    /// <summary>Strip a markdown code fence from a model-authored Rhai script.</summary>
+    private static string ExtractScript(string raw)
+    {
+        string s = raw.Trim();
+        int fence = s.IndexOf("```", StringComparison.Ordinal);
+        if (fence >= 0)
+        {
+            int nl = s.IndexOf('\n', fence);
+            int end = s.IndexOf("```", fence + 3, StringComparison.Ordinal);
+            if (nl >= 0 && end > nl) return s.Substring(nl + 1, end - nl - 1).Trim();
+        }
+        return s;
+    }
 
     partial void OnTemperatureChanged(double value) => ApplySampling();
     partial void OnTopKChanged(double value) => ApplySampling();
@@ -200,8 +248,15 @@ public partial class ChatViewModel : ViewModelBase
     private string BuildSystemContent()
     {
         string s = SystemPrompt.Trim();
-        if (ToolCallingEnabled)
+        if (OrchestratorMode)
+        {
+            string pre = BuildToolRegistry().BuildPreamble();
+            s = s.Length > 0 ? pre + "\n\n" + s : pre;
+        }
+        else if (ToolCallingEnabled)
+        {
             s = s.Length > 0 ? ToolFormat.ToolSchemaPrompt + "\n\n" + s : ToolFormat.ToolSchemaPrompt;
+        }
         if (ThinkingMode) s = "<|think|>" + s; // PWA prepends silently
         return s;
     }
@@ -211,15 +266,31 @@ public partial class ChatViewModel : ViewModelBase
     public ChatViewModel(RagService? rag)
     {
         _rag = rag ?? new RagService();
+        _queue = new GenerationQueue(RunJobAsync);
+        _queue.Changed += OnQueueChanged;
+
         ModelPath = _settings.Get("modelPath")
             ?? Environment.GetEnvironmentVariable("RULLAMA_TEST_GGUF")
             ?? string.Empty;
         foreach (ConversationRow c in _store.List())
             Conversations.Add(new ConversationViewModel(c.Id, c.Title, c.UpdatedAt));
+
+        // M11: restore a persisted queue (jobs + attachment media). Don't kick the
+        // pump yet — it needs a loaded model; kick after LoadModel succeeds. Skip
+        // jobs whose conversation was deleted while the app was closed.
+        var liveConvIds = Conversations.Select(c => c.Id).ToHashSet();
+        foreach (GenJob j in _queueStore.Load())
+        {
+            if (liveConvIds.Contains(j.ConvId)) _queue.Enqueue(j, kick: false);
+            else _queueStore.DropJobMedia(j.JobId);
+        }
+
+        // First-launch: start with one empty chat already present + selected.
+        if (Conversations.Count == 0) CreateEmptyConversation();
     }
 
     // ---- model loading ----
-    private bool CanLoad => !IsBusy && !IsModelLoaded && !IsDownloading;
+    private bool CanLoad => !IsLoadingModel && !IsModelLoaded && !IsDownloading && !GenActive;
 
     [RelayCommand(CanExecute = nameof(CanLoad))]
     private async Task LoadModelAsync()
@@ -229,7 +300,7 @@ public partial class ChatViewModel : ViewModelBase
             Status = "Enter a path to a .gguf model (or an Ollama blob).";
             return;
         }
-        IsBusy = true;
+        IsLoadingModel = true;
         Status = "Loading model… (this can take a minute)";
         try
         {
@@ -240,6 +311,8 @@ public partial class ChatViewModel : ViewModelBase
             IsAudioAvailable = _engine.HasAudio;
             _settings.Set("modelPath", ModelPath.Trim());
             Status = $"Ready · vocab {_engine.VocabSize}{(IsVisionAvailable ? " · vision" : "")}{(IsAudioAvailable ? " · audio" : "")}";
+            // Resume any queue restored at boot now that the model is ready.
+            _queue.Kick();
         }
         catch (Exception e)
         {
@@ -247,7 +320,7 @@ public partial class ChatViewModel : ViewModelBase
         }
         finally
         {
-            IsBusy = false;
+            IsLoadingModel = false;
         }
     }
 
@@ -300,12 +373,26 @@ public partial class ChatViewModel : ViewModelBase
     private void CancelDownload() => _dlCts?.Cancel();
 
     // ---- conversation management ----
+    private static long Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+    private void CreateEmptyConversation()
+    {
+        string id = _store.Create(NewChatTitle);
+        var conv = new ConversationViewModel(id, NewChatTitle, Now);
+        Conversations.Insert(0, conv);
+        SelectConversation(conv);
+    }
+
     [RelayCommand]
     private void NewChat()
     {
-        _activeConvId = null;
-        Messages.Clear();
-        foreach (ConversationViewModel c in Conversations) c.IsActive = false;
+        // Reuse-one-empty: never stack duplicate empty "New chat" rows.
+        ConversationViewModel? empty = Conversations.FirstOrDefault(c =>
+            c.Title == NewChatTitle
+            && !_queue.HasPendingFor(c.Id)
+            && _store.MessagesWithIds(c.Id).Count == 0);
+        if (empty is not null) { SelectConversation(empty); return; }
+        CreateEmptyConversation();
     }
 
     [RelayCommand]
@@ -313,14 +400,41 @@ public partial class ChatViewModel : ViewModelBase
     {
         _activeConvId = conv.Id;
         foreach (ConversationViewModel c in Conversations) c.IsActive = ReferenceEquals(c, conv);
+
         Messages.Clear();
         foreach (MessageRow m in _store.Messages(conv.Id))
             Messages.Add(new ChatMessageViewModel(m.Role, m.Content));
+
+        // Detach live VMs from conversations we're no longer viewing.
+        foreach (KeyValuePair<string, LiveBuffer> kv in _live)
+            if (kv.Key != conv.Id) kv.Value.Vm = null;
+
+        // Overlay this conversation's live partial (the full accumulated text,
+        // which may run past the last DB flush) onto the trailing model bubble.
+        if (_live.TryGetValue(conv.Id, out LiveBuffer? buf))
+        {
+            ChatMessageViewModel? last = Messages.LastOrDefault();
+            if (last is { Role: "model" })
+            {
+                last.Content = buf.Content;
+                buf.Vm = last;
+            }
+        }
+        RaiseQueueDependentProps();
     }
 
     [RelayCommand]
     private void DeleteConversation(ConversationViewModel conv)
     {
+        // Cancel a running job for this conv; dequeue + drop media for queued ones.
+        if (_queue.RunningConvId == conv.Id) _queue.CancelRunning();
+        foreach (GenJob j in _queue.Jobs.Where(j => j.ConvId == conv.Id).ToList())
+        {
+            _queueStore.DropJobMedia(j.JobId);
+            _queue.Remove(j);
+        }
+        _live.TryRemove(conv.Id, out _);
+
         _store.Delete(conv.Id);
         Conversations.Remove(conv);
         if (_activeConvId == conv.Id)
@@ -328,17 +442,26 @@ public partial class ChatViewModel : ViewModelBase
             _activeConvId = null;
             Messages.Clear();
         }
+        RaiseQueueDependentProps();
     }
 
-    // ---- send / stop ----
-    private bool CanSend => IsModelLoaded && !IsBusy
+    private void TouchConversation(string convId)
+    {
+        ConversationViewModel? conv = Conversations.FirstOrDefault(c => c.Id == convId);
+        if (conv is null) return;
+        conv.UpdatedAt = Now;
+        int idx = Conversations.IndexOf(conv);
+        if (idx > 0) Conversations.Move(idx, 0);
+    }
+
+    // ---- send (enqueue) / stop ----
+    private bool CanSend => IsModelLoaded
         && (!string.IsNullOrWhiteSpace(Input) || PendingImagePreview is not null || PendingAudioLabel is not null);
 
     [RelayCommand(CanExecute = nameof(CanSend))]
     private async Task SendAsync()
     {
         string text = Input.Trim();
-        Input = string.Empty;
 
         // Detach any pending media for this turn.
         ProcessedImage? image = _pendingImage;
@@ -349,83 +472,191 @@ public partial class ChatViewModel : ViewModelBase
         _pendingAudioPcm = null;
         PendingAudioLabel = null;
 
-        // Open a conversation lazily on first message.
-        if (_activeConvId is null)
-        {
-            string seed = text.Length > 0 ? text : "Image";
-            string title = seed.Length > 40 ? seed[..40] + "…" : seed;
-            _activeConvId = _store.Create(title);
-            var conv = new ConversationViewModel(_activeConvId, title, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
-            {
-                IsActive = true,
-            };
-            Conversations.Insert(0, conv);
-        }
-        string convId = _activeConvId;
+        if (text.Length == 0 && image is null && audio is null) return;
+        Input = string.Empty;
 
-        var userMsg = new ChatMessageViewModel("user", text) { Image = preview };
-        Messages.Add(userMsg);
+        // Ensure a real conversation row exists (rename a reused empty on first send).
+        EnsureActiveConversation(text, image is not null || audio is not null);
+        string convId = _activeConvId!;
+
+        // A same-conv job already pending? (then this one chains off its result.)
+        bool priorPending = _queue.HasPendingFor(convId);
+
+        // Persist user + empty model rows now so they show immediately + survive reload.
         _store.AddMessage(convId, "user", text);
+        long modelRowId = _store.AddMessage(convId, "model", string.Empty);
 
+        // Optimistic UI: this conversation is active, so paint the new turn now.
+        var userMsg = new ChatMessageViewModel("user", text) { Image = preview };
         var reply = new ChatMessageViewModel("model", string.Empty);
+        Messages.Add(userMsg);
         Messages.Add(reply);
+        _live[convId] = new LiveBuffer { ModelRowId = modelRowId, Vm = reply };
 
-        // Retrieve knowledge context (RAG) for this query, if enabled.
+        // RAG context is resolved at enqueue time (enqueue-time semantics).
         string ragContext = string.Empty;
         if (UseKnowledge && RagService.Available && text.Length > 0)
         {
             try { ragContext = await _rag.BuildContextAsync(text, 5, CancellationToken.None); }
             catch (Exception e) { Status = "Knowledge search failed: " + e.Message; }
         }
-
-        // Engine history: prepend the media sentinel pair to this user turn's content.
-        string promptUserContent =
-            image is not null ? "<|image><image|>" + text
-            : audio is not null ? "<|audio><audio|>" + text
-            : text;
-        var history = new List<(string, string)>();
         string sys = BuildSystemContent();
         if (ragContext.Length > 0) sys = sys.Length > 0 ? ragContext + "\n\n" + sys : ragContext;
-        if (!string.IsNullOrWhiteSpace(sys)) history.Add(("system", sys));
-        foreach (ChatMessageViewModel m in Messages.Where(m => !ReferenceEquals(m, reply)))
-            history.Add(ReferenceEquals(m, userMsg) ? ("user", promptUserContent) : (m.Role, m.Content));
 
-        _cts = new CancellationTokenSource();
-        IsBusy = true;
-        // Accumulate raw assistant text on the worker thread; mirror to the UI.
+        var job = new GenJob
+        {
+            ConvId = convId,
+            ModelRowId = modelRowId,
+            UserText = text,
+            Temperature = (float)Temperature,
+            TopK = (uint)TopK,
+            TopP = (float)TopP,
+            RepetitionPenalty = (float)RepetitionPenalty,
+            MaxTokens = (uint)MaxTokens,
+            Thinking = ThinkingMode,
+            ToolMode = ToolCallingEnabled,
+            OrchestratorMode = OrchestratorMode,
+            SystemContent = sys,
+            UseFahrenheit = UseFahrenheit,
+            UseLocation = UseLocation,
+            WeatherApiKey = string.IsNullOrWhiteSpace(WeatherApiKey) ? null : WeatherApiKey.Trim(),
+            ImagePixels = image?.Pixels,
+            ImageH = image?.Height ?? 0,
+            ImageW = image?.Width ?? 0,
+            AudioPcm = audio,
+        };
+        _ = priorPending; // context is rebuilt from the DB at run time regardless.
+        _queueStore.SaveJobMedia(job);
+        _queue.Enqueue(job); // kicks the pump; OnQueueChanged persists the manifest.
+    }
+
+    private void EnsureActiveConversation(string text, bool hasMedia)
+    {
+        if (_activeConvId is not null)
+        {
+            ConversationViewModel? cur = Conversations.FirstOrDefault(c => c.Id == _activeConvId);
+            if (cur is { Title: NewChatTitle } && _store.MessagesWithIds(cur.Id).Count == 0)
+            {
+                string t = MakeTitle(text, hasMedia);
+                _store.Rename(cur.Id, t);
+                cur.Title = t;
+            }
+            return;
+        }
+        string title = MakeTitle(text, hasMedia);
+        string id = _store.Create(title);
+        var conv = new ConversationViewModel(id, title, Now) { IsActive = true };
+        Conversations.Insert(0, conv);
+        _activeConvId = id;
+    }
+
+    private static string MakeTitle(string text, bool hasMedia)
+    {
+        string seed = text.Length > 0 ? text : (hasMedia ? "Attachment" : NewChatTitle);
+        return seed.Length > 40 ? seed[..40] + "…" : seed;
+    }
+
+    /// <summary>Run one generation job (the moved body of the old SendAsync). Reads
+    /// from <paramref name="job"/> and reflects tokens via the live buffer so the
+    /// UI repaints only when the user is viewing this conversation.</summary>
+    private async Task RunJobAsync(GenJob job, CancellationToken ct)
+    {
+        string convId = job.ConvId;
+
+        // Ensure a live buffer exists (resumed/non-active jobs have none yet).
+        LiveBuffer buf = _live.GetOrAdd(convId, _ => new LiveBuffer { ModelRowId = job.ModelRowId });
+        buf.ModelRowId = job.ModelRowId;
+        if (convId == _activeConvId && buf.Vm is null)
+        {
+            ChatMessageViewModel? last = Messages.LastOrDefault();
+            if (last is { Role: "model" }) buf.Vm = last;
+        }
+
+        // Rebuild history from the DB up to (and excluding) this job's open model
+        // row — correct for same-conv queued chaining.
+        var turns = new List<(string Role, string Content)>();
+        int lastUserIdx = -1;
+        foreach (MessageRowId r in _store.MessagesWithIds(convId))
+        {
+            if (r.Id > job.ModelRowId) break;
+            if (r.Id == job.ModelRowId) continue;
+            turns.Add((r.Role, r.Content));
+            if (r.Role == "user") lastUserIdx = turns.Count - 1;
+        }
+        // Splice the media sentinel pair into the latest user turn.
+        if (lastUserIdx >= 0)
+        {
+            string marker = job.ImagePixels is not null ? "<|image><image|>"
+                : job.AudioPcm is not null ? "<|audio><audio|>" : string.Empty;
+            if (marker.Length > 0)
+                turns[lastUserIdx] = ("user", marker + turns[lastUserIdx].Content);
+        }
+        var history = new List<(string Role, string Content)>();
+        if (!string.IsNullOrWhiteSpace(job.SystemContent)) history.Add(("system", job.SystemContent));
+        history.AddRange(turns);
+
+        // Apply this job's captured sampling (the model is shared + serial).
+        _engine.SetSampling(job.Temperature, job.TopK, job.TopP, job.RepetitionPenalty, 0);
+
         var sb = new StringBuilder();
+        int sinceFlush = 0;
         void OnPiece(string piece)
         {
             sb.Append(piece);
             string snap = sb.ToString();
-            Dispatcher.UIThread.Post(() => reply.Content = snap);
+            ReflectToken(job, snap);
+            if (++sinceFlush >= 16) { sinceFlush = 0; _store.UpdateMessage(job.ModelRowId, snap); }
         }
-        void Mirror()
-        {
-            string snap = sb.ToString();
-            Dispatcher.UIThread.Post(() => reply.Content = snap);
-        }
+        void Mirror() => ReflectToken(job, sb.ToString());
+
         try
         {
-            uint maxNew = (uint)MaxTokens;
-            if (image is { } img)
-                await _engine.SendImageAsync(history, img.Pixels, img.Height, img.Width, maxNew, OnPiece, _cts.Token);
-            else if (audio is { } pcm)
-                await _engine.SendAudioAsync(history, pcm, maxNew, OnPiece, _cts.Token);
+            uint maxNew = job.MaxTokens;
+            if (job.ImagePixels is { } px)
+                await _engine.SendImageAsync(history, px, job.ImageH, job.ImageW, maxNew, OnPiece, ct);
+            else if (job.AudioPcm is { } pcm)
+                await _engine.SendAudioAsync(history, pcm, maxNew, OnPiece, ct);
             else
-                await _engine.SendAsync(history, maxNew, OnPiece, _cts.Token);
+                await _engine.SendAsync(history, maxNew, OnPiece, ct);
 
-            // Agentic tool loop: run executable tool calls and let the model continue.
-            if (ToolCallingEnabled)
+            // M12: programmatic Rhai orchestration (falls back to the JSON loop).
+            bool runJsonLoop = job.ToolMode;
+            if (job.OrchestratorMode)
+            {
+                runJsonLoop = false;
+                string script = ExtractScript(sb.ToString());
+                try
+                {
+                    string answer = await ToolOrchestration.RunAsync(script, BuildToolRegistry(), ct);
+                    sb.Append("\n\n").Append(answer);
+                    Mirror();
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception e)
+                {
+                    if (job.ToolMode)
+                    {
+                        runJsonLoop = true; // fall back to the tolerant JSON tool loop
+                    }
+                    else
+                    {
+                        sb.Append($"\n\n[orchestrator error: {e.Message}]");
+                        Mirror();
+                    }
+                }
+            }
+
+            // Agentic JSON tool loop: run executable tool calls and let the model continue.
+            if (runJsonLoop)
             {
                 var executor = new ToolExecutors
                 {
-                    UseFahrenheit = UseFahrenheit,
-                    WeatherApiKey = string.IsNullOrWhiteSpace(WeatherApiKey) ? null : WeatherApiKey.Trim(),
-                    UseLocation = UseLocation,
+                    UseFahrenheit = job.UseFahrenheit,
+                    WeatherApiKey = job.WeatherApiKey,
+                    UseLocation = job.UseLocation,
                 };
                 int executed = 0;
-                for (int round = 0; round < 5 && !_cts.IsCancellationRequested; round++)
+                for (int round = 0; round < 5 && !ct.IsCancellationRequested; round++)
                 {
                     List<ToolCall> calls = ToolCalling.Parse(sb.ToString());
                     if (calls.Count <= executed) break;
@@ -436,7 +667,7 @@ public partial class ChatViewModel : ViewModelBase
                     }
                     executed = calls.Count;
                     Mirror();
-                    await _engine.ContinueAsync(history, sb.ToString(), maxNew, OnPiece, _cts.Token);
+                    await _engine.ContinueAsync(history, sb.ToString(), maxNew, OnPiece, ct);
                 }
             }
         }
@@ -448,26 +679,72 @@ public partial class ChatViewModel : ViewModelBase
         }
         finally
         {
-            IsBusy = false;
-            _cts?.Dispose();
-            _cts = null;
-            _store.AddMessage(convId, "model", sb.ToString());
+            _store.UpdateMessage(job.ModelRowId, sb.ToString());
             _store.Touch(convId);
             TouchConversation(convId);
+            _live.TryRemove(convId, out _);
+            _queueStore.DropJobMedia(job.JobId);
         }
     }
 
-    private void TouchConversation(string convId)
+    /// <summary>Update the live buffer (always) and repaint the bubble only when the
+    /// user is viewing this conversation. Safe to call from the worker thread.</summary>
+    private void ReflectToken(GenJob job, string full)
     {
-        ConversationViewModel? conv = Conversations.FirstOrDefault(c => c.Id == convId);
-        if (conv is null) return;
-        conv.UpdatedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        int idx = Conversations.IndexOf(conv);
-        if (idx > 0) Conversations.Move(idx, 0);
+        if (!_live.TryGetValue(job.ConvId, out LiveBuffer? buf)) return;
+        buf.Content = full;
+        ChatMessageViewModel? vm = buf.Vm;
+        if (vm is not null && job.ConvId == _activeConvId)
+            Dispatcher.UIThread.Post(() => vm.Content = full);
     }
 
-    private bool CanStop => IsBusy && _cts is not null;
+    private void OnQueueChanged()
+    {
+        if (!Dispatcher.UIThread.CheckAccess())
+        {
+            Dispatcher.UIThread.Post(OnQueueChanged);
+            return;
+        }
+        GenActive = _queue.Active;
+        string? running = _queue.RunningConvId;
+        var queued = _queue.Jobs.Where(j => j.Status == JobStatus.Queued).Select(j => j.ConvId).ToHashSet();
+        foreach (ConversationViewModel c in Conversations)
+        {
+            c.IsRunning = c.Id == running;
+            c.IsQueued = queued.Contains(c.Id);
+        }
+        RaiseQueueDependentProps();
+        _queueStore.Persist(_queue.Jobs);
+    }
+
+    /// <summary>True if the conversation the user is viewing has work running or queued.</summary>
+    public bool ActiveConvIsBusy =>
+        _activeConvId is not null
+        && (_queue.RunningConvId == _activeConvId || _queue.IsQueuedConv(_activeConvId));
+
+    private void RaiseQueueDependentProps()
+    {
+        OnPropertyChanged(nameof(ActiveConvIsBusy));
+        StopCommand.NotifyCanExecuteChanged();
+        LoadModelCommand.NotifyCanExecuteChanged();
+    }
+
+    private bool CanStop => ActiveConvIsBusy;
 
     [RelayCommand(CanExecute = nameof(CanStop))]
-    private void Stop() => _cts?.Cancel();
+    private void Stop()
+    {
+        if (_activeConvId is null) return;
+        if (_queue.RunningConvId == _activeConvId)
+        {
+            _queue.CancelRunning();
+            return;
+        }
+        // Otherwise it's queued: remove its job(s) + drop persisted media.
+        foreach (GenJob j in _queue.Jobs.Where(j => j.ConvId == _activeConvId && j.Status == JobStatus.Queued).ToList())
+        {
+            _queueStore.DropJobMedia(j.JobId);
+            _queue.Remove(j);
+        }
+    }
 }

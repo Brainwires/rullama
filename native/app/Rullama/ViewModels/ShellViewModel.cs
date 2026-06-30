@@ -16,6 +16,7 @@ public partial class ShellViewModel : ViewModelBase
     public ChatViewModel Chat { get; }
     public VoiceViewModel Voice { get; }
     public KnowledgeViewModel Knowledge { get; }
+    public ImageViewModel Image { get; } = new();
     public FineTuneViewModel FineTune { get; } = new();
     public SettingsViewModel Settings { get; } = new();
 
@@ -30,6 +31,9 @@ public partial class ShellViewModel : ViewModelBase
 
     [ObservableProperty]
     private bool _isKnowledge;
+
+    [ObservableProperty]
+    private bool _isImage;
 
     [ObservableProperty]
     private bool _isTune;
@@ -51,11 +55,13 @@ public partial class ShellViewModel : ViewModelBase
         IsChat = tab == "chat";
         IsVoice = tab == "voice";
         IsKnowledge = tab == "knowledge";
+        IsImage = tab == "image";
         IsTune = tab == "tune";
         IsSettings = tab == "settings";
         if (IsKnowledge) Knowledge.RefreshDocuments();
         Current = IsVoice ? Voice
             : IsKnowledge ? Knowledge
+            : IsImage ? Image
             : IsTune ? FineTune
             : IsSettings ? (ViewModelBase)Settings
             : Chat;

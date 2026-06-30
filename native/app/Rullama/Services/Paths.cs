@@ -32,4 +32,15 @@ public static class Paths
             return dir;
         }
     }
+
+    /// <summary>Background generation queue (M11): manifest + per-job media sidecars.</summary>
+    public static string QueueDir
+    {
+        get
+        {
+            string dir = Path.Combine(DataDir, "queue");
+            Directory.CreateDirectory(dir);
+            return dir;
+        }
+    }
 }

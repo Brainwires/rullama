@@ -3,7 +3,11 @@ using System.IO;
 
 namespace Rullama.Services;
 
-public sealed record CatalogModel(string Name, string Url, long Size)
+/// <summary>What kind of model a catalog entry is. Chat = a single GGUF;
+/// ImageGen = an Ollama MLX per-tensor safetensors blob set (a directory). (M13)</summary>
+public enum ModelKind { Chat, ImageGen }
+
+public sealed record CatalogModel(string Name, string Url, long Size, ModelKind Kind = ModelKind.Chat)
 {
     /// <summary>Local filename (matches the PWA's sanitized scheme).</summary>
     public string FileName => SanitizeName(Name) + ".gguf";

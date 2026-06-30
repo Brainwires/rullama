@@ -33,7 +33,16 @@
                       <StackPanel>
                         <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis"
                                    Foreground="{StaticResource Foreground}" FontSize="12" />
-                        <TextBlock Text="{Binding RelativeTime}" Classes="muted" FontSize="10" />
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                          <TextBlock Text="{Binding RelativeTime}" Classes="muted" FontSize="10"
+                                     VerticalAlignment="Center" />
+                          <!-- M11: running dot / queued badge -->
+                          <TextBlock Text="●" FontSize="10" VerticalAlignment="Center"
+                                     Foreground="{StaticResource Primary}"
+                                     IsVisible="{Binding IsRunning}" ToolTip.Tip="Generating" />
+                          <TextBlock Text="queued" Classes="muted" FontSize="10" VerticalAlignment="Center"
+                                     IsVisible="{Binding IsQueued}" />
+                        </StackPanel>
                       </StackPanel>
                     </Button>
                     <Button Grid.Column="1" Classes="ghost iconsm" Content="✕"
@@ -80,7 +89,7 @@
                     Click="Browse_Click" />
           </Grid>
           <Button Classes="primary" Content="Load model"
-                  Command="{Binding LoadModelCommand}" IsEnabled="{Binding !IsBusy}"
+                  Command="{Binding LoadModelCommand}" IsEnabled="{Binding !IsLoadingModel}"
                   HorizontalAlignment="Center" />
           <TextBlock Classes="muted" Text="{Binding Status}" HorizontalAlignment="Center"
                      TextWrapping="Wrap" />
@@ -123,9 +132,9 @@
                        AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="140"
                        KeyDown="Composer_KeyDown" />
               <Button Grid.Column="3" Classes="primary" Content="Send"
-                      Command="{Binding SendCommand}" IsVisible="{Binding !IsBusy}" />
+                      Command="{Binding SendCommand}" IsVisible="{Binding !ActiveConvIsBusy}" />
               <Button Grid.Column="3" Classes="destructive" Content="Stop"
-                      Command="{Binding StopCommand}" IsVisible="{Binding IsBusy}" />
+                      Command="{Binding StopCommand}" IsVisible="{Binding ActiveConvIsBusy}" />
             </Grid>
           </StackPanel>
         </Border>
@@ -223,10 +232,19 @@
                           Content="Enable tool calling" />
                 <TextBlock Classes="muted" TextWrapping="Wrap"
                            Text="Lets the model call get_weather and other tools via &lt;tool_call&gt; blocks." />
+                <CheckBox IsChecked="{Binding OrchestratorMode, Mode=TwoWay}"
+                          Content="Programmatic orchestration (Rhai)" />
+                <TextBlock Classes="muted" TextWrapping="Wrap"
+                           Text="The model writes a Rhai script that calls multiple tools (weather, Wikipedia, knowledge) with control flow; results are resolved and replayed. Falls back to JSON tool calls on error." />
                 <StackPanel Spacing="4">
                   <TextBlock Classes="label" Text="WEATHERAPI.COM KEY (OPTIONAL)" />
                   <TextBox Text="{Binding WeatherApiKey, Mode=TwoWay}" PasswordChar="•"
                            Watermark="blank = free Open-Meteo" />
+                </StackPanel>
+                <StackPanel Spacing="4">
+                  <TextBlock Classes="label" Text="GNEWS API KEY (OPTIONAL)" />
+                  <TextBox Text="{Binding GnewsApiKey, Mode=TwoWay}" PasswordChar="•"
+                           Watermark="enables the get_news tool" />
                 </StackPanel>
                 <CheckBox IsChecked="{Binding UseFahrenheit, Mode=TwoWay}" Content="Use °F (imperial)" />
                 <CheckBox IsChecked="{Binding UseLocation, Mode=TwoWay}"

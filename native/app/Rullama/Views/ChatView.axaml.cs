@@ -22,7 +22,7 @@ public partial class ChatView : UserControl
             // Stick to the bottom while a reply is streaming.
             _scroll.LayoutUpdated += (_, _) =>
             {
-                if (DataContext is ChatViewModel { IsBusy: true } && _scroll is not null)
+                if (DataContext is ChatViewModel { ActiveConvIsBusy: true } && _scroll is not null)
                     _scroll.Offset = new Vector(_scroll.Offset.X, _scroll.Extent.Height);
             };
         }

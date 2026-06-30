@@ -205,6 +205,37 @@ internal static class RustCore
     internal static extern int rl_embed(
         IntPtr t, [MarshalAs(UnmanagedType.LPUTF8Str)] string text, UIntPtr targetDim, out IntPtr outPtr, out UIntPtr outLen);
 
+    // ---- M12: Rhai tool-orchestration (no model handle) ----
+    [DllImport(Lib, EntryPoint = "rl_orch_run")]
+    internal static extern int rl_orch_run(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string script,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string cachedJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string toolNames,
+        out IntPtr outJson);
+
+    // ---- M13: image generation (DiT diffusion; separate handle) ----
+    /// <summary>Per-step progress: (ctx, step, total, stage).</summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ImageProgressCallback(IntPtr ctx, uint step, uint total, IntPtr stage);
+
+    [DllImport(Lib, EntryPoint = "rl_imagegen_create")]
+    internal static extern IntPtr rl_imagegen_create();
+
+    [DllImport(Lib, EntryPoint = "rl_imagegen_free")]
+    internal static extern void rl_imagegen_free(IntPtr t);
+
+    [DllImport(Lib, EntryPoint = "rl_imagegen_load_blobs")]
+    internal static extern int rl_imagegen_load_blobs(IntPtr t, [MarshalAs(UnmanagedType.LPUTF8Str)] string dir);
+
+    [DllImport(Lib, EntryPoint = "rl_imagegen_generate")]
+    internal static extern int rl_imagegen_generate(
+        IntPtr t,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string prompt,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string negPrompt,
+        float cfgScale, uint latentH, uint latentW, uint steps, ulong seed,
+        ImageProgressCallback progress, IntPtr ctx,
+        out IntPtr outPtr, out UIntPtr outLen, out uint outW, out uint outH);
+
     // ---- helpers ----
     internal static string Version() => Marshal.PtrToStringUTF8(rl_version()) ?? "unknown";
 

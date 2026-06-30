@@ -3,17 +3,21 @@ resolver = "3"
 members = [
     "xtask",
 ]
-# Excluded from the workspace so `cargo build --workspace` stays clean:
-#   - dev-server: native dev HTTP server (axum/tokio/notify); invoked by
-#     xtask via `--manifest-path` rather than `-p`. It has its own deps and is
-#     not part of the (now tiny) workspace.
-#
-# The inference engine moved out into the rullama-framework platform repo as
-# rullama-engine + rullama-lora (its engine/ sub-workspace). This repo is the
-# rullama app — the PWA in web/ plus the serve/proxy dev-server. See README.md
-# and rullama-framework/docs/ARCHITECTURE-engine-harness.md.
+# This repo holds three consumer apps — web/ (PWA), native/ (.NET/Avalonia
+# desktop + mobile, with a rust-core C-ABI shim), cli/ (the agentic CLI) — plus
+# the serve/proxy dev-server that hosts web/. The root workspace stays tiny
+# (just xtask); everything that pulls the rullama-framework crates / wgpu is
+# EXCLUDED so `cargo build --workspace` here stays fast and native-only:
+#   - dev-server:        axum/tokio/notify HTTP server; run via --manifest-path.
+#   - cli:               the agentic CLI — its OWN cargo workspace (own Cargo.lock),
+#                        path-deps the sibling ../../rullama-framework crates.
+#   - native/rust-core:  C-ABI cdylib over rullama-engine/rullama-lora; links wgpu.
+# The inference engine + harness live in the sibling rullama-framework repo. See
+# README.md and rullama-framework/docs/ARCHITECTURE-engine-harness.md.
 exclude = [
     "dev-server",
+    "cli",
+    "native/rust-core",
 ]
 
 [workspace.package]

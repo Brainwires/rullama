@@ -18,6 +18,14 @@ public partial class ConversationViewModel : ViewModelBase
     [ObservableProperty]
     private bool _isActive;
 
+    /// <summary>This conversation has a generation running (M11).</summary>
+    [ObservableProperty]
+    private bool _isRunning;
+
+    /// <summary>This conversation has a queued (not-yet-running) generation (M11).</summary>
+    [ObservableProperty]
+    private bool _isQueued;
+
     public ConversationViewModel(string id, string title, long updatedAt)
     {
         Id = id;
