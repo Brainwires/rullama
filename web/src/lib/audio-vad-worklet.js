@@ -9,7 +9,7 @@
 // pre-roll size) trivial to tune from React without rebuilding the
 // worklet file.
 //
-// Frame size choice: 20 ms is the same window the brainwires-framework
+// Frame size choice: 20 ms is the same window the rullama-framework
 // EnergyVad uses and is short enough to detect end-of-utterance within
 // the 800 ms silence budget while long enough that one syllable's RMS
 // is a stable signal.

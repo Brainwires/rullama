@@ -101,20 +101,20 @@ fn is_rs_or_wgsl(p: &std::path::Path) -> bool {
 }
 
 async fn build_wasm(paths: &Paths) -> Result<(), String> {
-    // The engine lives in a sibling brainwires checkout now. Build its unified
-    // wasm bundle (brainwires-lora = inference Model + training TrainingSession)
+    // The engine lives in a sibling rullama-framework checkout now. Build its unified
+    // wasm bundle (rullama-lora = inference Model + training TrainingSession)
     // into the app's pkg/. --out-name rullama keeps the app's /pkg/rullama.js
     // import stable. Without an engine checkout (CI/prod) there's nothing to
     // build — the prebuilt pkg/ from npm/CDN is served as-is.
     let Some(engine) = &paths.engine_dir else {
-        return Err("no engine checkout (set BRAINWIRES_ENGINE_DIR or place \
-                    ../brainwires-framework/engine); serving prebuilt pkg/ as-is"
+        return Err("no engine checkout (set RULLAMA_ENGINE_DIR or place \
+                    ../rullama-framework/engine); serving prebuilt pkg/ as-is"
             .to_string());
     };
     let mut cmd = Command::new("wasm-pack");
     cmd.current_dir(engine)
         .arg("build")
-        .arg("brainwires-lora")
+        .arg("rullama-lora")
         .arg("--target")
         .arg("web")
         .arg("--release")

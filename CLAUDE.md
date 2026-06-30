@@ -10,17 +10,18 @@ Workbox SW in `web/`) plus the native dev/serve server that hosts it
 also talks to optional cloud providers.
 
 The **inference engine moved out of this repo.** It now lives in the
-**brainwires** platform repo as `brainwires-engine` (+ `brainwires-lora` for
+**rullama-framework** platform repo as `rullama-engine` (+ `rullama-lora` for
 local LoRA training), in an isolated `engine/` wasm32 sub-workspace. The Gemma 4
 forward pass, WGSL kernels, GGUF loading, tokenizer, vision/audio/diffusion
 towers, image-gen, TTS, embeddings — all engine concerns — are documented in the
 engine's own CLAUDE.md, not here.
 
 > The engine handles **tokens**; the harness handles **turns**; this app sits
-> **on top**. Two brands: **rullama** = the consumer product family (this app +
-> `rullama-cli` + the paid `rullama-native`), **brainwires** = the OSS platform
-> (engine + harness). See the canonical topology doc
-> `brainwires-framework/docs/ARCHITECTURE-engine-harness.md`.
+> **on top**. One brand — **rullama** — across the stack: this app, `rullama-cli`,
+> the paid `rullama-native`, and the OSS platform (`rullama-framework` = engine +
+> harness). **Brainwires** is the company / GitHub org, not a project name. See
+> the canonical topology doc
+> `rullama-framework/docs/ARCHITECTURE-engine-harness.md`.
 
 ### How the app consumes the engine
 
@@ -32,7 +33,7 @@ engine's own CLAUDE.md, not here.
 2. **Cloud passthrough:** the devserver `/api/cloud/*` proxy + `web/src/lib/cloud/*`
    relay to OpenAI / Ollama Cloud (BYOK).
 3. **Native (optional):** any OpenAI-compatible client can point at the engine's
-   `brainwires-serve` bin (`POST /v1/chat/completions`).
+   `rullama-serve` bin (`POST /v1/chat/completions`).
 
 ## Workspace layout
 
@@ -50,12 +51,12 @@ Rust toolchain pinned to **1.91** via `rust-toolchain.toml`.
 ## Engine bundle (the one cross-repo coupling)
 
 The PWA needs the engine's wasm bundle in `pkg/`. It is built from a **sibling
-brainwires engine checkout**:
+rullama-framework engine checkout**:
 
 ```sh
-# Resolved automatically; override with BRAINWIRES_ENGINE_DIR.
-# Default: ../brainwires-framework/engine  (sibling of this repo)
-wasm-pack build brainwires-lora --target web --release \
+# Resolved automatically; override with RULLAMA_ENGINE_DIR.
+# Default: ../rullama-framework/engine  (sibling of this repo)
+wasm-pack build rullama-lora --target web --release \
     --out-dir <this-repo>/pkg --out-name rullama   # run inside the engine dir
 ```
 
@@ -150,7 +151,7 @@ pm2 status
   to the main thread.
 - **The app never bundles engine Rust source.** It consumes the engine only via
   the wasm bundle (`/pkg/rullama.js`), the cloud proxy, or `/v1`. Engine changes
-  happen in the brainwires repo.
+  happen in the rullama-framework repo.
 - **Keep the public surface small.** The worker ↔ main-thread RPC and the
   `inference.ts` client are the seam; engine API changes flow through the bundle.
 - **`xtask` stays std-only.** No deps, so `cargo dev` is fast on a cold tree.

@@ -56,16 +56,16 @@ else
     echo "[pm2-start] devserver up-to-date ✓"
 fi
 
-# 2. WASM bundle (pkg/) — built from the sibling brainwires engine checkout
+# 2. WASM bundle (pkg/) — built from the sibling rullama-framework engine checkout
 #    (the engine moved out of this repo). Rebuilt when any engine source or
 #    manifest is newer than the built wasm. --out-name rullama keeps the PWA's
 #    /pkg/rullama.js import stable. With no engine checkout, serve prebuilt pkg/.
-ENGINE_DIR="${BRAINWIRES_ENGINE_DIR:-$REPO_ROOT/../brainwires-framework/engine}"
+ENGINE_DIR="${RULLAMA_ENGINE_DIR:-$REPO_ROOT/../rullama-framework/engine}"
 PKG_WASM="$REPO_ROOT/pkg/rullama_bg.wasm"
 if [ -d "$ENGINE_DIR" ]; then
-    if [ -n "$(stale "$PKG_WASM" "$ENGINE_DIR/brainwires-engine/src" "$ENGINE_DIR/brainwires-lora/src" "$ENGINE_DIR/brainwires-engine/Cargo.toml" "$ENGINE_DIR/brainwires-lora/Cargo.toml" "$ENGINE_DIR/Cargo.toml")" ]; then
+    if [ -n "$(stale "$PKG_WASM" "$ENGINE_DIR/rullama-engine/src" "$ENGINE_DIR/rullama-lora/src" "$ENGINE_DIR/rullama-engine/Cargo.toml" "$ENGINE_DIR/rullama-lora/Cargo.toml" "$ENGINE_DIR/Cargo.toml")" ]; then
         echo "[pm2-start] wasm stale — rebuilding from engine ($ENGINE_DIR)…"
-        ( cd "$ENGINE_DIR" && wasm-pack build brainwires-lora --target web --release --out-dir "$REPO_ROOT/pkg" --out-name rullama ) \
+        ( cd "$ENGINE_DIR" && wasm-pack build rullama-lora --target web --release --out-dir "$REPO_ROOT/pkg" --out-name rullama ) \
             && echo "[pm2-start] wasm rebuilt ✓" \
             || echo "[pm2-start] ⚠ wasm-pack build FAILED — serving the previous pkg/. Fix and restart." >&2
     else

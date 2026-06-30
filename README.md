@@ -4,28 +4,29 @@ The **rullama app** — a browser-resident AI PWA (React + Vite + Tailwind +
 Workbox) that runs **Gemma 4 inference in the browser** on your local GPU, with
 optional cloud providers. Chat (text / vision / audio-input), a Knowledge tab
 (drop docs → embed → RAG), a Fine-tune tab (in-browser LoRA), and a Voice tab,
-all over the brainwires engine's wasm bundle — your data never has to leave the
+all over the rullama engine's wasm bundle — your data never has to leave the
 device.
 
-The inference **engine moved out of this repo** into the brainwires platform
-(`brainwires-engine` + `brainwires-lora`). This repo is the app: the PWA in
+The inference **engine moved out of this repo** into the rullama-framework platform
+(`rullama-engine` + `rullama-lora`). This repo is the app: the PWA in
 `web/` and the serve/proxy devserver. The app loads the engine's wasm bundle at
 `/pkg/rullama.js` and can also reach it natively over an OpenAI-compatible
 `/v1` endpoint.
 
-> **rullama is the product family; [brainwires](../brainwires-framework) is the
-> platform.** The rullama brand spans this repo (the PWA), `rullama-native` (the
-> paid .NET/Avalonia desktop + mobile app, already shipping), and `rullama-cli`
-> (the agentic CLI) — all at `rullama.com`. They run on the brainwires platform — its inference **engine** (`brainwires-engine`) and
-> agent **harness** (agents, tools, memory, RAG, providers). The app consumes the
-> platform in-browser via the engine's wasm bundle and natively via an
-> OpenAI-compatible `/v1/chat/completions` endpoint. The engine moved out of
-> this repo into brainwires; what stays here is the app. See the canonical
-> topology doc: `brainwires-framework/docs/ARCHITECTURE-engine-harness.md`.
+> **One brand — rullama — across the stack.** It spans this repo (the PWA),
+> `rullama-native` (the paid .NET/Avalonia desktop + mobile app, already
+> shipping), `rullama-cli` (the agentic CLI), and the OSS platform
+> [`rullama-framework`](../rullama-framework) — all at `rullama.com`. The platform
+> is the inference **engine** (`rullama-engine`) + agent **harness** (agents,
+> tools, memory, RAG, providers). The app consumes it in-browser via the engine's
+> wasm bundle and natively via an OpenAI-compatible `/v1/chat/completions`
+> endpoint. **Brainwires** is the company / GitHub org, not a project name. See
+> the canonical topology doc:
+> `rullama-framework/docs/ARCHITECTURE-engine-harness.md`.
 
 ## Layout
 
-The app repo is small — the engine moved to brainwires.
+The app repo is small — the engine moved to rullama-framework.
 
 | Path                       | What it is |
 |----------------------------|------------|
@@ -35,8 +36,8 @@ The app repo is small — the engine moved to brainwires.
 | `pkg/`                     | The engine wasm bundle (built artifact, `--out-name rullama`; gitignored). |
 
 The inference engine + LoRA trainer live in the
-[brainwires](../brainwires-framework) repo as `brainwires-engine` /
-`brainwires-lora` (an isolated `engine/` wasm32 sub-workspace). The iOS bench
+[rullama-framework](../rullama-framework) repo as `rullama-engine` /
+`rullama-lora` (an isolated `engine/` wasm32 sub-workspace). The iOS bench
 harness moved there too (`engine/tools/ios-bench`).
 
 ## What works today
@@ -87,22 +88,22 @@ You need:
 
 ### Get the wasm bundle (from the engine)
 
-The engine bundle is built from a **sibling brainwires engine checkout**. With
-`../brainwires-framework/engine` present, `cargo dev` rebuilds it automatically
+The engine bundle is built from a **sibling rullama-framework engine checkout**. With
+`../rullama-framework/engine` present, `cargo dev` rebuilds it automatically
 when engine source changes; otherwise build it once:
 
 ```sh
 # Unified bundle — inference (`Model`) + training (`TrainingSession`) surfaces.
 # Run inside the engine checkout. --out-name rullama keeps pkg/rullama.js stable.
-# Override the location with BRAINWIRES_ENGINE_DIR.
-cd ../brainwires-framework/engine
-wasm-pack build brainwires-lora --target web --release \
+# Override the location with RULLAMA_ENGINE_DIR.
+cd ../rullama-framework/engine
+wasm-pack build rullama-lora --target web --release \
     --out-dir ../../rullama/pkg --out-name rullama
 ```
 
 This emits `pkg/rullama.js` + `pkg/rullama_bg.wasm` + TypeScript typings into
 the app's `pkg/`. (Engine internals — kernels, GGUF, towers, parity — are
-documented in the brainwires engine repo.)
+documented in the rullama-framework engine repo.)
 
 ### Two example PWAs
 
@@ -204,9 +205,9 @@ loaded for inference accepts the trained adapter via `Model.loadAdapter(bytes)`
 (re-runs in the chat tab against the adapted weights).
 
 **Native:** the native trainer examples (`overfit_one`, `train_jsonl`,
-`eval_adapter`) live with the engine now — run them from the brainwires engine
-repo against `brainwires-lora` (e.g.
-`cargo run -p brainwires-lora --release --example overfit_one -- <gguf>`). See
+`eval_adapter`) live with the engine now — run them from the rullama-framework engine
+repo against `rullama-lora` (e.g.
+`cargo run -p rullama-lora --release --example overfit_one -- <gguf>`). See
 the engine repo's README.
 
 ## Architecture

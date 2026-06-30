@@ -5,7 +5,7 @@
 //
 // Gemma 4 has NO native tool-call token (its chat template only defines
 // `<|turn>` / `<turn|>` turns and the `<|channel>thought` / `<channel|>`
-// reasoning channel — see the engine repo (brainwires-engine/src/template/gemma4_small.rs), which
+// reasoning channel — see the engine repo (rullama-engine/src/template/gemma4_small.rs), which
 // explicitly defers tool-call rendering). So this is a chosen, prompt-level
 // convention, not something baked into the model.
 //
@@ -64,7 +64,7 @@ export const TOOL_PARAMS: Record<string, string[]> = {
 
 // The tool schema, injected as a system preamble so the model copies exact
 // tool names + argument keys instead of memorizing them. MUST stay byte-
-// identical to the engine repo (brainwires-lora/examples/data/tool-schema.txt) (the LoRA
+// identical to the engine repo (rullama-lora/examples/data/tool-schema.txt) (the LoRA
 // is trained with that file as a System turn; inference must present the same
 // text or the slot keys drift). When wiring the chat path, prepend this to the
 // system message while the function-call adapter is active (mirrors the RAG

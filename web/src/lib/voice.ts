@@ -1,6 +1,6 @@
 // Tunables for the in-browser VAD used by the mic button. Mirrors the
 // algorithm parameters previously hard-coded in `useMicCapture.ts`; the
-// defaults match brainwires-framework's EnergyVad (-40 dBFS threshold,
+// defaults match rullama-framework's EnergyVad (-40 dBFS threshold,
 // 800 ms silence cutoff). The 20 ms frame size is intentionally *not*
 // exposed — it's a worklet protocol constant tied to the RMS smoothing
 // window, not a knob users should be turning.

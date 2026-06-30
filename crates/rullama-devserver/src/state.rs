@@ -11,7 +11,7 @@ pub struct Paths {
     pub repo_root: PathBuf,
     pub pkg_dir: PathBuf,
     pub ollama_models: PathBuf,
-    /// The brainwires engine sub-workspace (sibling checkout). The inference
+    /// The rullama-framework engine sub-workspace (sibling checkout). The inference
     /// engine lives in a separate repo now; for local dev we build its wasm
     /// bundle from here into `pkg_dir`. `None` when no engine checkout is
     /// present — then the devserver serves a prebuilt `pkg/` (CI/prod, sourced
@@ -36,12 +36,12 @@ impl Paths {
                     .map(|h| h.join(".ollama").join("models"))
                     .unwrap_or_else(|| PathBuf::from("/Users/nightness/.ollama/models"))
             });
-        // BRAINWIRES_ENGINE_DIR overrides; otherwise default to the sibling
-        // `../brainwires-framework/engine` checkout. Only used when it exists.
-        let engine_dir = std::env::var_os("BRAINWIRES_ENGINE_DIR")
+        // RULLAMA_ENGINE_DIR overrides; otherwise default to the sibling
+        // `../rullama-framework/engine` checkout. Only used when it exists.
+        let engine_dir = std::env::var_os("RULLAMA_ENGINE_DIR")
             .map(PathBuf::from)
             .or_else(|| {
-                let sibling = repo_root.join("../brainwires-framework/engine");
+                let sibling = repo_root.join("../rullama-framework/engine");
                 sibling.is_dir().then_some(sibling)
             })
             .filter(|p| p.is_dir());
@@ -67,8 +67,8 @@ impl Paths {
     pub fn rust_watch_dirs(&self) -> Vec<PathBuf> {
         match &self.engine_dir {
             Some(engine) => vec![
-                engine.join("brainwires-engine/src"),
-                engine.join("brainwires-lora/src"),
+                engine.join("rullama-engine/src"),
+                engine.join("rullama-lora/src"),
             ],
             None => Vec::new(),
         }
