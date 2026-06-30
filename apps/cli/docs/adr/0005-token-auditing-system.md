@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-Brainwires CLI uses multiple token-intensive AI techniques including:
+rullama CLI uses multiple token-intensive AI techniques including:
 - Multi-agent orchestration (multiple concurrent agents)
 - MDAP voting (k× multiplier for consensus)
 - Infinite context memory (embedding/retrieval overhead)

@@ -1,6 +1,6 @@
 # Future Work
 
-Ideas and planned improvements for the Brainwires CLI. Items are organized by area and tagged by rough priority:
+Ideas and planned improvements for the rullama CLI. Items are organized by area and tagged by rough priority:
 
 - **High** — pre-release blocker or near-term must-have
 - **Medium** — high-impact, target shortly after initial release
@@ -36,7 +36,7 @@ Ideas and planned improvements for the Brainwires CLI. Items are organized by ar
   - HTTP server mode — expose an agent directly via HTTP without requiring a bridge
   - Push notification webhooks — async callbacks for long-running tasks
   - gRPC transport — alternative to HTTP polling
-  - External A2A agent federation — interoperate with non-Brainwires A2A agents
+  - External A2A agent federation — interoperate with non-rullama A2A agents
   - Agent registry — discover agents by declared skill or capability
 - **Routines** `Low` — AI-created, reusable sequences of actions designed to accomplish recurring tasks. Routines can be named, saved, and triggered by events or conditions to automate repetitive workflows.
 

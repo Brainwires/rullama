@@ -1,6 +1,6 @@
 # Adaptive Prompting
 
-Brainwires CLI implements **Adaptive Prompting** — automatic selection of the most effective prompting technique for each task based on task characteristics, SEAL quality signals, and learned user/collective preferences.
+rullama CLI implements **Adaptive Prompting** — automatic selection of the most effective prompting technique for each task based on task characteristics, SEAL quality signals, and learned user/collective preferences.
 
 This feature is based on the paper *"Adaptive Selection of Prompting Techniques"* (arXiv:2510.18162).
 

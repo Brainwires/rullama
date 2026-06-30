@@ -1,10 +1,10 @@
 # Token Usage Auditing System
 
-This document describes the token usage auditing system in Brainwires CLI, designed to track, report, and optimize API token consumption across all AI operations.
+This document describes the token usage auditing system in rullama CLI, designed to track, report, and optimize API token consumption across all AI operations.
 
 ## Overview
 
-Brainwires CLI uses multiple token-intensive AI techniques including multi-agent orchestration, MDAP voting, infinite context memory, and adaptive prompting. The token auditing system provides visibility into token consumption and helps identify optimization opportunities.
+rullama CLI uses multiple token-intensive AI techniques including multi-agent orchestration, MDAP voting, infinite context memory, and adaptive prompting. The token auditing system provides visibility into token consumption and helps identify optimization opportunities.
 
 ## Architecture
 

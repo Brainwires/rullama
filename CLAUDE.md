@@ -4,47 +4,60 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-**rullama is the app** — the consumer-facing PWA (React + Vite + Tailwind +
-Workbox SW in `web/`) plus the native dev/serve server that hosts it
-(`dev-server`). It runs AI **in the browser** on the local GPU and
-also talks to optional cloud providers.
+**rullama is the consumer product family** — a monorepo of three front-end apps,
+all running Gemma 4 on the local GPU (with optional cloud providers):
 
-The **inference engine moved out of this repo.** It now lives in the
-**rullama-framework** platform repo as `rullama-engine` (+ `rullama-lora` for
-local LoRA training), in an isolated `engine/` wasm32 sub-workspace. The Gemma 4
-forward pass, WGSL kernels, GGUF loading, tokenizer, vision/audio/diffusion
-towers, image-gen, TTS, embeddings — all engine concerns — are documented in the
-engine's own CLAUDE.md, not here.
+- **`apps/web/`** — the PWA (React + Vite + Tailwind + Workbox SW). Runs AI **in
+  the browser** via the engine's wasm bundle.
+- **`apps/native/`** — the desktop + mobile app (.NET / Avalonia) over a Rust
+  `rust-core` C-ABI shim that links the engine directly.
+- **`apps/cli/`** — the agentic CLI (its own Cargo workspace; BYOK providers,
+  tools, MCP).
 
-> The engine handles **tokens**; the harness handles **turns**; this app sits
-> **on top**. One brand — **rullama** — across the stack: this app, `rullama-cli`,
-> the paid `rullama-native`, and the OSS platform (`rullama-framework` = engine +
-> harness). **Brainwires** is the company / GitHub org, not a project name. See
-> the canonical topology doc
+…plus `services/dev-server/` (the dev/serve HTTP server that hosts the PWA) and
+`services/worker/` (the Cloudflare BYOK cloud proxy).
+
+The **inference engine + agent harness live in a separate repo** —
+**rullama-framework** — as `rullama-engine` (+ `rullama-lora` for local LoRA
+training) in an isolated `engine/` wasm32 sub-workspace, plus the `rullama-*`
+harness crates. The Gemma 4 forward pass, WGSL kernels, GGUF, tokenizer,
+vision/audio/diffusion towers, image-gen, TTS, embeddings — all engine concerns —
+are documented there, not here.
+
+> The engine handles **tokens**; the harness handles **turns**; these apps sit
+> **on top**. One brand — **rullama** — across the stack; **Brainwires** is the
+> company / GitHub org, not a project name. See the canonical topology doc
 > `rullama-framework/docs/ARCHITECTURE-engine-harness.md`.
 
-### How the app consumes the engine
+### How each app consumes the platform
 
-1. **In-browser (primary):** the app imports the engine's **wasm bundle** at
+1. **`apps/web` (in-browser):** imports the engine's **wasm bundle** at
    `/pkg/rullama.js` (classes `Model`, `TrainingSession`, `EmbeddingModel`,
-   `DiffusionGemma`), driven inside a Dedicated Worker. The bundle is **built
-   from the sibling engine checkout** (see "Engine bundle" below), not from this
-   repo — there is no engine Rust source here anymore.
-2. **Cloud passthrough:** the devserver `/api/cloud/*` proxy + `web/src/lib/cloud/*`
-   relay to OpenAI / Ollama Cloud (BYOK).
-3. **Native (optional):** any OpenAI-compatible client can point at the engine's
-   `rullama-serve` bin (`POST /v1/chat/completions`).
+   `DiffusionGemma`) in a Dedicated Worker; built from the sibling engine checkout
+   (see "Engine bundle" below) — no engine Rust source lives here. Cloud via the
+   `services/dev-server` `/api/cloud/*` proxy + `apps/web/src/lib/cloud/*` (BYOK).
+2. **`apps/native` (C-ABI):** `rust-core` links `rullama-engine` + `rullama-lora`
+   directly via P/Invoke (no HTTP, no wasm).
+3. **`apps/cli` (path-deps):** depends on the `rullama-framework` harness crates;
+   BYOK providers via `rullama-provider`.
+4. **Native serve (optional):** any OpenAI-compatible client can point at the
+   engine's `rullama-serve` bin (`POST /v1/chat/completions`).
 
 ## Workspace layout
 
-This repo is now small — the engine left. Two-crate-ish layout:
+The root Cargo workspace is just `xtask`; everything that pulls the framework
+crates / wgpu is **excluded** and built via `--manifest-path` (keeps the root
+build native-only + fast).
 
 | Path | Target | Notes |
 |------|--------|-------|
-| `web/` | PWA (TS) | React + Vite + Tailwind + Workbox SW. Imports the engine wasm bundle from `/pkg/rullama.js` over HTTP at runtime. |
-| `dev-server` | native | The dev/serve HTTP server: Vite proxy, `/api/blob`, `/api/models`, `/api/cloud/*`, `/pkg/*`, and the cross-repo wasm-bundle watcher. **Excluded** from the workspace (axum/tokio/notify); run via `--manifest-path`. |
-| `xtask` | native | Tiny std-only dispatcher for `cargo dev` + `cargo docker:*`. Keep it dependency-free. |
-| `pkg/` | wasm bundle | Built artifact from the engine (`--out-name rullama`). Gitignored; sourced at dev/build time. |
+| `apps/web/` | PWA (TS) | React + Vite + Tailwind + Workbox SW. Imports the engine wasm bundle from `/pkg/rullama.js`. |
+| `apps/native/` | .NET + Rust | `app/` (Avalonia) + `rust-core/` (C-ABI cdylib over the engine). Excluded from the root workspace. |
+| `apps/cli/` | native | The agentic CLI — its **own** Cargo workspace (own `Cargo.lock`); path-deps `../../../rullama-framework`. Excluded. |
+| `services/dev-server/` | native | The dev/serve HTTP server: Vite proxy, `/api/blob`, `/api/models`, `/api/cloud/*`, `/pkg/*`, cross-repo wasm-bundle watcher. Excluded (axum/tokio/notify); run via `--manifest-path`. |
+| `services/worker/` | TS | Cloudflare Worker — production BYOK cloud proxy (deployed via `wrangler`). |
+| `xtask` | native | Tiny std-only dispatcher for `cargo dev` + `cargo docker:*`. The root workspace. |
+| `pkg/` | wasm bundle | Built artifact from the engine (`--out-name rullama`). Gitignored, at the repo root; sourced at dev/build time. |
 
 Rust toolchain pinned to **1.91** via `rust-toolchain.toml`.
 
@@ -93,7 +106,7 @@ cargo fmt --all
 
 ## PWA dev loops
 
-The user-facing PWA lives in `web/` (React + Vite + Tailwind + Workbox SW),
+The user-facing PWA lives in `apps/web/` (React + Vite + Tailwind + Workbox SW),
 built against the shared `pkg/` wasm bundle. `cargo dev` runs the devserver and
 (when an engine checkout is present) keeps the bundle fresh.
 
@@ -125,7 +138,7 @@ Add a task by appending a match arm in `xtask/src/main.rs` and the alias line in
 | Mode | Command | Vite proxy? | `/api/log` writeable? | `/api/models` listed? | Use when |
 |------|---------|-------------|-----------------------|-----------------------|----------|
 | Local dev (default) | `cargo dev` | yes (HMR works through :25321) | yes | yes | working locally, **tunnel is OFF** |
-| Public / tunnel-safe | `cargo dev -- --public` | no (serves `web/dist/`) | no | no | tunnel is up, public origin is reachable |
+| Public / tunnel-safe | `cargo dev -- --public` | no (serves `apps/web/dist/`) | no | no | tunnel is up, public origin is reachable |
 
 **Important security boundary**: `cargo dev` (no flags) reverse-proxies `*` to Vite. Vite's `fs.allow=[repoRoot]` exposes every file under the repo to whatever can reach :25321 — including, transitively, anyone on the internet via `https://rullama.brainwires.net`. **Run `cargo dev --public` whenever the Cloudflare tunnel is up.**
 

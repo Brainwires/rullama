@@ -1,6 +1,6 @@
 # Agent System Architecture
 
-This document describes how child agents are spawned, executed, coordinated, and completed in the Brainwires CLI.
+This document describes how child agents are spawned, executed, coordinated, and completed in the rullama CLI.
 
 ---
 

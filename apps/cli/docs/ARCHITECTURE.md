@@ -1,10 +1,10 @@
-# Brainwires CLI Architecture
+# rullama CLI Architecture
 
 This document describes the high-level architecture of the rullama-cli application.
 
 ## Overview
 
-Brainwires CLI is an AI-powered agentic command-line tool for autonomous coding assistance. It combines multi-agent orchestration, Model Context Protocol (MCP) integration, infinite context memory, and extensive tool execution capabilities.
+rullama CLI is an AI-powered agentic command-line tool for autonomous coding assistance. It combines multi-agent orchestration, Model Context Protocol (MCP) integration, infinite context memory, and extensive tool execution capabilities.
 
 ## System Architecture
 

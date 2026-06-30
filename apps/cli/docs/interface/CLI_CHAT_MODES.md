@@ -1,6 +1,6 @@
 # CLI Chat Modes
 
-Brainwires CLI provides flexible chat modes designed for different workflows, from interactive conversations to automated scripting and batch processing.
+rullama CLI provides flexible chat modes designed for different workflows, from interactive conversations to automated scripting and batch processing.
 
 ## Overview
 
@@ -55,7 +55,7 @@ rullama chat
 
 ```bash
 $ rullama chat
-Brainwires Chat
+rullama Chat
 ───────────────
 Model: gpt-4o (rullama)
 Conversation ID: abc123...
@@ -284,7 +284,7 @@ rullama attach session-20251219-133511
 
 ## MCP Server Mode
 
-Expose Brainwires CLI as an MCP (Model Context Protocol) server over stdio.
+Expose rullama CLI as an MCP (Model Context Protocol) server over stdio.
 
 ### Usage
 

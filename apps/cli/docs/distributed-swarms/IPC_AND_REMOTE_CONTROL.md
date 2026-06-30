@@ -1,6 +1,6 @@
 # IPC and Remote Control Architecture
 
-This document describes the Inter-Process Communication (IPC) system used by Brainwires CLI for local agent-viewer communication, and the Remote Control system for web-based agent management.
+This document describes the Inter-Process Communication (IPC) system used by rullama CLI for local agent-viewer communication, and the Remote Control system for web-based agent management.
 
 ## Table of Contents
 
@@ -15,7 +15,7 @@ This document describes the Inter-Process Communication (IPC) system used by Bra
 
 ## Overview
 
-Brainwires CLI uses a multi-layered communication architecture:
+rullama CLI uses a multi-layered communication architecture:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐

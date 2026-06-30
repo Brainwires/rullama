@@ -1,4 +1,4 @@
-# Brainwires CLI Summary (v0.5.0)
+# rullama CLI Summary (v0.5.0)
 
 **Core**: Rust-based AI agent CLI/TUI (~55,700 LOC, 237 files, 12 language AST support)
 

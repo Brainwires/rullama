@@ -17,7 +17,7 @@ None of these approaches allow **perfect recall** of early conversation details 
 
 ## Our Solution: Compaction + RAG Recall
 
-Brainwires CLI implements a hybrid approach that combines compaction with Retrieval-Augmented Generation (RAG):
+rullama CLI implements a hybrid approach that combines compaction with Retrieval-Augmented Generation (RAG):
 
 ```
 ┌─────────────────────────────────────────────────────────────┐

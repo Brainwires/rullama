@@ -1,4 +1,4 @@
-# Brainwires CLI - Features & Architecture
+# rullama CLI - Features & Architecture
 
 > **The Bleeding-Edge AI Agent CLI/TUI**
 >
@@ -82,7 +82,7 @@
 
 ### Orchestrator Agent
 
-The brain of Brainwires - coordinates all agent activities with a maximum of 25 iterations per task.
+The brain of rullama - coordinates all agent activities with a maximum of 25 iterations per task.
 
 ```
 src/agents/                          # CLI-local files
@@ -678,7 +678,7 @@ src/mcp/
 
 ### MCP Server Mode
 
-Expose Brainwires as an MCP server:
+Expose rullama as an MCP server:
 
 ```bash
 rullama chat --mcp-server

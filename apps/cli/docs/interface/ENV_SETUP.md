@@ -2,7 +2,7 @@
 
 ## Overview
 
-Brainwires CLI uses `.env` files to manage environment variables without committing secrets to git.
+rullama CLI uses `.env` files to manage environment variables without committing secrets to git.
 
 ## Quick Start
 

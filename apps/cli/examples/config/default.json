@@ -1,5 +1,4 @@
 {
-  "$schema": "https://brainwires.studio/schemas/cli-config.json",
   "version": "1.0",
   "description": "Default configuration - balanced settings for general use",
 
