@@ -1,5 +1,5 @@
 use anyhow::Result;
-use brainwires_cli::cli::app::App;
+use rullama_cli::cli::app::App;
 
 fn main() -> Result<()> {
     // Create runtime manually so we can control shutdown behavior
@@ -19,7 +19,7 @@ fn main() -> Result<()> {
 
         // Flush and shut down analytics before the runtime exits so queued
         // events are not lost. Fail-open: analytics errors never surface to users.
-        if let Some(collector) = brainwires_cli::utils::logger::analytics_collector() {
+        if let Some(collector) = rullama_cli::utils::logger::analytics_collector() {
             collector.shutdown().await;
         }
 
@@ -35,7 +35,7 @@ fn main() -> Result<()> {
     // hang in its pause() loop waiting for SIGHUP that will never come.
     // The attacher PID was passed via environment variable from reattach_terminal().
     #[cfg(unix)]
-    if let Ok(attacher_pid_str) = std::env::var("BRAINWIRES_ATTACHER_PID")
+    if let Ok(attacher_pid_str) = std::env::var("RULLAMA_ATTACHER_PID")
         && let Ok(attacher_pid) = attacher_pid_str.parse::<i32>()
         && attacher_pid > 0
     {

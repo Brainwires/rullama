@@ -5,9 +5,9 @@
 /// 2. Execute /clear to save and clear the conversation
 /// 3. Execute /resume to restore the cleared conversation
 /// 4. Try /resume again to verify it shows "no cleared conversation"
-use brainwires_cli::commands::executor::{CommandAction, CommandExecutor, CommandResult};
-use brainwires_cli::types::message::{Message, MessageContent, Role};
-use brainwires_cli::utils::conversation::ConversationManager;
+use rullama_cli::commands::executor::{CommandAction, CommandExecutor, CommandResult};
+use rullama_cli::types::message::{Message, MessageContent, Role};
+use rullama_cli::utils::conversation::ConversationManager;
 
 fn main() -> anyhow::Result<()> {
     println!("Testing /clear and /resume commands");

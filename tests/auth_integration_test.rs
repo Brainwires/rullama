@@ -3,7 +3,7 @@
 // Run with: cargo test --test auth_integration_test -- --ignored
 mod common;
 
-use brainwires_cli::auth::{AuthClient, SessionManager};
+use rullama_cli::auth::{AuthClient, SessionManager};
 use std::sync::Mutex;
 use tempfile::TempDir;
 

@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use brainwires::agent_network::client::{AgentConfig, AgentNetworkClient};
+use rullama::agent_network::client::{AgentConfig, AgentNetworkClient};
 
 use super::comparator::{Comparator, ComparisonResult, PathResult};
 use super::config::SelfImprovementConfig;
@@ -356,7 +356,7 @@ impl SelfImprovementController {
     ) -> Result<PathResult> {
         let start = Instant::now();
 
-        let mut client = match AgentNetworkClient::connect("brainwires").await {
+        let mut client = match AgentNetworkClient::connect("rullama").await {
             Ok(c) => c,
             Err(e) => {
                 return Ok(PathResult::failure(

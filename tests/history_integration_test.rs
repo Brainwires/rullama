@@ -17,7 +17,7 @@ impl TestEnv {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
         // Create necessary subdirectories
-        let data_dir = temp_dir.path().join(".local/share/brainwires");
+        let data_dir = temp_dir.path().join(".local/share/rullama");
         fs::create_dir_all(&data_dir).expect("Failed to create data dir");
 
         Self { temp_dir }
@@ -26,11 +26,11 @@ impl TestEnv {
     fn db_path(&self) -> PathBuf {
         self.temp_dir
             .path()
-            .join(".local/share/brainwires/conversations.lance")
+            .join(".local/share/rullama/conversations.lance")
     }
 
     fn cmd(&self) -> Command {
-        let mut cmd = Command::cargo_bin("brainwires").expect("Failed to find brainwires binary");
+        let mut cmd = Command::cargo_bin("rullama").expect("Failed to find rullama binary");
 
         cmd.env("HOME", self.temp_dir.path());
         cmd.env("XDG_DATA_HOME", self.temp_dir.path().join(".local/share"));

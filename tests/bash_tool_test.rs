@@ -1,8 +1,8 @@
 // Integration tests for bash tool
 mod common;
 
-use brainwires_cli::tools::BashTool;
-use brainwires_cli::types::tool::ToolContext;
+use rullama_cli::tools::BashTool;
+use rullama_cli::types::tool::ToolContext;
 use common::create_test_dir;
 use serde_json::json;
 

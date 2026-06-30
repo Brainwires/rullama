@@ -765,7 +765,7 @@ impl ToolExecutor {
 #### 6.3 Configuration File Format
 
 ```toml
-# ~/.brainwires/permissions.toml
+# ~/.rullama/permissions.toml
 
 [default]
 profile = "standard_dev"  # read_only | standard_dev | full_access | custom
@@ -910,22 +910,22 @@ New commands for permission management:
 
 ```bash
 # View current permissions
-brainwires permissions show
+rullama permissions show
 
 # Set permission profile
-brainwires permissions set standard_dev
+rullama permissions set standard_dev
 
 # View audit log
-brainwires audit log [--agent <id>] [--since <time>]
+rullama audit log [--agent <id>] [--since <time>]
 
 # View agent trust levels
-brainwires trust show [--agent <id>]
+rullama trust show [--agent <id>]
 
 # Reset trust for an agent
-brainwires trust reset <agent-id>
+rullama trust reset <agent-id>
 
 # Create custom policy
-brainwires policy create <name> --conditions '...' --action deny
+rullama policy create <name> --conditions '...' --action deny
 ```
 
 ---

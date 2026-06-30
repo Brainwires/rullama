@@ -298,7 +298,7 @@ provider.clear_cache();  // Clear if needed
 Before performing expensive RAG lookups, a cheap classifier determines if retrieval is needed:
 
 ```rust
-use brainwires_cli::utils::retrieval_gate::{needs_retrieval, classify_retrieval_need};
+use rullama_cli::utils::retrieval_gate::{needs_retrieval, classify_retrieval_need};
 
 // Simple boolean check
 if needs_retrieval(user_message, recent_context_len, has_compaction) {
@@ -358,7 +358,7 @@ Messages flow down tiers based on:
 Each message receives an importance score (0.0-1.0) based on:
 
 ```rust
-use brainwires_cli::utils::importance::{calculate_importance, ImportanceContext};
+use rullama_cli::utils::importance::{calculate_importance, ImportanceContext};
 
 let context = ImportanceContext {
     forward_references: 2,  // Referenced by 2 later messages
@@ -401,7 +401,7 @@ for result in results {
 Automatically enhances conversation context with relevant historical information:
 
 ```rust
-use brainwires_cli::utils::context_builder::{ContextBuilder, ContextBuilderConfig};
+use rullama_cli::utils::context_builder::{ContextBuilder, ContextBuilderConfig};
 
 let config = ContextBuilderConfig {
     injection_threshold: 0.75,  // Only inject if score > 75%
@@ -431,7 +431,7 @@ Features:
 Utilities for Anthropic API prompt caching:
 
 ```rust
-use brainwires_cli::utils::prompt_cache::{
+use rullama_cli::utils::prompt_cache::{
     build_cached_system_prompt,
     CacheAnalyzer,
     CacheConfig,
@@ -459,8 +459,8 @@ Cache points identified:
 The `ConversationManager` now integrates all these optimizations automatically:
 
 ```rust
-use brainwires_cli::utils::conversation::ConversationManager;
-use brainwires_cli::utils::context_builder::ContextBuilderConfig;
+use rullama_cli::utils::conversation::ConversationManager;
+use rullama_cli::utils::context_builder::ContextBuilderConfig;
 
 // Default configuration
 let mut manager = ConversationManager::new(100_000);
@@ -514,7 +514,7 @@ No enhancement occurs when:
 Automatically extracts named entities from conversation messages:
 
 ```rust
-use brainwires_cli::utils::entity_extraction::{EntityExtractor, EntityStore, EntityType};
+use rullama_cli::utils::entity_extraction::{EntityExtractor, EntityStore, EntityType};
 
 let extractor = EntityExtractor::new();
 let mut store = EntityStore::new();
@@ -543,7 +543,7 @@ Entity types extracted:
 Stores and queries relationships between entities:
 
 ```rust
-use brainwires_cli::storage::{RelationshipGraph, EdgeType};
+use rullama_cli::storage::{RelationshipGraph, EdgeType};
 
 let mut graph = RelationshipGraph::new();
 

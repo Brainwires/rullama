@@ -1,4 +1,4 @@
-//! Interactive UI mode system prompts for the brainwires CLI.
+//! Interactive UI mode system prompts for the rullama CLI.
 //!
 //! Each prompt function corresponds to one of the CLI's interactive modes
 //! (Edit, Ask, Plan, Batch) or a specialised sub-agent spawned by a tool.
@@ -6,7 +6,7 @@
 
 use crate::types::WorkingSet;
 use anyhow::Result;
-use brainwires::knowledge::bks_pks::matcher::{MatchedTruth, format_truths_for_prompt};
+use rullama::knowledge::bks_pks::matcher::{MatchedTruth, format_truths_for_prompt};
 
 // ── Edit mode (full read/write access) ─────────────────────────────────────
 
@@ -87,7 +87,7 @@ let config = if has_cargo {{ read_file("Cargo.toml") }} else {{ "No config" }};
     // to learn a new incantation.
     let instructions = load_auto_instructions();
 
-    // Auto-load per-project memory notes (~/.brainwires/projects/<cwd>/memory/).
+    // Auto-load per-project memory notes (~/.rullama/projects/<cwd>/memory/).
     let memory = load_auto_memory();
 
     let mut assembled = base_prompt;
@@ -113,9 +113,9 @@ let config = if has_cargo {{ read_file("Cargo.toml") }} else {{ "No config" }};
 ///
 /// Returns an empty string when discovery finds nothing, when the cwd is
 /// unreadable, or when the user has opted out via
-/// `BRAINWIRES_DISABLE_AUTO_INSTRUCTIONS=1`.
+/// `RULLAMA_DISABLE_AUTO_INSTRUCTIONS=1`.
 fn load_auto_instructions() -> String {
-    if std::env::var("BRAINWIRES_DISABLE_AUTO_INSTRUCTIONS")
+    if std::env::var("RULLAMA_DISABLE_AUTO_INSTRUCTIONS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
     {
@@ -125,15 +125,15 @@ fn load_auto_instructions() -> String {
     let Ok(cwd) = std::env::current_dir() else {
         return String::new();
     };
-    let sources = crate::utils::brainwires_md::discover_project_instructions(&cwd);
-    crate::utils::brainwires_md::render_instructions(&sources)
+    let sources = crate::utils::rullama_md::discover_project_instructions(&cwd);
+    crate::utils::rullama_md::render_instructions(&sources)
 }
 
 /// Load per-project auto memory for injection into the system prompt.
-/// Opt-out via `BRAINWIRES_DISABLE_AUTO_MEMORY=1`, mirroring the auto
+/// Opt-out via `RULLAMA_DISABLE_AUTO_MEMORY=1`, mirroring the auto
 /// instructions escape hatch.
 fn load_auto_memory() -> String {
-    if std::env::var("BRAINWIRES_DISABLE_AUTO_MEMORY")
+    if std::env::var("RULLAMA_DISABLE_AUTO_MEMORY")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
     {

@@ -259,7 +259,7 @@ impl CostTracker {
     fn default_path() -> Result<PathBuf> {
         let data_dir =
             dirs::data_dir().ok_or_else(|| anyhow::anyhow!("Could not find data directory"))?;
-        Ok(data_dir.join("brainwires").join("cost_tracker.json"))
+        Ok(data_dir.join("rullama").join("cost_tracker.json"))
     }
 
     /// Track a usage event

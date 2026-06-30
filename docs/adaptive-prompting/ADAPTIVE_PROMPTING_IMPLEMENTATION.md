@@ -21,11 +21,11 @@ Rather than applying the same system prompt template to every task, the adaptive
 
 ## Module Layout
 
-> **Note:** The prompting module lives in the `brainwires-knowledge` framework crate (a
+> **Note:** The prompting module lives in the `rullama-knowledge` framework crate (a
 > dependency of the CLI), not in the CLI's own `src/` directory.
 
 ```
-brainwires-knowledge crate / src/prompting/
+rullama-knowledge crate / src/prompting/
 ├── techniques.rs    # 15 prompting technique definitions and metadata
 ├── library.rs       # TechniqueLibrary — BKS-backed technique catalog
 ├── clustering.rs    # TaskClusterManager — k-means cluster matching
@@ -152,7 +152,7 @@ Learning Pipeline
 - Technique effectiveness statistics per cluster
 - Temperature performance data
 
-Database location: `~/.brainwires/adaptive_prompting.db`
+Database location: `~/.rullama/adaptive_prompting.db`
 
 ---
 
@@ -180,9 +180,9 @@ pub fn last_generated_prompt(&self) -> Option<&GeneratedPrompt>
 ## Usage Example
 
 ```rust
-use brainwires_cli::prompting::{TechniqueLibrary, TaskClusterManager, PromptGenerator};
-use brainwires_cli::prompting::storage::ClusterStorage;
-use brainwires_cli::storage::embeddings::CachedEmbeddingProvider;
+use rullama_cli::prompting::{TechniqueLibrary, TaskClusterManager, PromptGenerator};
+use rullama_cli::prompting::storage::ClusterStorage;
+use rullama_cli::storage::embeddings::CachedEmbeddingProvider;
 use std::sync::Arc;
 
 // Initialize components
@@ -192,7 +192,7 @@ let library = TechniqueLibrary::new()
     .with_bks(bks_cache.clone());
 
 let mut cluster_manager = TaskClusterManager::new();
-let storage = ClusterStorage::new("~/.brainwires/adaptive_prompting.db")?;
+let storage = ClusterStorage::new("~/.rullama/adaptive_prompting.db")?;
 for cluster in storage.load_clusters()? {
     cluster_manager.add_cluster(cluster);
 }

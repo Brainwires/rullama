@@ -908,7 +908,7 @@ impl App {
             return;
         }
 
-        use brainwires::agent_network::ipc::{IpcConnection, ViewerMessage};
+        use rullama::agent_network::ipc::{IpcConnection, ViewerMessage};
         match IpcConnection::connect(&sock_path).await {
             Ok(conn) => {
                 let (_, mut writer) = conn.split();

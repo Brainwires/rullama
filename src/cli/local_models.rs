@@ -31,7 +31,7 @@ pub enum LocalModelCommands {
         /// Model ID to download (use 'list --available' to see options)
         model_id: String,
 
-        /// Custom path to save the model (default: ~/.local/share/brainwires/models/)
+        /// Custom path to save the model (default: ~/.local/share/rullama/models/)
         #[arg(short, long)]
         path: Option<PathBuf>,
 
@@ -141,11 +141,11 @@ fn list_installed_models(verbose: bool) -> Result<()> {
         println!();
         println!(
             "Use {} to see downloadable models",
-            style("brainwires local-models list --available").cyan()
+            style("rullama local-models list --available").cyan()
         );
         println!(
             "Use {} to download a model",
-            style("brainwires local-models download <model_id>").cyan()
+            style("rullama local-models download <model_id>").cyan()
         );
         return Ok(());
     }
@@ -227,7 +227,7 @@ fn list_available_models(verbose: bool) -> Result<()> {
 
     println!(
         "Download with: {}",
-        style("brainwires local-models download <model_id>").cyan()
+        style("rullama local-models download <model_id>").cyan()
     );
 
     Ok(())

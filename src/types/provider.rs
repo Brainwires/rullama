@@ -1,15 +1,15 @@
 //! Provider types.
 //!
-//! Re-exports ChatOptions from brainwires-core and ProviderType/ProviderConfig from brainwires-provider.
+//! Re-exports ChatOptions from rullama-core and ProviderType/ProviderConfig from rullama-provider.
 
 use serde::{Deserialize, Serialize};
 
 // Re-export ChatOptions from framework
-pub use brainwires::core::provider::ChatOptions;
+pub use rullama::core::provider::ChatOptions;
 
 // Re-export from providers crate
-pub use brainwires::providers::ProviderConfig;
-pub use brainwires::providers::ProviderType;
+pub use rullama::providers::ProviderConfig;
+pub use rullama::providers::ProviderType;
 
 /// Brainwires backend configuration (CLI-specific)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,7 +65,7 @@ mod tests {
     }
 
     #[test]
-    fn test_brainwires_config() {
+    fn test_rullama_config() {
         let config = BrainwiresConfig::new("claude-3-5-sonnet-20241022".to_string())
             .with_api_key("test-key");
         assert_eq!(config.model, "claude-3-5-sonnet-20241022");

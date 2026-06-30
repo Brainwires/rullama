@@ -133,7 +133,7 @@ pub async fn hibernate_agents() -> Result<Vec<String>> {
 
         // Send shutdown signal via IPC with authentication
         use crate::ipc::read_session_token;
-        use brainwires::agent_network::ipc::{Handshake, HandshakeResponse, ViewerMessage};
+        use rullama::agent_network::ipc::{Handshake, HandshakeResponse, ViewerMessage};
 
         // Read session token for authenticated connection
         let session_token = match read_session_token(&agent.session_id) {

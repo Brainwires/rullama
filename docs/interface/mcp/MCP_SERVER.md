@@ -1,6 +1,6 @@
 # MCP Server Mode
 
-The `brainwires` CLI can run as an **Model Context Protocol (MCP) server**, exposing its AI agents and tools to other applications like Claude Desktop, IDEs, and custom MCP clients.
+The `rullama` CLI can run as an **Model Context Protocol (MCP) server**, exposing its AI agents and tools to other applications like Claude Desktop, IDEs, and custom MCP clients.
 
 ## Overview
 
@@ -16,13 +16,13 @@ MCP server mode transforms the CLI into a background service that:
 
 ```bash
 # Start as MCP server (listens on stdin/stdout)
-brainwires chat --mcp-server
+rullama chat --mcp-server
 
 # With specific model
-brainwires chat --mcp-server --model gpt-5-mini
+rullama chat --mcp-server --model gpt-5-mini
 
 # With custom system prompt
-brainwires chat --mcp-server --system "You are a specialized code reviewer"
+rullama chat --mcp-server --system "You are a specialized code reviewer"
 ```
 
 ### Using with Claude Desktop
@@ -32,8 +32,8 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
 ```json
 {
   "mcpServers": {
-    "brainwires": {
-      "command": "/path/to/brainwires",
+    "rullama": {
+      "command": "/path/to/rullama",
       "args": ["chat", "--mcp-server"],
       "env": {
         "ANTHROPIC_API_KEY": "your-key-here"
@@ -43,7 +43,7 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
 }
 ```
 
-Restart Claude Desktop, and you'll have access to brainwires tools in your conversations.
+Restart Claude Desktop, and you'll have access to rullama tools in your conversations.
 
 ## Available Tools
 
@@ -92,7 +92,7 @@ Stop a running task agent.
 
 ### Built-in Tools
 
-All standard brainwires tools are also exposed:
+All standard rullama tools are also exposed:
 - File operations (read, write, list directory)
 - Code search (query_codebase)
 - Git operations
@@ -223,7 +223,7 @@ agent_spawn("Watch for security vulnerabilities in dependencies")
 
 ### 4. IDE Integration
 
-Connect your IDE to brainwires agents:
+Connect your IDE to rullama agents:
 - Refactoring suggestions
 - Test generation
 - Documentation writing
@@ -234,17 +234,17 @@ Connect your IDE to brainwires agents:
 ### Environment Variables
 
 - `ANTHROPIC_API_KEY` - Anthropic API key for Claude models
-- `BRAINWIRES_SESSION` - Alternative: Brainwires Studio session
+- `RULLAMA_SESSION` - Alternative: Brainwires Studio session
 - `RUST_LOG` - Logging level (e.g., `debug`, `info`)
 
 ### Model Selection
 
 ```bash
 # Use specific Claude model
-brainwires chat --mcp-server --model gpt-5-mini
+rullama chat --mcp-server --model gpt-5-mini
 
 # Uses default model from config if not specified
-brainwires chat --mcp-server
+rullama chat --mcp-server
 ```
 
 ### System Prompt Customization
@@ -252,7 +252,7 @@ brainwires chat --mcp-server
 Customize agent behavior with system prompts:
 
 ```bash
-brainwires chat --mcp-server --system "You are an expert in Rust programming. Focus on memory safety and performance."
+rullama chat --mcp-server --system "You are an expert in Rust programming. Focus on memory safety and performance."
 ```
 
 ## Performance
@@ -306,13 +306,13 @@ Store API keys securely:
 
 ```bash
 # Check for configuration issues
-brainwires chat --mcp-server 2>&1 | grep -i error
+rullama chat --mcp-server 2>&1 | grep -i error
 
 # Verify API key
 echo $ANTHROPIC_API_KEY
 
 # Test with verbose logging
-RUST_LOG=debug brainwires chat --mcp-server
+RUST_LOG=debug rullama chat --mcp-server
 ```
 
 ### Agent Not Spawning
@@ -417,7 +417,7 @@ def call_mcp_tool(tool_name, arguments):
     }
 
     proc = subprocess.Popen(
-        ["brainwires", "chat", "--mcp-server"],
+        ["rullama", "chat", "--mcp-server"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True
@@ -449,7 +449,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
-      - name: Install brainwires
+      - name: Install rullama
         run: cargo install --path .
 
       - name: Run AI review
@@ -457,7 +457,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_spawn","arguments":{"task":"Review PR changes for issues"}}}' | \
-            brainwires chat --mcp-server > review.json
+            rullama chat --mcp-server > review.json
 
       - name: Post review
         run: cat review.json
@@ -473,5 +473,5 @@ jobs:
 ## Support
 
 For issues, questions, or contributions:
-- GitHub Issues: https://github.com/yourusername/brainwires-cli/issues
+- GitHub Issues: https://github.com/yourusername/rullama-cli/issues
 - MCP Discord: https://discord.gg/modelcontextprotocol

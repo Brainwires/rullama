@@ -89,18 +89,18 @@ build_and_upload() {
             echo -e "${RED}  ✗ ${NAME} build failed${NC}"
             return 1
         }
-        BINARY_PATH="target/${TARGET}/release/brainwires"
+        BINARY_PATH="target/${TARGET}/release/rullama"
     else
         cargo build --release --target "$TARGET" || {
             echo -e "${RED}  ✗ ${NAME} build failed${NC}"
             return 1
         }
-        BINARY_PATH="target/${TARGET}/release/brainwires"
+        BINARY_PATH="target/${TARGET}/release/rullama"
     fi
 
     if [ ! -f "$BINARY_PATH" ]; then
         # Try without target subfolder for native builds
-        BINARY_PATH="target/release/brainwires"
+        BINARY_PATH="target/release/rullama"
     fi
 
     if [ -f "$BINARY_PATH" ]; then
@@ -110,7 +110,7 @@ build_and_upload() {
         cp "$BINARY_PATH" dist/
         cp README.md LICENSE CHANGELOG.md dist/ 2>/dev/null || true
 
-        ARCHIVE_NAME="brainwires-${CLI_VERSION}-${NAME}.tar.xz"
+        ARCHIVE_NAME="rullama-${CLI_VERSION}-${NAME}.tar.xz"
         cd dist
         tar -cJf "../${ARCHIVE_NAME}" *
         cd ..
@@ -134,7 +134,7 @@ build_and_upload() {
                 --silent --show-error && echo -e "${GREEN}  ✓ Uploaded versioned${NC}"
 
             # Upload to stable
-            STABLE_ARCHIVE="brainwires-latest-${NAME}.tar.xz"
+            STABLE_ARCHIVE="rullama-latest-${NAME}.tar.xz"
             cp "${ARCHIVE_NAME}" "${STABLE_ARCHIVE}"
             curl -X POST "${SUPABASE_URL}/storage/v1/object/cli-releases/stable/${NAME}/${STABLE_ARCHIVE}" \
                 -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
@@ -198,7 +198,7 @@ build_and_upload_windows() {
         cp "$BINARY_PATH" dist/
         cp README.md LICENSE CHANGELOG.md dist/ 2>/dev/null || true
 
-        ARCHIVE_NAME="brainwires-${CLI_VERSION}-${NAME}.zip"
+        ARCHIVE_NAME="rullama-${CLI_VERSION}-${NAME}.zip"
         cd dist
         zip -q "../${ARCHIVE_NAME}" *
         cd ..
@@ -222,7 +222,7 @@ build_and_upload_windows() {
                 --silent --show-error && echo -e "${GREEN}  ✓ Uploaded versioned${NC}"
 
             # Upload to stable
-            STABLE_ARCHIVE="brainwires-latest-${NAME}.zip"
+            STABLE_ARCHIVE="rullama-latest-${NAME}.zip"
             cp "${ARCHIVE_NAME}" "${STABLE_ARCHIVE}"
             curl -X POST "${SUPABASE_URL}/storage/v1/object/cli-releases/stable/${NAME}/${STABLE_ARCHIVE}" \
                 -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \

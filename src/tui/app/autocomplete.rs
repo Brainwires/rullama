@@ -201,7 +201,7 @@ impl App {
         use crate::utils::paths::PlatformPaths;
         use std::fs;
 
-        let cache_path = PlatformPaths::brainwires_data_dir()
+        let cache_path = PlatformPaths::rullama_data_dir()
             .ok()?
             .join("models_cache.json");
         if !cache_path.exists() {

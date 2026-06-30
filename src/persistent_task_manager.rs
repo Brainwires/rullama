@@ -7,12 +7,12 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use brainwires_agent::task_manager::TaskManager;
-use brainwires_core::{Task, TaskPriority, TaskStatus};
+use rullama_agent::task_manager::TaskManager;
+use rullama_core::{Task, TaskPriority, TaskStatus};
 
-use brainwires_storage::LanceDatabase;
+use rullama_storage::LanceDatabase;
 
-use brainwires_stores::TaskStore;
+use rullama_stores::TaskStore;
 
 /// A TaskManager that automatically persists to the storage backend
 pub struct PersistentTaskManager {
@@ -244,7 +244,7 @@ impl PersistentTaskManager {
     }
 
     /// Get statistics
-    pub async fn get_stats(&self) -> brainwires_agent::task_manager::TaskStats {
+    pub async fn get_stats(&self) -> rullama_agent::task_manager::TaskStats {
         self.manager.get_stats().await
     }
 

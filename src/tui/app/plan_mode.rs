@@ -9,7 +9,7 @@ use super::autocomplete::AutocompleteOps;
 use super::state::{App, AppMode, LogLevel, TuiMessage};
 use crate::tui::Event;
 use crate::types::plan_mode::{PlanModeState, SavedMainContext};
-use brainwires::agent_network::ipc::{AgentMessage, DisplayMessage, ViewerMessage};
+use rullama::agent_network::ipc::{AgentMessage, DisplayMessage, ViewerMessage};
 
 impl App {
     /// Enter plan mode with optional focus/goal

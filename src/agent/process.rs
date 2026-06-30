@@ -16,7 +16,7 @@ use crate::config::ConfigManager;
 use crate::ipc::get_agent_socket_path;
 use crate::mdap::MdapConfig;
 use crate::types::tool::{ToolContext, ToolUse};
-use brainwires::agent_network::ipc::{
+use rullama::agent_network::ipc::{
     AgentMessage, Handshake, HandshakeResponse, IpcConnection, LockChangeType, LockInfo,
     ResourceLockType, ViewerMessage,
 };
@@ -82,7 +82,7 @@ impl AgentProcess {
 
         // Generate and store session token for secure reattachment
         let session_id = self.state.read().await.session_id.clone();
-        let session_token = brainwires::agent_network::ipc::socket::generate_session_token();
+        let session_token = rullama::agent_network::ipc::socket::generate_session_token();
         crate::ipc::write_session_token(&session_id, &session_token)?;
         tracing::info!("Session token generated and saved with 0600 permissions");
 
@@ -180,7 +180,7 @@ impl AgentProcess {
                     };
 
                     if let Ok(mut conn) = crate::ipc::connect_to_agent(&child.session_id).await {
-                        use brainwires::agent_network::ipc::{
+                        use rullama::agent_network::ipc::{
                             Handshake, HandshakeResponse, ParentSignalType, ViewerMessage,
                         };
 
@@ -1165,7 +1165,7 @@ async fn handle_viewer_message(
             tracing::info!("Found {} child agent(s) to notify", children.len());
 
             let mut notified_children = Vec::new();
-            use brainwires::agent_network::ipc::{ChildNotifyAction, ParentSignalType};
+            use rullama::agent_network::ipc::{ChildNotifyAction, ParentSignalType};
 
             for child in &children {
                 // Check if child is alive
@@ -1195,7 +1195,7 @@ async fn handle_viewer_message(
 
                 // Send signal to child via authenticated IPC
                 if let Ok(mut conn) = crate::ipc::connect_to_agent(&child.session_id).await {
-                    use brainwires::agent_network::ipc::{Handshake, HandshakeResponse};
+                    use rullama::agent_network::ipc::{Handshake, HandshakeResponse};
 
                     // Perform authenticated handshake
                     let handshake = Handshake::reattach(child.session_id.clone(), child_token);
@@ -1268,7 +1268,7 @@ async fn handle_viewer_message(
                 parent_session_id
             );
 
-            use brainwires::agent_network::ipc::ParentSignalType;
+            use rullama::agent_network::ipc::ParentSignalType;
             match signal {
                 ParentSignalType::ParentExiting => {
                     // Check if we're busy - if idle, set exit_when_done
@@ -1796,7 +1796,7 @@ async fn stream_with_tool_execution(
                     working_directory: working_directory.clone(),
                     // Use full_access for agent mode - agents need unrestricted file access
                     capabilities: serde_json::to_value(
-                        brainwires::permissions::AgentCapabilities::full_access(),
+                        rullama::permissions::AgentCapabilities::full_access(),
                     )
                     .ok(),
                     ..Default::default()
@@ -2001,7 +2001,7 @@ async fn stream_continuation_with_tool_result(
 
     // Get API key from secure storage (keyring or fallback)
     let api_key = SessionManager::get_api_key()?
-        .context("No API key found. Please re-authenticate with: brainwires auth")?;
+        .context("No API key found. Please re-authenticate with: rullama auth")?;
 
     let http_client = reqwest::Client::new();
     let url = format!("{}/api/chat/stream", session.backend);
@@ -2202,7 +2202,7 @@ async fn stream_continuation_with_tool_result(
                             let tool_context = ToolContext {
                                 working_directory: working_directory.to_string(),
                                 capabilities: serde_json::to_value(
-                                    brainwires::permissions::AgentCapabilities::full_access(),
+                                    rullama::permissions::AgentCapabilities::full_access(),
                                 )
                                 .ok(),
                                 ..Default::default()

@@ -1,6 +1,6 @@
 # Brainwires CLI Tests
 
-This directory contains comprehensive tests for brainwires-cli, including unit tests, integration tests, and AI-evaluated tests.
+This directory contains comprehensive tests for rullama-cli, including unit tests, integration tests, and AI-evaluated tests.
 
 ## Test Categories
 
@@ -31,7 +31,7 @@ cargo test --tests
 ```
 
 ### AI-Evaluated Tests ⭐
-**New!** Tests that validate brainwires' core autonomous coding capabilities.
+**New!** Tests that validate rullama' core autonomous coding capabilities.
 
 - **`ai_code_fix_test.rs`** - Autonomous code fixing with AI evaluation
   - See: [AI_CODE_FIX_TEST.md](./AI_CODE_FIX_TEST.md) for details
@@ -89,7 +89,7 @@ cargo test --test ai_code_fix_test -- --ignored --nocapture
 
 **Option 2: Using environment variable**
 ```bash
-export TEST_API_KEY=your_brainwires_api_key
+export TEST_API_KEY=your_rullama_api_key
 cargo test --test ai_code_fix_test -- --ignored --nocapture
 ```
 
@@ -116,7 +116,7 @@ use predicates::prelude::*;
 
 #[test]
 fn test_new_feature() {
-    Command::cargo_bin("brainwires")
+    Command::cargo_bin("rullama")
         .unwrap()
         .arg("command")
         .assert()

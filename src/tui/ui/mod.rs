@@ -386,7 +386,7 @@ fn draw_status_bar(
     // Draw the status text on the left
     let queued_count = app.queued_message_count();
     let mut status_spans = vec![Span::styled(
-        "brainwires-cli",
+        "rullama-cli",
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),

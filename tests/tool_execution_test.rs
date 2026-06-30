@@ -1,6 +1,6 @@
 /// Integration test for CLI-local tool execution flow
 /// Tests the complete cycle: toolCall event → execute tool → send continuation → receive response
-use brainwires_cli::types::message::StreamChunk;
+use rullama_cli::types::message::StreamChunk;
 use serde_json::json;
 
 #[test]

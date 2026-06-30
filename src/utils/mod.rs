@@ -1,5 +1,5 @@
 pub mod ambiguity_effectiveness;
-pub mod brainwires_md;
+pub mod rullama_md;
 pub mod checkpoint;
 pub mod completion_detector;
 pub mod context_builder;
@@ -20,7 +20,7 @@ pub mod paths;
 pub mod test_util {
     use std::sync::Mutex;
     /// Serialise tests that mutate process-global env vars (`HOME`,
-    /// `BRAINWIRES_MEMORY_ROOT`). Env vars leak across test boundaries
+    /// `RULLAMA_MEMORY_ROOT`). Env vars leak across test boundaries
     /// and tokio's default test executor runs tests concurrently, so
     /// every such test must hold this mutex for the duration of the
     /// mutation.
@@ -59,9 +59,9 @@ pub mod test_util {
     }
 }
 /// Plan parser re-exported from the framework's reasoning crate.
-/// (Moved out of `brainwires-core` during the 0.10 architecture restoration.)
+/// (Moved out of `rullama-core` during the 0.10 architecture restoration.)
 pub mod plan_parser {
-    pub use brainwires::reasoning::plan_parser::*;
+    pub use rullama::reasoning::plan_parser::*;
 }
 pub mod prompt_cache;
 pub mod prompt_history;

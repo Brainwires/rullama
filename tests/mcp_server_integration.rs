@@ -59,7 +59,7 @@ fn test_mcp_server_initialize() -> Result<()> {
     assert_eq!(response["id"], 1);
     assert!(response["result"].is_object());
     assert_eq!(response["result"]["protocolVersion"], "2024-11-05");
-    assert_eq!(response["result"]["serverInfo"]["name"], "brainwires-cli");
+    assert_eq!(response["result"]["serverInfo"]["name"], "rullama-cli");
     assert!(response["result"]["capabilities"]["tools"].is_object());
 
     // Clean up

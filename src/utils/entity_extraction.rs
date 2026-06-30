@@ -4,7 +4,7 @@
 //! to build a relationship graph for better context retrieval.
 //!
 //! Entity types (EntityType, Entity, Relationship, ExtractionResult, EntityStore)
-//! are re-exported from the brainwires-storage framework crate.
+//! are re-exported from the rullama-storage framework crate.
 //!
 //! # Local LLM Enhancement
 //!
@@ -14,15 +14,15 @@
 //! - Classifies relationships semantically (not just co-occurrence)
 //! - Identifies domain concepts dynamically
 
-// Re-export entity types from framework (brainwires-knowledge::knowledge)
-pub use brainwires::knowledge::entity::{
+// Re-export entity types from framework (rullama-knowledge::knowledge)
+pub use rullama::knowledge::entity::{
     Entity, EntityStore, EntityStoreStats, EntityType, ExtractionResult, Relationship,
 };
 
 use regex::Regex;
 use std::collections::HashSet;
 
-use brainwires::reasoning::{EntityEnhancer, SemanticEntityType};
+use rullama::reasoning::{EntityEnhancer, SemanticEntityType};
 
 /// Entity extractor with compiled regex patterns
 pub struct EntityExtractor {
@@ -368,10 +368,10 @@ fn convert_semantic_to_entity_type(semantic: &SemanticEntityType) -> Option<Enti
 
 /// Convert EnhancedRelationship to Relationship
 fn convert_enhanced_relationship(
-    enhanced: &brainwires::reasoning::EnhancedRelationship,
+    enhanced: &rullama::reasoning::EnhancedRelationship,
     message_id: &str,
 ) -> Relationship {
-    use brainwires::reasoning::RelationType;
+    use rullama::reasoning::RelationType;
 
     match &enhanced.relation_type {
         RelationType::Contains => Relationship::Contains {

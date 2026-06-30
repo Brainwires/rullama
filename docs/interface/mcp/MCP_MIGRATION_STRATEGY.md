@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-This document outlines the strategy for migrating brainwires-cli from its custom Model Context Protocol (MCP) implementation (~1,000 lines) to the official `rmcp` crate (v0.8).
+This document outlines the strategy for migrating rullama-cli from its custom Model Context Protocol (MCP) implementation (~1,000 lines) to the official `rmcp` crate (v0.8).
 
 **Status**: rmcp is already listed in Cargo.toml but completely unused.
 

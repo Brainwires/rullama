@@ -142,7 +142,7 @@ mod tests {
     fn setup_temp_home() -> (TempDir, EnvVarGuard, std::sync::MutexGuard<'static, ()>) {
         let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().unwrap();
-        let env = EnvVarGuard::set("BRAINWIRES_MEMORY_ROOT", tmp.path());
+        let env = EnvVarGuard::set("RULLAMA_MEMORY_ROOT", tmp.path());
         (tmp, env, lock)
     }
 

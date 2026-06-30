@@ -1,6 +1,6 @@
 //! Dream (sleep) consolidation — CLI integration layer.
 //!
-//! The framework's `brainwires::dream::DreamConsolidator` does the actual work
+//! The framework's `rullama::dream::DreamConsolidator` does the actual work
 //! (summarise old messages, extract durable facts, prune raw history). This
 //! module just adapts the CLI's session state to the framework's
 //! `DreamSessionStore` trait and exposes a tiny global "last report" cache so
@@ -15,10 +15,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use brainwires::core::{Message, Provider};
-use brainwires::dream::consolidator::{DreamConsolidator, DreamSessionStore};
-use brainwires::dream::metrics::DreamReport;
-use brainwires::dream::policy::DemotionPolicy;
+use rullama::core::{Message, Provider};
+use rullama::dream::consolidator::{DreamConsolidator, DreamSessionStore};
+use rullama::dream::metrics::DreamReport;
+use rullama::dream::policy::DemotionPolicy;
 use tokio::sync::Mutex as AsyncMutex;
 
 /// In-memory `DreamSessionStore` seeded from the active conversation.
@@ -143,7 +143,7 @@ pub fn format_report(report: &DreamReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brainwires::core::{MessageContent, Role};
+    use rullama::core::{MessageContent, Role};
 
     fn msg(role: Role, text: &str) -> Message {
         Message {

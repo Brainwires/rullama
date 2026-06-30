@@ -49,6 +49,6 @@
     ]
   },
   "env": {
-    "RUST_LOG": "brainwires_cli=info"
+    "RUST_LOG": "rullama_cli=info"
   }
 }

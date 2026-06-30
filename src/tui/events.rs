@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use brainwires::agent_network::ipc::AgentMessage;
+use rullama::agent_network::ipc::AgentMessage;
 
 /// TUI Event types
 #[derive(Debug, Clone)]
@@ -239,7 +239,7 @@ impl EventHandler {
     ///
     /// This spawns a background task that reads from the IPC connection and sends
     /// messages as Event::Ipc variants. This makes IPC fully event-driven - no polling needed.
-    pub fn start_ipc_reader(&mut self, mut reader: brainwires::agent_network::ipc::IpcReader) {
+    pub fn start_ipc_reader(&mut self, mut reader: rullama::agent_network::ipc::IpcReader) {
         let event_tx = self.tx.clone();
         let stopped = Arc::clone(&self.stopped);
 

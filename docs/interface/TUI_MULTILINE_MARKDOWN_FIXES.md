@@ -1,7 +1,7 @@
 # TUI Multi-line Input and Markdown Rendering Fixes
 
 ## Overview
-This document describes the fixes applied to enable proper multi-line input support and markdown rendering in the brainwires-cli TUI chat interface.
+This document describes the fixes applied to enable proper multi-line input support and markdown rendering in the rullama-cli TUI chat interface.
 
 ## Issues Fixed
 

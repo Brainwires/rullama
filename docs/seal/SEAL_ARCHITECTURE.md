@@ -1,10 +1,10 @@
 # SEAL Architecture
 
-Self-Evolving Agentic Learning (SEAL) integration for brainwires-cli.
+Self-Evolving Agentic Learning (SEAL) integration for rullama-cli.
 
 ## Overview
 
-The SEAL module enhances brainwires-cli with techniques from the SEAL paper to improve:
+The SEAL module enhances rullama-cli with techniques from the SEAL paper to improve:
 - **Coreference Resolution**: Understanding "it", "the file", "that function" in context
 - **Semantic Query Cores**: Structured query extraction from natural language
 - **Self-Evolving Learning**: Learning from successful interactions without retraining
@@ -72,7 +72,7 @@ Uses salience-based ranking with weighted factors:
 **Usage:**
 
 ```rust
-use brainwires::seal::{CoreferenceResolver, DialogState};
+use rullama::seal::{CoreferenceResolver, DialogState};
 
 let resolver = CoreferenceResolver::new();
 let mut state = DialogState::new();
@@ -114,7 +114,7 @@ Extracts S-expression-like structured queries from natural language.
 **Usage:**
 
 ```rust
-use brainwires::seal::QueryCoreExtractor;
+use rullama::seal::QueryCoreExtractor;
 
 let extractor = QueryCoreExtractor::new();
 let entities = vec![("main.rs".to_string(), EntityType::File)];
@@ -162,7 +162,7 @@ Successful Query Execution
 **Usage:**
 
 ```rust
-use brainwires::seal::LearningCoordinator;
+use rullama::seal::LearningCoordinator;
 
 let mut coordinator = LearningCoordinator::new("session-123".to_string());
 
@@ -203,7 +203,7 @@ Post-execution analysis for error detection and correction.
 **Usage:**
 
 ```rust
-use brainwires::seal::{ReflectionModule, ReflectionConfig};
+use rullama::seal::{ReflectionModule, ReflectionConfig};
 
 let mut reflection = ReflectionModule::new(ReflectionConfig::default());
 

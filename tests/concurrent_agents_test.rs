@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::sync::Barrier;
 use tokio::time::timeout;
 
-use brainwires_cli::agents::{CommunicationHub, FileLockManager, LockType};
+use rullama_cli::agents::{CommunicationHub, FileLockManager, LockType};
 
 /// Test that multiple concurrent read locks are allowed
 #[tokio::test]
@@ -292,7 +292,7 @@ async fn test_communication_hub_routing() {
         .expect("Should register agent-2");
 
     // Use AgentMessage enum from communication module
-    use brainwires_cli::agents::AgentMessage;
+    use rullama_cli::agents::AgentMessage;
 
     let message = AgentMessage::StatusUpdate {
         agent_id: "agent-sender".to_string(),

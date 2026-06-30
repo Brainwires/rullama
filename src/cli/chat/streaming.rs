@@ -163,14 +163,14 @@ pub async fn process_chat_stream(
                     eprintln!("⚠️  Ignoring tool from unknown server: {}\n", server);
                 }
             }
-            // The brainwires HTTP provider emits StreamChunk::Usage exactly once per
+            // The rullama HTTP provider emits StreamChunk::Usage exactly once per
             // SSE stream inside the "complete" event, with cumulative totals for that
             // turn. Tool-use continuations open a new stream that emits its own cumulative
             // Usage — hence saturating_add across chunks correctly sums turn totals.
             // If counts ever look wrong, enable RUST_LOG=trace and compare per-turn
             // totals against actual reply length before touching this math.
             StreamChunk::Usage(usage) => {
-                // Accumulate so `brainwires cost` has data to show.
+                // Accumulate so `rullama cost` has data to show.
                 total_prompt_tokens = total_prompt_tokens.saturating_add(usage.prompt_tokens);
                 total_completion_tokens =
                     total_completion_tokens.saturating_add(usage.completion_tokens);
@@ -193,7 +193,7 @@ pub async fn process_chat_stream(
         }
     }
 
-    // Persist usage to the cost tracker so `brainwires cost` can report it.
+    // Persist usage to the cost tracker so `rullama cost` can report it.
     // Best-effort: failures here should not fail the user's chat.
     if got_usage {
         let provider_name = provider.name().to_string();
@@ -215,9 +215,9 @@ pub async fn process_chat_stream(
 
 /// Load the persistent cost tracker, record a single usage event, and save.
 ///
-/// This is the plumbing that makes `brainwires cost` non-empty after running
-/// `brainwires chat --prompt ...`. The data file lives alongside other
-/// Brainwires data (`~/.local/share/brainwires/cost_tracker.json` on Linux).
+/// This is the plumbing that makes `rullama cost` non-empty after running
+/// `rullama chat --prompt ...`. The data file lives alongside other
+/// Brainwires data (`~/.local/share/rullama/cost_tracker.json` on Linux).
 async fn record_usage_event(
     provider: &str,
     model: &str,

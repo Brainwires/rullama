@@ -4,9 +4,9 @@ node_modules/
 target/
 
 # Brainwires project-specific data (RAG index, caches)
-.brainwires/
+.rullama/
 
-# Legacy fastembed cache (now stored in ~/.local/share/brainwires/fastembed/)
+# Legacy fastembed cache (now stored in ~/.local/share/rullama/fastembed/)
 .fastembed_cache/
 
 # Build output

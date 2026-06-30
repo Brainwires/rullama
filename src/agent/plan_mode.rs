@@ -12,7 +12,7 @@ use super::AgentState;
 use crate::storage::PlanModeStore;
 use crate::types::message::{Message, MessageContent, Role};
 use crate::types::plan_mode::{PlanModeState, SavedMainContext};
-use brainwires::agent_network::ipc::{AgentMessage, DisplayMessage};
+use rullama::agent_network::ipc::{AgentMessage, DisplayMessage};
 
 /// Plan mode operations for AgentState
 impl AgentState {

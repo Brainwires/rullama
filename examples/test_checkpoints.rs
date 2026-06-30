@@ -1,6 +1,6 @@
 use anyhow::Result;
-use brainwires_cli::types::message::{Message, MessageContent, Role};
-use brainwires_cli::utils::checkpoint::CheckpointManager;
+use rullama_cli::types::message::{Message, MessageContent, Role};
+use rullama_cli::utils::checkpoint::CheckpointManager;
 use std::collections::HashMap;
 
 #[tokio::main]

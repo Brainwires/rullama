@@ -1,6 +1,6 @@
 //! AI-evaluated code fix integration test
 //!
-//! This test validates brainwires' core capability: autonomous code fixing.
+//! This test validates rullama' core capability: autonomous code fixing.
 //! It takes a buggy project, asks the AI to fix it, and evaluates the result.
 //!
 //! ## Setup
@@ -26,7 +26,7 @@ fn load_env() {
 /// Create a test session file for authentication
 fn create_test_session(temp_dir: &Path, api_key: &str) -> std::io::Result<()> {
     // Create the data directory structure
-    let data_dir = temp_dir.join(".local/share/brainwires");
+    let data_dir = temp_dir.join(".local/share/rullama");
     fs::create_dir_all(&data_dir)?;
 
     // Determine backend URL based on key prefix
@@ -84,15 +84,15 @@ fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result
 }
 
 /// Helper to create test command with clean environment
-fn brainwires_cmd(temp_dir: &TempDir) -> Command {
-    let mut cmd = Command::cargo_bin("brainwires").expect("Failed to find brainwires binary");
+fn rullama_cmd(temp_dir: &TempDir) -> Command {
+    let mut cmd = Command::cargo_bin("rullama").expect("Failed to find rullama binary");
     cmd.env("HOME", temp_dir.path());
     cmd.env("XDG_CONFIG_HOME", temp_dir.path().join(".config"));
     cmd.env("XDG_DATA_HOME", temp_dir.path().join(".local/share"));
 
-    // Set API key if available - use both TEST_API_KEY and BRAINWIRES_API_KEY
+    // Set API key if available - use both TEST_API_KEY and RULLAMA_API_KEY
     if let Ok(api_key) = env::var("TEST_API_KEY") {
-        cmd.env("BRAINWIRES_API_KEY", &api_key);
+        cmd.env("RULLAMA_API_KEY", &api_key);
         cmd.env("TEST_API_KEY", api_key);
     }
 
@@ -163,8 +163,8 @@ fn test_fix_calculator_bug() {
     let lib_path = project_path.join("src/lib.rs");
     let original_code = read_file(&lib_path);
 
-    // Run brainwires to fix the bug
-    println!("\n🤖 Running brainwires to fix the bug...");
+    // Run rullama to fix the bug
+    println!("\n🤖 Running rullama to fix the bug...");
 
     // Use a model available on the current backend
     // Dev keys (bw_dev_*) use dev.brainwires.net which has different models
@@ -176,7 +176,7 @@ fn test_fix_calculator_bug() {
 
     println!("📦 Using model: {}", model);
 
-    let mut cmd = brainwires_cmd(&temp_dir);
+    let mut cmd = rullama_cmd(&temp_dir);
     cmd.current_dir(&project_path)
         .arg("task")
         .arg("--model")
@@ -195,12 +195,12 @@ fn test_fix_calculator_bug() {
               You MUST actually modify the file using your tools, not just explain the fix.",
         );
 
-    let output = cmd.output().expect("Failed to run brainwires");
+    let output = cmd.output().expect("Failed to run rullama");
 
-    // Check if brainwires executed successfully
+    // Check if rullama executed successfully
     if !output.status.success() {
         panic!(
-            "brainwires command failed:\nstdout: {}\nstderr: {}",
+            "rullama command failed:\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -281,7 +281,7 @@ Respond with ONLY a JSON object in this exact format:
         "claude-3-haiku-20240307" // Fast, cheap model on production
     };
 
-    let mut cmd = brainwires_cmd(temp_dir);
+    let mut cmd = rullama_cmd(temp_dir);
     cmd.arg("task")
         .arg("--model")
         .arg(eval_model)
@@ -338,13 +338,13 @@ Respond with ONLY a JSON object in this exact format:
 fn test_fix_with_multiple_bugs() {
     load_env();
     // TODO: Create a fixture with multiple related bugs
-    // and test that brainwires can fix them all
+    // and test that rullama can fix them all
 }
 
 #[test]
 #[ignore] // Requires API key
 fn test_fix_preserves_working_code() {
     load_env();
-    // TODO: Verify that brainwires doesn't break working parts
+    // TODO: Verify that rullama doesn't break working parts
     // while fixing bugs
 }

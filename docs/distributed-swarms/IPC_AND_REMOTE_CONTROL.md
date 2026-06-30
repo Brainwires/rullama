@@ -19,7 +19,7 @@ Brainwires CLI uses a multi-layered communication architecture:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Web Browser (brainwires-studio)                    │
+│                           Web Browser (rullama-studio)                    │
 │  ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐       │
 │  │ RemoteAgentsPanel│    │RemoteAgentViewer │    │   useRemoteAgent │       │
 │  └────────┬─────────┘    └────────┬─────────┘    └────────┬─────────┘       │
@@ -102,7 +102,7 @@ The TUI uses an **event-driven architecture** for IPC communication. Events from
 
 **Starting a Session:**
 ```bash
-brainwires chat
+rullama chat
 ```
 This spawns an Agent process and launches the TUI in viewer mode connected via IPC.
 
@@ -113,23 +113,23 @@ This spawns an Agent process and launches the TUI in viewer mode connected via I
 
 **Listing Sessions:**
 ```bash
-brainwires sessions
+rullama sessions
 ```
 Shows all backgrounded sessions with their status (running/stale).
 
 **Attaching to a Session:**
 ```bash
 # Attach to most recent session
-brainwires attach
+rullama attach
 
 # Attach to specific session
-brainwires attach <session-id>
+rullama attach <session-id>
 ```
 Launches a new TUI that connects to the existing Agent via IPC. The Agent sends a `ConversationSync` message with full state on connect.
 
 **Terminating a Session:**
 ```bash
-brainwires exit <session-id>
+rullama exit <session-id>
 ```
 Sends an `Exit` message to the Agent, causing it to shut down.
 
@@ -140,18 +140,18 @@ When the TUI exits normally (via `Ctrl+C` or quit command), it sends `ViewerMess
 
 Agent sockets are stored at:
 ```
-~/.local/share/brainwires/sessions/<session-id>.sock
+~/.local/share/rullama/sessions/<session-id>.sock
 ```
 
 Metadata files are stored alongside:
 ```
-~/.local/share/brainwires/sessions/<session-id>.meta.json
+~/.local/share/rullama/sessions/<session-id>.meta.json
 ```
 
 Log files for debugging:
 ```
-~/.local/share/brainwires/sessions/<session-id>.stdout.log
-~/.local/share/brainwires/sessions/<session-id>.stderr.log
+~/.local/share/rullama/sessions/<session-id>.stdout.log
+~/.local/share/rullama/sessions/<session-id>.stderr.log
 ```
 
 ### Protocol Format
@@ -312,7 +312,7 @@ Supabase Realtime WebSocket client that:
 - Exchanges API key for Supabase-compatible JWT via `/api/remote/connect`
 - Handles automatic reconnection on disconnect
 
-#### RemoteBridge (`crates/brainwires-framework/crates/brainwires-network/src/remote/bridge.rs`)
+#### RemoteBridge (`crates/rullama-framework/crates/rullama-network/src/remote/bridge.rs`)
 
 Bridge coordinator that:
 - Manages RealtimeClient lifecycle
@@ -546,7 +546,7 @@ The streaming pipeline converts `AgentMessage` types to `StreamChunkType`:
 
 ## Configuration
 
-### CLI Configuration (`~/.brainwires/config.json`)
+### CLI Configuration (`~/.rullama/config.json`)
 
 ```json
 {
@@ -566,22 +566,22 @@ The streaming pipeline converts `AgentMessage` types to `StreamChunkType`:
 
 ```bash
 # View remote config
-brainwires remote config
+rullama remote config
 
 # Enable remote control
-brainwires remote config --enabled true
+rullama remote config --enabled true
 
 # Set API key
-brainwires remote config --api-key bw_prod_xxxxx
+rullama remote config --api-key bw_prod_xxxxx
 
 # Start bridge manually
-brainwires remote start
+rullama remote start
 
 # Check status
-brainwires remote status
+rullama remote status
 
 # Stop bridge
-brainwires remote stop
+rullama remote stop
 ```
 
 ---
@@ -620,7 +620,7 @@ Tests cover:
 
 ## Files Reference
 
-### CLI (brainwires-cli)
+### CLI (rullama-cli)
 
 | File | Description |
 |------|-------------|
@@ -629,13 +629,13 @@ Tests cover:
 | `src/ipc/socket.rs` | Unix socket utilities |
 | `src/remote/mod.rs` | Remote module root |
 | `src/remote/protocol.rs` | Remote protocol types |
-| `crates/brainwires-framework/crates/brainwires-network/src/remote/bridge.rs` | Bridge coordinator |
+| `crates/rullama-framework/crates/rullama-network/src/remote/bridge.rs` | Bridge coordinator |
 | `src/remote/realtime.rs` | Supabase Realtime WebSocket client |
 | `src/remote/heartbeat.rs` | Agent status collection |
 | `src/remote/manager.rs` | Bridge lifecycle management |
 | `src/cli/remote.rs` | CLI commands |
 
-### Backend (brainwires-studio)
+### Backend (rullama-studio)
 
 | File | Description |
 |------|-------------|

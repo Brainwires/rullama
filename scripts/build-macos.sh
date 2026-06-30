@@ -89,7 +89,7 @@ build_and_upload_macos() {
         return 1
     }
 
-    local BINARY_PATH="target/${TARGET}/release/brainwires"
+    local BINARY_PATH="target/${TARGET}/release/rullama"
 
     if [ -f "$BINARY_PATH" ]; then
         # Create archive
@@ -98,7 +98,7 @@ build_and_upload_macos() {
         cp "$BINARY_PATH" dist/
         cp README.md LICENSE CHANGELOG.md dist/ 2>/dev/null || true
 
-        ARCHIVE_NAME="brainwires-${CLI_VERSION}-${NAME}.tar.xz"
+        ARCHIVE_NAME="rullama-${CLI_VERSION}-${NAME}.tar.xz"
         cd dist
         tar -cJf "../${ARCHIVE_NAME}" *
         cd ..
@@ -122,7 +122,7 @@ build_and_upload_macos() {
                 --silent --show-error && echo -e "${GREEN}  ✓ Uploaded versioned${NC}"
 
             # Upload to stable
-            STABLE_ARCHIVE="brainwires-latest-${NAME}.tar.xz"
+            STABLE_ARCHIVE="rullama-latest-${NAME}.tar.xz"
             cp "${ARCHIVE_NAME}" "${STABLE_ARCHIVE}"
             curl -X POST "${SUPABASE_URL}/storage/v1/object/cli-releases/stable/${NAME}/${STABLE_ARCHIVE}" \
                 -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \

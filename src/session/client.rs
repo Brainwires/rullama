@@ -30,7 +30,7 @@ fn client_log(msg: &str) {
         if let Ok(mut f) = OpenOptions::new()
             .create(true)
             .append(true)
-            .open("/tmp/brainwires_client.log")
+            .open("/tmp/rullama_client.log")
         {
             let _ = writeln!(
                 f,
@@ -287,8 +287,8 @@ pub fn attach(session_id: Option<&str>) -> Result<()> {
                     println!("Options:");
                     println!("  1. Use the GUI/web interface to interact with this agent");
                     println!("  2. Kill this session and start a new one:");
-                    println!("     brainwires kill {}", session_id);
-                    println!("     brainwires chat");
+                    println!("     rullama kill {}", session_id);
+                    println!("     rullama chat");
                     println!();
                     println!("Tip: To properly background a TUI session, use the /background");
                     println!("     slash command instead of Ctrl+Z.");

@@ -1,6 +1,6 @@
 //! Markdown Command Parser
 //!
-//! Parses .md files from .brainwires/commands/ directory
+//! Parses .md files from .rullama/commands/ directory
 //!
 //! Format:
 //! ```markdown

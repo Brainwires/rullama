@@ -85,69 +85,69 @@ impl PlatformPaths {
 
     /// Get Brainwires-specific data directory
     ///
-    /// Returns: {data_dir}/brainwires
-    pub fn brainwires_data_dir() -> Result<PathBuf> {
-        Ok(Self::data_dir()?.join("brainwires"))
+    /// Returns: {data_dir}/rullama
+    pub fn rullama_data_dir() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("rullama"))
     }
 
     /// Get Brainwires-specific cache directory
     ///
-    /// Returns: {cache_dir}/brainwires
-    pub fn brainwires_cache_dir() -> Result<PathBuf> {
-        Ok(Self::cache_dir()?.join("brainwires"))
+    /// Returns: {cache_dir}/rullama
+    pub fn rullama_cache_dir() -> Result<PathBuf> {
+        Ok(Self::cache_dir()?.join("rullama"))
     }
 
     /// Get Brainwires-specific config directory
     ///
-    /// Returns: {config_dir}/brainwires
-    pub fn brainwires_config_dir() -> Result<PathBuf> {
-        Ok(Self::config_dir()?.join("brainwires"))
+    /// Returns: {config_dir}/rullama
+    pub fn rullama_config_dir() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("rullama"))
     }
 
-    /// Get the home-based .brainwires directory (~/.brainwires/)
+    /// Get the home-based .rullama directory (~/.rullama/)
     ///
     /// This is used for user-facing config files like permissions.toml
     /// that users might want to edit manually.
     ///
-    /// Honors `BRAINWIRES_HOME` as an override — useful in tests and for
+    /// Honors `RULLAMA_HOME` as an override — useful in tests and for
     /// pointing at an alternate home dir without mutating `$HOME` (which
     /// is process-global and races under parallel tests).
-    pub fn dot_brainwires_dir() -> Result<PathBuf> {
-        if let Ok(override_dir) = std::env::var("BRAINWIRES_HOME") {
+    pub fn dot_rullama_dir() -> Result<PathBuf> {
+        if let Ok(override_dir) = std::env::var("RULLAMA_HOME") {
             return Ok(PathBuf::from(override_dir));
         }
         let home = dirs::home_dir().context("Failed to get home directory")?;
-        Ok(home.join(".brainwires"))
+        Ok(home.join(".rullama"))
     }
 
-    /// Ensure the ~/.brainwires directory exists
-    pub fn ensure_dot_brainwires_dir() -> Result<PathBuf> {
-        let dir = Self::dot_brainwires_dir()?;
+    /// Ensure the ~/.rullama directory exists
+    pub fn ensure_dot_rullama_dir() -> Result<PathBuf> {
+        let dir = Self::dot_rullama_dir()?;
         if !dir.exists() {
-            std::fs::create_dir_all(&dir).context("Failed to create ~/.brainwires directory")?;
+            std::fs::create_dir_all(&dir).context("Failed to create ~/.rullama directory")?;
         }
         Ok(dir)
     }
 
     /// Get the permissions config file path
     ///
-    /// Returns: ~/.brainwires/permissions.toml
+    /// Returns: ~/.rullama/permissions.toml
     pub fn permissions_file() -> Result<PathBuf> {
-        Ok(Self::dot_brainwires_dir()?.join("permissions.toml"))
+        Ok(Self::dot_rullama_dir()?.join("permissions.toml"))
     }
 
     /// Get the audit log directory
     ///
-    /// Returns: {data_dir}/brainwires/audit
+    /// Returns: {data_dir}/rullama/audit
     pub fn audit_log_dir() -> Result<PathBuf> {
-        Ok(Self::brainwires_data_dir()?.join("audit"))
+        Ok(Self::rullama_data_dir()?.join("audit"))
     }
 
     /// Get the trust store file path
     ///
-    /// Returns: {data_dir}/brainwires/trust.json
+    /// Returns: {data_dir}/rullama/trust.json
     pub fn trust_store_file() -> Result<PathBuf> {
-        Ok(Self::brainwires_data_dir()?.join("trust.json"))
+        Ok(Self::rullama_data_dir()?.join("trust.json"))
     }
 
     /// Ensure the audit log directory exists
@@ -159,89 +159,89 @@ impl PlatformPaths {
         Ok(dir)
     }
 
-    /// Get the old home directory (~/.brainwires/) for migration
+    /// Get the old home directory (~/.rullama/) for migration
     #[deprecated(note = "Use XDG-compliant directories instead")]
     pub fn old_home_dir() -> Result<PathBuf> {
-        Self::dot_brainwires_dir()
+        Self::dot_rullama_dir()
     }
 
     /// Get the config file path
     ///
-    /// Returns: {config_dir}/brainwires/config.json
+    /// Returns: {config_dir}/rullama/config.json
     pub fn config_file() -> Result<PathBuf> {
-        Ok(Self::brainwires_config_dir()?.join("config.json"))
+        Ok(Self::rullama_config_dir()?.join("config.json"))
     }
 
     /// Get the MCP config file path
     ///
-    /// Returns: {config_dir}/brainwires/mcp-config.json
+    /// Returns: {config_dir}/rullama/mcp-config.json
     pub fn mcp_config_file() -> Result<PathBuf> {
-        Ok(Self::brainwires_config_dir()?.join("mcp-config.json"))
+        Ok(Self::rullama_config_dir()?.join("mcp-config.json"))
     }
 
     /// Get the usage tracking file path
     ///
-    /// Returns: {cache_dir}/brainwires/usage.json
+    /// Returns: {cache_dir}/rullama/usage.json
     pub fn usage_file() -> Result<PathBuf> {
-        Ok(Self::brainwires_cache_dir()?.join("usage.json"))
+        Ok(Self::rullama_cache_dir()?.join("usage.json"))
     }
 
     /// Get the session file path
     ///
-    /// Returns: {data_dir}/brainwires/session.json
+    /// Returns: {data_dir}/rullama/session.json
     pub fn session_file() -> Result<PathBuf> {
-        Ok(Self::brainwires_data_dir()?.join("session.json"))
+        Ok(Self::rullama_data_dir()?.join("session.json"))
     }
 
     /// Get the checkpoint directory path
     ///
-    /// Returns: {data_dir}/brainwires/checkpoints
+    /// Returns: {data_dir}/rullama/checkpoints
     pub fn checkpoints_dir() -> Result<PathBuf> {
-        Ok(Self::brainwires_data_dir()?.join("checkpoints"))
+        Ok(Self::rullama_data_dir()?.join("checkpoints"))
     }
 
     /// Get the execution history file path
     ///
-    /// Returns: {cache_dir}/brainwires/history.json
+    /// Returns: {cache_dir}/rullama/history.json
     pub fn history_file() -> Result<PathBuf> {
-        Ok(Self::brainwires_cache_dir()?.join("history.json"))
+        Ok(Self::rullama_cache_dir()?.join("history.json"))
     }
 
     /// Get the conversation database path (for LanceDB)
     ///
-    /// Returns: {data_dir}/brainwires/conversations.lance
+    /// Returns: {data_dir}/rullama/conversations.lance
     pub fn conversations_db_path() -> Result<PathBuf> {
-        Ok(Self::brainwires_data_dir()?.join("conversations.lance"))
+        Ok(Self::rullama_data_dir()?.join("conversations.lance"))
     }
 
     /// Get the knowledge database path (SQLite for BKS)
     ///
-    /// Returns: {data_dir}/brainwires/knowledge.db
+    /// Returns: {data_dir}/rullama/knowledge.db
     pub fn knowledge_db() -> Result<PathBuf> {
         Self::ensure_data_dir()?;
-        Ok(Self::brainwires_data_dir()?.join("knowledge.db"))
+        Ok(Self::rullama_data_dir()?.join("knowledge.db"))
     }
 
     /// Get the personal knowledge database path (SQLite for PKS)
     ///
-    /// Returns: {data_dir}/brainwires/personal_knowledge.db
+    /// Returns: {data_dir}/rullama/personal_knowledge.db
     pub fn personal_knowledge_db() -> Result<PathBuf> {
         Self::ensure_data_dir()?;
-        Ok(Self::brainwires_data_dir()?.join("personal_knowledge.db"))
+        Ok(Self::rullama_data_dir()?.join("personal_knowledge.db"))
     }
 
     /// Get the plans directory path
     ///
-    /// Returns: {data_dir}/brainwires/plans
+    /// Returns: {data_dir}/rullama/plans
     pub fn plans_dir() -> Result<PathBuf> {
-        Ok(Self::brainwires_data_dir()?.join("plans"))
+        Ok(Self::rullama_data_dir()?.join("plans"))
     }
 
     /// Get the sessions directory path (for backgrounded session sockets)
     ///
-    /// Returns: {data_dir}/brainwires/sessions
+    /// Returns: {data_dir}/rullama/sessions
     pub fn sessions_dir() -> Result<PathBuf> {
-        Ok(Self::brainwires_data_dir()?.join("sessions"))
+        Ok(Self::rullama_data_dir()?.join("sessions"))
     }
 
     /// Ensure the sessions directory exists
@@ -255,14 +255,14 @@ impl PlatformPaths {
 
     /// Get the socket path for a specific session
     ///
-    /// Returns: {data_dir}/brainwires/sessions/{session_id}.sock
+    /// Returns: {data_dir}/rullama/sessions/{session_id}.sock
     pub fn session_socket(session_id: &str) -> Result<PathBuf> {
         Ok(Self::sessions_dir()?.join(format!("{}.sock", session_id)))
     }
 
     /// Get the path for a specific plan markdown file
     ///
-    /// Returns: {data_dir}/brainwires/plans/{plan_id}.md
+    /// Returns: {data_dir}/rullama/plans/{plan_id}.md
     pub fn plan_file(plan_id: &str) -> Result<PathBuf> {
         Ok(Self::plans_dir()?.join(format!("{}.md", plan_id)))
     }
@@ -278,7 +278,7 @@ impl PlatformPaths {
 
     /// Ensure the Brainwires data directory exists with secure permissions
     pub fn ensure_data_dir() -> Result<PathBuf> {
-        let dir = Self::brainwires_data_dir()?;
+        let dir = Self::rullama_data_dir()?;
         if !dir.exists() {
             std::fs::create_dir_all(&dir).context("Failed to create Brainwires data directory")?;
         }
@@ -296,7 +296,7 @@ impl PlatformPaths {
 
     /// Ensure the Brainwires config directory exists with secure permissions
     pub fn ensure_config_dir() -> Result<PathBuf> {
-        let dir = Self::brainwires_config_dir()?;
+        let dir = Self::rullama_config_dir()?;
         if !dir.exists() {
             std::fs::create_dir_all(&dir)
                 .context("Failed to create Brainwires config directory")?;
@@ -315,7 +315,7 @@ impl PlatformPaths {
 
     /// Ensure the Brainwires cache directory exists with secure permissions
     pub fn ensure_cache_dir() -> Result<PathBuf> {
-        let dir = Self::brainwires_cache_dir()?;
+        let dir = Self::rullama_cache_dir()?;
         if !dir.exists() {
             std::fs::create_dir_all(&dir).context("Failed to create Brainwires cache directory")?;
         }
@@ -366,7 +366,7 @@ impl PlatformPaths {
         Ok(path.to_path_buf())
     }
 
-    /// Migrate data from old ~/.brainwires/ to new XDG locations
+    /// Migrate data from old ~/.rullama/ to new XDG locations
     ///
     /// This moves:
     /// - config.json, mcp-config.json -> config_dir
@@ -472,43 +472,43 @@ impl PlatformPaths {
 
     /// Get project data directory (infallible, falls back to ".")
     pub fn project_data_dir() -> PathBuf {
-        Self::brainwires_data_dir().unwrap_or_else(|_| PathBuf::from("."))
+        Self::rullama_data_dir().unwrap_or_else(|_| PathBuf::from("."))
     }
 
     /// Get project cache directory (infallible, falls back to ".")
     pub fn project_cache_dir() -> PathBuf {
-        Self::brainwires_cache_dir().unwrap_or_else(|_| PathBuf::from("."))
+        Self::rullama_cache_dir().unwrap_or_else(|_| PathBuf::from("."))
     }
 
     /// Get project config directory (infallible, falls back to ".")
     pub fn project_config_dir() -> PathBuf {
-        Self::brainwires_config_dir().unwrap_or_else(|_| PathBuf::from("."))
+        Self::rullama_config_dir().unwrap_or_else(|_| PathBuf::from("."))
     }
 
     /// Get default LanceDB path for RAG indexing (infallible)
     ///
-    /// Returns: {data_dir}/brainwires/lancedb
+    /// Returns: {data_dir}/rullama/lancedb
     pub fn default_lancedb_path() -> PathBuf {
         Self::project_data_dir().join("lancedb")
     }
 
     /// Get default hash cache path (infallible)
     ///
-    /// Returns: {cache_dir}/brainwires/hash_cache.json
+    /// Returns: {cache_dir}/rullama/hash_cache.json
     pub fn default_hash_cache_path() -> PathBuf {
         Self::project_cache_dir().join("hash_cache.json")
     }
 
     /// Get default git cache path (infallible)
     ///
-    /// Returns: {cache_dir}/brainwires/git_cache.json
+    /// Returns: {cache_dir}/rullama/git_cache.json
     pub fn default_git_cache_path() -> PathBuf {
         Self::project_cache_dir().join("git_cache.json")
     }
 
     /// Get default config path (infallible)
     ///
-    /// Returns: {config_dir}/brainwires/config.toml
+    /// Returns: {config_dir}/rullama/config.toml
     pub fn default_config_path() -> PathBuf {
         Self::project_config_dir().join("config.toml")
     }
@@ -516,27 +516,27 @@ impl PlatformPaths {
     // =========================================================================
     // PROJECT-SPECIFIC PATHS (for RAG indexing per-project)
     //
-    // These paths are stored in .brainwires/ within the project root (CWD).
+    // These paths are stored in .rullama/ within the project root (CWD).
     // They contain project-specific data like RAG indexes and caches.
     // =========================================================================
 
-    /// Get the project-specific brainwires directory (.brainwires/ in CWD)
+    /// Get the project-specific rullama directory (.rullama/ in CWD)
     ///
-    /// Returns: {cwd}/.brainwires
-    pub fn project_brainwires_dir() -> Result<PathBuf> {
+    /// Returns: {cwd}/.rullama
+    pub fn project_rullama_dir() -> Result<PathBuf> {
         Ok(std::env::current_dir()
             .context("Failed to get current working directory")?
-            .join(".brainwires"))
+            .join(".rullama"))
     }
 
     /// Find the project root by walking upward from `cwd` looking for a
-    /// marker: `.git`, `.brainwires/`, `BRAINWIRES.md`, or `CLAUDE.md`.
+    /// marker: `.git`, `.rullama/`, `BRAINWIRES.md`, or `CLAUDE.md`.
     /// Returns `cwd` unchanged if none is found before the filesystem root.
     pub fn find_project_root(cwd: &Path) -> PathBuf {
         const MAX_WALK_UP_DEPTH: usize = 32;
         for dir in cwd.ancestors().take(MAX_WALK_UP_DEPTH) {
             if dir.join(".git").exists()
-                || dir.join(".brainwires").is_dir()
+                || dir.join(".rullama").is_dir()
                 || dir.join("BRAINWIRES.md").is_file()
                 || dir.join("CLAUDE.md").is_file()
             {
@@ -559,28 +559,28 @@ impl PlatformPaths {
     /// [`project_memory_dir`].
     pub fn project_memory_dir_in(home: &Path, cwd: &Path) -> PathBuf {
         let encoded = Self::encode_cwd_for_projects(cwd);
-        home.join(".brainwires")
+        home.join(".rullama")
             .join("projects")
             .join(encoded)
             .join("memory")
     }
 
     /// Per-project memory directory for the given cwd.
-    /// Returns: `~/.brainwires/projects/<encoded-cwd>/memory/`.
+    /// Returns: `~/.rullama/projects/<encoded-cwd>/memory/`.
     ///
-    /// Respects the `BRAINWIRES_MEMORY_ROOT` env var when set — useful in
+    /// Respects the `RULLAMA_MEMORY_ROOT` env var when set — useful in
     /// tests and for pointing at an alternate home directory without
     /// mutating `HOME` (which is process-global and races under parallel
     /// test execution).
     pub fn project_memory_dir(cwd: &Path) -> Result<PathBuf> {
-        if let Ok(override_root) = std::env::var("BRAINWIRES_MEMORY_ROOT") {
+        if let Ok(override_root) = std::env::var("RULLAMA_MEMORY_ROOT") {
             let base = PathBuf::from(override_root);
             return Ok(base
                 .join("projects")
                 .join(Self::encode_cwd_for_projects(cwd))
                 .join("memory"));
         }
-        let home = Self::dot_brainwires_dir()?;
+        let home = Self::dot_rullama_dir()?;
         Ok(Self::project_memory_dir_in(
             home.parent().unwrap_or(&home),
             cwd,
@@ -602,42 +602,42 @@ impl PlatformPaths {
         Ok(Self::project_memory_dir(cwd)?.join("MEMORY.md"))
     }
 
-    /// Get the project-specific brainwires directory (infallible)
+    /// Get the project-specific rullama directory (infallible)
     ///
-    /// Returns: {cwd}/.brainwires or ".brainwires" on error
-    pub fn project_brainwires_dir_infallible() -> PathBuf {
-        Self::project_brainwires_dir().unwrap_or_else(|_| PathBuf::from(".brainwires"))
+    /// Returns: {cwd}/.rullama or ".rullama" on error
+    pub fn project_rullama_dir_infallible() -> PathBuf {
+        Self::project_rullama_dir().unwrap_or_else(|_| PathBuf::from(".rullama"))
     }
 
-    /// Ensure the project-specific brainwires directory exists
-    pub fn ensure_project_brainwires_dir() -> Result<PathBuf> {
-        let dir = Self::project_brainwires_dir()?;
+    /// Ensure the project-specific rullama directory exists
+    pub fn ensure_project_rullama_dir() -> Result<PathBuf> {
+        let dir = Self::project_rullama_dir()?;
         if !dir.exists() {
             std::fs::create_dir_all(&dir)
-                .context("Failed to create project .brainwires directory")?;
+                .context("Failed to create project .rullama directory")?;
         }
         Ok(dir)
     }
 
     /// Get project-specific LanceDB path for RAG indexing (infallible)
     ///
-    /// Returns: {cwd}/.brainwires/lancedb
+    /// Returns: {cwd}/.rullama/lancedb
     pub fn project_lancedb_path() -> PathBuf {
-        Self::project_brainwires_dir_infallible().join("lancedb")
+        Self::project_rullama_dir_infallible().join("lancedb")
     }
 
     /// Get project-specific hash cache path (infallible)
     ///
-    /// Returns: {cwd}/.brainwires/hash_cache.json
+    /// Returns: {cwd}/.rullama/hash_cache.json
     pub fn project_hash_cache_path() -> PathBuf {
-        Self::project_brainwires_dir_infallible().join("hash_cache.json")
+        Self::project_rullama_dir_infallible().join("hash_cache.json")
     }
 
     /// Get project-specific git cache path (infallible)
     ///
-    /// Returns: {cwd}/.brainwires/git_cache.json
+    /// Returns: {cwd}/.rullama/git_cache.json
     pub fn project_git_cache_path() -> PathBuf {
-        Self::project_brainwires_dir_infallible().join("git_cache.json")
+        Self::project_rullama_dir_infallible().join("git_cache.json")
     }
 
     // =========================================================================
@@ -648,14 +648,14 @@ impl PlatformPaths {
 
     /// Get global fastembed cache directory
     ///
-    /// Returns: {data_dir}/brainwires/fastembed
+    /// Returns: {data_dir}/rullama/fastembed
     pub fn fastembed_cache_dir() -> PathBuf {
         Self::project_data_dir().join("fastembed")
     }
 
     /// Ensure the fastembed cache directory exists
     pub fn ensure_fastembed_cache_dir() -> Result<PathBuf> {
-        let dir = Self::brainwires_data_dir()?.join("fastembed");
+        let dir = Self::rullama_data_dir()?.join("fastembed");
         if !dir.exists() {
             std::fs::create_dir_all(&dir).context("Failed to create fastembed cache directory")?;
         }
@@ -664,7 +664,7 @@ impl PlatformPaths {
 
     /// Migrate fastembed cache from project root to global location
     ///
-    /// Moves .fastembed_cache/ from CWD to ~/.local/share/brainwires/fastembed/
+    /// Moves .fastembed_cache/ from CWD to ~/.local/share/rullama/fastembed/
     pub fn migrate_fastembed_cache() -> Result<bool> {
         let old_cache = std::env::current_dir()?.join(".fastembed_cache");
         let new_cache = Self::ensure_fastembed_cache_dir()?;
@@ -695,15 +695,15 @@ impl PlatformPaths {
     // SKILLS DIRECTORIES
     //
     // Agent Skills are stored in two locations:
-    // - Personal: ~/.brainwires/skills/ (user-specific)
-    // - Project: .brainwires/skills/ (project-specific, takes precedence)
+    // - Personal: ~/.rullama/skills/ (user-specific)
+    // - Project: .rullama/skills/ (project-specific, takes precedence)
     // =========================================================================
 
     /// Get the personal skills directory
     ///
-    /// Returns: ~/.brainwires/skills/
+    /// Returns: ~/.rullama/skills/
     pub fn personal_skills_dir() -> Result<PathBuf> {
-        Ok(Self::dot_brainwires_dir()?.join("skills"))
+        Ok(Self::dot_rullama_dir()?.join("skills"))
     }
 
     /// Ensure the personal skills directory exists
@@ -714,9 +714,9 @@ impl PlatformPaths {
 
     /// Get the project-specific skills directory
     ///
-    /// Returns: {cwd}/.brainwires/skills/
+    /// Returns: {cwd}/.rullama/skills/
     pub fn project_skills_dir() -> Result<PathBuf> {
-        Ok(Self::project_brainwires_dir()?.join("skills"))
+        Ok(Self::project_rullama_dir()?.join("skills"))
     }
 
     /// Ensure the project skills directory exists
@@ -727,19 +727,19 @@ impl PlatformPaths {
 
     /// Get personal skills directory (infallible)
     ///
-    /// Returns: ~/.brainwires/skills/ or ".brainwires/skills" on error
+    /// Returns: ~/.rullama/skills/ or ".rullama/skills" on error
     pub fn personal_skills_dir_infallible() -> PathBuf {
-        Self::personal_skills_dir().unwrap_or_else(|_| PathBuf::from(".brainwires/skills"))
+        Self::personal_skills_dir().unwrap_or_else(|_| PathBuf::from(".rullama/skills"))
     }
 
     /// Get project skills directory (infallible)
     ///
-    /// Returns: {cwd}/.brainwires/skills/ or ".brainwires/skills" on error
+    /// Returns: {cwd}/.rullama/skills/ or ".rullama/skills" on error
     pub fn project_skills_dir_infallible() -> PathBuf {
-        Self::project_skills_dir().unwrap_or_else(|_| PathBuf::from(".brainwires/skills"))
+        Self::project_skills_dir().unwrap_or_else(|_| PathBuf::from(".rullama/skills"))
     }
 
-    /// Migrate data from old project-rag directories to new brainwires directories
+    /// Migrate data from old project-rag directories to new rullama directories
     ///
     /// OLD locations:
     /// - ~/.local/share/project-rag/
@@ -747,9 +747,9 @@ impl PlatformPaths {
     /// - ~/.config/project-rag/
     ///
     /// NEW locations:
-    /// - ~/.local/share/brainwires/
-    /// - ~/.cache/brainwires/
-    /// - ~/.config/brainwires/
+    /// - ~/.local/share/rullama/
+    /// - ~/.cache/rullama/
+    /// - ~/.config/rullama/
     pub fn migrate_from_project_rag() -> std::result::Result<(), std::io::Error> {
         let data_base = Self::data_dir().unwrap_or_else(|_| PathBuf::from("."));
         let cache_base = Self::cache_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -808,7 +808,7 @@ impl PlatformPaths {
         }
 
         if migrated {
-            eprintln!("Migration from project-rag to brainwires complete");
+            eprintln!("Migration from project-rag to rullama complete");
         }
 
         Ok(())
@@ -856,56 +856,56 @@ mod tests {
     }
 
     #[test]
-    fn test_brainwires_dirs_contain_brainwires() {
-        let data = PlatformPaths::brainwires_data_dir().unwrap();
-        let cache = PlatformPaths::brainwires_cache_dir().unwrap();
-        let config = PlatformPaths::brainwires_config_dir().unwrap();
+    fn test_rullama_dirs_contain_rullama() {
+        let data = PlatformPaths::rullama_data_dir().unwrap();
+        let cache = PlatformPaths::rullama_cache_dir().unwrap();
+        let config = PlatformPaths::rullama_config_dir().unwrap();
 
-        assert!(data.to_string_lossy().contains("brainwires"));
-        assert!(cache.to_string_lossy().contains("brainwires"));
-        assert!(config.to_string_lossy().contains("brainwires"));
+        assert!(data.to_string_lossy().contains("rullama"));
+        assert!(cache.to_string_lossy().contains("rullama"));
+        assert!(config.to_string_lossy().contains("rullama"));
     }
 
     #[test]
     fn test_config_file() {
         let config = PlatformPaths::config_file().unwrap();
         assert!(config.to_string_lossy().contains("config.json"));
-        assert!(config.to_string_lossy().contains("brainwires"));
+        assert!(config.to_string_lossy().contains("rullama"));
     }
 
     #[test]
     fn test_mcp_config_file() {
         let mcp_config = PlatformPaths::mcp_config_file().unwrap();
         assert!(mcp_config.to_string_lossy().contains("mcp-config.json"));
-        assert!(mcp_config.to_string_lossy().contains("brainwires"));
+        assert!(mcp_config.to_string_lossy().contains("rullama"));
     }
 
     #[test]
     fn test_usage_file() {
         let usage = PlatformPaths::usage_file().unwrap();
         assert!(usage.to_string_lossy().contains("usage.json"));
-        assert!(usage.to_string_lossy().contains("brainwires"));
+        assert!(usage.to_string_lossy().contains("rullama"));
     }
 
     #[test]
     fn test_session_file() {
         let session = PlatformPaths::session_file().unwrap();
         assert!(session.to_string_lossy().contains("session.json"));
-        assert!(session.to_string_lossy().contains("brainwires"));
+        assert!(session.to_string_lossy().contains("rullama"));
     }
 
     #[test]
     fn test_checkpoints_dir() {
         let checkpoints = PlatformPaths::checkpoints_dir().unwrap();
         assert!(checkpoints.to_string_lossy().contains("checkpoints"));
-        assert!(checkpoints.to_string_lossy().contains("brainwires"));
+        assert!(checkpoints.to_string_lossy().contains("rullama"));
     }
 
     #[test]
     fn test_history_file() {
         let history = PlatformPaths::history_file().unwrap();
         assert!(history.to_string_lossy().contains("history.json"));
-        assert!(history.to_string_lossy().contains("brainwires"));
+        assert!(history.to_string_lossy().contains("rullama"));
     }
 
     #[test]
@@ -916,14 +916,14 @@ mod tests {
                 .to_string_lossy()
                 .contains("conversations.lance")
         );
-        assert!(conversations.to_string_lossy().contains("brainwires"));
+        assert!(conversations.to_string_lossy().contains("rullama"));
     }
 
     #[test]
     fn test_plans_dir() {
         let plans = PlatformPaths::plans_dir().unwrap();
         assert!(plans.to_string_lossy().contains("plans"));
-        assert!(plans.to_string_lossy().contains("brainwires"));
+        assert!(plans.to_string_lossy().contains("rullama"));
     }
 
     #[test]
@@ -966,7 +966,7 @@ mod tests {
     #[allow(deprecated)]
     fn test_old_home_dir() {
         let old_home = PlatformPaths::old_home_dir().unwrap();
-        assert!(old_home.to_string_lossy().contains(".brainwires"));
+        assert!(old_home.to_string_lossy().contains(".rullama"));
     }
 
     #[test]
@@ -976,56 +976,56 @@ mod tests {
     }
 
     #[test]
-    fn test_project_brainwires_dir() {
-        let project_dir = PlatformPaths::project_brainwires_dir().unwrap();
-        assert!(project_dir.to_string_lossy().ends_with(".brainwires"));
+    fn test_project_rullama_dir() {
+        let project_dir = PlatformPaths::project_rullama_dir().unwrap();
+        assert!(project_dir.to_string_lossy().ends_with(".rullama"));
     }
 
     #[test]
-    fn test_project_brainwires_dir_infallible() {
-        let project_dir = PlatformPaths::project_brainwires_dir_infallible();
-        assert!(project_dir.to_string_lossy().ends_with(".brainwires"));
+    fn test_project_rullama_dir_infallible() {
+        let project_dir = PlatformPaths::project_rullama_dir_infallible();
+        assert!(project_dir.to_string_lossy().ends_with(".rullama"));
     }
 
     #[test]
     fn test_project_lancedb_path() {
         let lancedb_path = PlatformPaths::project_lancedb_path();
-        assert!(lancedb_path.to_string_lossy().contains(".brainwires"));
+        assert!(lancedb_path.to_string_lossy().contains(".rullama"));
         assert!(lancedb_path.to_string_lossy().ends_with("lancedb"));
     }
 
     #[test]
     fn test_project_hash_cache_path() {
         let hash_cache = PlatformPaths::project_hash_cache_path();
-        assert!(hash_cache.to_string_lossy().contains(".brainwires"));
+        assert!(hash_cache.to_string_lossy().contains(".rullama"));
         assert!(hash_cache.to_string_lossy().ends_with("hash_cache.json"));
     }
 
     #[test]
     fn test_project_git_cache_path() {
         let git_cache = PlatformPaths::project_git_cache_path();
-        assert!(git_cache.to_string_lossy().contains(".brainwires"));
+        assert!(git_cache.to_string_lossy().contains(".rullama"));
         assert!(git_cache.to_string_lossy().ends_with("git_cache.json"));
     }
 
     #[test]
     fn test_fastembed_cache_dir() {
         let fastembed_cache = PlatformPaths::fastembed_cache_dir();
-        assert!(fastembed_cache.to_string_lossy().contains("brainwires"));
+        assert!(fastembed_cache.to_string_lossy().contains("rullama"));
         assert!(fastembed_cache.to_string_lossy().ends_with("fastembed"));
     }
 
     #[test]
     fn test_personal_skills_dir() {
         let skills_dir = PlatformPaths::personal_skills_dir().unwrap();
-        assert!(skills_dir.to_string_lossy().contains(".brainwires"));
+        assert!(skills_dir.to_string_lossy().contains(".rullama"));
         assert!(skills_dir.to_string_lossy().ends_with("skills"));
     }
 
     #[test]
     fn test_project_skills_dir() {
         let skills_dir = PlatformPaths::project_skills_dir().unwrap();
-        assert!(skills_dir.to_string_lossy().contains(".brainwires"));
+        assert!(skills_dir.to_string_lossy().contains(".rullama"));
         assert!(skills_dir.to_string_lossy().ends_with("skills"));
     }
 

@@ -9,7 +9,7 @@ use crate::config::settings::Settings;
 use crate::utils::paths::PlatformPaths;
 
 /// Result of a settings load — merged `Settings` plus the list of files that
-/// contributed (for diagnostics / `brainwires config settings --explain`).
+/// contributed (for diagnostics / `rullama config settings --explain`).
 #[derive(Debug, Clone, Default)]
 pub struct SettingsManager {
     pub merged: Settings,
@@ -53,8 +53,8 @@ impl SettingsManager {
     pub fn candidate_paths(cwd: &Path) -> Vec<PathBuf> {
         let mut v = Vec::new();
 
-        // 1. User-wide brainwires settings.
-        if let Ok(home) = PlatformPaths::dot_brainwires_dir() {
+        // 1. User-wide rullama settings.
+        if let Ok(home) = PlatformPaths::dot_rullama_dir() {
             v.push(home.join("settings.json"));
         }
 
@@ -65,8 +65,8 @@ impl SettingsManager {
 
         // 3+4. Project root — shared settings, then local override.
         let project_root = PlatformPaths::find_project_root(cwd);
-        v.push(project_root.join(".brainwires").join("settings.json"));
-        v.push(project_root.join(".brainwires").join("settings.local.json"));
+        v.push(project_root.join(".rullama").join("settings.json"));
+        v.push(project_root.join(".rullama").join("settings.local.json"));
 
         v
     }
@@ -101,8 +101,8 @@ mod tests {
     /// project-scoped candidate paths explicitly.
     fn project_only_paths(project: &Path) -> Vec<PathBuf> {
         vec![
-            project.join(".brainwires").join("settings.json"),
-            project.join(".brainwires").join("settings.local.json"),
+            project.join(".rullama").join("settings.json"),
+            project.join(".rullama").join("settings.local.json"),
         ]
     }
 
@@ -118,7 +118,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let project = tmp.path();
         write_json(
-            &project.join(".brainwires").join("settings.json"),
+            &project.join(".rullama").join("settings.json"),
             &Settings {
                 permissions: Some(Permissions {
                     allow: vec!["Read".into()],
@@ -128,7 +128,7 @@ mod tests {
             },
         );
         write_json(
-            &project.join(".brainwires").join("settings.local.json"),
+            &project.join(".rullama").join("settings.local.json"),
             &Settings {
                 permissions: Some(Permissions {
                     allow: vec!["Edit".into()],
@@ -153,7 +153,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let project = tmp.path();
         write_json(
-            &project.join(".brainwires").join("settings.json"),
+            &project.join(".rullama").join("settings.json"),
             &Settings {
                 hooks: Some(Hooks {
                     pre_tool_use: vec![HookMatcher {
@@ -170,7 +170,7 @@ mod tests {
             },
         );
         write_json(
-            &project.join(".brainwires").join("settings.local.json"),
+            &project.join(".rullama").join("settings.local.json"),
             &Settings {
                 hooks: Some(Hooks {
                     pre_tool_use: vec![HookMatcher {
@@ -213,13 +213,13 @@ mod tests {
     #[test]
     fn malformed_json_is_skipped_not_fatal() {
         let tmp = TempDir::new().unwrap();
-        let bad = tmp.path().join(".brainwires").join("settings.json");
+        let bad = tmp.path().join(".rullama").join("settings.json");
         std::fs::create_dir_all(bad.parent().unwrap()).unwrap();
         std::fs::write(&bad, "not valid json {[").unwrap();
 
         // Also a valid local file — it should still apply.
         write_json(
-            &tmp.path().join(".brainwires").join("settings.local.json"),
+            &tmp.path().join(".rullama").join("settings.local.json"),
             &Settings {
                 permissions: Some(Permissions {
                     allow: vec!["Read".into()],

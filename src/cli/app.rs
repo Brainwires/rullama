@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use crate::build_info;
 
 #[derive(Parser)]
-#[command(name = "brainwires")]
+#[command(name = "rullama")]
 #[command(about = "AI-powered agentic CLI for autonomous coding assistance")]
 #[command(version = build_info::FULL_VERSION)]
 pub struct Cli {
@@ -202,7 +202,7 @@ enum Commands {
     #[command(subcommand)]
     Analytics(super::analytics::AnalyticsCommands),
 
-    /// Manage remote bridge connection to brainwires-studio
+    /// Manage remote bridge connection to rullama-studio
     #[command(subcommand)]
     Remote(super::remote::RemoteCommands),
 
@@ -464,11 +464,11 @@ impl App {
                 }
                 if let Some(mode) = sandbox.as_deref() {
                     // SAFETY: mutating process env during startup before any
-                    // threads are spawned that read BRAINWIRES_BASH_SANDBOX.
+                    // threads are spawned that read RULLAMA_BASH_SANDBOX.
                     // The bash tool only reads this on command build, never
                     // writes, so a single writer at startup is sound.
                     unsafe {
-                        std::env::set_var("BRAINWIRES_BASH_SANDBOX", mode);
+                        std::env::set_var("RULLAMA_BASH_SANDBOX", mode);
                     }
                 }
                 super::chat::handle_chat(
@@ -606,7 +606,7 @@ impl App {
             }
             None => {
                 // No command provided, show help
-                Cli::parse_from(["brainwires", "--help"]);
+                Cli::parse_from(["rullama", "--help"]);
                 Ok(())
             }
         }

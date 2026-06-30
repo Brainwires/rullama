@@ -15,9 +15,9 @@ use anyhow::Result;
 use crate::storage::{MessageMetadata, MessageStore, TieredMemory, TieredSearchResult};
 use crate::types::message::{Message, MessageContent, Role};
 use crate::utils::retrieval_gate::{RetrievalNeed, classify_retrieval_need, needs_retrieval};
-use brainwires_seal::{ResolvedReference, SealProcessingResult};
+use rullama_seal::{ResolvedReference, SealProcessingResult};
 
-use brainwires::reasoning::RelevanceScorer;
+use rullama::reasoning::RelevanceScorer;
 
 /// Configuration for context building
 #[derive(Debug, Clone)]
@@ -833,7 +833,7 @@ impl ContextBuilder {
     /// Formatted string for injection, or empty string if PKS disabled or no facts
     pub fn build_personal_context(&self, user_query: Option<&str>) -> String {
         use crate::utils::paths::PlatformPaths;
-        use brainwires::knowledge::bks_pks::personal::{
+        use rullama::knowledge::bks_pks::personal::{
             PersonalFactMatcher, PersonalKnowledgeCache,
         };
 
@@ -987,7 +987,7 @@ impl ContextBuilder {
         messages: &[Message],
         user_query: &str,
         seal_result: Option<&SealProcessingResult>,
-        coordinator: Option<&brainwires_seal::SealKnowledgeCoordinator>,
+        coordinator: Option<&rullama_seal::SealKnowledgeCoordinator>,
         message_store: &MessageStore,
         conversation_id: &str,
     ) -> Result<Vec<Message>> {
@@ -1260,7 +1260,7 @@ mod tests {
     #[test]
     fn test_format_seal_injection_with_resolutions() {
         use crate::utils::entity_extraction::EntityType;
-        use brainwires_seal::{ReferenceType, SalienceScore, UnresolvedReference};
+        use rullama_seal::{ReferenceType, SalienceScore, UnresolvedReference};
 
         let builder = ContextBuilder::new();
 
@@ -1336,7 +1336,7 @@ mod tests {
     #[test]
     fn test_format_seal_injection_low_confidence_filtered() {
         use crate::utils::entity_extraction::EntityType;
-        use brainwires_seal::{ReferenceType, SalienceScore, UnresolvedReference};
+        use rullama_seal::{ReferenceType, SalienceScore, UnresolvedReference};
 
         let builder = ContextBuilder::new();
 
@@ -1381,7 +1381,7 @@ mod tests {
     #[test]
     fn test_format_seal_injection_disabled() {
         use crate::utils::entity_extraction::EntityType;
-        use brainwires_seal::{ReferenceType, SalienceScore, UnresolvedReference};
+        use rullama_seal::{ReferenceType, SalienceScore, UnresolvedReference};
 
         let config = ContextBuilderConfig {
             inject_entity_context: false,

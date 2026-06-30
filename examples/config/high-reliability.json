@@ -39,7 +39,7 @@
     "file_operations": {
       "max_file_size_mb": 5,
       "backup_before_write": true,
-      "backup_dir": "~/.brainwires/backups"
+      "backup_dir": "~/.rullama/backups"
     },
     "web": {
       "timeout_seconds": 60,
@@ -64,7 +64,7 @@
   },
 
   "storage": {
-    "database_path": "~/.brainwires/data/lance.db",
+    "database_path": "~/.rullama/data/lance.db",
     "memory_tiers": {
       "hot_max_messages": 200,
       "warm_max_age_hours": 168,
@@ -82,7 +82,7 @@
 
   "logging": {
     "level": "debug",
-    "file": "~/.brainwires/logs/cli.log",
+    "file": "~/.rullama/logs/cli.log",
     "rotation": {
       "max_size_mb": 50,
       "max_files": 10

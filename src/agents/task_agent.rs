@@ -16,8 +16,8 @@ use crate::types::provider::ChatOptions;
 use crate::types::session_budget::SessionBudget;
 use crate::types::tool::{ToolContext, ToolContextExt, ToolUse};
 use crate::utils::context_builder::{ContextBuilder, ContextBuilderConfig};
-use brainwires::agents::roles::AgentRole;
-use brainwires::core::workflow_state::{
+use rullama::agents::roles::AgentRole;
+use rullama::core::workflow_state::{
     FsWorkflowStateStore, SideEffectRecord, WorkflowCheckpoint, WorkflowStateStore,
 };
 
@@ -87,7 +87,7 @@ pub struct TaskAgentConfig {
     /// MDAP configuration (Massively Decomposed Agentic Processes)
     pub mdap_config: Option<crate::mdap::MdapConfig>,
     /// Analytics collector — emit AgentRun and ToolCall events
-    pub analytics_collector: Option<std::sync::Arc<brainwires_telemetry::AnalyticsCollector>>,
+    pub analytics_collector: Option<std::sync::Arc<rullama_telemetry::AnalyticsCollector>>,
 
     /// Optional role that restricts which tools are presented to the model.
     ///
@@ -160,7 +160,7 @@ pub struct TaskAgent {
     /// iterations.  The file_ops `write_file` tool records hashes into this
     /// registry; the validation loop re-reads at finalisation to detect
     /// post-validation clobber by a concurrent writer.
-    intended_writes: brainwires::core::IntendedWrites,
+    intended_writes: rullama::core::IntendedWrites,
 }
 
 impl TaskAgent {
@@ -184,7 +184,7 @@ impl TaskAgent {
             status: Arc::new(RwLock::new(TaskAgentStatus::Idle)),
             config,
             context: Arc::new(RwLock::new(context)),
-            intended_writes: brainwires::core::IntendedWrites::new(),
+            intended_writes: rullama::core::IntendedWrites::new(),
         }
     }
 
@@ -615,7 +615,7 @@ impl TaskAgent {
                             let result =
                                 self.tool_executor.execute(&tool_use, &tool_context).await?;
                             if let Some(ref collector) = self.config.analytics_collector {
-                                collector.record(brainwires_telemetry::AnalyticsEvent::ToolCall {
+                                collector.record(rullama_telemetry::AnalyticsEvent::ToolCall {
                                     session_id: None,
                                     agent_id: Some(self.id.clone()),
                                     tool_name: tool_use.name.clone(),
@@ -728,7 +728,7 @@ impl TaskAgent {
                     let _tool_start = std::time::Instant::now();
                     let result = self.tool_executor.execute(&tool_use, &tool_context).await?;
                     if let Some(ref collector) = self.config.analytics_collector {
-                        collector.record(brainwires_telemetry::AnalyticsEvent::ToolCall {
+                        collector.record(rullama_telemetry::AnalyticsEvent::ToolCall {
                             session_id: None,
                             agent_id: Some(self.id.clone()),
                             tool_name: tool_use.name.clone(),
@@ -1053,8 +1053,8 @@ impl TaskAgent {
 
         // Build system prompt via the framework registry, which handles role suffix injection.
         let system_prompt = self.config.system_prompt.clone().unwrap_or_else(|| {
-            brainwires::agents::build_agent_prompt(
-                brainwires::agents::AgentPromptKind::Reasoning {
+            rullama::agents::build_agent_prompt(
+                rullama::agents::AgentPromptKind::Reasoning {
                     agent_id: &self.id,
                     working_directory: &context.working_directory,
                 },

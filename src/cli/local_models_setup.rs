@@ -158,17 +158,17 @@ pub async fn show_setup_dialog() -> Result<bool> {
         );
         println!(
             "      {}",
-            style("brainwires local-models download lfm2-350m").cyan()
+            style("rullama local-models download lfm2-350m").cyan()
         );
         println!(
             "      {}",
-            style("brainwires local-models download lfm2-1.2b").cyan()
+            style("rullama local-models download lfm2-1.2b").cyan()
         );
         println!();
         println!("  {} Or see all available models with:", style("ℹ").blue());
         println!(
             "      {}",
-            style("brainwires local-models list --available").cyan()
+            style("rullama local-models list --available").cyan()
         );
         println!();
 
@@ -209,7 +209,7 @@ pub async fn show_setup_dialog() -> Result<bool> {
         );
         println!(
             "      {}",
-            style("brainwires local-models download <model_id>").cyan()
+            style("rullama local-models download <model_id>").cyan()
         );
         println!();
         mark_setup_shown()?;
@@ -263,7 +263,7 @@ pub async fn show_setup_dialog() -> Result<bool> {
         println!(
             "  {} Manage models with: {}",
             style("→").cyan(),
-            style("brainwires local-models --help").cyan()
+            style("rullama local-models --help").cyan()
         );
     } else {
         println!(
@@ -272,7 +272,7 @@ pub async fn show_setup_dialog() -> Result<bool> {
         );
         println!(
             "      {}",
-            style("brainwires local-models download <model_id>").cyan()
+            style("rullama local-models download <model_id>").cyan()
         );
     }
 
@@ -361,7 +361,7 @@ async fn download_model_with_progress(model_id: String, pb: ProgressBar) -> Resu
 fn mark_setup_shown() -> Result<()> {
     let config_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("brainwires");
+        .join("rullama");
 
     std::fs::create_dir_all(&config_dir)?;
 
@@ -375,7 +375,7 @@ fn mark_setup_shown() -> Result<()> {
 pub fn setup_already_shown() -> bool {
     let config_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("brainwires");
+        .join("rullama");
 
     config_dir.join(".local_models_setup_shown").exists()
 }

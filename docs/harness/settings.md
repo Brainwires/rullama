@@ -15,17 +15,17 @@ you can edit one without risking the other.
 The CLI merges `settings.json` from four locations, in this order (later wins
 for scalars, arrays concatenate):
 
-1. `~/.brainwires/settings.json` — user-wide defaults, shared across projects.
+1. `~/.rullama/settings.json` — user-wide defaults, shared across projects.
 2. `~/.claude/settings.json` — **read-only migrator compatibility**. If you
    already had a Claude Code config, it's picked up as-is. Nothing is ever
    written here.
-3. `<project-root>/.brainwires/settings.json` — shared project rules. Commit
+3. `<project-root>/.rullama/settings.json` — shared project rules. Commit
    this to the repo.
-4. `<project-root>/.brainwires/settings.local.json` — local overrides. Add to
+4. `<project-root>/.rullama/settings.local.json` — local overrides. Add to
    `.gitignore`.
 
 "Project root" is the first ancestor of your current directory containing one
-of `.git`, `.brainwires/`, `BRAINWIRES.md`, or `CLAUDE.md`.
+of `.git`, `.rullama/`, `BRAINWIRES.md`, or `CLAUDE.md`.
 
 Malformed JSON in any single file is logged via `tracing` and skipped — one bad
 file never disables every other rule.
@@ -66,7 +66,7 @@ Syntax matches Claude Code's conventions so you can migrate rules directly.
 
 | Pattern                  | Meaning                                                                |
 |--------------------------|------------------------------------------------------------------------|
-| `"Read"`                 | The brainwires `read_file` tool with any args. Short-name aliases:     |
+| `"Read"`                 | The rullama `read_file` tool with any args. Short-name aliases:     |
 |                          | `Bash` → `execute_command`, `Read` → `read_file`, `Write` → `write_file`, |
 |                          | `Edit` → `edit_file`, `Grep` → `search`, `Glob` → `glob`, `WebFetch`,  |
 |                          | `WebSearch`.                                                           |
@@ -194,12 +194,12 @@ includes `prompt`. `Stop` includes `final_message`.
 ## Auto-memory
 
 Per-project memory notes live at
-`~/.brainwires/projects/<encoded-cwd>/memory/`, where `<encoded-cwd>` replaces
+`~/.rullama/projects/<encoded-cwd>/memory/`, where `<encoded-cwd>` replaces
 path separators with `-`. The layout matches Claude Code 1:1 so you can
 symlink or copy existing memory dirs.
 
 ```
-~/.brainwires/projects/-home-me-proj/memory/
+~/.rullama/projects/-home-me-proj/memory/
     MEMORY.md           # index, always loaded into the system prompt
     user_role.md        # typed memory files with YAML frontmatter
     feedback_terse.md
@@ -228,8 +228,8 @@ entries (e.g., from a manual `rm`) prune automatically.
 
 ### Opt-out
 
-Set `BRAINWIRES_DISABLE_AUTO_MEMORY=1` to skip memory injection for one run.
-Mirrors `BRAINWIRES_DISABLE_AUTO_INSTRUCTIONS` for `BRAINWIRES.md`/`CLAUDE.md`.
+Set `RULLAMA_DISABLE_AUTO_MEMORY=1` to skip memory injection for one run.
+Mirrors `RULLAMA_DISABLE_AUTO_INSTRUCTIONS` for `BRAINWIRES.md`/`CLAUDE.md`.
 
 ---
 

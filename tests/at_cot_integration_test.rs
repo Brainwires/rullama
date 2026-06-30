@@ -3,8 +3,8 @@
 //! Tests for Ambiguity Type-Chain of Thought integration with the
 //! clarifying questions system.
 
-use brainwires_cli::tui::question_parser::parse_response;
-use brainwires_cli::types::question::{AmbiguityType, QuestionAnswerState};
+use rullama_cli::tui::question_parser::parse_response;
+use rullama_cli::types::question::{AmbiguityType, QuestionAnswerState};
 
 #[test]
 fn test_full_at_cot_flow() {

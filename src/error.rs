@@ -1,6 +1,6 @@
 //! Unified Application Error Types
 //!
-//! Provides a consolidated error type hierarchy for the brainwires-cli application.
+//! Provides a consolidated error type hierarchy for the rullama-cli application.
 //! This module unifies error handling across different subsystems while preserving
 //! domain-specific error context.
 //!

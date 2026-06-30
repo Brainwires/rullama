@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the integration between SEAL (Self-Evolving Agentic Learning) and the Knowledge System (BKS/PKS), enabling bidirectional learning and context-aware entity resolution in brainwires-cli.
+This document describes the integration between SEAL (Self-Evolving Agentic Learning) and the Knowledge System (BKS/PKS), enabling bidirectional learning and context-aware entity resolution in rullama-cli.
 
 ## Architecture
 
@@ -53,13 +53,13 @@ SEAL: "it" → "main.rs" (confidence: 0.85)
   ↓
 PKS Query: get_all_facts() filtered by "main.rs"
   ↓
-Returns: ["main.rs is the entry point for brainwires-cli"]
+Returns: ["main.rs is the entry point for rullama-cli"]
   ↓
 Injected into system prompt as PERSONAL CONTEXT
 ```
 
 **Implementation:** `SealKnowledgeCoordinator::get_pks_context()`
-**Location:** `brainwires::seal::knowledge_integration` (framework crate)
+**Location:** `rullama::seal::knowledge_integration` (framework crate)
 
 ### 2. Query Context → BKS Truth Lookup
 
@@ -79,7 +79,7 @@ Injected into system prompt as BEHAVIORAL KNOWLEDGE
 ```
 
 **Implementation:** `SealKnowledgeCoordinator::get_bks_context()`
-**Location:** `brainwires::seal::knowledge_integration` (framework crate)
+**Location:** `rullama::seal::knowledge_integration` (framework crate)
 
 ### 3. Confidence Harmonization
 
@@ -99,7 +99,7 @@ Combined = 0.6*0.5 + 0.9*0.3 + 0.8*0.2
 ```
 
 **Implementation:** `SealKnowledgeCoordinator::harmonize_confidence()`
-**Location:** `brainwires::seal::knowledge_integration` (framework crate)
+**Location:** `rullama::seal::knowledge_integration` (framework crate)
 
 ### 4. Quality-Aware Retrieval Threshold Adjustment
 
@@ -118,7 +118,7 @@ More historical messages included to compensate for low quality
 ```
 
 **Implementation:** `SealKnowledgeCoordinator::adjust_retrieval_threshold()`
-**Location:** `brainwires::seal::knowledge_integration` (framework crate)
+**Location:** `rullama::seal::knowledge_integration` (framework crate)
 
 ### 5. Pattern Promotion to BKS
 
@@ -144,7 +144,7 @@ Reliability: 8/9 = 0.889
 ```
 
 **Implementation:** `SealKnowledgeCoordinator::check_and_promote_pattern()`
-**Location:** `brainwires::seal::knowledge_integration` (framework crate)
+**Location:** `rullama::seal::knowledge_integration` (framework crate)
 
 ### 6. PKS Entity Observation
 
@@ -163,7 +163,7 @@ PKS records: {
 ```
 
 **Implementation:** `SealKnowledgeCoordinator::observe_seal_resolutions()`
-**Location:** `brainwires::seal::knowledge_integration` (framework crate)
+**Location:** `rullama::seal::knowledge_integration` (framework crate)
 
 ### 7. Tool Failure Recording
 
@@ -182,7 +182,7 @@ Context: "editing Rust file with whitespace mismatch"
 ```
 
 **Implementation:** `SealKnowledgeCoordinator::record_tool_failure()`
-**Location:** `brainwires::seal::knowledge_integration` (framework crate)
+**Location:** `rullama::seal::knowledge_integration` (framework crate)
 
 ## OrchestratorAgent Integration
 
@@ -259,7 +259,7 @@ pub struct IntegrationConfig {
 }
 ```
 
-**Location:** `brainwires::seal::knowledge_integration` (framework crate)
+**Location:** `rullama::seal::knowledge_integration` (framework crate)
 
 ### Usage
 
@@ -296,7 +296,7 @@ Returns truths with relevance scores based on word overlap:
 - Sorts by relevance
 - Returns top N
 
-**Location:** `crates/brainwires-knowledge/src/knowledge/cache.rs:326-373`
+**Location:** `crates/rullama-knowledge/src/knowledge/cache.rs:326-373`
 
 ### PersonalKnowledgeCache
 
@@ -305,23 +305,23 @@ Returns truths with relevance scores based on word overlap:
 1. `get_all_facts() -> Vec<&PersonalFact>`
    - Returns all non-deleted facts
    - Used for entity-based filtering
-   - **Location:** `crates/brainwires-knowledge/src/knowledge/bks_pks/personal/cache.rs:305-310`
+   - **Location:** `crates/rullama-knowledge/src/knowledge/bks_pks/personal/cache.rs:305-310`
 
 2. `upsert_fact_simple(key, value, confidence, local_only)`
    - Simplified interface for quick fact insertion
    - Used by entity observation
-   - **Location:** `crates/brainwires-knowledge/src/knowledge/bks_pks/personal/cache.rs:296-303`
+   - **Location:** `crates/rullama-knowledge/src/knowledge/bks_pks/personal/cache.rs:296-303`
 
 3. `get_facts_by_key_prefix(prefix)`
    - Gets facts matching a key prefix
    - E.g., "recent_entity:" gets all tracked entities
-   - **Location:** `crates/brainwires-knowledge/src/knowledge/bks_pks/personal/cache.rs:312-318`
+   - **Location:** `crates/rullama-knowledge/src/knowledge/bks_pks/personal/cache.rs:312-318`
 
 ## Testing
 
 ### Unit Tests
 
-Located in `brainwires::seal::knowledge_integration` (framework crate):
+Located in `rullama::seal::knowledge_integration` (framework crate):
 
 ```rust
 #[test]
@@ -340,7 +340,7 @@ To test the full integration:
 
 ```bash
 # 1. Enable knowledge system in config
-vi ~/.brainwires/config.json
+vi ~/.rullama/config.json
 # Set: "knowledge_enabled": true
 
 # 2. Run interactive session
@@ -384,7 +384,7 @@ cargo run -- chat
 
 ```bash
 cargo build --lib
-# → Compiling brainwires-cli v0.8.0
+# → Compiling rullama-cli v0.8.0
 # → Finished (warnings only, no errors)
 ```
 
@@ -399,7 +399,7 @@ cargo build --lib
 ### Example Usage
 
 ```bash
-# In brainwires-cli interactive chat:
+# In rullama-cli interactive chat:
 > /profile:set rust_2024_status "stable as of early 2024, not experimental"
 ✅ Set profile fact
 
@@ -422,7 +422,7 @@ Category: Preference
 
 1. **User teaches fact:**
    - `/profile:set rust_2024_status "stable as of 2024"`
-   - Stored in PKS at `~/.brainwires/personal_facts.db`
+   - Stored in PKS at `~/.rullama/personal_facts.db`
    - Synced to server for cross-device persistence
 
 2. **Future conversation mentions entity:**
@@ -464,7 +464,7 @@ Category: Preference
 # Store sensitive facts locally only (never sync to server)
 > /profile:set --local api_key secret123
 
-# Fact is stored locally at ~/.brainwires/personal_facts.db
+# Fact is stored locally at ~/.rullama/personal_facts.db
 # Will NOT be synced to server ✅
 ```
 
@@ -489,8 +489,8 @@ Category: Preference
 - [ ] Wire into validation_loop.rs for automatic learning
 
 **Files:**
-- `brainwires::seal::learning` (framework crate — extend GlobalMemory)
-- `brainwires::agents::validation_loop` (framework crate, re-exported via `src/agents/mod.rs`)
+- `rullama::seal::learning` (framework crate — extend GlobalMemory)
+- `rullama::agents::validation_loop` (framework crate, re-exported via `src/agents/mod.rs`)
 
 ### Phase 4: Enhanced PKS Integration (HIGH PRIORITY)
 
@@ -502,7 +502,7 @@ Category: Preference
 - [ ] Entity relationship integration
 
 **Files:**
-- `crates/brainwires-knowledge/src/knowledge/personal/integration.rs`
+- `crates/rullama-knowledge/src/knowledge/personal/integration.rs`
 - `src/commands/executor/personal_commands.rs`
 
 ### Phase 5: Configuration & Testing (MEDIUM PRIORITY)
@@ -532,11 +532,11 @@ Category: Preference
 
 ## References
 
-- **SEAL Module:** `brainwires::seal` (framework crate)
-- **Knowledge System:** `crates/brainwires-knowledge/src/knowledge/mod.rs`
+- **SEAL Module:** `rullama::seal` (framework crate)
+- **Knowledge System:** `crates/rullama-knowledge/src/knowledge/mod.rs`
 - **Orchestrator:** `src/agents/orchestrator.rs`
-- **BKS:** `crates/brainwires-knowledge/src/knowledge/cache.rs`
-- **PKS:** `crates/brainwires-knowledge/src/knowledge/bks_pks/personal/cache.rs`
+- **BKS:** `crates/rullama-knowledge/src/knowledge/cache.rs`
+- **PKS:** `crates/rullama-knowledge/src/knowledge/bks_pks/personal/cache.rs`
 
 ## Contributing
 
@@ -551,4 +551,4 @@ When extending this integration:
 
 ## License
 
-Same as brainwires-cli parent project.
+Same as rullama-cli parent project.

@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use console::style;
 
-use brainwires_telemetry::query::AnalyticsQuery;
+use rullama_telemetry::query::AnalyticsQuery;
 
 #[derive(Subcommand)]
 pub enum AnalyticsCommands {

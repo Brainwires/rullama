@@ -89,7 +89,7 @@ impl ModelClient {
 
     /// Get cache file path
     fn cache_path() -> Result<PathBuf> {
-        Ok(PlatformPaths::brainwires_data_dir()?.join("models_cache.json"))
+        Ok(PlatformPaths::rullama_data_dir()?.join("models_cache.json"))
     }
 
     /// Load cached models
@@ -258,12 +258,12 @@ impl ModelRegistry {
     pub async fn fetch_models() -> Result<Vec<ModelInfo>> {
         // Get session to determine backend URL
         let session = SessionManager::get_session()?.ok_or_else(|| {
-            anyhow::anyhow!("Not authenticated. Please run 'brainwires auth' first.")
+            anyhow::anyhow!("Not authenticated. Please run 'rullama auth' first.")
         })?;
 
         // Get API key from secure storage
         let api_key = SessionManager::get_api_key()?.ok_or_else(|| {
-            anyhow::anyhow!("No API key found. Please re-authenticate with: brainwires auth")
+            anyhow::anyhow!("No API key found. Please re-authenticate with: rullama auth")
         })?;
 
         let client = ModelClient::new(session.backend.clone());

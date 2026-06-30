@@ -4,7 +4,7 @@ Brainwires CLI provides flexible chat modes designed for different workflows, fr
 
 ## Overview
 
-The `brainwires chat` command supports multiple modes:
+The `rullama chat` command supports multiple modes:
 
 - **Interactive Mode**: Traditional conversational interface
 - **Single-Shot Mode** (`--prompt`): Execute one prompt and exit
@@ -15,7 +15,7 @@ The `brainwires chat` command supports multiple modes:
 ## Command Line Options
 
 ```bash
-brainwires chat [OPTIONS]
+rullama chat [OPTIONS]
 
 Options:
   -m, --model <MODEL>        Model to use (overrides config)
@@ -38,7 +38,7 @@ The traditional conversational interface with rich formatting.
 ### Usage
 
 ```bash
-brainwires chat
+rullama chat
 ```
 
 ### Features
@@ -54,10 +54,10 @@ brainwires chat
 ### Example
 
 ```bash
-$ brainwires chat
+$ rullama chat
 Brainwires Chat
 ───────────────
-Model: gpt-4o (brainwires)
+Model: gpt-4o (rullama)
 Conversation ID: abc123...
 Type your message or 'exit' to quit
 
@@ -72,10 +72,10 @@ You: exit
 Interactive mode automatically handles piped input:
 
 ```bash
-echo "What is 2+2?" | brainwires chat
+echo "What is 2+2?" | rullama chat
 # Processes input and displays response
 
-printf "Question 1\nQuestion 2\nexit\n" | brainwires chat
+printf "Question 1\nQuestion 2\nexit\n" | rullama chat
 # Processes multiple prompts in sequence
 ```
 
@@ -86,7 +86,7 @@ Execute a single prompt and exit immediately - perfect for scripting and command
 ### Usage
 
 ```bash
-brainwires chat --prompt "Your question here"
+rullama chat --prompt "Your question here"
 ```
 
 ### Features
@@ -101,42 +101,42 @@ brainwires chat --prompt "Your question here"
 
 **Basic usage:**
 ```bash
-brainwires chat --prompt "What is Rust ownership?"
+rullama chat --prompt "What is Rust ownership?"
 # Output: Full formatted response with "Assistant:" label
 ```
 
 **Plain output for scripting:**
 ```bash
-brainwires chat --prompt "What is 2+2?" --format=plain
+rullama chat --prompt "What is 2+2?" --format=plain
 # Output: Just the answer text
 ```
 
 **Quiet mode for clean output:**
 ```bash
-brainwires chat --prompt "Calculate 7*8" --quiet --format=plain
+rullama chat --prompt "Calculate 7*8" --quiet --format=plain
 # Output: Minimal, just the result
 ```
 
 **JSON output:**
 ```bash
-brainwires chat --prompt "Explain async/await" --format=json
+rullama chat --prompt "Explain async/await" --format=json
 # Output: {"model": "gpt-4o", "response": "..."}
 ```
 
 **Capture output in shell variable:**
 ```bash
-ANSWER=$(brainwires chat --prompt "What is 15% of 200?" --quiet --format=plain)
+ANSWER=$(rullama chat --prompt "What is 15% of 200?" --quiet --format=plain)
 echo "The answer is: $ANSWER"
 ```
 
 **Code review:**
 ```bash
-brainwires chat --prompt "Review this code: $(cat myfile.rs)" --format=plain
+rullama chat --prompt "Review this code: $(cat myfile.rs)" --format=plain
 ```
 
 **Git integration:**
 ```bash
-git diff | brainwires chat --prompt "Summarize these changes" --quiet
+git diff | rullama chat --prompt "Summarize these changes" --quiet
 ```
 
 ## Batch Mode
@@ -146,7 +146,7 @@ Process multiple prompts from stdin, one per line. Each prompt is processed inde
 ### Usage
 
 ```bash
-cat prompts.txt | brainwires chat --batch
+cat prompts.txt | rullama chat --batch
 ```
 
 ### Features
@@ -161,17 +161,17 @@ cat prompts.txt | brainwires chat --batch
 
 **From a file:**
 ```bash
-cat questions.txt | brainwires chat --batch
+cat questions.txt | rullama chat --batch
 ```
 
 **Piped input:**
 ```bash
-printf "What is 2+2?\nWhat is 10-3?\nWhat is 5*2?\n" | brainwires chat --batch
+printf "What is 2+2?\nWhat is 10-3?\nWhat is 5*2?\n" | rullama chat --batch
 ```
 
 **Full format output (default):**
 ```bash
-$ printf "What is 2+2?\nWhat is 3+3?\n" | brainwires chat --batch
+$ printf "What is 2+2?\nWhat is 3+3?\n" | rullama chat --batch
 Q: What is 2+2?
 A: 4
 
@@ -181,14 +181,14 @@ A: 6
 
 **Plain format (responses only):**
 ```bash
-$ printf "What is 2+2?\nWhat is 3+3?\n" | brainwires chat --batch --format=plain
+$ printf "What is 2+2?\nWhat is 3+3?\n" | rullama chat --batch --format=plain
 4
 6
 ```
 
 **JSON format (structured output):**
 ```bash
-cat prompts.txt | brainwires chat --batch --format=json > results.json
+cat prompts.txt | rullama chat --batch --format=json > results.json
 ```
 
 Output:
@@ -210,7 +210,7 @@ Output:
 
 **Quiet batch mode:**
 ```bash
-cat prompts.txt | brainwires chat --batch --quiet
+cat prompts.txt | rullama chat --batch --quiet
 # Minimal output, no decorative text
 ```
 
@@ -221,9 +221,9 @@ Full-screen terminal user interface with rich formatting, visual controls, and b
 ### Usage
 
 ```bash
-brainwires chat
+rullama chat
 # or explicitly:
-brainwires chat --tui
+rullama chat --tui
 ```
 
 ### Features
@@ -246,21 +246,21 @@ The TUI uses a split architecture where:
 **Backgrounding a Session:**
 1. Press `Ctrl+Z` to open the background/suspend dialog
 2. Choose "Background" to detach the TUI while keeping the Agent running
-3. Use `brainwires attach` later to reconnect
+3. Use `rullama attach` later to reconnect
 
 **Session Commands:**
 ```bash
 # List backgrounded sessions
-brainwires sessions
+rullama sessions
 
 # Attach to most recent session
-brainwires attach
+rullama attach
 
 # Attach to specific session
-brainwires attach <session-id>
+rullama attach <session-id>
 
 # Terminate a backgrounded session
-brainwires exit <session-id>
+rullama exit <session-id>
 ```
 
 **Exit Behavior:**
@@ -270,15 +270,15 @@ brainwires exit <session-id>
 ### Example
 
 ```bash
-brainwires chat
+rullama chat
 # Launches full-screen interface with background Agent
 
 # Later, if backgrounded:
-brainwires sessions
+rullama sessions
 # Backgrounded sessions:
 #   session-20251219-133511 (running)
 
-brainwires attach session-20251219-133511
+rullama attach session-20251219-133511
 # Reconnects to the existing session
 ```
 
@@ -289,7 +289,7 @@ Expose Brainwires CLI as an MCP (Model Context Protocol) server over stdio.
 ### Usage
 
 ```bash
-brainwires chat --mcp-server
+rullama chat --mcp-server
 ```
 
 ### Features
@@ -308,7 +308,7 @@ Control how responses are formatted using the `--format` option.
 Rich formatting with labels, colors, and typing effects.
 
 ```bash
-brainwires chat --prompt "Hello" --format=full
+rullama chat --prompt "Hello" --format=full
 ```
 
 Output:
@@ -327,7 +327,7 @@ Features:
 Just the response text, no decoration.
 
 ```bash
-brainwires chat --prompt "Hello" --format=plain
+rullama chat --prompt "Hello" --format=plain
 ```
 
 Output:
@@ -346,7 +346,7 @@ Features:
 Structured JSON output with metadata.
 
 ```bash
-brainwires chat --prompt "Hello" --format=json
+rullama chat --prompt "Hello" --format=json
 ```
 
 Output:
@@ -387,7 +387,7 @@ Suppress decorative output for clean scripting.
 ### Usage
 
 ```bash
-brainwires chat --quiet
+rullama chat --quiet
 ```
 
 ### Features
@@ -402,16 +402,16 @@ brainwires chat --quiet
 
 ```bash
 # Quiet interactive mode
-echo "What is 2+2?" | brainwires chat --quiet
+echo "What is 2+2?" | rullama chat --quiet
 
 # Quiet single-shot
-brainwires chat --prompt "Calculate 3*7" --quiet
+rullama chat --prompt "Calculate 3*7" --quiet
 
 # Ultimate scripting mode
-brainwires chat --prompt "What is Rust?" --quiet --format=plain
+rullama chat --prompt "What is Rust?" --quiet --format=plain
 
 # Quiet batch mode
-cat prompts.txt | brainwires chat --batch --quiet --format=json
+cat prompts.txt | rullama chat --batch --quiet --format=json
 ```
 
 ## Combining Options
@@ -420,16 +420,16 @@ Mix and match options for powerful workflows:
 
 ```bash
 # Single-shot + quiet + plain = perfect for scripts
-RESULT=$(brainwires chat --prompt "What is 7*8?" --quiet --format=plain)
+RESULT=$(rullama chat --prompt "What is 7*8?" --quiet --format=plain)
 
 # Batch + JSON = structured data processing
-cat prompts.txt | brainwires chat --batch --format=json | jq '.results'
+cat prompts.txt | rullama chat --batch --format=json | jq '.results'
 
 # Single-shot + JSON = API-like behavior
-brainwires chat --prompt "Summarize: $(cat doc.md)" --format=json
+rullama chat --prompt "Summarize: $(cat doc.md)" --format=json
 
 # Quiet + plain = clean pipeline
-git log --oneline -5 | brainwires chat --prompt "Summarize commits" --quiet --format=plain
+git log --oneline -5 | rullama chat --prompt "Summarize commits" --quiet --format=plain
 ```
 
 ## Practical Use Cases
@@ -437,13 +437,13 @@ git log --oneline -5 | brainwires chat --prompt "Summarize commits" --quiet --fo
 ### 1. Quick Questions
 
 ```bash
-brainwires chat --prompt "What is the capital of France?" --quiet --format=plain
+rullama chat --prompt "What is the capital of France?" --quiet --format=plain
 ```
 
 ### 2. Code Review
 
 ```bash
-git diff HEAD~1 | brainwires chat --prompt "Review these changes" --format=plain
+git diff HEAD~1 | rullama chat --prompt "Review these changes" --format=plain
 ```
 
 ### 3. Batch Processing
@@ -457,7 +457,7 @@ Explain Rust ownership in one sentence
 EOF
 
 # Process all prompts
-cat prompts.txt | brainwires chat --batch --format=json > results.json
+cat prompts.txt | rullama chat --batch --format=json > results.json
 
 # Parse results
 jq '.results[] | .response' results.json
@@ -469,7 +469,7 @@ jq '.results[] | .response' results.json
 #!/bin/bash
 
 # Get AI analysis
-ANALYSIS=$(brainwires chat --prompt "Analyze this log: $(cat error.log)" --quiet --format=plain)
+ANALYSIS=$(rullama chat --prompt "Analyze this log: $(cat error.log)" --quiet --format=plain)
 
 # Use in script
 if echo "$ANALYSIS" | grep -q "critical"; then
@@ -481,7 +481,7 @@ fi
 
 ```bash
 # Generate commit message from diff
-MSG=$(git diff --staged | brainwires chat --prompt "Write a commit message for these changes" --quiet --format=plain)
+MSG=$(git diff --staged | rullama chat --prompt "Write a commit message for these changes" --quiet --format=plain)
 git commit -m "$MSG"
 ```
 
@@ -490,7 +490,7 @@ git commit -m "$MSG"
 ```bash
 # Generate docs for all functions
 for file in src/*.rs; do
-    brainwires chat --prompt "Document this code: $(cat $file)" --quiet --format=plain > "docs/$(basename $file .rs).md"
+    rullama chat --prompt "Document this code: $(cat $file)" --quiet --format=plain > "docs/$(basename $file .rs).md"
 done
 ```
 
@@ -505,10 +505,10 @@ This means you can use the same command both interactively and in scripts:
 
 ```bash
 # Interactive
-brainwires chat
+rullama chat
 
 # Piped
-echo "Hello" | brainwires chat
+echo "Hello" | rullama chat
 ```
 
 ## Conversation Management
@@ -517,7 +517,7 @@ echo "Hello" | brainwires chat
 - Conversations are auto-saved to the database
 - Each session gets a unique conversation ID
 - Use `--json` to export conversation on exit
-- Resume conversations with `brainwires history open <id>`
+- Resume conversations with `rullama history open <id>`
 
 ### Single-Shot Mode
 - No conversation history saved

@@ -1,6 +1,6 @@
 //! Remote Control Bridge - CLI adapter
 //!
-//! Thin adapter over `brainwires::agent_network::remote`. All types are re-exported
+//! Thin adapter over `rullama::agent_network::remote`. All types are re-exported
 //! from the bridge crate; this module adds CLI-specific trait implementations
 //! (`CliAgentSpawner`, `CliBridgeConfigProvider`) and convenience functions.
 //!
@@ -26,8 +26,8 @@ use crate::utils::paths::PlatformPaths;
 
 // ── Private imports from bridge ──────────────────────────────────────────
 
-use brainwires::agent_network::remote::manager::RemoteBridgeManager;
-use brainwires::agent_network::traits::{AgentSpawner, BridgeConfigProvider, RemoteBridgeConfig};
+use rullama::agent_network::remote::manager::RemoteBridgeManager;
+use rullama::agent_network::traits::{AgentSpawner, BridgeConfigProvider, RemoteBridgeConfig};
 
 // ============================================================================
 // CLI Agent Spawner — implements AgentSpawner trait

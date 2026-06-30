@@ -11,7 +11,7 @@ use proptest::prelude::*;
 
 mod token_counting {
     use super::*;
-    use brainwires_cli::utils::tokenizer::{
+    use rullama_cli::utils::tokenizer::{
         TokenizerConfig, estimate_tokens, estimate_tokens_with_config,
     };
 
@@ -68,7 +68,7 @@ mod token_counting {
 
 mod message_serialization {
     use super::*;
-    use brainwires_cli::types::message::{Message, MessageContent, Role};
+    use rullama_cli::types::message::{Message, MessageContent, Role};
 
     fn arb_role() -> impl Strategy<Value = Role> {
         prop_oneof![
@@ -191,7 +191,7 @@ mod tool_validation {
 
 mod error_classification {
     use super::*;
-    use brainwires_cli::tools::error::classify_error;
+    use rullama_cli::tools::error::classify_error;
 
     /// Generate error messages
     fn arb_error_message() -> impl Strategy<Value = String> {
@@ -245,7 +245,7 @@ mod error_classification {
 
 mod api_properties {
     use super::*;
-    use brainwires_cli::error::AppError;
+    use rullama_cli::error::AppError;
 
     proptest! {
         /// AppError should format without panicking

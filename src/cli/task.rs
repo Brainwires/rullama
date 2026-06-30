@@ -40,7 +40,7 @@ pub async fn handle_task(
     let provider_instance = factory
         .create_with_overrides(model_id.clone(), Some(active_provider), None)
         .await
-        .context("Failed to create provider — run `brainwires auth status` to diagnose")?;
+        .context("Failed to create provider — run `rullama auth status` to diagnose")?;
 
     // Create agent manager with Full permission mode for quick tasks
     let agent_manager = AgentManager::new(
@@ -57,12 +57,12 @@ pub async fn handle_task(
         working_directory: std::env::current_dir()?.to_string_lossy().to_string(),
         user_id,
         conversation_history: Vec::new(),
-        tools: brainwires_tool_builtins::registry_with_builtins()
+        tools: rullama_tool_builtins::registry_with_builtins()
             .get_all()
             .to_vec(),
         metadata: std::collections::HashMap::new(),
         working_set: crate::types::WorkingSet::new(),
-        capabilities: brainwires::permissions::AgentCapabilities::full_access(),
+        capabilities: rullama::permissions::AgentCapabilities::full_access(),
     };
 
     // Print header

@@ -180,7 +180,7 @@ Recommendations:
 
 ### Enable Token Auditing
 
-In `~/.brainwires/config.json`:
+In `~/.rullama/config.json`:
 
 ```json
 {
@@ -202,13 +202,13 @@ In `~/.brainwires/config.json`:
 
 ```bash
 # Show token usage after each session
-brainwires chat --show-tokens
+rullama chat --show-tokens
 
 # Set token budget for session
-brainwires chat --token-budget 50000
+rullama chat --token-budget 50000
 
 # Export usage report
-brainwires usage --export json --period today
+rullama usage --export json --period today
 ```
 
 ## Efficiency Optimization Strategies
@@ -270,7 +270,7 @@ Cache and reuse common prompt patterns:
 View real-time usage:
 
 ```bash
-brainwires usage --live
+rullama usage --live
 
 ┌─────────────────────────────────────────────────────────────┐
 │ Live Token Usage                              [Ctrl+C exit] │
@@ -305,7 +305,7 @@ Consensus Efficiency: 89% (high agreement, low redundancy)
 ## API for Custom Tracking
 
 ```rust
-use brainwires_cli::utils::{CostTracker, estimate_tokens};
+use rullama_cli::utils::{CostTracker, estimate_tokens};
 
 // Create tracker
 let mut tracker = CostTracker::new();

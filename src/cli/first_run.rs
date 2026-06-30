@@ -2,7 +2,7 @@
 //!
 //! Shown the first time a user runs an interactive CLI command with no
 //! config file on disk and no provider detected in the environment. Persists
-//! the selected provider to `~/.brainwires/config.json` and returns the
+//! the selected provider to `~/.rullama/config.json` and returns the
 //! chosen `ProviderType` so the caller can proceed with the session.
 //!
 //! Non-TTY invocations skip the picker and return an error instructing the
@@ -62,18 +62,18 @@ pub fn print_unconfigured_help() {
     eprintln!("      # …or run Ollama locally (OLLAMA_HOST)");
     eprintln!();
     eprintln!("  {} Log in explicitly:", style("·").cyan());
-    eprintln!("      brainwires auth login                     # Brainwires SaaS");
-    eprintln!("      brainwires auth login --provider anthropic");
+    eprintln!("      rullama auth login                     # Brainwires SaaS");
+    eprintln!("      rullama auth login --provider anthropic");
     eprintln!();
     eprintln!("  {} Pass a provider per-invocation:", style("·").cyan());
-    eprintln!("      brainwires chat --provider anthropic");
+    eprintln!("      rullama chat --provider anthropic");
     eprintln!();
 }
 
 /// Show the first-run picker interactively.
 ///
 /// Persists the choice to config (provider + default model for that provider).
-/// Does NOT prompt for an API key — that's the job of `brainwires auth login`.
+/// Does NOT prompt for an API key — that's the job of `rullama auth login`.
 /// Returns the selected provider so the caller can decide whether to keep
 /// going (e.g. env-var fallback works) or redirect the user to the auth flow.
 pub async fn prompt_and_save(config: &mut ConfigManager) -> Result<ProviderType> {
@@ -92,7 +92,7 @@ pub async fn prompt_and_save(config: &mut ConfigManager) -> Result<ProviderType>
     );
     println!(
         "  {}",
-        style("/provider in chat, or `brainwires config set provider <name>`.").dim()
+        style("/provider in chat, or `rullama config set provider <name>`.").dim()
     );
     println!();
     println!("{}", style("━".repeat(70)).cyan());
@@ -106,8 +106,8 @@ pub async fn prompt_and_save(config: &mut ConfigManager) -> Result<ProviderType>
     // Default selection: Brainwires if the user already has a saved SaaS
     // session (they previously ran `auth login`), otherwise Anthropic as
     // the most common coding target.
-    let prefer_brainwires = SessionManager::is_authenticated().unwrap_or(false);
-    let preferred = if prefer_brainwires {
+    let prefer_rullama = SessionManager::is_authenticated().unwrap_or(false);
+    let preferred = if prefer_rullama {
         ProviderType::Brainwires
     } else {
         ProviderType::Anthropic

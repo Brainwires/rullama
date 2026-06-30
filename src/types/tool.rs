@@ -1,8 +1,8 @@
 //! Tool types for tool execution framework.
 //!
-//! Re-exports from the brainwires-core framework crate, with CLI-specific extensions.
+//! Re-exports from the rullama-core framework crate, with CLI-specific extensions.
 
-pub use brainwires::core::tool::*;
+pub use rullama::core::tool::*;
 
 /// CLI-specific extension trait for ToolContext
 pub trait ToolContextExt {

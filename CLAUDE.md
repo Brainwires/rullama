@@ -51,7 +51,7 @@ cargo test --test '*'
 RUST_LOG=debug cargo run -- chat
 
 # Run MCP server with logging
-RUST_LOG=brainwires_cli=debug cargo run -- chat --mcp-server
+RUST_LOG=rullama_cli=debug cargo run -- chat --mcp-server
 
 # Test agent spawning
 cargo run -- chat
@@ -180,7 +180,7 @@ Most of these are essential for core functionality. Only `llama-cpp-2` is truly 
    - **Semantic Search**: Query past conversations by content similarity
    - Tiered memory: hot (recent), warm (session), cold (archived)
 
-8. **Context Layer** (framework: `brainwires-knowledge` crate, `knowledge` feature)
+8. **Context Layer** (framework: `rullama-knowledge` crate, `knowledge` feature)
    - **Entity Extraction**: Automatically extracts files, functions, types, variables from messages
    - **Relationship Graph**: Tracks co-occurrence, containment, dependencies between entities
    - **Smart Context Injection**: Retrieves relevant past messages when needed
@@ -283,7 +283,7 @@ When running as MCP server (`--mcp-server`), the CLI exposes agent management to
 }
 ```
 
-This enables hierarchical AI workflows: Claude Desktop can spawn brainwires agents to handle complex coding tasks autonomously.
+This enables hierarchical AI workflows: Claude Desktop can spawn rullama agents to handle complex coding tasks autonomously.
 
 ---
 
@@ -398,7 +398,7 @@ if iterations >= self.config.max_iterations {
 ```
 
 ### Bug #5: Agent Reports Success Without Creating File (FIXED)
-**Location**: `brainwires::agents::validation_loop` (framework crate, re-exported via `src/agents/mod.rs`)
+**Location**: `rullama::agents::validation_loop` (framework crate, re-exported via `src/agents/mod.rs`)
 ```rust
 // CRITICAL: Verify all files in working set exist on disk
 for file in &changed_files {
@@ -599,7 +599,7 @@ This ensures authentic performance measurement.
 **Bug #5: Agent Reports Success Without Creating File** (⭐⭐⭐⭐⭐ CRITICAL)
 - **Issue**: Agent reported completion but file didn't exist on disk
 - **Fix**: Added file existence check to validation loop
-- **Location**: `brainwires::agents::validation_loop` (framework crate, re-exported via `src/agents/mod.rs`)
+- **Location**: `rullama::agents::validation_loop` (framework crate, re-exported via `src/agents/mod.rs`)
 - **Status**: ✅ FIXED
 - **Impact**: Critical reliability issue that broke completion signal trust
 
@@ -672,8 +672,8 @@ To run similar comprehensive stress testing:
 ### Spawning an Agent Programmatically
 
 ```rust
-use brainwires_cli::agents::{TaskAgent, TaskAgentConfig, AgentContext};
-use brainwires_cli::types::task::Task;
+use rullama_cli::agents::{TaskAgent, TaskAgentConfig, AgentContext};
+use rullama_cli::types::task::Task;
 
 let task = Task::new("task-id".to_string(), "Task description".to_string());
 let context = AgentContext {
@@ -792,9 +792,9 @@ match params.name.as_ref() {
 
 ## Configuration Files
 
-- **User Config**: `~/.brainwires/config.json` - Provider, model, permissions, etc.
-- **Session**: `~/.brainwires/session.json` - Authentication tokens
-- **MCP Servers**: `~/.brainwires/mcp_servers.json` - Registered MCP servers
+- **User Config**: `~/.rullama/config.json` - Provider, model, permissions, etc.
+- **Session**: `~/.rullama/session.json` - Authentication tokens
+- **MCP Servers**: `~/.rullama/mcp_servers.json` - Registered MCP servers
 - **API Keys**: Stored in system keyring via `keyring` crate (more secure than env vars)
 
 ---

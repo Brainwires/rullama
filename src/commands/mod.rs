@@ -1,6 +1,6 @@
 //! Slash Command System
 //!
-//! Supports custom commands from .brainwires/commands/*.md files
+//! Supports custom commands from .rullama/commands/*.md files
 //! and built-in commands like /clear, /status, /model
 
 mod builtin;

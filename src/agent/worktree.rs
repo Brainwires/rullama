@@ -1,7 +1,7 @@
 //! Git-worktree isolation primitive for background agents.
 //!
 //! Provides a RAII [`WorktreeGuard`] that creates a scratch `git worktree`
-//! under `~/.brainwires/worktrees/<uuid>/` and removes it on drop. Agents
+//! under `~/.rullama/worktrees/<uuid>/` and removes it on drop. Agents
 //! that want isolation can spawn with their working directory pointed at
 //! the guard's path; the guard's [`Drop`] impl runs `git worktree remove`
 //! so orphans don't accumulate.
@@ -17,7 +17,7 @@
 //! # use std::path::Path;
 //! # use anyhow::Result;
 //! # fn demo(repo: &Path) -> Result<()> {
-//! use brainwires_cli::agent::worktree::WorktreeGuard;
+//! use rullama_cli::agent::worktree::WorktreeGuard;
 //! let guard = WorktreeGuard::create(repo, "my-agent")?;
 //! // Use `guard.path()` as the agent's working_directory...
 //! // Drop (at end of scope) runs `git worktree remove`.
@@ -43,7 +43,7 @@ pub struct WorktreeGuard {
 }
 
 impl WorktreeGuard {
-    /// Create a new worktree rooted at `~/.brainwires/worktrees/<uuid>/` off
+    /// Create a new worktree rooted at `~/.rullama/worktrees/<uuid>/` off
     /// of `repo`. `label` is mixed into the uuid directory name for easier
     /// debugging when worktrees leak.
     ///
@@ -54,7 +54,7 @@ impl WorktreeGuard {
             .canonicalize()
             .with_context(|| format!("repo path not found: {}", repo.display()))?;
 
-        let root = PlatformPaths::dot_brainwires_dir()?.join("worktrees");
+        let root = PlatformPaths::dot_rullama_dir()?.join("worktrees");
         std::fs::create_dir_all(&root)
             .with_context(|| format!("failed to create {}", root.display()))?;
 
@@ -155,10 +155,10 @@ impl Drop for WorktreeGuard {
     }
 }
 
-/// Garbage-collect leaked worktrees under `~/.brainwires/worktrees/` by
+/// Garbage-collect leaked worktrees under `~/.rullama/worktrees/` by
 /// asking git to prune the bookkeeping. Cheap; safe to call at startup.
 pub fn prune_orphans() -> Result<()> {
-    let root = PlatformPaths::dot_brainwires_dir()?.join("worktrees");
+    let root = PlatformPaths::dot_rullama_dir()?.join("worktrees");
     if !root.exists() {
         return Ok(());
     }
@@ -195,7 +195,7 @@ mod tests {
     }
 
     fn setup_home() -> (TempDir, EnvVarGuard, std::sync::MutexGuard<'static, ()>) {
-        // Use BRAINWIRES_HOME — it's a brainwires-specific override that no
+        // Use RULLAMA_HOME — it's a rullama-specific override that no
         // other test reads. Mutating $HOME directly leaks into unrelated
         // tests (file_explorer, anything reading dirs::home_dir()) even
         // with a guard, because unrelated tests may read $HOME during our
@@ -203,7 +203,7 @@ mod tests {
         // env-mutating tests.
         let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().unwrap();
-        let env = EnvVarGuard::set("BRAINWIRES_HOME", tmp.path().join(".brainwires"));
+        let env = EnvVarGuard::set("RULLAMA_HOME", tmp.path().join(".rullama"));
         (tmp, env, lock)
     }
 

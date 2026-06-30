@@ -5,10 +5,10 @@
 //! Merge order (later wins for scalars, arrays concatenate for
 //! `permissions.allow/deny/ask`):
 //!
-//! 1. `~/.brainwires/settings.json` — user-wide
+//! 1. `~/.rullama/settings.json` — user-wide
 //! 2. `~/.claude/settings.json` — migrator compatibility (if present)
-//! 3. `<project-root>/.brainwires/settings.json` — committed project rules
-//! 4. `<project-root>/.brainwires/settings.local.json` — local overrides
+//! 3. `<project-root>/.rullama/settings.json` — committed project rules
+//! 4. `<project-root>/.rullama/settings.local.json` — local overrides
 //!
 //! Pattern syntax for `permissions`:
 //! - `"Read"` — tool name match, any args
@@ -203,9 +203,9 @@ fn split_pattern(raw: &str) -> (&str, Option<&str>) {
     (raw, None)
 }
 
-/// Map a Claude-Code-style short name to the brainwires tool name when we
+/// Map a Claude-Code-style short name to the rullama tool name when we
 /// know the canonical alias. Unknown names pass through unchanged so users
-/// can target brainwires-native tool names directly.
+/// can target rullama-native tool names directly.
 fn canonical_tool_name(pat: &str) -> &str {
     match pat {
         "Bash" => "execute_command",

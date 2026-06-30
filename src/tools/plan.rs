@@ -132,7 +132,7 @@ impl PlanTool {
         let working_dir = std::env::current_dir()?.to_string_lossy().to_string();
 
         // Get read-only tools for the planning agent
-        let all_tools = brainwires_tool_builtins::registry_with_builtins()
+        let all_tools = rullama_tool_builtins::registry_with_builtins()
             .get_all()
             .to_vec();
         let read_only_tools: Vec<_> = all_tools
@@ -165,7 +165,7 @@ impl PlanTool {
             user_id: None,
             metadata: HashMap::new(),
             working_set: crate::types::WorkingSet::new(),
-            capabilities: brainwires::permissions::AgentCapabilities::read_only(),
+            capabilities: rullama::permissions::AgentCapabilities::read_only(),
         };
 
         // Configure the planning agent

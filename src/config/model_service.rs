@@ -39,7 +39,7 @@ fn cache_ttl(provider: ProviderType) -> Duration {
 
 /// Directory for per-provider cache files.
 fn cache_dir() -> Result<PathBuf> {
-    let dir = PlatformPaths::brainwires_data_dir()?.join("provider_models_cache");
+    let dir = PlatformPaths::rullama_data_dir()?.join("provider_models_cache");
     if !dir.exists() {
         fs::create_dir_all(&dir).context("Failed to create provider model cache directory")?;
     }
@@ -141,7 +141,7 @@ impl ModelService {
 
         if provider_type == ProviderType::Brainwires {
             return Err(anyhow::anyhow!(
-                "Use 'brainwires models list' without --provider for Brainwires SaaS models"
+                "Use 'rullama models list' without --provider for Brainwires SaaS models"
             ));
         }
 
@@ -277,11 +277,11 @@ mod tests {
         assert!(!old.is_valid(ProviderType::Ollama));
 
         // 24h provider still valid at 13h
-        let brainwires_cache = ProviderModelCache {
+        let rullama_cache = ProviderModelCache {
             models: vec![],
             cached_at: Utc::now() - Duration::hours(13),
         };
-        assert!(brainwires_cache.is_valid(ProviderType::Brainwires));
+        assert!(rullama_cache.is_valid(ProviderType::Brainwires));
     }
 
     #[test]

@@ -79,7 +79,7 @@ pub async fn handle_auth(cmd: AuthCommands) -> Result<()> {
                 )
                 .await
             } else {
-                handle_brainwires_login(key, backend).await
+                handle_rullama_login(key, backend).await
             }
         }
 
@@ -134,7 +134,7 @@ pub async fn handle_auth(cmd: AuthCommands) -> Result<()> {
 
             match config.provider_type {
                 ProviderType::Brainwires => {
-                    show_brainwires_status(verbose)?;
+                    show_rullama_status(verbose)?;
                 }
                 ProviderType::Ollama => {
                     let base_url = config
@@ -243,7 +243,7 @@ pub async fn handle_auth(cmd: AuthCommands) -> Result<()> {
 
             match config.provider_type {
                 ProviderType::Brainwires => {
-                    validate_brainwires_session().await?;
+                    validate_rullama_session().await?;
                 }
                 ProviderType::Ollama => {
                     let base_url = config
@@ -306,7 +306,7 @@ pub async fn handle_auth(cmd: AuthCommands) -> Result<()> {
                         ));
                     } else {
                         Logger::error(format!(
-                            "No API key configured for {}. Run: brainwires auth login --provider {}",
+                            "No API key configured for {}. Run: rullama auth login --provider {}",
                             config.provider_type.as_str(),
                             config.provider_type.as_str()
                         ));
@@ -337,7 +337,7 @@ pub async fn handle_auth(cmd: AuthCommands) -> Result<()> {
 }
 
 /// Handle Brainwires SaaS login (existing flow).
-async fn handle_brainwires_login(key: Option<String>, backend: Option<String>) -> Result<()> {
+async fn handle_rullama_login(key: Option<String>, backend: Option<String>) -> Result<()> {
     let api_key = if let Some(k) = key {
         k
     } else {
@@ -405,7 +405,7 @@ async fn handle_direct_provider_login(
 
     if provider_type == ProviderType::Brainwires {
         return Err(anyhow!(
-            "Use 'brainwires auth login' (without --provider) for Brainwires SaaS login"
+            "Use 'rullama auth login' (without --provider) for Brainwires SaaS login"
         ));
     }
 
@@ -623,7 +623,7 @@ async fn validate_selected_model(
 }
 
 /// Show Brainwires SaaS authentication status.
-fn show_brainwires_status(verbose: bool) -> Result<()> {
+fn show_rullama_status(verbose: bool) -> Result<()> {
     match SessionManager::get_session()? {
         Some(session) => {
             if session.is_expired() {
@@ -657,7 +657,7 @@ fn show_brainwires_status(verbose: bool) -> Result<()> {
             println!(
                 "{}",
                 RichOutput::boxed(
-                    "Provider: Brainwires (SaaS)\nStatus: Not authenticated\n\nRun \"brainwires auth login\" to authenticate",
+                    "Provider: Brainwires (SaaS)\nStatus: Not authenticated\n\nRun \"rullama auth login\" to authenticate",
                     Some("Authentication Status"),
                     "yellow"
                 )
@@ -668,7 +668,7 @@ fn show_brainwires_status(verbose: bool) -> Result<()> {
 }
 
 /// Validate Brainwires SaaS session.
-async fn validate_brainwires_session() -> Result<()> {
+async fn validate_rullama_session() -> Result<()> {
     if !SessionManager::is_authenticated()? {
         Logger::error("Not authenticated");
         return Ok(());

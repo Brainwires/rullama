@@ -6,7 +6,7 @@ use crate::agents::TaskManager;
 use crate::tools::ToolExecutor;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use brainwires_agent::agent_manager::{AgentInfo, AgentManager, AgentResult, SpawnConfig};
+use rullama_agent::agent_manager::{AgentInfo, AgentManager, AgentResult, SpawnConfig};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -77,7 +77,7 @@ impl McpServerHandler {
             .await
             .context("Failed to create provider")?;
 
-        let tool_registry = brainwires_tool_builtins::registry_with_builtins();
+        let tool_registry = rullama_tool_builtins::registry_with_builtins();
         let agent_tool_registry = Arc::new(RwLock::new(AgentToolRegistry::new()));
         let communication_hub = Arc::new(CommunicationHub::new());
         let file_lock_manager = Arc::new(FileLockManager::new());
@@ -186,7 +186,7 @@ impl McpServerHandler {
             protocol_version: "2024-11-05".to_string(),
             capabilities,
             server_info: ServerInfo {
-                name: "brainwires-cli".to_string(),
+                name: "rullama-cli".to_string(),
                 version: crate::build_info::VERSION.to_string(),
             },
         };
@@ -366,7 +366,7 @@ impl McpServerHandler {
             working_directory: std::env::current_dir()?.to_string_lossy().to_string(),
             // Use full_access for MCP server mode - tools should have write access
             capabilities: serde_json::to_value(
-                brainwires::permissions::AgentCapabilities::full_access(),
+                rullama::permissions::AgentCapabilities::full_access(),
             )
             .ok(),
             ..Default::default()
@@ -483,7 +483,7 @@ impl McpServerHandler {
             metadata: HashMap::new(),
             working_set: crate::types::WorkingSet::new(),
             // Use full_access for MCP server mode - agents should have write access
-            capabilities: brainwires::permissions::AgentCapabilities::full_access(),
+            capabilities: rullama::permissions::AgentCapabilities::full_access(),
         };
 
         // Check if validation should be enabled (default: true)
@@ -1003,7 +1003,7 @@ mod tests {
     /// Test is_mcp_allowed_tool function
     #[test]
     fn test_is_mcp_allowed_tool_agent_tools() {
-        let registry = brainwires_tool_builtins::registry_with_builtins();
+        let registry = rullama_tool_builtins::registry_with_builtins();
         let handler = TestableHandler {
             tool_registry: registry,
         };
@@ -1020,7 +1020,7 @@ mod tests {
 
     #[test]
     fn test_is_mcp_allowed_tool_task_tools() {
-        let registry = brainwires_tool_builtins::registry_with_builtins();
+        let registry = rullama_tool_builtins::registry_with_builtins();
         let handler = TestableHandler {
             tool_registry: registry,
         };
@@ -1036,7 +1036,7 @@ mod tests {
 
     #[test]
     fn test_is_mcp_allowed_tool_planning_tools() {
-        let registry = brainwires_tool_builtins::registry_with_builtins();
+        let registry = rullama_tool_builtins::registry_with_builtins();
         let handler = TestableHandler {
             tool_registry: registry,
         };
@@ -1049,7 +1049,7 @@ mod tests {
 
     #[test]
     fn test_is_mcp_allowed_tool_disallowed() {
-        let registry = brainwires_tool_builtins::registry_with_builtins();
+        let registry = rullama_tool_builtins::registry_with_builtins();
         let handler = TestableHandler {
             tool_registry: registry,
         };
@@ -1141,14 +1141,14 @@ mod tests {
             protocol_version: "2024-11-05".to_string(),
             capabilities,
             server_info: ServerInfo {
-                name: "brainwires-cli".to_string(),
+                name: "rullama-cli".to_string(),
                 version: "0.7.0".to_string(),
             },
         };
 
         let serialized = serde_json::to_value(&result).unwrap();
         assert_eq!(serialized["protocolVersion"], "2024-11-05");
-        assert_eq!(serialized["serverInfo"]["name"], "brainwires-cli");
+        assert_eq!(serialized["serverInfo"]["name"], "rullama-cli");
         assert!(serialized["capabilities"]["tools"].is_object());
     }
 
@@ -1397,7 +1397,7 @@ mod tests {
 
         let result = response.result.unwrap();
         assert_eq!(result["protocolVersion"], "2024-11-05");
-        assert_eq!(result["serverInfo"]["name"], "brainwires-cli");
+        assert_eq!(result["serverInfo"]["name"], "rullama-cli");
     }
 
     #[tokio::test]

@@ -39,7 +39,7 @@ cargo build                    # Development build
 cargo build --release         # Production build
 cargo test                    # Run all tests
 RUST_LOG=debug cargo test     # With debug logging
-./target/release/brainwires   # Binary execution
+./target/release/rullama   # Binary execution
 
 # Cross-compilation (use scripts)
 ./scripts/build-release.sh    # Multi-platform builds
@@ -64,7 +64,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 
 ### Configuration Pattern
 ```rust
-// Config in ~/.brainwires/config.json with environment overrides
+// Config in ~/.rullama/config.json with environment overrides
 // Key files: src/config/{mod.rs, manager.rs}
 use serde::{Deserialize, Serialize};
 ```
@@ -88,7 +88,7 @@ use serde::{Deserialize, Serialize};
 - **Agents**: `orchestrator`, `worker`, `task_agent`
 - **Stores**: `conversation_store`, `message_store`, `plan_store`
 - **Tools**: Descriptive names like `file_ops`, `semantic_search`
-- **Config**: Environment variables prefixed with `BRAINWIRES_`
+- **Config**: Environment variables prefixed with `RULLAMA_`
 
 ### Memory Management
 ```rust
@@ -103,8 +103,8 @@ use std::sync::Arc;
 ### MCP Protocol
 ```bash
 # MCP server mode (stdio-based, no files)
-brainwires chat --mcp-server
-# Test with: echo '{"jsonrpc":"2.0"...}' | ./target/release/brainwires
+rullama chat --mcp-server
+# Test with: echo '{"jsonrpc":"2.0"...}' | ./target/release/rullama
 ```
 
 ### SEAL Integration Points
@@ -142,7 +142,7 @@ use tokio_test;
 ```rust
 // Key test env vars
 RUST_LOG=debug               # Debug logging in tests
-BRAINWIRES_TEST_MODE=1       # Test mode flags
+RULLAMA_TEST_MODE=1       # Test mode flags
 ```
 
 ## Performance Considerations
@@ -186,7 +186,7 @@ use tokio::task::spawn;
 ### Tool Execution
 ```rust
 // Always check permission mode before tool execution
-// AccessControlManager is from brainwires::agents (framework crate, re-exported via src/agents/mod.rs)
+// AccessControlManager is from rullama::agents (framework crate, re-exported via src/agents/mod.rs)
 ```
 
 ### Cross-Platform Builds

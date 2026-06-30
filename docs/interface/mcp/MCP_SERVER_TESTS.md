@@ -102,14 +102,14 @@ Test basic JSON-RPC communication:
 
 ```bash
 # Start MCP server
-./target/debug/brainwires chat --mcp-server
+./target/debug/rullama chat --mcp-server
 
 # In another terminal, send requests:
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | \
-  ./target/debug/brainwires chat --mcp-server
+  ./target/debug/rullama chat --mcp-server
 
 echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | \
-  ./target/debug/brainwires chat --mcp-server
+  ./target/debug/rullama chat --mcp-server
 ```
 
 ### Test with Claude Desktop
@@ -118,8 +118,8 @@ echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | \
 ```json
 {
   "mcpServers": {
-    "brainwires": {
-      "command": "/path/to/brainwires",
+    "rullama": {
+      "command": "/path/to/rullama",
       "args": ["chat", "--mcp-server"]
     }
   }
@@ -135,15 +135,15 @@ echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | \
 
 ```bash
 # Start server
-./target/debug/brainwires chat --mcp-server
+./target/debug/rullama chat --mcp-server
 
 # Send agent_spawn request
 echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agent_spawn","arguments":{"task":"List files in current directory"}}}' | \
-  ./target/debug/brainwires chat --mcp-server
+  ./target/debug/rullama chat --mcp-server
 
 # List agents
 echo '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"agent_list","arguments":{}}}' | \
-  ./target/debug/brainwires chat --mcp-server
+  ./target/debug/rullama chat --mcp-server
 ```
 
 ## Test Coverage Summary

@@ -247,7 +247,7 @@ impl HotkeyCategoryTrait for HotkeyCategory {
     }
 }
 
-/// Provider for brainwires-cli hotkeys.
+/// Provider for rullama-cli hotkeys.
 ///
 /// Implements `HotkeyProvider` from ratatui_interact to supply hotkey data
 /// to the generic hotkey dialog component.

@@ -160,7 +160,7 @@ impl CommandExecutor {
                 "Usage: /profile:import <file_path>\n\n\
                 Import personal facts from a JSON file.\n\n\
                 Example:\n\
-                  /profile:import ~/brainwires-profile.json\n\n\
+                  /profile:import ~/rullama-profile.json\n\n\
                 The file should be a JSON export from /profile:export."
             );
         }

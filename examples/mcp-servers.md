@@ -4,10 +4,10 @@ This file contains example configurations for popular MCP servers that can be us
 
 ## Adding MCP Servers
 
-Use the `brainwires mcp add` command to add servers:
+Use the `rullama mcp add` command to add servers:
 
 ```bash
-brainwires mcp add <name> <command> [args...]
+rullama mcp add <name> <command> [args...]
 ```
 
 ## Example Servers
@@ -17,7 +17,7 @@ brainwires mcp add <name> <command> [args...]
 Provides file system operations.
 
 ```bash
-brainwires mcp add filesystem npx -y @modelcontextprotocol/server-filesystem /path/to/directory
+rullama mcp add filesystem npx -y @modelcontextprotocol/server-filesystem /path/to/directory
 ```
 
 ### 2. GitHub Server
@@ -28,7 +28,7 @@ Access GitHub repositories and issues.
 # Set GITHUB_TOKEN environment variable first
 export GITHUB_TOKEN=your_github_token
 
-brainwires mcp add github npx -y @modelcontextprotocol/server-github
+rullama mcp add github npx -y @modelcontextprotocol/server-github
 ```
 
 ### 3. PostgreSQL Server
@@ -39,7 +39,7 @@ Query PostgreSQL databases.
 # Set DATABASE_URL environment variable
 export DATABASE_URL=postgresql://user:pass@localhost/dbname
 
-brainwires mcp add postgres npx -y @modelcontextprotocol/server-postgres
+rullama mcp add postgres npx -y @modelcontextprotocol/server-postgres
 ```
 
 ### 4. Slack Server
@@ -51,7 +51,7 @@ Interact with Slack workspaces.
 export SLACK_BOT_TOKEN=xoxb-your-token
 export SLACK_TEAM_ID=T123456
 
-brainwires mcp add slack npx -y @modelcontextprotocol/server-slack
+rullama mcp add slack npx -y @modelcontextprotocol/server-slack
 ```
 
 ### 5. Google Drive Server
@@ -59,7 +59,7 @@ brainwires mcp add slack npx -y @modelcontextprotocol/server-slack
 Access Google Drive files.
 
 ```bash
-brainwires mcp add gdrive npx -y @modelcontextprotocol/server-gdrive
+rullama mcp add gdrive npx -y @modelcontextprotocol/server-gdrive
 ```
 
 ### 6. Memory Server
@@ -67,7 +67,7 @@ brainwires mcp add gdrive npx -y @modelcontextprotocol/server-gdrive
 Simple key-value store for agent memory.
 
 ```bash
-brainwires mcp add memory npx -y @modelcontextprotocol/server-memory
+rullama mcp add memory npx -y @modelcontextprotocol/server-memory
 ```
 
 ### 7. Brave Search Server
@@ -78,7 +78,7 @@ Web search via Brave Search API.
 # Set BRAVE_API_KEY
 export BRAVE_API_KEY=your_api_key
 
-brainwires mcp add brave npx -y @modelcontextprotocol/server-brave-search
+rullama mcp add brave npx -y @modelcontextprotocol/server-brave-search
 ```
 
 ### 8. Git Server
@@ -86,7 +86,7 @@ brainwires mcp add brave npx -y @modelcontextprotocol/server-brave-search
 Git repository operations.
 
 ```bash
-brainwires mcp add git npx -y @modelcontextprotocol/server-git /path/to/repo
+rullama mcp add git npx -y @modelcontextprotocol/server-git /path/to/repo
 ```
 
 ## Usage
@@ -95,22 +95,22 @@ After adding servers, connect to them:
 
 ```bash
 # Connect to a server
-brainwires mcp connect filesystem
+rullama mcp connect filesystem
 
 # List available tools
-brainwires mcp tools filesystem
+rullama mcp tools filesystem
 
 # List available resources
-brainwires mcp resources filesystem
+rullama mcp resources filesystem
 
 # Use in chat
-brainwires chat
+rullama chat
 > "Use the filesystem server to list files in the current directory"
 ```
 
 ## Configuration File
 
-Servers are stored in `~/.brainwires/mcp-config.json`:
+Servers are stored in `~/.rullama/mcp-config.json`:
 
 ```json
 {
@@ -130,13 +130,13 @@ You can create your own MCP servers. Here's an example configuration:
 
 ```bash
 # Python MCP server
-brainwires mcp add custom python -m my_mcp_server
+rullama mcp add custom python -m my_mcp_server
 
 # Node.js MCP server
-brainwires mcp add custom node /path/to/server.js
+rullama mcp add custom node /path/to/server.js
 
 # Binary MCP server
-brainwires mcp add custom /path/to/binary --arg1 --arg2
+rullama mcp add custom /path/to/binary --arg1 --arg2
 ```
 
 ## Troubleshooting
@@ -157,13 +157,13 @@ brainwires mcp add custom /path/to/binary --arg1 --arg2
 
 1. Ensure server is connected:
    ```bash
-   brainwires mcp list
+   rullama mcp list
    ```
 
 2. Reconnect if needed:
    ```bash
-   brainwires mcp disconnect server_name
-   brainwires mcp connect server_name
+   rullama mcp disconnect server_name
+   rullama mcp connect server_name
    ```
 
 ### Permission Issues

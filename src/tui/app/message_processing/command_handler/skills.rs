@@ -18,7 +18,7 @@ impl App {
     ///   to run via the `execute_script` tool. Tools are scoped to the
     ///   skill's allowlist so the script runs in a constrained context.
     pub(super) async fn handle_invoke_skill(&mut self, name: &str, args: Vec<String>) {
-        use brainwires_skills::{SkillExecutionMode, SkillSource};
+        use rullama_skills::{SkillExecutionMode, SkillSource};
 
         if self.skill_registry.is_none() {
             self.add_console_message("Skill registry not initialized".to_string());
@@ -58,7 +58,7 @@ impl App {
                     let allowed = skill.allowed_tools().cloned();
                     let name_s = skill.name().to_string();
                     let desc = skill.description().to_string();
-                    let body = brainwires_skills::render_template(&skill.instructions, &arg_map);
+                    let body = rullama_skills::render_template(&skill.instructions, &arg_map);
                     (body, desc, src, mode, allowed, name_s)
                 }
                 Err(e) => {
@@ -152,7 +152,7 @@ impl App {
 
     /// Handle /skills - list all available skills
     pub(super) async fn handle_list_skills(&mut self) {
-        use brainwires_skills::SkillSource;
+        use rullama_skills::SkillSource;
 
         let result = if let Some(ref registry) = self.skill_registry {
             let skills = registry.list_skills();
@@ -160,8 +160,8 @@ impl App {
             if skills.is_empty() {
                 "No skills found.\n\n\
                 Skills can be placed in:\n\
-                - Personal: ~/.brainwires/skills/\n\
-                - Project: .brainwires/skills/\n\n\
+                - Personal: ~/.rullama/skills/\n\
+                - Project: .rullama/skills/\n\n\
                 Each skill is a SKILL.md file with YAML frontmatter."
                     .to_string()
             } else {
@@ -236,7 +236,7 @@ impl App {
 
     /// Handle /skill:show <name> - show skill details
     pub(super) async fn handle_show_skill(&mut self, name: &str) {
-        use brainwires_skills::SkillSource;
+        use rullama_skills::SkillSource;
 
         let result = if let Some(ref mut registry) = self.skill_registry {
             // Collect the resource listing first (shared borrow scope) so it
@@ -277,8 +277,8 @@ impl App {
             match registry.get_skill(name) {
                 Ok(skill) => {
                     let source_str = match skill.metadata.source {
-                        SkillSource::Personal => "Personal (~/.brainwires/skills/)",
-                        SkillSource::Project => "Project (.brainwires/skills/)",
+                        SkillSource::Personal => "Personal (~/.rullama/skills/)",
+                        SkillSource::Project => "Project (.rullama/skills/)",
                         SkillSource::Builtin => "Builtin",
                     };
 
@@ -372,8 +372,8 @@ impl App {
             Some("project") | None => {
                 // Default to project
                 std::env::current_dir()
-                    .map(|cwd| cwd.join(".brainwires/skills"))
-                    .unwrap_or_else(|_| std::path::PathBuf::from(".brainwires/skills"))
+                    .map(|cwd| cwd.join(".rullama/skills"))
+                    .unwrap_or_else(|_| std::path::PathBuf::from(".rullama/skills"))
             }
             Some("personal") => match PlatformPaths::personal_skills_dir() {
                 Ok(dir) => dir,

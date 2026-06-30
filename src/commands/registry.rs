@@ -114,7 +114,7 @@ impl CommandRegistry {
         Ok(())
     }
 
-    /// Load custom commands from .brainwires/commands/ directory
+    /// Load custom commands from .rullama/commands/ directory
     pub fn load_custom(&mut self, commands_dir: &std::path::Path) -> Result<()> {
         if !commands_dir.exists() {
             return Ok(()); // No custom commands directory

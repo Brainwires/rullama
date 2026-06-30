@@ -32,7 +32,7 @@
     },
     "web": {
       "timeout_seconds": 30,
-      "user_agent": "brainwires-cli/0.8.0"
+      "user_agent": "rullama-cli/0.8.0"
     }
   },
 
@@ -51,7 +51,7 @@
   },
 
   "storage": {
-    "database_path": "~/.brainwires/data/lance.db",
+    "database_path": "~/.rullama/data/lance.db",
     "memory_tiers": {
       "hot_max_messages": 100,
       "warm_max_age_hours": 24,
@@ -65,7 +65,7 @@
 
   "logging": {
     "level": "info",
-    "file": "~/.brainwires/logs/cli.log",
+    "file": "~/.rullama/logs/cli.log",
     "rotation": {
       "max_size_mb": 10,
       "max_files": 5

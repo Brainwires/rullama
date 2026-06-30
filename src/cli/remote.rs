@@ -1,6 +1,6 @@
 //! Remote Bridge CLI Commands
 //!
-//! Commands for managing the remote bridge connection to brainwires-studio.
+//! Commands for managing the remote bridge connection to rullama-studio.
 
 use std::process::Stdio;
 
@@ -105,20 +105,20 @@ async fn handle_start(force: bool, foreground: bool) -> Result<()> {
 
     if !settings.enabled {
         Logger::warn("Remote bridge is disabled in config. Enable it first:");
-        Logger::info("  brainwires remote config --enabled true");
+        Logger::info("  rullama remote config --enabled true");
         return Ok(());
     }
 
     if settings.api_key.is_none() {
         Logger::error("No API key configured. Set one first:");
-        Logger::info("  brainwires remote config --api-key <your-key>");
+        Logger::info("  rullama remote config --api-key <your-key>");
         return Ok(());
     }
 
     // Check if already running via PID file
     if !force && is_bridge_running() {
         Logger::warn("Remote bridge is already running");
-        Logger::info("Use --force to restart, or 'brainwires remote stop' first");
+        Logger::info("Use --force to restart, or 'rullama remote stop' first");
         return Ok(());
     }
 
@@ -140,7 +140,7 @@ async fn handle_start(force: bool, foreground: bool) -> Result<()> {
         Logger::info(format!("Backend URL: {}", settings.backend_url));
     } else {
         Logger::error("Failed to start remote bridge daemon");
-        Logger::info("Check logs at ~/.brainwires/remote-bridge.log");
+        Logger::info("Check logs at ~/.rullama/remote-bridge.log");
     }
 
     Ok(())
@@ -407,7 +407,7 @@ async fn handle_status() -> Result<()> {
 /// Get the log file path
 fn get_log_file_path() -> Result<std::path::PathBuf> {
     let data_dir = crate::utils::paths::PlatformPaths::data_dir()?;
-    Ok(data_dir.join("brainwires").join("remote-bridge.log"))
+    Ok(data_dir.join("rullama").join("remote-bridge.log"))
 }
 
 async fn handle_log(follow: bool, lines: usize, clear: bool) -> Result<()> {
@@ -615,7 +615,7 @@ async fn handle_pair() -> Result<()> {
     let client = reqwest::Client::new();
 
     // Compute device fingerprint for auto-registration
-    let device_fingerprint = brainwires::agent_network::remote::compute_device_fingerprint();
+    let device_fingerprint = rullama::agent_network::remote::compute_device_fingerprint();
 
     // Step 1: Initiate pairing
     let initiate_url = format!("{}/api/remote/pair/initiate", backend_url);
@@ -720,18 +720,18 @@ async fn handle_pair() -> Result<()> {
                         }
                         Err(e) => {
                             Logger::warn(format!(
-                                "API key saved but authentication failed: {}. You can still use 'brainwires remote start'.",
+                                "API key saved but authentication failed: {}. You can still use 'rullama remote start'.",
                                 e
                             ));
                         }
                     }
 
                     Logger::info("Remote bridge is now configured. Start it with:");
-                    Logger::info("  brainwires remote start");
+                    Logger::info("  rullama remote start");
                     return Ok(());
                 } else if status_response.get("api_key_retrieved").is_some() {
                     Logger::error("Pairing was confirmed but API key was already retrieved.");
-                    Logger::info("Please try pairing again: brainwires remote pair");
+                    Logger::info("Please try pairing again: rullama remote pair");
                     return Ok(());
                 }
             }

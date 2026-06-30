@@ -2,7 +2,7 @@
 
 ## Overview
 
-The brainwires-cli TUI includes two powerful full-screen tools for file management and version control:
+The rullama-cli TUI includes two powerful full-screen tools for file management and version control:
 
 1. **File Explorer** - Browse files, add them to AI context, and edit with the built-in nano-style editor
 2. **Git SCM** - Full Git integration with staging, committing, pushing, pulling, and more

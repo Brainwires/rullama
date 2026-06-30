@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::ipc::{get_agent_socket_path, write_agent_metadata};
 use crate::mdap::MdapConfig;
-use brainwires::agent_network::ipc::AgentMetadata;
+use rullama::agent_network::ipc::AgentMetadata;
 
 /// Options for spawning an agent process
 #[derive(Debug, Clone, Default)]
@@ -57,7 +57,7 @@ impl SpawnOptions {
 
 /// Spawn an Agent process for the given session
 ///
-/// This spawns a new `brainwires agent <session_id>` process that runs in the
+/// This spawns a new `rullama agent <session_id>` process that runs in the
 /// background and handles all AI interactions. The TUI connects to this Agent
 /// via IPC.
 ///
@@ -321,7 +321,7 @@ pub async fn cleanup_agent(session_id: &str, notify_children: bool) -> Result<()
 
                 // Connect and send ParentSignal with authentication
                 if let Ok(mut conn) = crate::ipc::connect_to_agent(&child.session_id).await {
-                    use brainwires::agent_network::ipc::{
+                    use rullama::agent_network::ipc::{
                         Handshake, HandshakeResponse, ParentSignalType, ViewerMessage,
                     };
 

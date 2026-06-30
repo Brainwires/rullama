@@ -785,7 +785,7 @@ impl App {
     /// to the live TUI buffer; this is strictly a report path until the
     /// persistence-aware adapter lands.
     async fn handle_dream_run(&mut self) {
-        use brainwires::core::{Message, MessageContent, Role};
+        use rullama::core::{Message, MessageContent, Role};
 
         if self.messages.is_empty() {
             self.add_console_message(
@@ -984,7 +984,7 @@ impl App {
     fn handle_show_tool_mode(&mut self) {
         use crate::types::tool::ToolMode;
 
-        let registry = brainwires_tool_builtins::registry_with_builtins();
+        let registry = rullama_tool_builtins::registry_with_builtins();
         let builtin_count = registry.get_all().len();
         let mcp_count = self.mcp_tools.len();
         let total = builtin_count + mcp_count;
@@ -1036,7 +1036,7 @@ impl App {
     fn handle_set_tool_mode(&mut self, mode: crate::types::tool::ToolMode) {
         use crate::types::tool::ToolMode;
 
-        let registry = brainwires_tool_builtins::registry_with_builtins();
+        let registry = rullama_tool_builtins::registry_with_builtins();
 
         self.tools = match &mode {
             ToolMode::Full => {
@@ -1085,7 +1085,7 @@ impl App {
         use crate::types::tool::ToolMode;
         use std::collections::{HashMap, HashSet};
 
-        let registry = brainwires_tool_builtins::registry_with_builtins();
+        let registry = rullama_tool_builtins::registry_with_builtins();
 
         // Get currently selected tools (if already in explicit mode)
         let selected_names: HashSet<String> = match &self.tool_mode {
@@ -1184,7 +1184,7 @@ impl App {
                 .map(|(name, _, _)| name.clone())
                 .collect();
 
-            let registry = brainwires_tool_builtins::registry_with_builtins();
+            let registry = rullama_tool_builtins::registry_with_builtins();
 
             // Get built-in tools
             let mut tools: Vec<_> = selected

@@ -14,7 +14,7 @@
 //! based purely on query analysis and context size. The `has_compaction_summary`
 //! parameter is kept for backward compatibility but is no longer required.
 
-use brainwires::reasoning::RetrievalClassifier;
+use rullama::reasoning::RetrievalClassifier;
 
 /// Reference patterns that suggest the user is referring to earlier context
 const REFERENCE_PATTERNS: &[&str] = &[
@@ -188,10 +188,10 @@ pub async fn classify_retrieval_need_enhanced(
         if let Some(result) = classifier.classify(user_message, recent_context_len).await {
             // Convert LocalRetrievalNeed to our RetrievalNeed
             let need = match result.need {
-                brainwires::reasoning::LocalRetrievalNeed::None => RetrievalNeed::None,
-                brainwires::reasoning::LocalRetrievalNeed::Low => RetrievalNeed::Low,
-                brainwires::reasoning::LocalRetrievalNeed::Medium => RetrievalNeed::Medium,
-                brainwires::reasoning::LocalRetrievalNeed::High => RetrievalNeed::High,
+                rullama::reasoning::LocalRetrievalNeed::None => RetrievalNeed::None,
+                rullama::reasoning::LocalRetrievalNeed::Low => RetrievalNeed::Low,
+                rullama::reasoning::LocalRetrievalNeed::Medium => RetrievalNeed::Medium,
+                rullama::reasoning::LocalRetrievalNeed::High => RetrievalNeed::High,
             };
             return (need, result.confidence);
         }

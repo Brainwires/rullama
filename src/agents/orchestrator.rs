@@ -17,7 +17,7 @@ use crate::types::message::{ChatResponse, ContentBlock, Message, MessageContent,
 use crate::types::provider::ChatOptions;
 use crate::types::tool::{ToolContext, ToolContextExt, ToolUse};
 use crate::utils::entity_extraction::{EntityExtractor, EntityStore};
-use brainwires_seal::{DialogState, SealConfig, SealProcessingResult, SealProcessor};
+use rullama_seal::{DialogState, SealConfig, SealProcessingResult, SealProcessor};
 
 use super::TaskManager;
 
@@ -33,12 +33,12 @@ pub struct OrchestratorAgent {
     entity_store: EntityStore,
     entity_extractor: EntityExtractor,
     // SEAL + Knowledge integration
-    knowledge_coordinator: Option<brainwires_seal::SealKnowledgeCoordinator>,
+    knowledge_coordinator: Option<rullama_seal::SealKnowledgeCoordinator>,
     // Adaptive prompting (Phase 4 integration)
-    prompt_generator: Option<brainwires::prompting::PromptGenerator>,
+    prompt_generator: Option<rullama::prompting::PromptGenerator>,
     use_adaptive_prompts: bool,
     // Track last prompt generation for learning
-    last_generated_prompt: Option<brainwires::prompting::generator::GeneratedPrompt>,
+    last_generated_prompt: Option<rullama::prompting::generator::GeneratedPrompt>,
     // Embedding provider for adaptive prompting (Phase 8)
     embedding_provider: Option<Arc<crate::storage::embeddings::CachedEmbeddingProvider>>,
 }
@@ -122,7 +122,7 @@ impl OrchestratorAgent {
         provider: Arc<dyn Provider>,
         permission_mode: PermissionMode,
         seal_config: SealConfig,
-        knowledge_coordinator: brainwires_seal::SealKnowledgeCoordinator,
+        knowledge_coordinator: rullama_seal::SealKnowledgeCoordinator,
     ) -> Self {
         let task_manager = Arc::new(RwLock::new(TaskManager::new()));
         let task_manager_tool = TaskManagerTool::new(task_manager.clone());
@@ -147,7 +147,7 @@ impl OrchestratorAgent {
     /// Enable knowledge integration
     pub fn enable_knowledge_integration(
         &mut self,
-        coordinator: brainwires_seal::SealKnowledgeCoordinator,
+        coordinator: rullama_seal::SealKnowledgeCoordinator,
     ) {
         self.knowledge_coordinator = Some(coordinator);
     }
@@ -165,7 +165,7 @@ impl OrchestratorAgent {
     /// Enable adaptive prompting with provided generator
     pub fn enable_adaptive_prompting(
         &mut self,
-        generator: brainwires::prompting::PromptGenerator,
+        generator: rullama::prompting::PromptGenerator,
         embedding_provider: Arc<crate::storage::embeddings::CachedEmbeddingProvider>,
     ) {
         self.prompt_generator = Some(generator);
@@ -196,7 +196,7 @@ impl OrchestratorAgent {
     /// Get reference to the last generated prompt (for learning/debugging)
     pub fn last_generated_prompt(
         &self,
-    ) -> Option<&brainwires::prompting::generator::GeneratedPrompt> {
+    ) -> Option<&rullama::prompting::generator::GeneratedPrompt> {
         self.last_generated_prompt.as_ref()
     }
 
@@ -1018,7 +1018,7 @@ impl OrchestratorAgent {
                         // Generate adaptive prompt
                         // Convert CLI SealProcessingResult to framework's stub type
                         let framework_seal = seal_result.map(|r| {
-                            brainwires::prompting::SealProcessingResult::new(
+                            rullama::prompting::SealProcessingResult::new(
                                 r.quality_score,
                                 &r.resolved_query,
                             )

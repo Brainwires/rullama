@@ -1,6 +1,6 @@
 # Brainwires CLI Architecture
 
-This document describes the high-level architecture of the brainwires-cli application.
+This document describes the high-level architecture of the rullama-cli application.
 
 ## Overview
 
@@ -82,7 +82,7 @@ Multi-agent orchestration system for complex task decomposition:
 - `worker.rs` - Worker agent implementation
 - `pool.rs` - Agent lifecycle management
 
-**From `brainwires` framework crate** (re-exported via `pub use brainwires::agents::*`):
+**From `rullama` framework crate** (re-exported via `pub use rullama::agents::*`):
 - `communication` - Message hub for agent coordination
 - `file_locks` - Read/write file locking
 - `validation_loop` - Pre-completion validation checks
@@ -193,7 +193,7 @@ Persistent storage for conversations and embeddings:
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### 7. Knowledge Layer (framework: `brainwires-knowledge` crate, `knowledge` feature)
+### 7. Knowledge Layer (framework: `rullama-knowledge` crate, `knowledge` feature)
 
 Entity extraction and context management:
 
@@ -211,9 +211,9 @@ Authentication and session management:
 - Direct provider API key support
 - Secure keyring storage via `keyring` crate
 
-### 9. Prompting & SEAL (framework: `brainwires-knowledge` crate)
+### 9. Prompting & SEAL (framework: `rullama-knowledge` crate)
 
-Adaptive prompting and self-evolving learning are implemented in the `brainwires-knowledge`
+Adaptive prompting and self-evolving learning are implemented in the `rullama-knowledge`
 framework crate, which the CLI integrates as a dependency. These systems are not local `src/`
 modules.
 
@@ -296,7 +296,7 @@ Background agent process management (distinct from `src/agents/` orchestration):
 - `plan_mode.rs` — Plan-mode integration for agents
 - `message_queue.rs` — Persistent message queue for background agents
 
-### 15. Remote Layer (`src/remote.rs`, framework: `brainwires-network` crate, `remote-transport` feature)
+### 15. Remote Layer (`src/remote.rs`, framework: `rullama-network` crate, `remote-transport` feature)
 
 Remote relay connector for external orchestration:
 
@@ -496,7 +496,7 @@ MCP Client Request
                               │    ipc     │
                               └────────────┘
 ```
-> `knowledge` is implemented in the `brainwires-knowledge` framework crate (not a local `src/` module).
+> `knowledge` is implemented in the `rullama-knowledge` framework crate (not a local `src/` module).
 
 ### Module Descriptions
 
@@ -518,9 +518,9 @@ MCP Client Request
 | `session` | `src/session/` | PTY session persistence |
 | `ipc` | `src/ipc.rs` | Inter-process communication |
 | `auth` | `src/auth.rs` | Authentication and session tokens |
-| `knowledge` | framework crate | Entity extraction, context graphs (`brainwires-knowledge`) |
-| `seal` | framework crate | Self-evolving adaptive learning (`brainwires-knowledge`) |
-| `prompting` | framework crate | Adaptive prompting techniques (`brainwires-knowledge`) |
+| `knowledge` | framework crate | Entity extraction, context graphs (`rullama-knowledge`) |
+| `seal` | framework crate | Self-evolving adaptive learning (`rullama-knowledge`) |
+| `prompting` | framework crate | Adaptive prompting techniques (`rullama-knowledge`) |
 
 ## Error Handling
 
@@ -572,7 +572,7 @@ Errors support:
 
 ## Configuration
 
-Configuration is stored in `~/.brainwires/`:
+Configuration is stored in `~/.rullama/`:
 
 | File | Purpose |
 |------|---------|

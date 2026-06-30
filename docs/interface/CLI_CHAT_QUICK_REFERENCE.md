@@ -1,11 +1,11 @@
 # CLI Chat Quick Reference
 
-Quick reference for `brainwires chat` modes and options.
+Quick reference for `rullama chat` modes and options.
 
 ## Command Syntax
 
 ```bash
-brainwires chat [OPTIONS]
+rullama chat [OPTIONS]
 ```
 
 ## Common Options
@@ -27,52 +27,52 @@ brainwires chat [OPTIONS]
 
 ### Interactive Chat
 ```bash
-brainwires chat
+rullama chat
 ```
 
 ### Single-Shot Queries
 ```bash
 # Basic
-brainwires chat --prompt "What is Rust ownership?"
+rullama chat --prompt "What is Rust ownership?"
 
 # Scripting-friendly
-brainwires chat --prompt "Calculate 7*8" --quiet --format=plain
+rullama chat --prompt "Calculate 7*8" --quiet --format=plain
 
 # JSON output
-brainwires chat --prompt "Explain async" --format=json
+rullama chat --prompt "Explain async" --format=json
 ```
 
 ### Batch Processing
 ```bash
 # From file
-cat questions.txt | brainwires chat --batch
+cat questions.txt | rullama chat --batch
 
 # Piped input
-printf "Q1\nQ2\nQ3\n" | brainwires chat --batch
+printf "Q1\nQ2\nQ3\n" | rullama chat --batch
 
 # JSON output
-cat prompts.txt | brainwires chat --batch --format=json > results.json
+cat prompts.txt | rullama chat --batch --format=json > results.json
 ```
 
 ### Piped Input
 ```bash
 # Interactive mode with piped input
-echo "What is 2+2?" | brainwires chat
+echo "What is 2+2?" | rullama chat
 
 # Quiet piped input
-echo "Hello" | brainwires chat --quiet
+echo "Hello" | rullama chat --quiet
 ```
 
 ### Shell Integration
 ```bash
 # Capture in variable
-RESULT=$(brainwires chat --prompt "What is 5*5?" --quiet --format=plain)
+RESULT=$(rullama chat --prompt "What is 5*5?" --quiet --format=plain)
 
 # Git integration
-git diff | brainwires chat --prompt "Summarize changes" --quiet
+git diff | rullama chat --prompt "Summarize changes" --quiet
 
 # Code review
-cat file.rs | brainwires chat --prompt "Review this code" --format=plain
+cat file.rs | rullama chat --prompt "Review this code" --format=plain
 ```
 
 ## Output Formats
@@ -121,8 +121,8 @@ Interactive mode auto-detects input source:
 
 ```bash
 # Same command works both ways
-brainwires chat              # Interactive
-echo "Hello" | brainwires chat   # Piped
+rullama chat              # Interactive
+echo "Hello" | rullama chat   # Piped
 ```
 
 ## Combining Flags
@@ -156,11 +156,11 @@ Common useful combinations:
 
 ## Configuration
 
-Default config location: `~/.brainwires/config.json`
+Default config location: `~/.rullama/config.json`
 
 Override with command-line options:
 ```bash
-brainwires chat --model claude-3-5-sonnet-20241022 --provider anthropic
+rullama chat --model claude-3-5-sonnet-20241022 --provider anthropic
 ```
 
 ## Performance Tips

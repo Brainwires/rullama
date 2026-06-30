@@ -10,16 +10,16 @@ static STALE_MODEL_WARNED: AtomicBool = AtomicBool::new(false);
 use super::paths::PlatformPaths;
 use crate::types::agent::PermissionMode;
 use crate::types::provider::ProviderType;
-use brainwires::agent_network::auth::keyring::KeyringKeyStore;
-use brainwires::agent_network::traits::KeyStore;
-use brainwires::knowledge::bks_pks::KnowledgeSettings as KnowledgeSettingsCore;
-use brainwires_seal::SealConfig;
+use rullama::agent_network::auth::keyring::KeyringKeyStore;
+use rullama::agent_network::traits::KeyStore;
+use rullama::knowledge::bks_pks::KnowledgeSettings as KnowledgeSettingsCore;
+use rullama_seal::SealConfig;
 
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Active provider type (default: Brainwires SaaS)
-    /// Use `brainwires auth login --provider <name>` to change
+    /// Use `rullama auth login --provider <name>` to change
     #[serde(default = "default_provider_type", alias = "provider")]
     pub provider_type: ProviderType,
 
@@ -398,8 +398,8 @@ impl Default for SealKnowledgeSettings {
 
 impl SealKnowledgeSettings {
     /// Convert to IntegrationConfig for use with SealKnowledgeCoordinator
-    pub fn to_integration_config(&self) -> brainwires_seal::IntegrationConfig {
-        use brainwires_seal::EntityResolutionStrategy;
+    pub fn to_integration_config(&self) -> rullama_seal::IntegrationConfig {
+        use rullama_seal::EntityResolutionStrategy;
 
         let strategy = match self.entity_resolution_strategy.as_str() {
             "seal_first" => EntityResolutionStrategy::SealFirst,
@@ -410,7 +410,7 @@ impl SealKnowledgeSettings {
             },
         };
 
-        brainwires_seal::IntegrationConfig {
+        rullama_seal::IntegrationConfig {
             enabled: self.enabled,
             seal_to_knowledge: self.seal_to_knowledge,
             knowledge_to_seal: self.knowledge_to_seal,
@@ -429,7 +429,7 @@ impl SealKnowledgeSettings {
 
 /// Remote Control Bridge settings
 ///
-/// Controls the HTTP polling connection to brainwires-studio
+/// Controls the HTTP polling connection to rullama-studio
 /// for remote monitoring and control of CLI agents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteSettings {
@@ -624,7 +624,7 @@ pub struct LocalLlmSettings {
 fn default_local_models_dir() -> std::path::PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("brainwires")
+        .join("rullama")
         .join("models")
 }
 
@@ -672,7 +672,7 @@ fn default_provider_type() -> ProviderType {
 
 pub(crate) fn default_model() -> String {
     // A first-run default must be a model the backend actually advertises in
-    // `brainwires models list`. The previous default "gpt-5-mini" did not
+    // `rullama models list`. The previous default "gpt-5-mini" did not
     // appear in that list (the closest real model is "openai-gpt-5-mini"),
     // which produced silent request failures for fresh installs.
     //
@@ -770,7 +770,7 @@ impl ConfigManager {
             if !STALE_MODEL_WARNED.swap(true, Ordering::Relaxed) {
                 eprintln!(
                     "⚠ Config pins a stale model ('{}'). Using '{}' for this session. \
-                     Run `brainwires config --set model=<name>` to persist a choice.",
+                     Run `rullama config --set model=<name>` to persist a choice.",
                     config.model, fresh
                 );
             }

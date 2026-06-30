@@ -1,12 +1,12 @@
 use super::message::Message;
 use super::tool::Tool;
 use super::working_set::WorkingSet;
-use brainwires::permissions::AgentCapabilities;
+use rullama::permissions::AgentCapabilities;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // Re-export Task types from framework (structurally identical)
-pub use brainwires::core::task::{AgentResponse, Task, TaskPriority, TaskStatus};
+pub use rullama::core::task::{AgentResponse, Task, TaskPriority, TaskStatus};
 
 /// Context for agent execution
 #[derive(Debug, Clone)]

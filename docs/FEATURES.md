@@ -91,7 +91,7 @@ src/agents/                          # CLI-local files
 ├── worker.rs            # Worker agent implementation
 └── pool.rs              # Agent lifecycle management
 
-brainwires::agents (framework crate) # Re-exported via src/agents/mod.rs
+rullama::agents (framework crate) # Re-exported via src/agents/mod.rs
 ├── file_locks           # Cross-process synchronization
 ├── access_control       # Permission management
 ├── validation_loop      # Pre-completion validation
@@ -279,7 +279,7 @@ Agents work in isolated git worktrees to prevent conflicts:
 project/
 ├── .git/                      # Main repository
 ├── src/                       # Main working tree
-└── .brainwires/worktrees/
+└── .rullama/worktrees/
     ├── agent-abc123/          # Agent A's isolated copy
     │   └── src/
     └── agent-def456/          # Agent B's isolated copy
@@ -681,7 +681,7 @@ src/mcp/
 Expose Brainwires as an MCP server:
 
 ```bash
-brainwires chat --mcp-server
+rullama chat --mcp-server
 ```
 
 ---
@@ -764,10 +764,10 @@ Dedicated split-pane view for monitoring and messaging running sub-agents:
 
 | Command | Description |
 |---------|-------------|
-| `brainwires chat` | Start new session (spawns Agent + TUI) |
-| `brainwires sessions` | List backgrounded sessions |
-| `brainwires attach [id]` | Attach TUI to existing Agent |
-| `brainwires exit <id>` | Terminate a backgrounded session |
+| `rullama chat` | Start new session (spawns Agent + TUI) |
+| `rullama sessions` | List backgrounded sessions |
+| `rullama attach [id]` | Attach TUI to existing Agent |
+| `rullama exit <id>` | Terminate a backgrounded session |
 
 **TUI Shortcuts**:
 - `Ctrl+Z`: Open background/suspend dialog
@@ -782,12 +782,12 @@ The TUI uses an event-driven architecture - IPC messages from the Agent flow thr
 
 | Mode | Usage |
 |------|-------|
-| **Interactive** | `brainwires chat` |
-| **TUI** | `brainwires chat --tui` |
-| **Single-Shot** | `brainwires chat --prompt "..."` |
-| **Batch** | `cat prompts.txt \| brainwires chat --batch` |
-| **Quiet** | `brainwires chat -q` |
-| **MCP Server** | `brainwires chat --mcp-server` |
+| **Interactive** | `rullama chat` |
+| **TUI** | `rullama chat --tui` |
+| **Single-Shot** | `rullama chat --prompt "..."` |
+| **Batch** | `cat prompts.txt \| rullama chat --batch` |
+| **Quiet** | `rullama chat -q` |
+| **MCP Server** | `rullama chat --mcp-server` |
 
 ### Output Formats
 
@@ -838,8 +838,8 @@ src/storage/
 
 ### Data Locations
 
-- **Project Data**: `.brainwires/` in project root
-- **Global Data**: `~/.brainwires/` for user config
+- **Project Data**: `.rullama/` in project root
+- **Global Data**: `~/.rullama/` for user config
 - **XDG Compliant**: Follows XDG directory specification
 
 ---
@@ -927,10 +927,10 @@ strip = true
 cargo install --path .
 
 # Authenticate
-brainwires auth login
+rullama auth login
 
 # Start chatting
-brainwires chat
+rullama chat
 
 # Index your codebase
 > /project:index .

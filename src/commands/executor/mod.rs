@@ -257,7 +257,7 @@ impl CommandExecutor {
 
         // Try to load custom commands from current directory
         if let Ok(cwd) = std::env::current_dir() {
-            let commands_dir = cwd.join(".brainwires/commands");
+            let commands_dir = cwd.join(".rullama/commands");
             if let Err(e) = registry.load_custom(&commands_dir) {
                 tracing::warn!("Failed to load custom commands: {}", e);
             }

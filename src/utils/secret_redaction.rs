@@ -219,7 +219,7 @@ lazy_static! {
 /// # Examples
 ///
 /// ```
-/// use brainwires_cli::utils::secret_redaction::redact_secrets;
+/// use rullama_cli::utils::secret_redaction::redact_secrets;
 ///
 /// let log = "Connecting with api_key=sk-1234567890abcdef1234567890abcdef12345678901234567890";
 /// let redacted = redact_secrets(log);

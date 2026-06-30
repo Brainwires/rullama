@@ -86,7 +86,7 @@ Index Statistics:
 - Total files: 245
 - Total chunks: 3,892
 - Languages: Rust (180), TOML (15), Markdown (50)
-- Database: .brainwires/lancedb
+- Database: .rullama/lancedb
 ```
 
 ---
@@ -331,13 +331,13 @@ Index Statistics:
 
 ### Vector Database
 - **Backend**: LanceDB
-- **Location**: `.brainwires/lancedb` (project-specific, in project root)
+- **Location**: `.rullama/lancedb` (project-specific, in project root)
 - **Features**: Local, fast, persistent, per-project isolation
 
 ### Cache & Models
-- **Embedding Models**: `~/.local/share/brainwires/fastembed/` (shared globally)
-- **Hash Cache**: `.brainwires/hash_cache.json` (per-project)
-- **Git Cache**: `.brainwires/git_cache.json` (per-project)
+- **Embedding Models**: `~/.local/share/rullama/fastembed/` (shared globally)
+- **Hash Cache**: `.rullama/hash_cache.json` (per-project)
+- **Git Cache**: `.rullama/git_cache.json` (per-project)
 
 ### Performance
 - **Indexing Speed**: ~1000 files/minute

@@ -183,7 +183,7 @@ Application messages are wrapped in multiple layers:
 ### 4.1 Transport Layer
 
 - **Socket Type:** Unix Domain Socket (Linux/macOS) or Named Pipe (Windows)
-- **Location:** `$XDG_RUNTIME_DIR/brainwires/` or `/tmp/brainwires/`
+- **Location:** `$XDG_RUNTIME_DIR/rullama/` or `/tmp/rullama/`
 - **File Pattern:** `agent-{session_id}.sock`
 - **Permissions:** `0600` (owner read/write only)
 
@@ -220,7 +220,7 @@ All messages after handshake use the following frame format:
 
 **Encryption Details:**
 - **Algorithm:** ChaCha20-Poly1305 (RFC 8439)
-- **Key Derivation:** `SHA256("brainwires-ipc-v1:" || session_token)`
+- **Key Derivation:** `SHA256("rullama-ipc-v1:" || session_token)`
 - **Nonce:** Random 96-bit value, unique per message
 - **Overhead:** 28 bytes per message (12 nonce + 16 auth tag)
 
@@ -636,7 +636,7 @@ Examples:
 #### 7.1.2 Key Storage
 
 - **Primary:** System keyring (GNOME Keyring, macOS Keychain, Windows Credential Manager)
-- **Fallback:** Encrypted file in `~/.config/brainwires-cli/`
+- **Fallback:** Encrypted file in `~/.config/rullama-cli/`
 - **Memory:** Zeroized immediately after use
 
 #### 7.1.3 Key Verification
@@ -665,7 +665,7 @@ Examples:
 ```typescript
 const token = jwt.sign(
   {
-    iss: "brainwires-cli",
+    iss: "rullama-cli",
     sub: userId,
     aud: "authenticated",
     role: "authenticated",
@@ -683,7 +683,7 @@ const token = jwt.sign(
 
 | Claim | Type | Purpose |
 |-------|------|---------|
-| `iss` | string | Issuer identifier ("brainwires-cli") |
+| `iss` | string | Issuer identifier ("rullama-cli") |
 | `sub` | string | User ID (maps to auth.uid() in RLS) |
 | `aud` | string | Audience ("authenticated") |
 | `role` | string | Supabase role ("authenticated") |
@@ -760,7 +760,7 @@ All network communication uses TLS 1.3:
 ```rust
 fn derive_key_from_token(token: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
-    hasher.update(b"brainwires-ipc-v1:");  // Domain separator
+    hasher.update(b"rullama-ipc-v1:");  // Domain separator
     hasher.update(token.as_bytes());
     hasher.finalize().into()
 }
@@ -1249,7 +1249,7 @@ type MeshCapability =
 #### 13.3.2 Local Network Discovery (mDNS)
 
 ```
-Service: _brainwires-mesh._udp.local
+Service: _rullama-mesh._udp.local
 TXT Records:
   - version=1.0
   - pubkey=<base64 Ed25519 public key>
@@ -1691,10 +1691,10 @@ Agent A:
 
 ### 15.3 Internal References
 
-- Source: `brainwires-cli/src/remote/` - Bridge implementation
-- Source: `brainwires-cli/src/ipc/` - IPC encryption
-- Source: `brainwires-studio/lib/remote/` - Protocol types
-- Source: `brainwires-studio/lib/realtime/` - Realtime channels
+- Source: `rullama-cli/src/remote/` - Bridge implementation
+- Source: `rullama-cli/src/ipc/` - IPC encryption
+- Source: `rullama-studio/lib/remote/` - Protocol types
+- Source: `rullama-studio/lib/realtime/` - Realtime channels
 
 ---
 

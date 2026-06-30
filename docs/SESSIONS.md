@@ -1,6 +1,6 @@
 # Sessions
 
-Sessions are the core unit of persistence and multiplexing in brainwires-cli. Each session is a named, resumable conversation with an Agent — it survives terminal disconnections and can be reattached from any terminal.
+Sessions are the core unit of persistence and multiplexing in rullama-cli. Each session is a named, resumable conversation with an Agent — it survives terminal disconnections and can be reattached from any terminal.
 
 ---
 
@@ -17,9 +17,9 @@ Sessions are stored in:
 
 | Platform | Path |
 |----------|------|
-| Linux/Unix (XDG) | `$XDG_DATA_HOME/brainwires/sessions/` or `~/.local/share/brainwires/sessions/` |
-| macOS | `~/Library/Application Support/brainwires/sessions/` |
-| Fallback | `~/.brainwires/sessions/` |
+| Linux/Unix (XDG) | `$XDG_DATA_HOME/rullama/sessions/` or `~/.local/share/rullama/sessions/` |
+| macOS | `~/Library/Application Support/rullama/sessions/` |
+| Fallback | `~/.rullama/sessions/` |
 
 ---
 
@@ -95,18 +95,18 @@ Socket paths:
 
 ```bash
 # Start a new session (creates session, opens TUI)
-brainwires chat
+rullama chat
 
 # Resume an existing session by ID
-brainwires chat --session <session_id>
+rullama chat --session <session_id>
 
 # Attach to a running session's PTY
-brainwires attach <session_id>
+rullama attach <session_id>
 
 # List all live sessions
-brainwires sessions
+rullama sessions
 # or
-brainwires ls
+rullama ls
 ```
 
 ### TUI Background/Suspend
@@ -114,7 +114,7 @@ brainwires ls
 | Key | Effect |
 |-----|--------|
 | **Ctrl+Z** | Opens dialog: Background or Suspend |
-| Background | Detaches TUI; Agent keeps running; reconnect with `brainwires attach <id>` |
+| Background | Detaches TUI; Agent keeps running; reconnect with `rullama attach <id>` |
 | Suspend | Suspends the TUI process (SIGTSTP); resume with `fg` in the terminal |
 
 ---

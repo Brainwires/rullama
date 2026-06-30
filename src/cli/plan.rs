@@ -125,7 +125,7 @@ pub async fn handle_plan(
     let provider_instance = factory
         .create(model_id.clone())
         .await
-        .context("Failed to create provider — run `brainwires auth status` to diagnose")?;
+        .context("Failed to create provider — run `rullama auth status` to diagnose")?;
 
     // Create agent manager
     let agent_manager = AgentManager::new(provider_instance, PermissionMode::Auto, 5).await?;
@@ -149,17 +149,17 @@ pub async fn handle_plan(
         working_directory: std::env::current_dir()?.to_string_lossy().to_string(),
         user_id,
         conversation_history: Vec::new(),
-        tools: brainwires_tool_builtins::registry_with_builtins()
+        tools: rullama_tool_builtins::registry_with_builtins()
             .get_all()
             .to_vec(),
         metadata: std::collections::HashMap::new(),
         working_set: crate::types::WorkingSet::new(),
-        capabilities: brainwires::permissions::AgentCapabilities::standard_dev(),
+        capabilities: rullama::permissions::AgentCapabilities::standard_dev(),
     };
 
     // Print header
     println!("\n{}", RichOutput::header("Brainwires Plan", "magenta"));
-    println!("Model: {} (brainwires)", model_id);
+    println!("Model: {} (rullama)", model_id);
     println!("Task: {}\n", console::style(&task).cyan());
 
     // Show planning indicator
@@ -292,7 +292,7 @@ pub async fn handle_plan(
             } else if saved_plan.is_ok() {
                 println!(
                     "{}",
-                    console::style("Plan saved. Use 'brainwires plan list' to view saved plans.")
+                    console::style("Plan saved. Use 'rullama plan list' to view saved plans.")
                         .dim()
                 );
             }

@@ -9,7 +9,7 @@ use crate::utils::logger::Logger;
 
 lazy_static! {
     static ref MCP_CLIENT: Arc<RwLock<McpClient>> = Arc::new(RwLock::new(McpClient::new(
-        "brainwires",
+        "rullama",
         env!("CARGO_PKG_VERSION")
     )));
 }
@@ -62,7 +62,7 @@ async fn handle_list() -> Result<()> {
 
     if servers.is_empty() {
         println!("{}", console::style("No MCP servers configured").dim());
-        println!("\nUse 'brainwires mcp add <name> <command> [args...]' to add a server");
+        println!("\nUse 'rullama mcp add <name> <command> [args...]' to add a server");
         return Ok(());
     }
 
@@ -206,7 +206,7 @@ async fn handle_tools(server: String) -> Result<()> {
 
     if !client.is_connected(&server).await {
         anyhow::bail!(
-            "Not connected to server '{}'. Use 'brainwires mcp connect {}'",
+            "Not connected to server '{}'. Use 'rullama mcp connect {}'",
             server,
             server
         );
@@ -241,7 +241,7 @@ async fn handle_resources(server: String) -> Result<()> {
 
     if !client.is_connected(&server).await {
         anyhow::bail!(
-            "Not connected to server '{}'. Use 'brainwires mcp connect {}'",
+            "Not connected to server '{}'. Use 'rullama mcp connect {}'",
             server,
             server
         );
@@ -277,7 +277,7 @@ async fn handle_prompts(server: String) -> Result<()> {
 
     if !client.is_connected(&server).await {
         anyhow::bail!(
-            "Not connected to server '{}'. Use 'brainwires mcp connect {}'",
+            "Not connected to server '{}'. Use 'rullama mcp connect {}'",
             server,
             server
         );

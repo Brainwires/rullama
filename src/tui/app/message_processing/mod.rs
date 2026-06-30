@@ -250,7 +250,7 @@ impl App {
                 // Smart routing: analyze messages to determine needed tools
                 crate::tools::get_smart_tools(
                     &conversation_clone,
-                    &brainwires_tool_builtins::registry_with_builtins(),
+                    &rullama_tool_builtins::registry_with_builtins(),
                 )
             }
             _ => self.tools.clone(),
@@ -343,7 +343,7 @@ impl App {
     /// In IPC mode, we send the user input to the Session (Agent) and receive
     /// streaming responses via IPC events. The Session handles all AI/tools/MCP.
     async fn call_ai_provider_ipc(&mut self) -> Result<()> {
-        use brainwires::agent_network::ipc::ViewerMessage;
+        use rullama::agent_network::ipc::ViewerMessage;
 
         // The pending_skill_tool_scope lives on the client side; the remote
         // session owns its own ToolExecutor and tool list. We can't enforce
@@ -412,8 +412,8 @@ impl App {
     ///
     /// Called from the main event loop when Event::Ipc is received.
     /// This is the event-driven replacement for the old polling approach.
-    pub fn handle_ipc_event(&mut self, msg: brainwires::agent_network::ipc::AgentMessage) {
-        use brainwires::agent_network::ipc::AgentMessage;
+    pub fn handle_ipc_event(&mut self, msg: rullama::agent_network::ipc::AgentMessage) {
+        use rullama::agent_network::ipc::AgentMessage;
 
         match msg {
             AgentMessage::StreamChunk { text } => {
@@ -541,9 +541,9 @@ impl App {
     /// and reconnects, preserving state from storage.
     ///
     /// Returns the new IpcReader so the caller can restart the IPC reader task.
-    pub async fn respawn_session(&mut self) -> Result<brainwires::agent_network::ipc::IpcReader> {
+    pub async fn respawn_session(&mut self) -> Result<rullama::agent_network::ipc::IpcReader> {
         use crate::agent::spawn::spawn_agent_process;
-        use brainwires::agent_network::ipc::{AgentMessage, Handshake};
+        use rullama::agent_network::ipc::{AgentMessage, Handshake};
 
         self.add_console_message("🔄 Respawning session...".to_string());
         self.set_status(LogLevel::Warn, "Respawning session...");
@@ -569,7 +569,7 @@ impl App {
         conn.writer.write(&handshake).await?;
 
         // Wait for handshake response
-        use brainwires::agent_network::ipc::HandshakeResponse;
+        use rullama::agent_network::ipc::HandshakeResponse;
         let response: HandshakeResponse = conn
             .reader
             .read()
@@ -771,7 +771,7 @@ impl App {
                 working_directory: self.working_directory.clone(),
                 // Use full_access for TUI mode - users expect agents to have write access
                 capabilities: serde_json::to_value(
-                    brainwires::permissions::AgentCapabilities::full_access(),
+                    rullama::permissions::AgentCapabilities::full_access(),
                 )
                 .ok(),
                 ..Default::default()
@@ -1124,7 +1124,7 @@ impl App {
                 metadata: std::collections::HashMap::new(),
                 working_set: crate::types::WorkingSet::new(),
                 // Use full_access for TUI mode - users expect agents to have write access
-                capabilities: brainwires::permissions::AgentCapabilities::full_access(),
+                capabilities: rullama::permissions::AgentCapabilities::full_access(),
             };
 
             // Create a no-op logger (logs go to console via event)
@@ -1347,7 +1347,7 @@ impl App {
             metadata: std::collections::HashMap::new(),
             working_set: crate::types::WorkingSet::new(),
             // Use full_access for TUI mode - users expect agents to have write access
-            capabilities: brainwires::permissions::AgentCapabilities::full_access(),
+            capabilities: rullama::permissions::AgentCapabilities::full_access(),
         };
 
         // Create orchestrator and execute with MDAP

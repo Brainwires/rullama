@@ -4,12 +4,12 @@
 //! `{{variable}}` placeholders, searching/listing templates, and instantiating
 //! them with concrete values.
 //!
-//! Run: cargo run -p brainwires-cli --example plan_templates
+//! Run: cargo run -p rullama-cli --example plan_templates
 
 use std::collections::HashMap;
 
 use anyhow::Result;
-use brainwires_stores::{PlanTemplate, TemplateStore};
+use rullama_stores::{PlanTemplate, TemplateStore};
 
 #[tokio::main]
 async fn main() -> Result<()> {

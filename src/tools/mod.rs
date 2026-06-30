@@ -1,9 +1,9 @@
 // Tools module - built-in tool implementations
 //
-// Re-exports from the brainwires-tools framework crate, plus CLI-specific tools.
+// Re-exports from the rullama-tools framework crate, plus CLI-specific tools.
 #![allow(hidden_glob_reexports)]
 
-pub use brainwires::tools::*;
+pub use rullama::tools::*;
 
 // CLI-specific tool modules
 mod agent_pool;
@@ -35,7 +35,7 @@ pub use task_manager::*;
 pub use validation_tools::*;
 
 // Explicitly re-export the CLI's concrete ToolExecutor struct so it shadows
-// the brainwires_tool_runtime::ToolExecutor trait that enters via the glob above.
+// the rullama_tool_runtime::ToolExecutor trait that enters via the glob above.
 pub use executor::ToolExecutor;
 
 // ── CLI-level tool-selection flag ─────────────────────────────────────────
@@ -62,7 +62,7 @@ pub fn all_tools_override() -> bool {
 /// Return the tool set to send to the provider for a non-TUI chat path.
 /// Honors `--all-tools` when set; otherwise returns the curated core set
 /// in canonical order (stable prefix for prompt caching).
-pub fn select_non_tui_tools(registry: &brainwires_tool_runtime::ToolRegistry) -> Vec<Tool> {
+pub fn select_non_tui_tools(registry: &rullama_tool_runtime::ToolRegistry) -> Vec<Tool> {
     if all_tools_override() {
         registry.get_all().to_vec()
     } else {

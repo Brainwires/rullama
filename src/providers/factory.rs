@@ -6,8 +6,8 @@ use super::local_llm::{LocalLlmConfig, LocalLlmProvider, LocalModelRegistry};
 use super::{Provider, ProviderType};
 use crate::auth::SessionManager;
 use crate::config::ConfigManager;
-use brainwires::providers::ChatProviderFactory;
-use brainwires::providers::ProviderConfig;
+use rullama::providers::ChatProviderFactory;
+use rullama::providers::ProviderConfig;
 
 /// CLI-specific provider factory.
 ///
@@ -30,7 +30,7 @@ impl ProviderFactory {
             Some(s) => match ProviderType::from_str_opt(s) {
                 Some(p) => Ok(Some(p)),
                 None => Err(anyhow!(
-                    "Unknown provider: '{}'. Supported: anthropic, openai, google, groq, ollama, brainwires, bedrock, vertex-ai, together, fireworks, minimax",
+                    "Unknown provider: '{}'. Supported: anthropic, openai, google, groq, ollama, rullama, bedrock, vertex-ai, together, fireworks, minimax",
                     s
                 )),
             },
@@ -39,7 +39,7 @@ impl ProviderFactory {
 
     /// Resolve the effective provider for an invocation.
     ///
-    /// Precedence: explicit CLI flag > `BRAINWIRES_PROVIDER` env var > config.
+    /// Precedence: explicit CLI flag > `RULLAMA_PROVIDER` env var > config.
     /// Does NOT fall back to env-var-based auto-detection — that's a first-run
     /// concern, not a per-invocation one.
     pub fn effective_provider(
@@ -49,7 +49,7 @@ impl ProviderFactory {
         if let Some(p) = Self::parse_provider_override(cli_override)? {
             return Ok(p);
         }
-        if let Ok(env) = std::env::var("BRAINWIRES_PROVIDER")
+        if let Ok(env) = std::env::var("RULLAMA_PROVIDER")
             && let Some(p) = ProviderType::from_str_opt(&env)
         {
             return Ok(p);
@@ -96,7 +96,7 @@ impl ProviderFactory {
 
         match active {
             ProviderType::Brainwires => {
-                self.create_brainwires_provider(model, backend_url_override)
+                self.create_rullama_provider(model, backend_url_override)
                     .await
             }
             ProviderType::Ollama => {
@@ -141,7 +141,7 @@ impl ProviderFactory {
                 // Direct providers: Anthropic, OpenAI, Google, Groq, Together, etc.
                 //
                 // API key resolution order:
-                //   1. System keyring (brainwires auth login --provider X)
+                //   1. System keyring (rullama auth login --provider X)
                 //   2. Provider-specific env var (ANTHROPIC_API_KEY, etc.)
                 //
                 // This matches what users expect from tools like the
@@ -179,8 +179,8 @@ impl ProviderFactory {
 
     /// Attach the global analytics collector to a ProviderConfig.
     ///
-    /// brainwires-analytics is a direct dep of brainwires-cli and brainwires-provider
-    /// is built with the `analytics` feature via brainwires/full, so this is always available.
+    /// rullama-analytics is a direct dep of rullama-cli and rullama-provider
+    /// is built with the `analytics` feature via rullama/full, so this is always available.
     fn attach_analytics(config: &mut ProviderConfig) {
         if let Some(collector) = crate::utils::logger::analytics_collector() {
             config.analytics_collector = Some(std::sync::Arc::new(collector));
@@ -188,21 +188,21 @@ impl ProviderFactory {
     }
 
     /// Create a Brainwires SaaS provider (existing flow).
-    async fn create_brainwires_provider(
+    async fn create_rullama_provider(
         &self,
         model: String,
         backend_url_override: Option<String>,
     ) -> Result<Arc<dyn Provider>> {
-        // Env-var fallback: BRAINWIRES_API_KEY lets users run Brainwires SaaS
+        // Env-var fallback: RULLAMA_API_KEY lets users run Brainwires SaaS
         // without a persisted session (useful for CI / ephemeral shells).
-        if let Ok(env_key) = std::env::var("BRAINWIRES_API_KEY")
+        if let Ok(env_key) = std::env::var("RULLAMA_API_KEY")
             && !env_key.is_empty()
         {
             let backend_url = backend_url_override.clone().unwrap_or_else(|| {
                 crate::config::constants::get_backend_from_api_key(&env_key).to_string()
             });
             tracing::info!(
-                "Using BRAINWIRES_API_KEY from environment (backend: {})",
+                "Using RULLAMA_API_KEY from environment (backend: {})",
                 backend_url
             );
             let provider_config = ProviderConfig::new(ProviderType::Brainwires, model)
@@ -213,7 +213,7 @@ impl ProviderFactory {
 
         if let Ok(Some(session)) = SessionManager::get_session() {
             let api_key = SessionManager::get_api_key()?.ok_or_else(|| {
-                anyhow!("No API key found. Please re-authenticate with: brainwires auth login")
+                anyhow!("No API key found. Please re-authenticate with: rullama auth login")
             })?;
 
             let backend_url = backend_url_override.unwrap_or_else(|| session.backend.clone());
@@ -457,11 +457,11 @@ mod tests {
 
     #[test]
     fn effective_provider_falls_back_to_config() {
-        // Clear BRAINWIRES_PROVIDER to avoid test interference.
+        // Clear RULLAMA_PROVIDER to avoid test interference.
         let _guard = TEST_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let original = std::env::var("BRAINWIRES_PROVIDER").ok();
+        let original = std::env::var("RULLAMA_PROVIDER").ok();
         // SAFETY: guarded by TEST_ENV_MUTEX
-        unsafe { std::env::remove_var("BRAINWIRES_PROVIDER") };
+        unsafe { std::env::remove_var("RULLAMA_PROVIDER") };
 
         let p = ProviderFactory::effective_provider(None, ProviderType::Ollama).unwrap();
         assert_eq!(p, ProviderType::Ollama);
@@ -469,8 +469,8 @@ mod tests {
         // SAFETY: guarded by TEST_ENV_MUTEX
         unsafe {
             match original {
-                Some(v) => std::env::set_var("BRAINWIRES_PROVIDER", v),
-                None => std::env::remove_var("BRAINWIRES_PROVIDER"),
+                Some(v) => std::env::set_var("RULLAMA_PROVIDER", v),
+                None => std::env::remove_var("RULLAMA_PROVIDER"),
             }
         }
     }

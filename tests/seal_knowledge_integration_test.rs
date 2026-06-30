@@ -3,9 +3,9 @@
 //! Tests the bidirectional learning between SEAL (entity-centric learning)
 //! and the Knowledge System (BKS + PKS).
 
-use brainwires::knowledge::EntityType;
-use brainwires::knowledge::bks_pks::{BehavioralKnowledgeCache, PersonalKnowledgeCache};
-use brainwires_seal::{
+use rullama::knowledge::EntityType;
+use rullama::knowledge::bks_pks::{BehavioralKnowledgeCache, PersonalKnowledgeCache};
+use rullama_seal::{
     EntityResolutionStrategy, IntegrationConfig, ReferenceType, ResolvedReference, SalienceScore,
     SealKnowledgeCoordinator, SealProcessingResult, UnresolvedReference,
 };

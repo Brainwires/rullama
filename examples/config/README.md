@@ -30,23 +30,23 @@ Minimize API costs while maintaining functionality.
 
 ## Usage
 
-Copy the desired configuration to `~/.brainwires/config.json`:
+Copy the desired configuration to `~/.rullama/config.json`:
 
 ```bash
 # Use default configuration
-cp examples/config/default.json ~/.brainwires/config.json
+cp examples/config/default.json ~/.rullama/config.json
 
 # Use high-reliability configuration
-cp examples/config/high-reliability.json ~/.brainwires/config.json
+cp examples/config/high-reliability.json ~/.rullama/config.json
 
 # Use cost-optimized configuration
-cp examples/config/cost-optimized.json ~/.brainwires/config.json
+cp examples/config/cost-optimized.json ~/.rullama/config.json
 ```
 
 Or specify a configuration file at runtime:
 
 ```bash
-brainwires chat --config path/to/config.json
+rullama chat --config path/to/config.json
 ```
 
 ## Configuration Sections
@@ -100,7 +100,7 @@ Controls conversation persistence and embeddings:
 ```json
 {
   "storage": {
-    "database_path": "~/.brainwires/data/lance.db",
+    "database_path": "~/.rullama/data/lance.db",
     "memory_tiers": {
       "hot_max_messages": 100,
       "warm_max_age_hours": 24
@@ -115,7 +115,7 @@ Controls log output:
 {
   "logging": {
     "level": "info",
-    "file": "~/.brainwires/logs/cli.log"
+    "file": "~/.rullama/logs/cli.log"
   }
 }
 ```
@@ -127,7 +127,7 @@ Log levels: `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`
 You can merge configurations by starting with a base and overriding specific values. The CLI loads configuration in this order:
 
 1. Built-in defaults
-2. `~/.brainwires/config.json` (if exists)
+2. `~/.rullama/config.json` (if exists)
 3. `--config` flag (if provided)
 4. Command-line flags (highest priority)
 
@@ -137,9 +137,9 @@ Some settings can be overridden via environment variables:
 
 | Variable | Description |
 |----------|-------------|
-| `BRAINWIRES_PROVIDER` | Default provider |
-| `BRAINWIRES_MODEL` | Default model |
-| `BRAINWIRES_LOG_LEVEL` | Log level |
+| `RULLAMA_PROVIDER` | Default provider |
+| `RULLAMA_MODEL` | Default model |
+| `RULLAMA_LOG_LEVEL` | Log level |
 | `ANTHROPIC_API_KEY` | Anthropic API key |
 | `OPENAI_API_KEY` | OpenAI API key |
 

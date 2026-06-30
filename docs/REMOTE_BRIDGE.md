@@ -1,6 +1,6 @@
 # Remote Bridge
 
-The Remote Bridge connects your local `brainwires` CLI to a backend (Brainwires Studio or a compatible server), enabling real-time monitoring and control of your local AI agents from a web dashboard.
+The Remote Bridge connects your local `rullama` CLI to a backend (Brainwires Studio or a compatible server), enabling real-time monitoring and control of your local AI agents from a web dashboard.
 
 ---
 
@@ -24,7 +24,7 @@ The CLI initiates all connections — no inbound ports are opened.
   │         Your Machine         │
   │                              │
   │  ┌──────────────┐            │
-  │  │  brainwires  │  HTTPS/WSS │       ┌─────────────────────┐
+  │  │  rullama  │  HTTPS/WSS │       ┌─────────────────────┐
   │  │     CLI      │◄──────────────────►│  Backend (Studio)   │
   │  └──────┬───────┘            │       └──────────┬──────────┘
   │         │ Unix socket         │                  │ SSE / WebSocket
@@ -39,7 +39,7 @@ The CLI initiates all connections — no inbound ports are opened.
 - **Outbound only** — CLI connects to the backend; backend never initiates a connection back
 - **API key auth** — all requests carry your `bw_*` API key in an `Authorization: Bearer` header
 - **Dual transport** — prefers Supabase Realtime (WebSocket) for commands; falls back to HTTP polling (heartbeat) automatically
-- **Agent IPC** — the bridge talks to local agents via encrypted Unix sockets (`~/.brainwires/sessions/`)
+- **Agent IPC** — the bridge talks to local agents via encrypted Unix sockets (`~/.rullama/sessions/`)
 
 ---
 
@@ -50,7 +50,7 @@ The CLI initiates all connections — no inbound ports are opened.
 1. Log in to Studio, navigate to **Settings → API Keys**, and generate a key.
 2. Authenticate the CLI:
    ```bash
-   brainwires auth login
+   rullama auth login
    # Paste your bw_prod_... key when prompted
    ```
 3. The CLI exchanges the key for a user profile and Supabase credentials via `POST /api/cli/auth`.
@@ -63,19 +63,19 @@ If you don't have a Studio account, authenticate directly with an AI provider:
 
 ```bash
 # Anthropic
-brainwires auth login --provider anthropic
+rullama auth login --provider anthropic
 
 # OpenAI
-brainwires auth login --provider openai
+rullama auth login --provider openai
 
 # Ollama (no key required)
-brainwires auth login --provider ollama
+rullama auth login --provider ollama
 
 # AWS Bedrock (uses ~/.aws/credentials)
-brainwires auth login --provider bedrock
+rullama auth login --provider bedrock
 
 # Google Vertex AI (uses GOOGLE_APPLICATION_CREDENTIALS)
-brainwires auth login --provider vertex-ai
+rullama auth login --provider vertex-ai
 ```
 
 Direct provider auth gives you full CLI functionality (chat, agents, tools) but disables the Remote Bridge — there is no backend to relay through.
@@ -92,7 +92,7 @@ Examples:
 
 - `prod` keys → `https://brainwires.studio`
 - `dev` keys → `https://dev.brainwires.net`
-- Custom backend → pass `--backend <url>` to `brainwires auth login`
+- Custom backend → pass `--backend <url>` to `rullama auth login`
 
 Keys are stored in your system keyring (not in plain files).
 
@@ -103,27 +103,27 @@ Keys are stored in your system keyring (not in plain files).
 ### Enable and start
 
 ```bash
-# Enable the bridge (persists in ~/.brainwires/config.json)
-brainwires remote config --enabled true
+# Enable the bridge (persists in ~/.rullama/config.json)
+rullama remote config --enabled true
 
 # Start the daemon (runs in the background)
-brainwires remote start
+rullama remote start
 
 # Check status
-brainwires remote status
+rullama remote status
 
 # View logs
-brainwires remote log --follow
+rullama remote log --follow
 ```
 
 ### Auto-start on CLI launch
 
-When `auto_start = true` (the default when `enabled = true`), the bridge daemon starts automatically whenever you open a chat session. You don't need to run `brainwires remote start` manually.
+When `auto_start = true` (the default when `enabled = true`), the bridge daemon starts automatically whenever you open a chat session. You don't need to run `rullama remote start` manually.
 
 ### Stop
 
 ```bash
-brainwires remote stop
+rullama remote stop
 ```
 
 ---
@@ -134,7 +134,7 @@ Pairing lets you link a machine to your Studio account without manually copying 
 
 **CLI side:**
 ```bash
-brainwires remote pair
+rullama remote pair
 ```
 The CLI displays a 6-character code, e.g. `A3K9MZ`, and polls for confirmation.
 
@@ -258,7 +258,7 @@ Agent stream data is pushed immediately via a separate `POST /api/remote/stream`
 
 ## Configuration Reference
 
-Config lives in `~/.brainwires/config.json` under the `remote` key.
+Config lives in `~/.rullama/config.json` under the `remote` key.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -272,19 +272,19 @@ Config lives in `~/.brainwires/config.json` under the `remote` key.
 | `blocked_remote_commands` | string[] | `["exec"]` | Commands backend cannot invoke |
 | `warned_remote_commands` | string[] | `["exit"]` | Commands that log a warning when invoked remotely |
 
-### `brainwires remote config` options
+### `rullama remote config` options
 
 ```bash
-brainwires remote config                 # show current config
-brainwires remote config --enabled true
-brainwires remote config --url https://my-backend.example.com
-brainwires remote config --api-key bw_prod_...
-brainwires remote config --heartbeat 60
+rullama remote config                 # show current config
+rullama remote config --enabled true
+rullama remote config --url https://my-backend.example.com
+rullama remote config --api-key bw_prod_...
+rullama remote config --heartbeat 60
 ```
 
 ---
 
-## `brainwires remote` Command Reference
+## `rullama remote` Command Reference
 
 | Command | Description |
 |---------|-------------|
@@ -296,7 +296,7 @@ brainwires remote config --heartbeat 60
 | `remote config [OPTIONS]` | View or update bridge settings |
 | `remote daemon` | Internal: run the daemon process directly (debugging) |
 
-Logs are written to `~/.brainwires/remote-bridge.log`. PID file: `~/.brainwires/remote-bridge.pid`.
+Logs are written to `~/.rullama/remote-bridge.log`. PID file: `~/.rullama/remote-bridge.pid`.
 
 ---
 
@@ -545,7 +545,7 @@ These are objects returned in heartbeat `commands[]` or pushed via Realtime.
 
 - **No inbound ports** — the CLI never listens; the remote cannot initiate a connection
 - **HTTPS/WSS only** — all transport is TLS-encrypted
-- **API key in keyring** — never stored in plain files; only the session metadata goes to `~/.brainwires/session.json`
+- **API key in keyring** — never stored in plain files; only the session metadata goes to `~/.rullama/session.json`
 - **Agent IPC encrypted** — local Unix socket messages use ChaCha20-Poly1305; access requires the session token
 - **Device fingerprint** — SHA-256 of machine-id + hostname + OS; prevents key sharing between machines
 - **Blocked commands** — by default, remote cannot invoke `exec` (raw shell); configurable via `blocked_remote_commands`

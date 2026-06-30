@@ -18,7 +18,7 @@ The Personal Knowledge System lets you **teach the AI facts that persist across 
 The easiest way to teach facts:
 
 ```bash
-# In brainwires-cli interactive chat:
+# In rullama-cli interactive chat:
 > /remember Rust 2024 edition is stable as of early 2024
 
 ✅ Set profile fact
@@ -32,7 +32,7 @@ Category: Preference
 ### How It Works
 
 1. **You teach the fact:** `/remember <anything>`
-2. **Stored locally + synced to server:** `~/.brainwires/personal_facts.db`
+2. **Stored locally + synced to server:** `~/.rullama/personal_facts.db`
 3. **Future conversations mention related topics:**
    - SEAL detects entities like "Rust", "2024", "edition"
    - PKS is queried for matching facts
@@ -136,7 +136,7 @@ AI: "Based on your role as Senior Backend Engineer on the Platform
 > /profile:set --local ssh_key_path "~/.ssh/id_prod_rsa"
 > /profile:set --local internal_api_token "bearer_abc123"
 
-# These facts are stored in ~/.brainwires/personal_facts.db
+# These facts are stored in ~/.rullama/personal_facts.db
 # but NEVER synced to the server ✅
 ```
 
@@ -205,7 +205,7 @@ AI: "Based on your role as Senior Backend Engineer on the Platform
 ```bash
 # Export to JSON file
 > /profile:export ~/my-profile.json
-> /profile:export  # Defaults to ~/brainwires-profile.json
+> /profile:export  # Defaults to ~/rullama-profile.json
 
 # Import from JSON file
 > /profile:import ~/my-profile.json
@@ -351,7 +351,7 @@ Each fact has a confidence score (0.0-1.0):
 
 **Check local database:**
 ```bash
-ls -lh ~/.brainwires/personal_facts.db
+ls -lh ~/.rullama/personal_facts.db
 ```
 
 **Re-import from backup:**
@@ -380,8 +380,8 @@ ls -lh ~/.brainwires/personal_facts.db
 
 ### Storage Location
 
-- **Linux/macOS:** `~/.brainwires/personal_facts.db`
-- **Windows:** `%USERPROFILE%\.brainwires\personal_facts.db`
+- **Linux/macOS:** `~/.rullama/personal_facts.db`
+- **Windows:** `%USERPROFILE%\.rullama\personal_facts.db`
 
 ### Database Schema
 
@@ -433,14 +433,14 @@ Coming in future releases:
 ## Related Documentation
 
 - **SEAL Integration:** `docs/SEAL_KNOWLEDGE_INTEGRATION.md`
-- **Knowledge System:** `crates/brainwires-knowledge/src/knowledge/mod.rs`
+- **Knowledge System:** `crates/rullama-knowledge/src/knowledge/mod.rs`
 - **Personal Commands:** `src/commands/executor/personal_commands.rs`
 
 ## Support
 
-- **GitHub Issues:** https://github.com/brainwires/brainwires-framework/issues
+- **GitHub Issues:** https://github.com/rullama/rullama-framework/issues
 - **Documentation:** `docs/` directory
-- **Source Code:** `crates/brainwires-knowledge/src/knowledge/personal/`
+- **Source Code:** `crates/rullama-knowledge/src/knowledge/personal/`
 
 ---
 

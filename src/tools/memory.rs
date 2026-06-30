@@ -1,6 +1,6 @@
 //! MemoryTool — agent-facing tools for managing per-project memory notes.
 //!
-//! Memory lives at `~/.brainwires/projects/<encoded-cwd>/memory/`:
+//! Memory lives at `~/.rullama/projects/<encoded-cwd>/memory/`:
 //! - `MEMORY.md` — lightweight index, always injected into the system prompt.
 //! - `<name>.md` — individual memory file with YAML frontmatter
 //!   (`name`, `description`, `type`) and a markdown body.
@@ -74,7 +74,7 @@ impl MemoryTool {
         );
         Tool {
             name: "memory_save".to_string(),
-            description: "Persist a typed memory note for this project. Written to ~/.brainwires/projects/<cwd>/memory/<name>.md and indexed in MEMORY.md. Re-saving with the same name updates in place."
+            description: "Persist a typed memory note for this project. Written to ~/.rullama/projects/<cwd>/memory/<name>.md and indexed in MEMORY.md. Re-saving with the same name updates in place."
                 .to_string(),
             input_schema: ToolInputSchema::object(
                 props,
@@ -398,13 +398,13 @@ mod tests {
     use crate::utils::test_util::{ENV_LOCK, EnvVarGuard};
     use tempfile::TempDir;
 
-    /// Redirect memory storage into a tempdir via `BRAINWIRES_MEMORY_ROOT`,
+    /// Redirect memory storage into a tempdir via `RULLAMA_MEMORY_ROOT`,
     /// holding the shared env lock + a guard that restores the previous
     /// value on drop so post-test env state is clean.
     fn setup_temp_home() -> (TempDir, EnvVarGuard, std::sync::MutexGuard<'static, ()>) {
         let lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().unwrap();
-        let env = EnvVarGuard::set("BRAINWIRES_MEMORY_ROOT", tmp.path());
+        let env = EnvVarGuard::set("RULLAMA_MEMORY_ROOT", tmp.path());
         (tmp, env, lock)
     }
 

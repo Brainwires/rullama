@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::message::Message;
-use brainwires::agent_network::ipc::DisplayMessage;
+use rullama::agent_network::ipc::DisplayMessage;
 
 /// Plan mode session state - isolated context for planning.
 ///

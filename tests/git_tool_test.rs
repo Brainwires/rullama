@@ -1,8 +1,8 @@
 // Integration tests for git tool
 mod common;
 
-use brainwires_cli::tools::GitTool;
-use brainwires_cli::types::tool::ToolContext;
+use rullama_cli::tools::GitTool;
+use rullama_cli::types::tool::ToolContext;
 use serde_json::json;
 use std::env;
 

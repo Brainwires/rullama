@@ -1,1 +1,1 @@
-pub use brainwires_agent::AgentToolRegistry;
+pub use rullama_agent::AgentToolRegistry;

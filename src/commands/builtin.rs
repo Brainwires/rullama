@@ -476,9 +476,9 @@ pub fn register_builtin_commands(registry: &mut CommandRegistry) {
         .with_arg("mode".to_string(), Some("Approval mode: suggest, auto-edit, or full-auto".to_string()), false)
     );
 
-    // /brainwires - Load project instructions from BRAINWIRES.md
+    // /rullama - Load project instructions from BRAINWIRES.md
     registry.register(Command::builtin(
-        "brainwires".to_string(),
+        "rullama".to_string(),
         "Load project-specific instructions from BRAINWIRES.md (supports @file.md imports)"
             .to_string(),
         "".to_string(),
@@ -1146,7 +1146,7 @@ pub fn register_builtin_commands(registry: &mut CommandRegistry) {
         )
         .with_arg(
             "file".to_string(),
-            Some("Output file path (default: ~/brainwires-profile.json)".to_string()),
+            Some("Output file path (default: ~/rullama-profile.json)".to_string()),
             false,
         ),
     );

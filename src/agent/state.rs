@@ -23,8 +23,8 @@ use crate::types::tool::{Tool, ToolMode};
 use crate::utils::checkpoint::CheckpointManager;
 use crate::utils::paths::PlatformPaths;
 use crate::utils::system_prompt::build_system_prompt;
-use brainwires::agent_network::ipc::{AgentMessage, DisplayMessage};
-use brainwires::knowledge::bks_pks::{
+use rullama::agent_network::ipc::{AgentMessage, DisplayMessage};
+use rullama::knowledge::bks_pks::{
     BehavioralKnowledgeCache, LearningCollector, detect_correction,
 };
 
@@ -112,10 +112,10 @@ pub struct AgentState {
     pub has_pending_request: bool,
 
     /// SEAL processor for query enhancement
-    pub seal_processor: Option<brainwires_seal::SealProcessor>,
+    pub seal_processor: Option<rullama_seal::SealProcessor>,
 
     /// Dialog state for SEAL
-    pub seal_dialog_state: brainwires_seal::DialogState,
+    pub seal_dialog_state: rullama_seal::DialogState,
 
     /// Entity store for SEAL
     pub seal_entity_store: crate::utils::entity_extraction::EntityStore,
@@ -212,7 +212,7 @@ impl AgentState {
         );
 
         // Initialize tools with core tools only
-        let registry = brainwires_tool_builtins::registry_with_builtins();
+        let registry = rullama_tool_builtins::registry_with_builtins();
         let tools: Vec<_> = registry.get_core().into_iter().cloned().collect();
         let mut tool_executor = ToolExecutor::new(PermissionMode::Auto);
 
@@ -238,8 +238,8 @@ impl AgentState {
         // Build system prompt
         let system_prompt = {
             use crate::utils::paths::PlatformPaths;
-            use brainwires::knowledge::bks_pks::BehavioralKnowledgeCache;
-            use brainwires::knowledge::bks_pks::matcher::{MatchedTruth, format_truths_for_prompt};
+            use rullama::knowledge::bks_pks::BehavioralKnowledgeCache;
+            use rullama::knowledge::bks_pks::matcher::{MatchedTruth, format_truths_for_prompt};
 
             let truths_section = if let Ok(cache_path) = PlatformPaths::knowledge_db() {
                 if let Ok(cache) = BehavioralKnowledgeCache::new(&cache_path, 100) {
@@ -349,11 +349,11 @@ impl AgentState {
             exit_when_done: false,
             has_pending_request,
             seal_processor: if seal_settings.enabled {
-                Some(brainwires_seal::SealProcessor::with_defaults())
+                Some(rullama_seal::SealProcessor::with_defaults())
             } else {
                 None
             },
-            seal_dialog_state: brainwires_seal::DialogState::new(),
+            seal_dialog_state: rullama_seal::DialogState::new(),
             seal_entity_store: crate::utils::entity_extraction::EntityStore::new(),
             seal_entity_extractor: crate::utils::entity_extraction::EntityExtractor::new(),
             seal_enabled: seal_settings.enabled,
@@ -572,7 +572,7 @@ impl AgentState {
         tracing::info!("Connecting to {} MCP server(s)...", servers.len());
 
         let client = Arc::new(RwLock::new(McpClient::new(
-            "brainwires",
+            "rullama",
             env!("CARGO_PKG_VERSION"),
         )));
 

@@ -1,8 +1,8 @@
-// File logging with daily rotation to ~/.brainwires/logs/
-// Logs to file: ~/.brainwires/logs/brainwires.log.YYYY-MM-DD
-//! Comprehensive logging system for brainwires-cli
+// File logging with daily rotation to ~/.rullama/logs/
+// Logs to file: ~/.rullama/logs/brainwires.log.YYYY-MM-DD
+//! Comprehensive logging system for rullama-cli
 //!
-//! Logs to both stdout and rotating files in ~/.brainwires/logs/
+//! Logs to both stdout and rotating files in ~/.rullama/logs/
 
 use anyhow::Result;
 use std::path::PathBuf;
@@ -23,7 +23,7 @@ pub fn init_logging() -> Result<()> {
 
     // Build the subscriber with both file and stdout layers
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("brainwires_cli=debug,info"));
+        .unwrap_or_else(|_| EnvFilter::new("rullama_cli=debug,info"));
 
     tracing_subscriber::registry()
         .with(env_filter)
@@ -50,10 +50,10 @@ pub fn init_logging() -> Result<()> {
     Ok(())
 }
 
-/// Get the log directory path: ~/.brainwires/logs/
+/// Get the log directory path: ~/.rullama/logs/
 fn get_log_directory() -> Result<PathBuf> {
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))?;
-    Ok(PathBuf::from(home).join(".brainwires").join("logs"))
+    Ok(PathBuf::from(home).join(".rullama").join("logs"))
 }
 
 /// Get path to current log file

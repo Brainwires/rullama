@@ -5,7 +5,7 @@
 /// This creates a test conversation, stores messages with embeddings,
 /// and demonstrates semantic search retrieval.
 use anyhow::Result;
-use brainwires_cli::storage::{
+use rullama_cli::storage::{
     CachedEmbeddingProvider, LanceDatabase, MessageMetadata, MessageStore, VectorDatabase,
 };
 use chrono::Utc;

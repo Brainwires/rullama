@@ -1,7 +1,7 @@
 # TUI Keyboard Shortcuts Reference
 
 ## Overview
-The brainwires-cli TUI supports a comprehensive set of keyboard shortcuts for efficient text editing and navigation, similar to standard terminal editors and IDEs.
+The rullama-cli TUI supports a comprehensive set of keyboard shortcuts for efficient text editing and navigation, similar to standard terminal editors and IDEs.
 
 ## Multi-line Input
 
@@ -92,7 +92,7 @@ The brainwires-cli TUI supports a comprehensive set of keyboard shortcuts for ef
 | **Ctrl+Z** | Open background/suspend dialog |
 
 When the background dialog appears:
-- **Background**: Detaches TUI, keeps Agent running in background. Use `brainwires attach` to reconnect later.
+- **Background**: Detaches TUI, keeps Agent running in background. Use `rullama attach` to reconnect later.
 - **Suspend**: Suspends the TUI process (like terminal `Ctrl+Z`), resumes with `fg`.
 - **Cancel**: Closes the dialog.
 

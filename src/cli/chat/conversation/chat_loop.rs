@@ -22,7 +22,7 @@ use crate::utils::conversation::ConversationManager;
 use crate::utils::logger::Logger;
 use crate::utils::rich_output::RichOutput;
 use crate::utils::system_prompt::build_system_prompt;
-use brainwires::knowledge::bks_pks::personal::PksIntegration;
+use rullama::knowledge::bks_pks::personal::PksIntegration;
 
 /// Handle chat with conversation management
 #[allow(clippy::too_many_arguments)]
@@ -74,12 +74,12 @@ pub async fn handle_chat_with_conversation(
             backend_url_override,
         )
         .await
-        .context("Failed to create provider — run `brainwires auth status` to diagnose")?;
+        .context("Failed to create provider — run `rullama auth status` to diagnose")?;
 
     // Initialize agent context with core tools only to reduce token cost
     let user_id = session.as_ref().map(|s| s.user.user_id.clone());
 
-    let registry = brainwires_tool_builtins::registry_with_builtins();
+    let registry = rullama_tool_builtins::registry_with_builtins();
     let mut context = AgentContext {
         working_directory: std::env::current_dir()?.to_string_lossy().to_string(),
         user_id,
@@ -88,7 +88,7 @@ pub async fn handle_chat_with_conversation(
         metadata: std::collections::HashMap::new(),
         working_set: crate::types::WorkingSet::new(),
         // Use full_access for CLI mode - users expect agents to have write access
-        capabilities: brainwires::permissions::AgentCapabilities::full_access(),
+        capabilities: rullama::permissions::AgentCapabilities::full_access(),
     };
 
     // Initialize conversation manager for auto-save
@@ -164,7 +164,7 @@ pub async fn handle_chat_with_conversation(
     // Print welcome message (unless quiet)
     if !quiet {
         println!("{}", RichOutput::header("Brainwires Chat", "cyan"));
-        println!("Model: {} (brainwires)", model_id);
+        println!("Model: {} (rullama)", model_id);
         println!(
             "Conversation ID: {}",
             console::style(conversation_manager.conversation_id()).dim()

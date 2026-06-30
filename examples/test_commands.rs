@@ -2,12 +2,12 @@
 //!
 //! Run with: cargo run --example test_commands
 
-use brainwires_cli::commands::CommandExecutor;
+use rullama_cli::commands::CommandExecutor;
 
 fn main() -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
-        .with_env_filter("brainwires_cli=info")
+        .with_env_filter("rullama_cli=info")
         .init();
 
     println!("=== Testing Slash Command System ===\n");
@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
     println!("----------------");
     match executor.parse_input("/help") {
         Some((cmd, args)) => match executor.execute(&cmd, &args)? {
-            brainwires_cli::commands::executor::CommandResult::Help(lines) => {
+            rullama_cli::commands::executor::CommandResult::Help(lines) => {
                 for line in lines {
                     println!("{}", line);
                 }
@@ -39,7 +39,7 @@ fn main() -> anyhow::Result<()> {
     println!("----------------");
     match executor.parse_input("/model llama-3.3-70b-versatile") {
         Some((cmd, args)) => match executor.execute(&cmd, &args)? {
-            brainwires_cli::commands::executor::CommandResult::Action(action) => {
+            rullama_cli::commands::executor::CommandResult::Action(action) => {
                 println!("Action: {:?}", action);
             }
             _ => println!("Unexpected result"),
@@ -53,7 +53,7 @@ fn main() -> anyhow::Result<()> {
     if executor.registry().get("explain").is_some() {
         match executor.parse_input("/explain async/await in Rust") {
             Some((cmd, args)) => match executor.execute(&cmd, &args)? {
-                brainwires_cli::commands::executor::CommandResult::Message(msg) => {
+                rullama_cli::commands::executor::CommandResult::Message(msg) => {
                     println!("{}", msg);
                 }
                 _ => println!("Unexpected result"),
@@ -61,7 +61,7 @@ fn main() -> anyhow::Result<()> {
             None => println!("Failed to parse /explain"),
         }
     } else {
-        println!("Custom /explain command not found (expected at .brainwires/commands/explain.md)");
+        println!("Custom /explain command not found (expected at .rullama/commands/explain.md)");
     }
 
     Ok(())

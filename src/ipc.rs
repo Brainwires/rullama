@@ -1,7 +1,7 @@
 //! Inter-Process Communication for Agent-Viewer Architecture
 //!
 //! This module provides the IPC protocol for communication between the TUI viewer
-//! and the Agent process. The core implementation lives in the `brainwires_network`
+//! and the Agent process. The core implementation lives in the `rullama_network`
 //! framework crate. This CLI adapter re-exports those types and provides
 //! convenience wrappers that inject `PlatformPaths::sessions_dir()`.
 //!
@@ -30,7 +30,7 @@ use crate::utils::paths::PlatformPaths;
 
 // ── Private imports from bridge ──────────────────────────────────────────
 
-use brainwires::agent_network::ipc::{
+use rullama::agent_network::ipc::{
     IpcConnection, discovery as bridge_discovery,
     protocol::AgentMetadata,
     socket::{self as bridge_socket},

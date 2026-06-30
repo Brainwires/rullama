@@ -83,11 +83,11 @@ Ideas and planned improvements for the Brainwires CLI. Items are organized by ar
 ## Framework Infrastructure
 
 - **OS detection for tools** `Medium` — tool executors that run shell commands should detect the host OS (Windows/macOS/Linux) and select the appropriate command syntax automatically, rather than assuming Unix.
-- **Video and image processing crates** `Low` — in the same spirit as `brainwires-hardware` (audio), add crates for video and image handling: object detection, image classification, video summarization, frame extraction. Enables agents to reason about multimedia content.
-- **WASM verification** `Low` — audit `brainwires-wasm` bindings for completeness against all core types; ensure the browser target builds successfully with `wasm-pack`; add basic WASM smoke tests to CI.
+- **Video and image processing crates** `Low` — in the same spirit as `rullama-hardware` (audio), add crates for video and image handling: object detection, image classification, video summarization, frame extraction. Enables agents to reason about multimedia content.
+- **WASM verification** `Low` — audit `rullama-wasm` bindings for completeness against all core types; ensure the browser target builds successfully with `wasm-pack`; add basic WASM smoke tests to CI.
 - **Structured extraction module** `Low` — typed LLM output extraction: deserialize model responses directly into Rust structs via JSON mode, similar to Rig's `extractor` module.
 - **HuggingFace model hub integration** `Low` — a `from_pretrained()`-style API for downloading model weights from HuggingFace Hub for use with local inference, eliminating the need for users to manually source and place weight files.
-- **Additional extras** `Low` — expand the extras workspace with standalone binaries for audio processing (building on `brainwires-hardware`) and training pipeline tools (building on the `burn`-based training crates).
+- **Additional extras** `Low` — expand the extras workspace with standalone binaries for audio processing (building on `rullama-hardware`) and training pipeline tools (building on the `burn`-based training crates).
 
 ---
 

@@ -1,6 +1,6 @@
 //! Miscellaneous Commands
 //!
-//! Other commands: checkpoint, review, brainwires, exec, compact, approvals, shells
+//! Other commands: checkpoint, review, rullama, exec, compact, approvals, shells
 
 use anyhow::{Context, Result};
 
@@ -18,7 +18,7 @@ impl CommandExecutor {
             "restore" => Some(self.cmd_restore(args)),
             "checkpoints" => Some(Ok(CommandResult::Action(CommandAction::ListCheckpoints))),
             "review" => Some(self.cmd_review()),
-            "brainwires" => Some(self.cmd_brainwires()),
+            "rullama" => Some(self.cmd_rullama()),
             "exec" => Some(self.cmd_exec(args)),
             "shell" => Some(Ok(CommandResult::Action(CommandAction::OpenShell))),
             "shells" => Some(Ok(CommandResult::Action(CommandAction::ShowShellHistory))),
@@ -90,12 +90,12 @@ impl CommandExecutor {
         Ok(CommandResult::Message(message))
     }
 
-    fn cmd_brainwires(&self) -> Result<CommandResult> {
-        use crate::utils::brainwires_md;
+    fn cmd_rullama(&self) -> Result<CommandResult> {
+        use crate::utils::rullama_md;
 
         let cwd = std::env::current_dir().context("Failed to get current working directory")?;
 
-        match brainwires_md::load_brainwires_instructions(&cwd) {
+        match rullama_md::load_rullama_instructions(&cwd) {
             Ok(content) if content.is_empty() => Ok(CommandResult::Message(
                 "No BRAINWIRES.md file found in current directory.\n\n\
                     Create a BRAINWIRES.md file to add project-specific instructions.\n\

@@ -2,19 +2,19 @@
 //!
 //! Implementation of the MAKER framework from "Solving a Million-Step LLM Task with Zero Errors".
 //!
-//! All core MDAP modules are re-exported from the brainwires-mdap framework crate.
+//! All core MDAP modules are re-exported from the rullama-mdap framework crate.
 //! CLI-specific modules: tool_executor (local), plus MdapConfig/MdapExecutor (inline).
 
 // Re-export all framework modules
-pub use brainwires_mdap::composer;
-pub use brainwires_mdap::decomposition;
-pub use brainwires_mdap::error;
-pub use brainwires_mdap::metrics;
-pub use brainwires_mdap::microagent;
-pub use brainwires_mdap::red_flags;
-pub use brainwires_mdap::scaling;
-pub use brainwires_mdap::tool_intent;
-pub use brainwires_mdap::voting;
+pub use rullama_mdap::composer;
+pub use rullama_mdap::decomposition;
+pub use rullama_mdap::error;
+pub use rullama_mdap::metrics;
+pub use rullama_mdap::microagent;
+pub use rullama_mdap::red_flags;
+pub use rullama_mdap::scaling;
+pub use rullama_mdap::tool_intent;
+pub use rullama_mdap::voting;
 
 // CLI-specific module (kept local)
 pub mod tool_executor;
@@ -55,7 +55,7 @@ pub use tool_executor::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use brainwires::reasoning::{ComplexityScorer, RecommendedStrategy, StrategySelector};
+use rullama::reasoning::{ComplexityScorer, RecommendedStrategy, StrategySelector};
 
 /// Main MDAP configuration
 #[derive(Clone, Debug)]
@@ -192,7 +192,7 @@ impl MdapConfig {
                 None => s.select_heuristic(task),
             }
         } else {
-            let _selector = brainwires::reasoning::StrategySelectorBuilder::default();
+            let _selector = rullama::reasoning::StrategySelectorBuilder::default();
             self.select_strategy_heuristic(task)
         };
 
@@ -208,8 +208,8 @@ impl MdapConfig {
         self
     }
 
-    fn select_strategy_heuristic(&self, task: &str) -> brainwires::reasoning::StrategyResult {
-        use brainwires::reasoning::{RecommendedStrategy, StrategyResult, TaskType};
+    fn select_strategy_heuristic(&self, task: &str) -> rullama::reasoning::StrategyResult {
+        use rullama::reasoning::{RecommendedStrategy, StrategyResult, TaskType};
 
         let lower = task.to_lowercase();
         let word_count = task.split_whitespace().count();
@@ -557,8 +557,8 @@ mod local_llm_mdap {
     use crate::providers::local_llm::{LocalInferenceParams, LocalLlmProvider};
 
     /// Newtype wrapper around `LocalLlmProvider` to satisfy Rust's orphan
-    /// rules — both `MicroagentProvider` (defined in `brainwires_agent`) and
-    /// `LocalLlmProvider` (re-exported from `brainwires::providers::local_llm`)
+    /// rules — both `MicroagentProvider` (defined in `rullama_agent`) and
+    /// `LocalLlmProvider` (re-exported from `rullama::providers::local_llm`)
     /// are foreign to this crate, so the impl has to hang off a local type.
     pub struct LocalLlmMicroagent(pub Arc<LocalLlmProvider>);
 
@@ -571,7 +571,7 @@ mod local_llm_mdap {
             temperature: f32,
             max_tokens: u32,
         ) -> MdapResult<MicroagentResponse> {
-            use brainwires::reasoning::InferenceTimer;
+            use rullama::reasoning::InferenceTimer;
 
             let timer = InferenceTimer::new("microagent_chat", self.0.config().name.as_str());
             let start = std::time::Instant::now();

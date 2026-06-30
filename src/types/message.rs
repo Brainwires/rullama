@@ -1,5 +1,5 @@
 //! Message types for chat conversations.
 //!
-//! Re-exports from the brainwires-core framework crate.
+//! Re-exports from the rullama-core framework crate.
 
-pub use brainwires::core::message::*;
+pub use rullama::core::message::*;

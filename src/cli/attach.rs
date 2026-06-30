@@ -1,6 +1,6 @@
 //! Attach to backgrounded TUI sessions
 //!
-//! This module provides commands to attach to backgrounded brainwires sessions,
+//! This module provides commands to attach to backgrounded rullama sessions,
 //! list available sessions, and terminate backgrounded sessions.
 //!
 //! With the PTY-based session architecture:
@@ -77,7 +77,7 @@ pub async fn exit_session(session: Option<String>) -> Result<()> {
     // Connect to the agent and send Exit message
     match ipc::connect_to_agent(&session_id).await {
         Ok(mut conn) => {
-            use brainwires::agent_network::ipc::{Handshake, HandshakeResponse, ViewerMessage};
+            use rullama::agent_network::ipc::{Handshake, HandshakeResponse, ViewerMessage};
 
             // Perform authenticated handshake
             let handshake = Handshake::reattach(session_id.clone(), session_token);
@@ -209,7 +209,7 @@ pub async fn list_sessions() -> Result<()> {
     }
 
     println!();
-    println!("Use 'brainwires attach <session_id>' to reconnect.");
+    println!("Use 'rullama attach <session_id>' to reconnect.");
 
     Ok(())
 }

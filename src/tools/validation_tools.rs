@@ -1,2 +1,2 @@
-//! Validation tools - re-exported from brainwires-tools framework crate
-pub use brainwires::tools::validation::*;
+//! Validation tools - re-exported from rullama-tools framework crate
+pub use rullama::tools::validation::*;

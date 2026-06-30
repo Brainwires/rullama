@@ -7,8 +7,8 @@ use std::env;
 use tempfile::TempDir;
 
 /// Helper to create a test command with clean environment
-fn brainwires_cmd() -> Command {
-    let mut cmd = Command::cargo_bin("brainwires").expect("Failed to find brainwires binary");
+fn rullama_cmd() -> Command {
+    let mut cmd = Command::cargo_bin("rullama").expect("Failed to find rullama binary");
 
     // Use a temporary config directory to avoid interfering with real config
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -21,11 +21,11 @@ fn brainwires_cmd() -> Command {
 
 /// Helper for commands that need authentication
 fn authenticated_cmd() -> Command {
-    let mut cmd = brainwires_cmd();
+    let mut cmd = rullama_cmd();
 
     // Set test API key if provided via env
     if let Ok(api_key) = env::var("TEST_API_KEY") {
-        cmd.env("BRAINWIRES_API_KEY", api_key);
+        cmd.env("RULLAMA_API_KEY", api_key);
     }
 
     cmd
@@ -37,7 +37,7 @@ fn authenticated_cmd() -> Command {
 
 #[test]
 fn test_config_help() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("config")
         .arg("--help")
         .assert()
@@ -50,7 +50,7 @@ fn test_config_help() {
 
 #[test]
 fn test_config_list_empty() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("config")
         .arg("--list")
         .assert()
@@ -63,7 +63,7 @@ fn test_config_set_and_get() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
     // Set a config value
-    let mut cmd = Command::cargo_bin("brainwires").unwrap();
+    let mut cmd = Command::cargo_bin("rullama").unwrap();
     cmd.env("HOME", temp_dir.path());
     cmd.arg("config")
         .arg("--set")
@@ -72,7 +72,7 @@ fn test_config_set_and_get() {
         .success();
 
     // Get the config value
-    let mut cmd = Command::cargo_bin("brainwires").unwrap();
+    let mut cmd = Command::cargo_bin("rullama").unwrap();
     cmd.env("HOME", temp_dir.path());
     cmd.arg("config")
         .arg("--get")
@@ -88,7 +88,7 @@ fn test_config_set_multiple_formats() {
     let home_path = temp_dir.path();
 
     // Format 1: key=value (set backend_url)
-    let mut cmd = Command::cargo_bin("brainwires").unwrap();
+    let mut cmd = Command::cargo_bin("rullama").unwrap();
     cmd.env("HOME", home_path);
     cmd.env("XDG_CONFIG_HOME", home_path.join(".config"));
     cmd.arg("config")
@@ -98,7 +98,7 @@ fn test_config_set_multiple_formats() {
         .success();
 
     // Format 2: key value (space-separated) - set temperature
-    let mut cmd = Command::cargo_bin("brainwires").unwrap();
+    let mut cmd = Command::cargo_bin("rullama").unwrap();
     cmd.env("HOME", home_path);
     cmd.env("XDG_CONFIG_HOME", home_path.join(".config"));
     cmd.arg("config")
@@ -109,7 +109,7 @@ fn test_config_set_multiple_formats() {
         .success();
 
     // Verify both were set
-    let mut cmd = Command::cargo_bin("brainwires").unwrap();
+    let mut cmd = Command::cargo_bin("rullama").unwrap();
     cmd.env("HOME", home_path);
     cmd.env("XDG_CONFIG_HOME", home_path.join(".config"));
     cmd.arg("config")
@@ -126,7 +126,7 @@ fn test_config_set_multiple_formats() {
 
 #[test]
 fn test_models_help() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("models")
         .arg("--help")
         .assert()
@@ -162,7 +162,7 @@ fn test_models_list_by_provider() {
 
 #[test]
 fn test_history_help() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("history")
         .arg("--help")
         .assert()
@@ -176,7 +176,7 @@ fn test_history_help() {
 
 #[test]
 fn test_history_list_empty() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("history")
         .arg("list")
         .assert()
@@ -189,7 +189,7 @@ fn test_history_list_empty() {
 
 #[test]
 fn test_history_list_with_limit() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("history")
         .arg("list")
         .arg("--limit")
@@ -200,7 +200,7 @@ fn test_history_list_with_limit() {
 
 #[test]
 fn test_history_search_empty() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("history")
         .arg("search")
         .arg("test query")
@@ -213,7 +213,7 @@ fn test_history_search_empty() {
 
 #[test]
 fn test_history_search_with_options() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("history")
         .arg("search")
         .arg("test")
@@ -227,7 +227,7 @@ fn test_history_search_with_options() {
 
 #[test]
 fn test_history_show_nonexistent() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("history")
         .arg("show")
         .arg("nonexistent-id-12345")
@@ -238,7 +238,7 @@ fn test_history_show_nonexistent() {
 
 #[test]
 fn test_history_delete_without_confirm() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("history")
         .arg("delete")
         .arg("00000000-0000-0000-0000-000000000000")
@@ -251,7 +251,7 @@ fn test_history_delete_without_confirm() {
 
 #[test]
 fn test_history_delete_nonexistent_with_confirm() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("history")
         .arg("delete")
         .arg("nonexistent-id")
@@ -267,7 +267,7 @@ fn test_history_delete_nonexistent_with_confirm() {
 
 #[test]
 fn test_no_command_shows_help() {
-    brainwires_cmd()
+    rullama_cmd()
         .assert()
         .success()
         .stdout(predicate::str::contains("AI-powered agentic CLI"))
@@ -277,7 +277,7 @@ fn test_no_command_shows_help() {
 
 #[test]
 fn test_help_flag() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("--help")
         .assert()
         .success()
@@ -290,7 +290,7 @@ fn test_help_flag() {
 
 #[test]
 fn test_version_flag() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("--version")
         .assert()
         .success()
@@ -303,7 +303,7 @@ fn test_version_flag() {
 
 #[test]
 fn test_chat_help() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("chat")
         .arg("--help")
         .assert()
@@ -323,7 +323,7 @@ fn test_chat_help() {
 
 #[test]
 fn test_cost_help() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("cost")
         .arg("--help")
         .assert()
@@ -335,12 +335,12 @@ fn test_cost_help() {
 
 #[test]
 fn test_cost_default() {
-    brainwires_cmd().arg("cost").assert().success();
+    rullama_cmd().arg("cost").assert().success();
 }
 
 #[test]
 fn test_cost_with_period() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("cost")
         .arg("--period")
         .arg("week")
@@ -354,7 +354,7 @@ fn test_cost_with_period() {
 
 #[test]
 fn test_mcp_help() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("mcp")
         .arg("--help")
         .assert()
@@ -364,7 +364,7 @@ fn test_mcp_help() {
 
 #[test]
 fn test_mcp_list_empty() {
-    brainwires_cmd().arg("mcp").arg("list").assert().success();
+    rullama_cmd().arg("mcp").arg("list").assert().success();
 }
 
 // ============================================================================
@@ -373,7 +373,7 @@ fn test_mcp_list_empty() {
 
 #[test]
 fn test_plan_help() {
-    brainwires_cmd()
+    rullama_cmd()
         .arg("plan")
         .arg("--help")
         .assert()
@@ -388,10 +388,10 @@ fn test_plan_help() {
 
 #[test]
 fn test_init() {
-    // `brainwires init` is documented as not yet implemented and now exits
+    // `rullama init` is documented as not yet implemented and now exits
     // non-zero so scripts can detect the no-op. Assert the current, correct
     // behavior: failure + "not yet implemented" message.
-    brainwires_cmd().arg("init").assert().failure().stderr(
+    rullama_cmd().arg("init").assert().failure().stderr(
         predicate::str::contains("Init not yet implemented")
             .or(predicate::str::contains("not yet implemented")),
     );

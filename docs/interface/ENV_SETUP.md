@@ -30,26 +30,26 @@ Get your test key from: https://brainwires.studio
 
 ### Optional Runtime Configuration
 
-> **Note:** The variables in this section (`BRAINWIRES_API_KEY`, `BRAINWIRES_BACKEND_URL`,
-> `BRAINWIRES_MODEL`) are **not read by the CLI at runtime**. Runtime configuration is managed
-> via `brainwires config --set key=value` (stored in `~/.brainwires/config.json`) and
-> `brainwires auth login`. These variables are listed here for reference only.
+> **Note:** The variables in this section (`RULLAMA_API_KEY`, `RULLAMA_BACKEND_URL`,
+> `RULLAMA_MODEL`) are **not read by the CLI at runtime**. Runtime configuration is managed
+> via `rullama config --set key=value` (stored in `~/.rullama/config.json`) and
+> `rullama auth login`. These variables are listed here for reference only.
 
-**`BRAINWIRES_API_KEY`** - Default API key
+**`RULLAMA_API_KEY`** - Default API key
 ```bash
-BRAINWIRES_API_KEY=bw_your_api_key_here
+RULLAMA_API_KEY=bw_your_api_key_here
 ```
 
-**`BRAINWIRES_BACKEND_URL`** - Backend endpoint
+**`RULLAMA_BACKEND_URL`** - Backend endpoint
 ```bash
-BRAINWIRES_BACKEND_URL=https://api.brainwires.studio  # Production
+RULLAMA_BACKEND_URL=https://api.brainwires.studio  # Production
 # or
-BRAINWIRES_BACKEND_URL=http://localhost:3000  # Local development
+RULLAMA_BACKEND_URL=http://localhost:3000  # Local development
 ```
 
-**`BRAINWIRES_MODEL`** - Default model
+**`RULLAMA_MODEL`** - Default model
 ```bash
-BRAINWIRES_MODEL=claude-3-5-sonnet-20241022
+RULLAMA_MODEL=claude-3-5-sonnet-20241022
 ```
 
 **`RUST_LOG`** - Logging level
@@ -84,20 +84,20 @@ While tests use `.env` automatically, runtime commands can also use environment 
 ```bash
 # Option 1: Use .env file
 source .env
-brainwires chat
+rullama chat
 
 # Option 2: Inline
-BRAINWIRES_API_KEY=bw_xxx brainwires chat
+RULLAMA_API_KEY=bw_xxx rullama chat
 
 # Option 3: Export
-export BRAINWIRES_API_KEY=bw_xxx
-brainwires chat
+export RULLAMA_API_KEY=bw_xxx
+rullama chat
 ```
 
 ## File Structure
 
 ```
-brainwires-cli/
+rullama-cli/
 ├── .env.example      ← Template (committed to git)
 ├── .env              ← Your secrets (NEVER committed)
 ├── .gitignore        ← Excludes .env files
@@ -127,7 +127,7 @@ brainwires-cli/
 ```bash
 # .env.development
 TEST_API_KEY=bw_dev_xxx
-BRAINWIRES_BACKEND_URL=http://localhost:3000
+RULLAMA_BACKEND_URL=http://localhost:3000
 RUST_LOG=debug
 ```
 
@@ -135,14 +135,14 @@ RUST_LOG=debug
 ```bash
 # .env.test
 TEST_API_KEY=bw_test_xxx
-BRAINWIRES_BACKEND_URL=https://test-api.brainwires.studio
+RULLAMA_BACKEND_URL=https://test-api.brainwires.studio
 ```
 
 ### Production
 ```bash
 # .env.production
-BRAINWIRES_API_KEY=bw_prod_xxx
-BRAINWIRES_BACKEND_URL=https://api.brainwires.studio
+RULLAMA_API_KEY=bw_prod_xxx
+RULLAMA_BACKEND_URL=https://api.brainwires.studio
 RUST_LOG=info
 ```
 
@@ -229,7 +229,7 @@ jobs:
     steps:
       - name: Run AI tests
         env:
-          TEST_API_KEY: ${{ secrets.BRAINWIRES_TEST_KEY }}
+          TEST_API_KEY: ${{ secrets.RULLAMA_TEST_KEY }}
         run: cargo test -- --ignored
 ```
 
@@ -254,7 +254,7 @@ echo 'dotenv' > .envrc
 direnv allow
 
 # Now .env loads automatically when entering directory!
-cd brainwires-cli  # ← .env loaded
+cd rullama-cli  # ← .env loaded
 ```
 
 ## Best Tools
@@ -270,10 +270,10 @@ For maximum security, use system keyring:
 
 ```bash
 # macOS Keychain
-security add-generic-password -a brainwires -s test_api_key -w
+security add-generic-password -a rullama -s test_api_key -w
 
 # Linux Secret Service
-secret-tool store --label='Brainwires Test Key' service brainwires key test_api_key
+secret-tool store --label='Brainwires Test Key' service rullama key test_api_key
 
 # Then retrieve in code
 # (requires additional dependencies)

@@ -1,10 +1,10 @@
 # rullama-cli
 
 > The agentic CLI of the **rullama** product family (installed binary: `rullama`).
-> Extracted from the `brainwires-framework` monorepo into its own repo. It builds
-> on the **brainwires** platform crates, resolved via path to a sibling
-> `../brainwires-framework` checkout (these flip to crates.io version pins once
-> the harness is published). Deeper rebrand of internal "brainwires" strings is a
+> Extracted from the `rullama-framework` monorepo into its own repo. It builds
+> on the **rullama** platform crates, resolved via path to a sibling
+> `../rullama-framework` checkout (these flip to crates.io version pins once
+> the harness is published). Deeper rebrand of internal "rullama" strings is a
 > follow-up; the crate + binary are renamed.
 
 An AI-powered agentic CLI tool for autonomous coding assistance, built in Rust.
@@ -28,7 +28,7 @@ An AI-powered agentic CLI tool for autonomous coding assistance, built in Rust.
 - 🌐 **Remote Control**: Control CLI agents from the web interface via secure bridge
 - 🌳 **Collapsible Journal Tree**: TUI Journal view renders conversation as a navigable, collapsible tree (Turn → Message → ToolCall → SubAgentSpawn) with vim-style `j/k/h/l` navigation
 - 🔭 **Sub-Agent Viewer** (`Ctrl+B`): Live split-pane view of running sub-agents with status icons, activity detail, and direct IPC messaging
-- 🧪 **Local LLM Inference** *(optional)*: Run models locally via the framework's `brainwires-provider` crate (`--features llama-cpp-2`)
+- 🧪 **Local LLM Inference** *(optional)*: Run models locally via the framework's `rullama-provider` crate (`--features llama-cpp-2`)
 
 ## Installation
 
@@ -47,7 +47,7 @@ Download the latest release from the releases page.
 
 Brainwires CLI is provider-agnostic — point it at Anthropic, OpenAI, Google, Groq, Ollama (local), Amazon Bedrock, Google Vertex AI, Together, Fireworks, MiniMax, or the Brainwires SaaS relay. Three ways to configure a provider:
 
-**1. First-run picker (interactive).** The very first time you run `brainwires chat` or `brainwires task` with no config, you'll see a picker listing the chat-capable providers. The choice is persisted to `~/.brainwires/config.json`.
+**1. First-run picker (interactive).** The very first time you run `rullama chat` or `rullama task` with no config, you'll see a picker listing the chat-capable providers. The choice is persisted to `~/.rullama/config.json`.
 
 **2. Environment variables.** If any of these are set, the CLI picks the provider up automatically and skips the picker:
 
@@ -58,25 +58,25 @@ Brainwires CLI is provider-agnostic — point it at Anthropic, OpenAI, Google, G
 | Google (Gemini) | `GEMINI_API_KEY` *or* `GOOGLE_API_KEY` |
 | Groq | `GROQ_API_KEY` |
 | Ollama (local) | `OLLAMA_HOST` (just presence detected) |
-| Brainwires SaaS | `BRAINWIRES_API_KEY` |
+| Brainwires SaaS | `RULLAMA_API_KEY` |
 | Together / Fireworks / MiniMax | `TOGETHER_API_KEY` / `FIREWORKS_API_KEY` / `MINIMAX_API_KEY` |
 | Bedrock | AWS credential chain (`AWS_ACCESS_KEY_ID`, …) |
 | Vertex AI | `GOOGLE_APPLICATION_CREDENTIALS` + project ID |
 
-You can also override per-invocation with `BRAINWIRES_PROVIDER=anthropic` or `--provider anthropic`.
+You can also override per-invocation with `RULLAMA_PROVIDER=anthropic` or `--provider anthropic`.
 
 **3. Explicit login.** Store credentials in your system keyring so they persist across shells:
 
 ```bash
 # Brainwires SaaS (default)
-brainwires auth login
+rullama auth login
 
 # Any direct provider
-brainwires auth login --provider anthropic
-brainwires auth login --provider openai --model gpt-5-mini
-brainwires auth login --provider ollama --base-url http://localhost:11434
-brainwires auth login --provider bedrock --region us-west-2
-brainwires auth login --provider vertex-ai --project-id my-gcp-project
+rullama auth login --provider anthropic
+rullama auth login --provider openai --model gpt-5-mini
+rullama auth login --provider ollama --base-url http://localhost:11434
+rullama auth login --provider bedrock --region us-west-2
+rullama auth login --provider vertex-ai --project-id my-gcp-project
 ```
 
 ### Switching providers
@@ -92,19 +92,19 @@ Inside an interactive TUI session, use slash commands:
 From the shell, just pass `--provider` to any command:
 
 ```bash
-brainwires chat --provider anthropic --prompt "explain ownership"
-brainwires task --provider ollama "summarize src/main.rs"
+rullama chat --provider anthropic --prompt "explain ownership"
+rullama task --provider ollama "summarize src/main.rs"
 ```
 
 ## Quick Start
 
 ### Authentication
 
-First, pick a provider — either run `brainwires chat` and use the first-run picker, or explicitly:
+First, pick a provider — either run `rullama chat` and use the first-run picker, or explicitly:
 
 ```bash
-brainwires auth login                             # Brainwires SaaS
-brainwires auth login --provider anthropic        # Claude
+rullama auth login                             # Brainwires SaaS
+rullama auth login --provider anthropic        # Claude
 ```
 
 Or just export an API key and the CLI picks it up:
@@ -124,8 +124,8 @@ Brainwires CLI offers multiple chat modes for different use cases:
 Start an interactive conversation with full-screen prompts and formatting:
 
 ```bash
-brainwires chat
-brainwires chat --model claude-3-5-sonnet-20241022
+rullama chat
+rullama chat --model claude-3-5-sonnet-20241022
 ```
 
 #### Single-Shot Mode
@@ -133,9 +133,9 @@ brainwires chat --model claude-3-5-sonnet-20241022
 Send a single prompt and get an immediate response (perfect for scripting):
 
 ```bash
-brainwires chat --prompt "Explain Rust ownership"
-brainwires chat --prompt "What is 2+2?" --format=plain
-brainwires chat --prompt "Calculate 5*3" --quiet --format=plain
+rullama chat --prompt "Explain Rust ownership"
+rullama chat --prompt "What is 2+2?" --format=plain
+rullama chat --prompt "Calculate 5*3" --quiet --format=plain
 ```
 
 #### Batch Mode
@@ -144,13 +144,13 @@ Process multiple prompts from stdin, one per line:
 
 ```bash
 # From a file
-cat questions.txt | brainwires chat --batch
+cat questions.txt | rullama chat --batch
 
 # Pipe multiple questions
-printf "What is 2+2?\nWhat is 10-3?\n" | brainwires chat --batch
+printf "What is 2+2?\nWhat is 10-3?\n" | rullama chat --batch
 
 # Get JSON output for batch processing
-cat prompts.txt | brainwires chat --batch --format=json > results.json
+cat prompts.txt | rullama chat --batch --format=json > results.json
 ```
 
 #### TUI Mode
@@ -158,7 +158,7 @@ cat prompts.txt | brainwires chat --batch --format=json > results.json
 Full-screen terminal user interface with rich formatting:
 
 ```bash
-brainwires chat --tui
+rullama chat --tui
 ```
 
 #### Output Formats
@@ -170,13 +170,13 @@ Control how responses are displayed:
 - **`--format=json`**: Structured JSON output with metadata
 
 ```bash
-brainwires chat --prompt "Hello" --format=full
+rullama chat --prompt "Hello" --format=full
 # Output: "Assistant: Hello! How can I help you today?"
 
-brainwires chat --prompt "Hello" --format=plain
+rullama chat --prompt "Hello" --format=plain
 # Output: "Hello! How can I help you today?"
 
-brainwires chat --prompt "Hello" --format=json
+rullama chat --prompt "Hello" --format=json
 # Output: {"model": "...", "response": "Hello! How can I help you today?"}
 ```
 
@@ -186,10 +186,10 @@ Suppress decorative output for clean scripting:
 
 ```bash
 # No welcome banner, spinners, or formatting
-echo "What is 2+2?" | brainwires chat --quiet
+echo "What is 2+2?" | rullama chat --quiet
 
 # Perfect for scripts
-ANSWER=$(brainwires chat --prompt "What is 7*8?" --quiet --format=plain)
+ANSWER=$(rullama chat --prompt "What is 7*8?" --quiet --format=plain)
 echo "The answer is: $ANSWER"
 ```
 
@@ -198,23 +198,23 @@ echo "The answer is: $ANSWER"
 Expose the CLI as an MCP server over stdio:
 
 ```bash
-brainwires chat --mcp-server
+rullama chat --mcp-server
 ```
 
 #### Practical Examples
 
 ```bash
 # Quick calculation
-brainwires chat --prompt "What is 15% of 200?" --quiet --format=plain
+rullama chat --prompt "What is 15% of 200?" --quiet --format=plain
 
 # Code review from stdin
-cat myfile.rs | brainwires chat --prompt "Review this code: $(cat -)" --format=plain
+cat myfile.rs | rullama chat --prompt "Review this code: $(cat -)" --format=plain
 
 # Batch processing with results
-cat questions.txt | brainwires chat --batch --format=json > results.json
+cat questions.txt | rullama chat --batch --format=json > results.json
 
 # Pipeline integration
-git diff | brainwires chat --prompt "Summarize these changes" --quiet
+git diff | rullama chat --prompt "Summarize these changes" --quiet
 ```
 
 For comprehensive documentation on all chat modes, see [docs/CLI_CHAT_MODES.md](docs/CLI_CHAT_MODES.md).
@@ -224,14 +224,14 @@ For comprehensive documentation on all chat modes, see [docs/CLI_CHAT_MODES.md](
 View current configuration:
 
 ```bash
-brainwires config --list
+rullama config --list
 ```
 
 Set configuration values:
 
 ```bash
-brainwires config --set provider=anthropic
-brainwires config --set permission_mode=auto
+rullama config --set provider=anthropic
+rullama config --set permission_mode=auto
 ```
 
 ### MCP Servers
@@ -239,19 +239,19 @@ brainwires config --set permission_mode=auto
 Add an MCP server:
 
 ```bash
-brainwires mcp add project-rag "project-rag serve"
+rullama mcp add project-rag "project-rag serve"
 ```
 
 Connect to an MCP server:
 
 ```bash
-brainwires mcp connect project-rag
+rullama mcp connect project-rag
 ```
 
 List available tools:
 
 ```bash
-brainwires mcp tools
+rullama mcp tools
 ```
 
 ### Remote Control
@@ -262,22 +262,22 @@ Control your CLI agents remotely from the Brainwires Studio web interface.
 
 ```bash
 # Enable remote control
-brainwires remote config --enabled true
+rullama remote config --enabled true
 
 # Set your API key (from Brainwires Studio account settings)
-brainwires remote config --api-key bw_prod_xxxxx
+rullama remote config --api-key bw_prod_xxxxx
 
 # Start the bridge
-brainwires remote start
+rullama remote start
 ```
 
 #### Commands
 
 ```bash
-brainwires remote start      # Start the bridge
-brainwires remote stop       # Stop the bridge
-brainwires remote status     # Check connection status
-brainwires remote config     # View/modify settings
+rullama remote start      # Start the bridge
+rullama remote stop       # Stop the bridge
+rullama remote status     # Check connection status
+rullama remote config     # View/modify settings
 ```
 
 #### Configuration Options
@@ -293,8 +293,8 @@ brainwires remote config     # View/modify settings
 
 1. **CLI side**: Configure and start the bridge:
    ```bash
-   brainwires remote config --enabled true --api-key <your-key>
-   brainwires remote start
+   rullama remote config --enabled true --api-key <your-key>
+   rullama remote start
    ```
 
 2. **Web side**: Navigate to `/cli/remote` in Brainwires Studio to see and control your connected agents
@@ -308,13 +308,13 @@ For detailed architecture documentation, see [docs/IPC_AND_REMOTE_CONTROL.md](do
 List all available models:
 
 ```bash
-brainwires models
+rullama models
 ```
 
 Filter by provider:
 
 ```bash
-brainwires models --provider anthropic
+rullama models --provider anthropic
 ```
 
 ### Cost Tracking
@@ -322,8 +322,8 @@ brainwires models --provider anthropic
 View API usage and costs:
 
 ```bash
-brainwires cost
-brainwires cost --period week
+rullama cost
+rullama cost --period week
 ```
 
 ### Slash Commands
@@ -355,7 +355,7 @@ Brainwires CLI includes powerful slash commands for codebase exploration and sem
 **Example usage:**
 ```bash
 # Start chat and use commands
-brainwires chat
+rullama chat
 
 > /project:index ~/projects/my-app
 > /project:query authentication implementation
@@ -534,7 +534,7 @@ For technical details, see [docs/INFINITE_CONTEXT.md](docs/INFINITE_CONTEXT.md).
 
 ## Configuration
 
-Configuration is stored in `~/.brainwires/config.json`:
+Configuration is stored in `~/.rullama/config.json`:
 
 ```json
 {
@@ -549,7 +549,7 @@ Configuration is stored in `~/.brainwires/config.json`:
 
 ## Supported Providers
 
-Provider integrations are supplied by the framework's `brainwires-provider` crate:
+Provider integrations are supplied by the framework's `rullama-provider` crate:
 
 - **Anthropic** (Claude models)
 - **OpenAI** (GPT models, o1)
@@ -591,24 +591,24 @@ cargo run -- chat
 
 Brainwires CLI is built on the **Brainwires Framework**, a submodule of 32 crates exposed through a feature-gated facade.
 
-### Brainwires Framework (`crates/brainwires-framework/`)
+### Brainwires Framework (`crates/rullama-framework/`)
 
 The framework provides all core capabilities. The CLI depends on a single facade crate:
 
 ```toml
-brainwires = { path = "crates/brainwires-framework/crates/brainwires", features = ["full"] }
+rullama = { path = "crates/rullama-framework/crates/rullama", features = ["full"] }
 ```
 
 The framework crates, grouped by function:
 
 | Group | Crates |
 |-------|--------|
-| **Core** | `brainwires-core`, `brainwires-tool-runtime`, `brainwires-tool-builtins`, `brainwires-agent`, `brainwires-inference` |
-| **Intelligence** | `brainwires-provider`, `brainwires-knowledge`, `brainwires-prompting`, `brainwires-rag`, `brainwires-storage`, `brainwires-stores`, `brainwires-memory` |
-| **Integration** | `brainwires-mcp-client`, `brainwires-mcp-server`, `brainwires-network` |
-| **Security** | `brainwires-permission` |
-| **Execution** | `brainwires-wasm`, `brainwires-autonomy` |
-| **Hardware & Training** | `brainwires-hardware`, `brainwires-finetune`, `brainwires-a2a` |
+| **Core** | `rullama-core`, `rullama-tool-runtime`, `rullama-tool-builtins`, `rullama-agent`, `rullama-inference` |
+| **Intelligence** | `rullama-provider`, `rullama-knowledge`, `rullama-prompting`, `rullama-rag`, `rullama-storage`, `rullama-stores`, `rullama-memory` |
+| **Integration** | `rullama-mcp-client`, `rullama-mcp-server`, `rullama-network` |
+| **Security** | `rullama-permission` |
+| **Execution** | `rullama-wasm`, `rullama-autonomy` |
+| **Hardware & Training** | `rullama-hardware`, `rullama-finetune`, `rullama-a2a` |
 
 ### CLI Layer
 

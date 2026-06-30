@@ -9,17 +9,17 @@ use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberI
 static LOGGER_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Global analytics collector — set once during startup, reused everywhere.
-static ANALYTICS: OnceLock<brainwires_telemetry::AnalyticsCollector> = OnceLock::new();
+static ANALYTICS: OnceLock<rullama_telemetry::AnalyticsCollector> = OnceLock::new();
 
 /// Initialize the analytics subsystem.
 ///
-/// Creates a `SqliteAnalyticsSink` writing to `~/.brainwires/analytics/analytics.db`
+/// Creates a `SqliteAnalyticsSink` writing to `~/.rullama/analytics/analytics.db`
 /// and stores the resulting [`AnalyticsCollector`] in a process-wide static so that
 /// `init_with_output` can attach the tracing layer without extra arguments.
 ///
 /// Safe to call multiple times — only the first call has any effect.
 pub fn init_analytics() {
-    use brainwires_telemetry::{AnalyticsCollector, SqliteAnalyticsSink};
+    use rullama_telemetry::{AnalyticsCollector, SqliteAnalyticsSink};
     if ANALYTICS.get().is_none() {
         match SqliteAnalyticsSink::new_default() {
             Ok(sink) => {
@@ -35,7 +35,7 @@ pub fn init_analytics() {
 }
 
 /// Return a clone of the global analytics collector, if initialized.
-pub fn analytics_collector() -> Option<brainwires_telemetry::AnalyticsCollector> {
+pub fn analytics_collector() -> Option<rullama_telemetry::AnalyticsCollector> {
     ANALYTICS.get().cloned()
 }
 
@@ -65,7 +65,7 @@ pub fn init_with_options(enable_output: bool, quiet: bool) {
     }
 
     // Create logs directory
-    let log_dir = get_log_directory().unwrap_or_else(|_| PathBuf::from(".brainwires/logs"));
+    let log_dir = get_log_directory().unwrap_or_else(|_| PathBuf::from(".rullama/logs"));
     let _ = std::fs::create_dir_all(&log_dir);
 
     // Create file appender with daily rotation
@@ -78,7 +78,7 @@ pub fn init_with_options(enable_output: bool, quiet: bool) {
         if quiet {
             EnvFilter::new("warn")
         } else {
-            EnvFilter::new("brainwires_cli=debug,info")
+            EnvFilter::new("rullama_cli=debug,info")
         }
     });
 
@@ -86,7 +86,7 @@ pub fn init_with_options(enable_output: bool, quiet: bool) {
     let analytics_layer = ANALYTICS
         .get()
         .cloned()
-        .map(brainwires_telemetry::AnalyticsLayer::new);
+        .map(rullama_telemetry::AnalyticsLayer::new);
 
     if !enable_output {
         // TUI mode: Only log to file, disable console
@@ -213,10 +213,10 @@ impl Logger {
     }
 }
 
-/// Get the log directory path: ~/.brainwires/logs/
+/// Get the log directory path: ~/.rullama/logs/
 fn get_log_directory() -> Result<PathBuf, std::env::VarError> {
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))?;
-    Ok(PathBuf::from(home).join(".brainwires").join("logs"))
+    Ok(PathBuf::from(home).join(".rullama").join("logs"))
 }
 
 /// Get path to current log file (for user reference)

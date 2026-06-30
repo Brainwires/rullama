@@ -2,14 +2,14 @@
 
 ## Overview
 
-Thalora is a headless browser MCP server that provides web scraping and search capabilities to brainwires-cli. It's already configured and ready to use!
+Thalora is a headless browser MCP server that provides web scraping and search capabilities to rullama-cli. It's already configured and ready to use!
 
 ## What's Configured
 
 ### MCP Server: `browser`
-- **Binary**: `/home/nightness/dev/brainwires-studio/rust/thalora-web-browser/target/release/thalora`
+- **Binary**: `/home/nightness/dev/rullama-studio/rust/thalora-web-browser/target/release/thalora`
 - **Mode**: `minimal` (basic web scraping tools)
-- **Config**: `~/.brainwires/mcp-config.json`
+- **Config**: `~/.rullama/mcp-config.json`
 
 ### Available Tools (Minimal Mode)
 
@@ -55,16 +55,16 @@ Search the web using various search engines:
 
 ### List Configured Servers
 ```bash
-brainwires mcp list
+rullama mcp list
 ```
 
 ### Connect to Browser (for testing)
 ```bash
-brainwires mcp connect browser
+rullama mcp connect browser
 ```
 
 ### In Chat Sessions
-When using brainwires chat, the AI can automatically use these tools:
+When using rullama chat, the AI can automatically use these tools:
 - Tools are prefixed as: `mcp_browser_scrape`, `mcp_browser_web_search`
 - The MCP server starts automatically when needed
 - Connection is maintained for the duration of the chat session
@@ -73,13 +73,13 @@ When using brainwires chat, the AI can automatically use these tools:
 
 To enable all browser features (sessions, CDP, memory), change the config mode:
 
-Edit `~/.brainwires/mcp-config.json`:
+Edit `~/.rullama/mcp-config.json`:
 ```json
 {
   "servers": [
     {
       "name": "browser",
-      "command": "/home/nightness/dev/brainwires-studio/rust/thalora-web-browser/target/release/thalora",
+      "command": "/home/nightness/dev/rullama-studio/rust/thalora-web-browser/target/release/thalora",
       "args": ["server", "--mcp-mode", "full"],
       "env": {
         "THALORA_SILENT": "false",
@@ -101,12 +101,12 @@ Full mode adds:
 
 ### Connection Issues
 If connection fails, check:
-1. Binary exists: `ls -lh ~/dev/brainwires-studio/rust/thalora-web-browser/target/release/thalora`
-2. Rebuild if needed: `cd ~/dev/brainwires-studio/rust/thalora-web-browser && cargo build --release`
+1. Binary exists: `ls -lh ~/dev/rullama-studio/rust/thalora-web-browser/target/release/thalora`
+2. Rebuild if needed: `cd ~/dev/rullama-studio/rust/thalora-web-browser && cargo build --release`
 
 ### Rebuilding Thalora
 ```bash
-cd ~/dev/brainwires-studio/rust/thalora-web-browser
+cd ~/dev/rullama-studio/rust/thalora-web-browser
 cargo build --release
 ```
 
@@ -115,13 +115,13 @@ The server logs to stderr. To see detailed output:
 ```bash
 # Remove THALORA_SILENT from env in config
 # Or run manually:
-~/dev/brainwires-studio/rust/thalora-web-browser/target/release/thalora server --mcp-mode minimal
+~/dev/rullama-studio/rust/thalora-web-browser/target/release/thalora server --mcp-mode minimal
 ```
 
 ## Architecture
 
 ### How It Works
-1. brainwires-cli reads `~/.brainwires/mcp-config.json`
+1. rullama-cli reads `~/.rullama/mcp-config.json`
 2. When AI needs browser tools, it spawns the thalora process
 3. Communication happens via JSON-RPC over STDIO
 4. Tools are automatically registered with `mcp_browser_` prefix
@@ -133,7 +133,7 @@ User Chat Request
     ↓
 AI decides to use web tool
     ↓
-brainwires-cli spawns thalora
+rullama-cli spawns thalora
     ↓
 thalora executes scraping/search
     ↓

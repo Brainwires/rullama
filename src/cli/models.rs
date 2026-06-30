@@ -101,7 +101,7 @@ async fn handle_models_list(provider: Option<String>, show_all: bool, refresh: b
 
     // Brainwires SaaS → existing ModelRegistry flow
     if provider_type == ProviderType::Brainwires {
-        return handle_brainwires_models_list().await;
+        return handle_rullama_models_list().await;
     }
 
     println!(
@@ -199,7 +199,7 @@ fn display_provider_models(models: &[AvailableModel], active_model: &str) {
 }
 
 /// Original Brainwires SaaS model listing.
-async fn handle_brainwires_models_list() -> Result<()> {
+async fn handle_rullama_models_list() -> Result<()> {
     println!("\n{}\n", style("Available Models:").cyan().bold());
 
     let models = ModelRegistry::get_all_models().await?;
@@ -237,7 +237,7 @@ async fn handle_brainwires_models_list() -> Result<()> {
 
     println!(
         "{}",
-        style("Tip: use 'brainwires models stats' to see model statistics").dim()
+        style("Tip: use 'rullama models stats' to see model statistics").dim()
     );
 
     Ok(())
@@ -248,7 +248,7 @@ async fn handle_models_stats(provider: Option<String>, refresh: bool) -> Result<
 
     // Brainwires SaaS → existing flow
     if provider_type == ProviderType::Brainwires {
-        return handle_brainwires_models_stats().await;
+        return handle_rullama_models_stats().await;
     }
 
     println!(
@@ -317,7 +317,7 @@ async fn handle_models_stats(provider: Option<String>, refresh: bool) -> Result<
 }
 
 /// Original Brainwires SaaS model stats.
-async fn handle_brainwires_models_stats() -> Result<()> {
+async fn handle_rullama_models_stats() -> Result<()> {
     println!("\n{}\n", style("Model Statistics:").cyan().bold());
 
     let models = ModelRegistry::get_all_models().await?;

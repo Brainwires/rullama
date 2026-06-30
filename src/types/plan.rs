@@ -1,5 +1,5 @@
 //! Plan types for persistence.
 //!
-//! Re-exports from the brainwires-core framework crate.
+//! Re-exports from the rullama-core framework crate.
 
-pub use brainwires::core::plan::*;
+pub use rullama::core::plan::*;

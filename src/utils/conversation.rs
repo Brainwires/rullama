@@ -12,7 +12,7 @@ use crate::types::message::{Message, MessageContent, Role};
 use crate::utils::context_builder::{ContextBuilder, ContextBuilderConfig};
 use crate::utils::entity_extraction::{EntityExtractor, EntityStore};
 use anyhow::{Context, Result};
-use brainwires::knowledge::RelationshipGraph;
+use rullama::knowledge::RelationshipGraph;
 use chrono::Utc;
 use std::path::Path;
 use std::sync::Arc;
@@ -137,7 +137,7 @@ impl ConversationManager {
 
         // Incrementally add to relationship graph
         for (name, entity_type) in &extraction.entities {
-            use brainwires::knowledge::relationship_graph::GraphNode;
+            use rullama::knowledge::relationship_graph::GraphNode;
             self.relationship_graph.add_node(GraphNode {
                 entity_name: name.clone(),
                 entity_type: entity_type.clone(),

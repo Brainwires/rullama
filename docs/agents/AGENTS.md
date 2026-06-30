@@ -21,8 +21,8 @@ The agent system enables autonomous, concurrent execution of coding tasks. An ex
 | Agent Tools | `src/mcp_server/agent_tools.rs` | MCP tool definitions for spawning/querying |
 | Task Type | `src/types/agent.rs` | Task struct and lifecycle methods |
 
-> ¹ Implemented in the `brainwires-agent` framework crate; re-exported into the CLI via
-> `pub use brainwires::agents::*` in `src/agents/mod.rs`. Fully accessible from CLI code
+> ¹ Implemented in the `rullama-agent` framework crate; re-exported into the CLI via
+> `pub use rullama::agents::*` in `src/agents/mod.rs`. Fully accessible from CLI code
 > but not present as local files under `src/agents/`.
 
 ---
@@ -484,8 +484,8 @@ Agents track files they create or modify in a `WorkingSet` (defined in `src/type
 ## Spawning an Agent Programmatically
 
 ```rust
-use brainwires_cli::agents::{TaskAgent, TaskAgentConfig, spawn_task_agent};
-use brainwires_cli::types::agent::{Task, AgentContext};
+use rullama_cli::agents::{TaskAgent, TaskAgentConfig, spawn_task_agent};
+use rullama_cli::types::agent::{Task, AgentContext};
 
 let task = Task::new("task-001", "Implement feature X");
 let context = AgentContext {

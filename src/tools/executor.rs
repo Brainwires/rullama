@@ -14,7 +14,7 @@ use crate::providers::Provider;
 use crate::types::agent::PermissionMode;
 use crate::types::session_task::SessionTaskList;
 use crate::types::tool::{Tool, ToolContext, ToolResult, ToolUse};
-use brainwires::permissions::{
+use rullama::permissions::{
     ActionOutcome, AuditEvent, AuditEventType, AuditLogger, PolicyAction, PolicyEngine,
     PolicyRequest, TrustLevel,
 };
@@ -83,7 +83,7 @@ pub struct ToolExecutor {
     sudo_password_tx: Option<tokio::sync::mpsc::Sender<crate::sudo::SudoPasswordRequest>>,
     /// Remote bridge for permission relay (dangerous tool approval via web UI)
     remote_bridge: Option<
-        std::sync::Arc<tokio::sync::RwLock<brainwires::agent_network::remote::RemoteBridge>>,
+        std::sync::Arc<tokio::sync::RwLock<rullama::agent_network::remote::RemoteBridge>>,
     >,
     /// Organization-level blocked tools (enforced client-side)
     org_blocked_tools: Vec<String>,
@@ -106,7 +106,7 @@ impl ToolExecutor {
     pub fn new(permission_mode: PermissionMode) -> Self {
         Self {
             registry: {
-                let mut r = brainwires_tool_builtins::registry_with_builtins();
+                let mut r = rullama_tool_builtins::registry_with_builtins();
                 r.register_tools(MonitorTool::get_tools());
                 r.register_tools(MemoryTool::get_tools());
                 r.register_tools(AskUserQuestionTool::get_tools());
@@ -142,7 +142,7 @@ impl ToolExecutor {
     pub fn with_provider(permission_mode: PermissionMode, provider: Arc<dyn Provider>) -> Self {
         Self {
             registry: {
-                let mut r = brainwires_tool_builtins::registry_with_builtins();
+                let mut r = rullama_tool_builtins::registry_with_builtins();
                 r.register_tools(MonitorTool::get_tools());
                 r.register_tools(MemoryTool::get_tools());
                 r.register_tools(AskUserQuestionTool::get_tools());
@@ -178,7 +178,7 @@ impl ToolExecutor {
     pub fn set_remote_bridge(
         &mut self,
         bridge: std::sync::Arc<
-            tokio::sync::RwLock<brainwires::agent_network::remote::RemoteBridge>,
+            tokio::sync::RwLock<rullama::agent_network::remote::RemoteBridge>,
         >,
     ) {
         self.remote_bridge = Some(bridge);
@@ -191,7 +191,7 @@ impl ToolExecutor {
     /// client-side enforcement provides faster UX feedback.
     pub fn apply_org_policies(
         &mut self,
-        policies: &brainwires::agent_network::remote::OrgPolicies,
+        policies: &rullama::agent_network::remote::OrgPolicies,
     ) {
         self.org_blocked_tools = policies.blocked_tools.clone();
         self.org_permission_relay_required = policies.permission_relay_required;
@@ -430,7 +430,7 @@ impl ToolExecutor {
             if bridge.is_ready().await
                 && bridge
                     .has_capability(
-                        brainwires::agent_network::remote::ProtocolCapability::PermissionRelay,
+                        rullama::agent_network::remote::ProtocolCapability::PermissionRelay,
                     )
                     .await
             {
@@ -1649,7 +1649,7 @@ impl ToolExecutor {
 
         // Check capabilities if present (new capability-based permission system)
         // Deserialize from JSON value to concrete AgentCapabilities type
-        let capabilities: Option<brainwires::permissions::AgentCapabilities> = context
+        let capabilities: Option<rullama::permissions::AgentCapabilities> = context
             .capabilities
             .as_ref()
             .and_then(|v| serde_json::from_value(v.clone()).ok());
@@ -1660,7 +1660,7 @@ impl ToolExecutor {
                 tracing::warn!(
                     "Tool '{}' denied by capability system (category: {:?})",
                     tool_use.name,
-                    brainwires::permissions::AgentCapabilities::categorize_tool(&tool_use.name)
+                    rullama::permissions::AgentCapabilities::categorize_tool(&tool_use.name)
                 );
                 return Ok(ToolResult::error(
                     tool_use.id.clone(),
@@ -1754,7 +1754,7 @@ impl ToolExecutor {
                 .and_then(|v| v.as_str())
                 .and_then(extract_domain_from_url);
             let git_op = if tool_use.name.starts_with("git_") {
-                brainwires::permissions::config::parse_git_operation(&tool_use.name)
+                rullama::permissions::config::parse_git_operation(&tool_use.name)
             } else {
                 None
             };
@@ -1768,7 +1768,7 @@ impl ToolExecutor {
 
             let request = PolicyRequest {
                 tool_name: Some(tool_use.name.clone()),
-                tool_category: Some(brainwires::permissions::AgentCapabilities::categorize_tool(
+                tool_category: Some(rullama::permissions::AgentCapabilities::categorize_tool(
                     &tool_use.name,
                 )),
                 file_path,
@@ -2384,7 +2384,7 @@ impl ToolExecutor {
 impl Default for ToolExecutor {
     fn default() -> Self {
         Self {
-            registry: brainwires_tool_builtins::registry_with_builtins(),
+            registry: rullama_tool_builtins::registry_with_builtins(),
             permission_mode: PermissionMode::Auto,
             provider: None,
             orchestrator: OrchestratorTool::new(),
@@ -2415,9 +2415,9 @@ impl Default for ToolExecutor {
 // ── Framework trait implementation ──────────────────────────────────────────
 
 /// Implement the framework's `ToolExecutor` trait so that the CLI's concrete
-/// executor can be used with `brainwires-agent`' `TaskAgent` and `AgentPool`.
+/// executor can be used with `rullama-agent`' `TaskAgent` and `AgentPool`.
 #[async_trait::async_trait]
-impl brainwires::tools::ToolExecutor for ToolExecutor {
+impl rullama::tools::ToolExecutor for ToolExecutor {
     async fn execute(
         &self,
         tool_use: &crate::types::tool::ToolUse,

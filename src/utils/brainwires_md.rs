@@ -6,14 +6,14 @@
 //!
 //! [`discover_project_instructions`] walks from the working directory toward
 //! the filesystem root collecting `BRAINWIRES.md` and `CLAUDE.md` files,
-//! then adds global instructions from `~/.claude/` and `~/.brainwires/`.
+//! then adds global instructions from `~/.claude/` and `~/.rullama/`.
 //! This matches Claude Code's behaviour so users migrating from Claude Code
 //! get their existing `CLAUDE.md` picked up automatically.
 //!
 //! Precedence (highest wins when rules conflict — we just concatenate, the
 //! model applies later rules on top of earlier ones):
 //!
-//! 1. Global user rules (`~/.claude/CLAUDE.md`, `~/.brainwires/CLAUDE.md`, `~/.brainwires/BRAINWIRES.md`).
+//! 1. Global user rules (`~/.claude/CLAUDE.md`, `~/.rullama/CLAUDE.md`, `~/.rullama/BRAINWIRES.md`).
 //! 2. Ancestor directories, outermost first, working toward cwd.
 //! 3. The cwd files themselves (applied last so they override ancestors).
 
@@ -43,22 +43,22 @@ pub struct InstructionSource {
 }
 
 /// Parse a BRAINWIRES.md file and resolve all @file.md imports
-pub fn load_brainwires_instructions(base_path: &Path) -> Result<String> {
-    let brainwires_path = base_path.join("BRAINWIRES.md");
+pub fn load_rullama_instructions(base_path: &Path) -> Result<String> {
+    let rullama_path = base_path.join("BRAINWIRES.md");
 
-    if !brainwires_path.exists() {
+    if !rullama_path.exists() {
         return Ok(String::new());
     }
 
     let mut visited = HashSet::new();
-    parse_file_with_imports(&brainwires_path, &mut visited, 0)
+    parse_file_with_imports(&rullama_path, &mut visited, 0)
 }
 
 /// Discover and load all project and global instruction files.
 ///
 /// Walks from `cwd` toward the filesystem root, collecting `BRAINWIRES.md`
 /// and `CLAUDE.md` files along the way. Also reads any files present in
-/// `~/.claude/` and `~/.brainwires/` as global user-level instructions.
+/// `~/.claude/` and `~/.rullama/` as global user-level instructions.
 ///
 /// Returns a vector in application order: global user instructions first,
 /// then ancestor-directory instructions from root-ward to cwd. Empty if
@@ -113,7 +113,7 @@ fn global_instruction_dirs() -> Vec<PathBuf> {
         // Claude Code's home for migrators — read-only compatibility.
         dirs.push(home.join(".claude"));
         // Brainwires native home.
-        dirs.push(home.join(".brainwires"));
+        dirs.push(home.join(".rullama"));
     }
     dirs
 }
@@ -273,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_finds_cwd_brainwires_md() {
+    fn discover_finds_cwd_rullama_md() {
         let tmp = TempDir::new().unwrap();
         write(&tmp.path().join("BRAINWIRES.md"), "project rule here\n");
 

@@ -1,6 +1,6 @@
 //! Agent System
 //!
-//! Re-exports core agent infrastructure from brainwires-agent framework crate,
+//! Re-exports core agent infrastructure from rullama-agent framework crate,
 //! plus CLI-specific orchestration, management, and execution modules.
 #![allow(hidden_glob_reexports)]
 
@@ -8,7 +8,7 @@
 // operation_tracker, resource_checker, resource_locks, state_model,
 // task_manager, task_queue, validation_loop, validation_agent, worktree,
 // contract_net, market_allocation, saga, optimistic, wait_queue)
-pub use brainwires::agents::*;
+pub use rullama::agents::*;
 
 // CLI-specific modules
 mod manager;
@@ -27,7 +27,7 @@ pub use worker::*;
 /// Prelude module for convenient imports
 pub mod prelude {
     // Framework types
-    pub use brainwires::agents::prelude::*;
+    pub use rullama::agents::prelude::*;
 
     // CLI-specific types
     pub use super::manager::AgentManager;

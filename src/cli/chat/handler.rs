@@ -199,8 +199,8 @@ async fn handle_background_session(
     match session::spawn_background_session(&session_id, &model).await {
         Ok(_) => {
             Logger::info(format!("✓ Session started in background: {}", session_id));
-            Logger::info("Use 'brainwires attach' to connect to the session");
-            Logger::info("Use 'brainwires sessions' to list all sessions");
+            Logger::info("Use 'rullama attach' to connect to the session");
+            Logger::info("Use 'rullama sessions' to list all sessions");
             Ok(())
         }
         Err(e) => {

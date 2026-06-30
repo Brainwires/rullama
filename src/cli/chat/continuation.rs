@@ -80,7 +80,7 @@ pub fn send_continuation_request<'a>(
 
         // Get API key from secure storage (keyring or fallback)
         let api_key = SessionManager::get_api_key()?
-            .context("No API key found. Please re-authenticate with: brainwires auth")?;
+            .context("No API key found. Please re-authenticate with: rullama auth")?;
 
         let http_client = Client::new();
         let url = format!("{}/api/chat/stream", session.backend);

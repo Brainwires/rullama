@@ -1,4 +1,4 @@
-//! Auth module — thin adapter over brainwires-network auth
+//! Auth module — thin adapter over rullama-network auth
 //!
 //! Re-exports bridge types and provides CLI-specific wrappers that preserve
 //! the static API used by 20+ call sites throughout the codebase.
@@ -11,11 +11,11 @@ use crate::utils::paths::PlatformPaths;
 
 // ── Private imports from bridge ──────────────────────────────────────────
 
-use brainwires::agent_network::auth::AuthClient as BridgeAuthClient;
-use brainwires::agent_network::auth::SessionManager as BridgeSessionManager;
-use brainwires::agent_network::auth::keyring::KeyringKeyStore;
-use brainwires::agent_network::auth::types::*;
-use brainwires::agent_network::traits::KeyStore;
+use rullama::agent_network::auth::AuthClient as BridgeAuthClient;
+use rullama::agent_network::auth::SessionManager as BridgeSessionManager;
+use rullama::agent_network::auth::keyring::KeyringKeyStore;
+use rullama::agent_network::auth::types::*;
+use rullama::agent_network::traits::KeyStore;
 
 // ── CLI AuthClient wrapper ──────────────────────────────────────────────
 

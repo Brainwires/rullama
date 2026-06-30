@@ -1,8 +1,8 @@
 // Integration tests for file operations
 mod common;
 
-use brainwires_cli::tools::FileOpsTool;
-use brainwires_cli::types::tool::ToolContext;
+use rullama_cli::tools::FileOpsTool;
+use rullama_cli::types::tool::ToolContext;
 use common::create_test_dir;
 use serde_json::json;
 use std::fs;

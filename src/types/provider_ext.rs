@@ -1,11 +1,11 @@
 //! CLI-local helpers for the framework's `ProviderType`.
 //!
-//! `ProviderType` is defined in `brainwires-provider` and re-exported via
+//! `ProviderType` is defined in `rullama-provider` and re-exported via
 //! `crate::providers`, so we cannot add methods to it. These free functions
 //! layer CLI-specific concerns on top: env-var discovery, UI summaries,
 //! and the chat-capable provider subset used by the picker.
 
-use brainwires::providers::ProviderType;
+use rullama::providers::ProviderType;
 
 /// The subset of providers that make sense as chat/code-assistant backends.
 ///
@@ -39,7 +39,7 @@ pub fn env_var_name(p: ProviderType) -> Option<&'static str> {
         ProviderType::OpenAI | ProviderType::OpenAiResponses => Some("OPENAI_API_KEY"),
         ProviderType::Google => Some("GEMINI_API_KEY"),
         ProviderType::Groq => Some("GROQ_API_KEY"),
-        ProviderType::Brainwires => Some("BRAINWIRES_API_KEY"),
+        ProviderType::Brainwires => Some("RULLAMA_API_KEY"),
         ProviderType::Together => Some("TOGETHER_API_KEY"),
         ProviderType::Fireworks => Some("FIREWORKS_API_KEY"),
         ProviderType::Anyscale => Some("ANYSCALE_API_KEY"),
@@ -85,23 +85,23 @@ pub fn summary(p: ProviderType) -> &'static str {
 
 /// Detect a configured provider from environment variables.
 ///
-/// Priority order: explicit `BRAINWIRES_PROVIDER` wins, otherwise we scan
+/// Priority order: explicit `RULLAMA_PROVIDER` wins, otherwise we scan
 /// known API-key env vars in a stable order. The first hit wins.
 ///
 /// Returns `Some((provider, env_var_name))` so callers can log which var
 /// was used.
 pub fn detect_provider_from_env() -> Option<(ProviderType, &'static str)> {
-    if let Ok(name) = std::env::var("BRAINWIRES_PROVIDER")
+    if let Ok(name) = std::env::var("RULLAMA_PROVIDER")
         && let Some(p) = ProviderType::from_str_opt(&name)
     {
-        return Some((p, "BRAINWIRES_PROVIDER"));
+        return Some((p, "RULLAMA_PROVIDER"));
     }
 
     // Stable priority: Brainwires SaaS first (if the user has a Brainwires
     // key in env they presumably want it), then direct providers in
     // order of popularity for coding tasks.
     let candidates: &[(ProviderType, &'static str)] = &[
-        (ProviderType::Brainwires, "BRAINWIRES_API_KEY"),
+        (ProviderType::Brainwires, "RULLAMA_API_KEY"),
         (ProviderType::Anthropic, "ANTHROPIC_API_KEY"),
         (ProviderType::OpenAI, "OPENAI_API_KEY"),
         (ProviderType::Google, "GEMINI_API_KEY"),
@@ -132,7 +132,7 @@ pub fn detect_provider_from_env() -> Option<(ProviderType, &'static str)> {
 pub fn credential_hint(p: ProviderType) -> String {
     match p {
         ProviderType::Brainwires => {
-            "Run: brainwires auth login  (or set BRAINWIRES_API_KEY)".to_string()
+            "Run: rullama auth login  (or set RULLAMA_API_KEY)".to_string()
         }
         ProviderType::Ollama => {
             "Start Ollama locally (default http://localhost:11434) or set OLLAMA_HOST.".to_string()
@@ -147,11 +147,11 @@ pub fn credential_hint(p: ProviderType) -> String {
         }
         other => match env_var_name(other) {
             Some(var) => format!(
-                "Run: brainwires auth login --provider {}  (or set {}=…)",
+                "Run: rullama auth login --provider {}  (or set {}=…)",
                 other.as_str(),
                 var
             ),
-            None => format!("Run: brainwires auth login --provider {}", other.as_str()),
+            None => format!("Run: rullama auth login --provider {}", other.as_str()),
         },
     }
 }
@@ -179,8 +179,8 @@ mod tests {
     }
 
     #[test]
-    fn credential_hint_mentions_brainwires_login_for_brainwires() {
-        assert!(credential_hint(ProviderType::Brainwires).contains("brainwires auth login"));
+    fn credential_hint_mentions_rullama_login_for_rullama() {
+        assert!(credential_hint(ProviderType::Brainwires).contains("rullama auth login"));
     }
 
     #[test]

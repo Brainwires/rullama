@@ -4,7 +4,7 @@
 
 ## Overview
 
-AT-CoT (Ambiguity Type-Chain of Thought) methodology has been integrated into brainwires-cli's clarifying questions system to improve disambiguation through ambiguity type prediction.
+AT-CoT (Ambiguity Type-Chain of Thought) methodology has been integrated into rullama-cli's clarifying questions system to improve disambiguation through ambiguity type prediction.
 
 ### What is AT-CoT?
 
@@ -259,7 +259,7 @@ When you receive a user query, follow this process:
 **Reading AT-CoT metadata:**
 
 ```rust
-use brainwires_cli::tui::question_parser::parse_response;
+use rullama_cli::tui::question_parser::parse_response;
 
 let result = parse_response(ai_response);
 if let Some(block) = result.questions {
@@ -282,7 +282,7 @@ if let Some(block) = result.questions {
 
 Set `RUST_LOG=debug` to see AT-CoT metadata in logs:
 ```bash
-RUST_LOG=brainwires_cli=debug cargo run -- chat
+RUST_LOG=rullama_cli=debug cargo run -- chat
 ```
 
 Example output:
@@ -339,7 +339,7 @@ cargo test test_full_at_cot_flow -- --nocapture
 
 4. **Check logs:**
    ```bash
-   RUST_LOG=brainwires_cli::tui::question_parser=debug cargo run -- chat --tui
+   RUST_LOG=rullama_cli::tui::question_parser=debug cargo run -- chat --tui
    ```
 
 ## Performance Impact
@@ -388,8 +388,8 @@ Track which ambiguity types lead to successful task completion:
 ### Phase 6: BKS/PKS Integration
 
 **Files:**
-- `crates/brainwires-knowledge/src/knowledge/truth.rs` - Add `TruthCategory::ClarifyingQuestions`
-- `crates/brainwires-knowledge/src/knowledge/personal/mod.rs` - Add `PersonalFactCategory::AmbiguityTypePreference`
+- `crates/rullama-knowledge/src/knowledge/truth.rs` - Add `TruthCategory::ClarifyingQuestions`
+- `crates/rullama-knowledge/src/knowledge/personal/mod.rs` - Add `PersonalFactCategory::AmbiguityTypePreference`
 
 Enable collective learning and user personalization.
 

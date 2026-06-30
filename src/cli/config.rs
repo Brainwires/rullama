@@ -57,7 +57,7 @@ pub async fn handle_config(
                     }
                     Ok(None) => {
                         Logger::warn(format!("Model '{}' not found in available models", value));
-                        println!("\nRun 'brainwires models' to see available models");
+                        println!("\nRun 'rullama models' to see available models");
                         return Ok(());
                     }
                     Err(e) => {
@@ -83,7 +83,7 @@ pub async fn handle_config(
                     }
                     None => {
                         Logger::warn(format!(
-                            "Unknown provider '{}'. Supported: anthropic, openai, google, groq, ollama, brainwires, bedrock, vertex-ai, together, fireworks, minimax",
+                            "Unknown provider '{}'. Supported: anthropic, openai, google, groq, ollama, rullama, bedrock, vertex-ai, together, fireworks, minimax",
                             value
                         ));
                         return Ok(());

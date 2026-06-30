@@ -110,7 +110,7 @@ pub async fn run_tui(
 
     // Set up panic hook to write to file for debugging
     std::panic::set_hook(Box::new(|panic_info| {
-        let _ = std::fs::write("/tmp/brainwires_panic.log", format!("{:?}", panic_info));
+        let _ = std::fs::write("/tmp/rullama_panic.log", format!("{:?}", panic_info));
         emergency_restore_terminal();
     }));
 
@@ -124,7 +124,7 @@ pub async fn run_tui(
     // Always spawn or connect to a Session (Agent) process
     // The Session is the "brain" that handles AI/tools/MCP
     use crate::agent::spawn::spawn_agent_process;
-    use brainwires::agent_network::ipc::{AgentMessage, Handshake};
+    use rullama::agent_network::ipc::{AgentMessage, Handshake};
 
     eprintln!("Connecting to session: {}", session_id);
 
@@ -143,7 +143,7 @@ pub async fn run_tui(
     conn.writer.write(&handshake).await?;
 
     // Wait for handshake response
-    use brainwires::agent_network::ipc::HandshakeResponse;
+    use rullama::agent_network::ipc::HandshakeResponse;
     let response: HandshakeResponse = conn
         .reader
         .read()
@@ -259,7 +259,7 @@ pub async fn run_tui(
             Ok(TuiLoopResult::Exit) => {
                 // Normal exit - send Exit to Session to shut it down
                 if let Some(mut writer) = app.ipc_writer.take() {
-                    use brainwires::agent_network::ipc::ViewerMessage;
+                    use rullama::agent_network::ipc::ViewerMessage;
                     let _ = writer.write(&ViewerMessage::Exit).await;
                 }
                 // Restore terminal and return
@@ -269,7 +269,7 @@ pub async fn run_tui(
             Err(e) => {
                 // Error exit - still try to shut down Session
                 if let Some(mut writer) = app.ipc_writer.take() {
-                    use brainwires::agent_network::ipc::ViewerMessage;
+                    use rullama::agent_network::ipc::ViewerMessage;
                     let _ = writer.write(&ViewerMessage::Exit).await;
                 }
                 // Restore terminal and return error
@@ -534,7 +534,7 @@ async fn run_app(
         // Check for pending agent switch
         if let Some(target_session_id) = app.pending_agent_switch.take() {
             use crate::ipc::{is_agent_alive, read_session_token};
-            use brainwires::agent_network::ipc::{AgentMessage, Handshake, ViewerMessage};
+            use rullama::agent_network::ipc::{AgentMessage, Handshake, ViewerMessage};
 
             // 1. Disconnect from current agent (if connected via IPC)
             if let Some(mut writer) = app.ipc_writer.take() {
@@ -572,7 +572,7 @@ async fn run_app(
                             Handshake::reattach(target_session_id.clone(), session_token);
                         if let Ok(()) = conn.writer.write(&handshake).await {
                             // 4. Receive HandshakeResponse first
-                            use brainwires::agent_network::ipc::HandshakeResponse;
+                            use rullama::agent_network::ipc::HandshakeResponse;
                             match conn.reader.read::<HandshakeResponse>().await {
                                 Ok(Some(response)) if !response.accepted => {
                                     app.add_console_message(format!(
@@ -850,7 +850,7 @@ fn print_conversation_on_exit(app: &App) {
 /// 3. Proxies I/O between clients and the PTY
 ///
 /// The current TUI process then exits, returning control to the shell.
-/// Users can reconnect using 'brainwires attach'.
+/// Users can reconnect using 'rullama attach'.
 #[cfg(unix)]
 fn background_process(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -896,11 +896,11 @@ fn background_process(
     // It will create a PTY and run a new TUI instance inside it
     match session::server::spawn_session(Some(session_id.to_string()), tui_args) {
         Ok((session_id, socket_path)) => {
-            println!("[brainwires backgrounded]");
+            println!("[rullama backgrounded]");
             println!("Session: {}", session_id);
             println!("Socket: {}", socket_path.display());
-            println!("Use 'brainwires attach {}' to reconnect.\n", session_id);
-            println!("Or just 'brainwires attach' to attach to the most recent session.\n");
+            println!("Use 'rullama attach {}' to reconnect.\n", session_id);
+            println!("Or just 'rullama attach' to attach to the most recent session.\n");
         }
         Err(e) => {
             println!("Failed to spawn session server: {}", e);
@@ -932,7 +932,7 @@ fn suspend_process(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Res
         Show
     )?;
 
-    println!("\n[brainwires suspended]");
+    println!("\n[rullama suspended]");
     println!("Use 'fg' to resume.\n");
 
     unsafe {

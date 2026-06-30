@@ -2,7 +2,7 @@
 
 ## Overview
 
-This integration test validates brainwires' **core capability**: autonomous code fixing with AI evaluation.
+This integration test validates rullama' **core capability**: autonomous code fixing with AI evaluation.
 
 **Test Location**: `tests/ai_code_fix_test.rs`
 **Test Fixture**: `tests/fixtures/buggy_calculator/`
@@ -30,7 +30,7 @@ This integration test validates brainwires' **core capability**: autonomous code
                │
                ▼
 ┌─────────────────────────────────────┐
-│ 3. Run brainwires CLI to fix bug    │
+│ 3. Run rullama CLI to fix bug    │
 │    "Fix the calculator's divide     │
 │     function bug..."                │
 └──────────────┬──────────────────────┘
@@ -104,7 +104,7 @@ pub fn divide(&self, a: f64, b: f64) -> Result<f64, String> {
    export TEST_API_KEY=your_api_key_here
    ```
 
-2. Ensure brainwires is built:
+2. Ensure rullama is built:
    ```bash
    cargo build --release
    ```
@@ -126,7 +126,7 @@ cargo test --test ai_code_fix_test -- --ignored --nocapture
 🧪 Running initial tests (should FAIL)...
 ✓ Confirmed: Tests fail as expected
 
-🤖 Running brainwires to fix the bug...
+🤖 Running rullama to fix the bug...
 📝 AI Response:
 [AI's analysis and fix explanation]
 
@@ -179,7 +179,7 @@ The test uses a secondary AI (Claude Haiku for cost efficiency) to evaluate:
 
 ## Why This Test Matters
 
-This test validates the **entire value proposition** of brainwires:
+This test validates the **entire value proposition** of rullama:
 
 1. **Autonomous Understanding**: AI must comprehend the codebase
 2. **Accurate Diagnosis**: Must identify the specific bug
@@ -254,7 +254,7 @@ Example:
 #[ignore]
 fn test_fix_your_bug() {
     // Copy fixture
-    // Run brainwires
+    // Run rullama
     // Verify fix
     // Evaluate with AI
 }
