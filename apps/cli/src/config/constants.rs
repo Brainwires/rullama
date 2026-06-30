@@ -1,4 +1,11 @@
-/// Backend URL constants
+// Backend URL + auth constants for the LEGACY remote-control bridge.
+//
+// The hosted backend these point at (Brainwires Studio) is DISCONTINUED. They
+// are used only by the off-by-default `remote-bridge` feature, which is kept as
+// legacy plumbing (likely to return against a new backend) — point it at your
+// own relay via `rullama remote config --url ...` rather than these defaults.
+// Not used by any default-compiled provider path (BYOK providers go through
+// rullama-provider).
 pub const DEFAULT_BACKEND_URL: &str = "https://brainwires.studio";
 pub const DEV_BACKEND_URL: &str = "https://dev.brainwires.net";
 pub const API_CLI_AUTH_ENDPOINT: &str = "/api/cli/auth";

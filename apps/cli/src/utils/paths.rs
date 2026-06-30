@@ -159,10 +159,13 @@ impl PlatformPaths {
         Ok(dir)
     }
 
-    /// Get the old home directory (~/.rullama/) for migration
-    #[deprecated(note = "Use XDG-compliant directories instead")]
+    /// Get the pre-rebrand home directory (`~/.brainwires/`) for one-time
+    /// migration into the current `~/.rullama/` + XDG layout. Dead/deprecated:
+    /// no callers; kept only so the migration helper below stays coherent.
+    #[deprecated(note = "Pre-rebrand path; migration is no longer wired up.")]
     pub fn old_home_dir() -> Result<PathBuf> {
-        Self::dot_rullama_dir()
+        let home = dirs::home_dir().context("Failed to get home directory")?;
+        Ok(home.join(".brainwires"))
     }
 
     /// Get the config file path
@@ -366,7 +369,7 @@ impl PlatformPaths {
         Ok(path.to_path_buf())
     }
 
-    /// Migrate data from old ~/.rullama/ to new XDG locations
+    /// Migrate data from the pre-rebrand ~/.brainwires/ to the current XDG locations
     ///
     /// This moves:
     /// - config.json, mcp-config.json -> config_dir
@@ -530,14 +533,14 @@ impl PlatformPaths {
     }
 
     /// Find the project root by walking upward from `cwd` looking for a
-    /// marker: `.git`, `.rullama/`, `BRAINWIRES.md`, or `CLAUDE.md`.
+    /// marker: `.git`, `.rullama/`, `RULLAMA.md`, or `CLAUDE.md`.
     /// Returns `cwd` unchanged if none is found before the filesystem root.
     pub fn find_project_root(cwd: &Path) -> PathBuf {
         const MAX_WALK_UP_DEPTH: usize = 32;
         for dir in cwd.ancestors().take(MAX_WALK_UP_DEPTH) {
             if dir.join(".git").exists()
                 || dir.join(".rullama").is_dir()
-                || dir.join("BRAINWIRES.md").is_file()
+                || dir.join("RULLAMA.md").is_file()
                 || dir.join("CLAUDE.md").is_file()
             {
                 return dir.to_path_buf();
@@ -966,7 +969,7 @@ mod tests {
     #[allow(deprecated)]
     fn test_old_home_dir() {
         let old_home = PlatformPaths::old_home_dir().unwrap();
-        assert!(old_home.to_string_lossy().contains(".rullama"));
+        assert!(old_home.to_string_lossy().contains(".brainwires"));
     }
 
     #[test]

@@ -81,7 +81,7 @@ let config = if has_cargo {{ read_file("Cargo.toml") }} else {{ "No config" }};
         today, cwd
     );
 
-    // Auto-load project and user instructions (BRAINWIRES.md / CLAUDE.md).
+    // Auto-load project and user instructions (RULLAMA.md / CLAUDE.md).
     // This is the `/instructions` workflow made automatic — it matches
     // Claude Code's CLAUDE.md auto-loading so migrating users don't need
     // to learn a new incantation.

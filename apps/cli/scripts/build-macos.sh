@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Build and upload Brainwires CLI releases for macOS platforms
+# Build and upload rullama CLI releases for macOS platforms
 # Run this script on macOS 13+ (Ventura or later)
 # Supports building for both Intel (x86_64) and Apple Silicon (aarch64)
 #
@@ -37,7 +37,7 @@ else
 fi
 
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}Brainwires CLI macOS Release Build${NC}"
+echo -e "${GREEN}rullama CLI macOS Release Build${NC}"
 echo -e "${GREEN}Version: ${CLI_VERSION}${NC}"
 if [ "$TARGET_FILTER" != "all" ]; then
     echo -e "${GREEN}Target: ${TARGET_FILTER}${NC}"

@@ -97,21 +97,21 @@ impl CommandExecutor {
 
         match rullama_md::load_rullama_instructions(&cwd) {
             Ok(content) if content.is_empty() => Ok(CommandResult::Message(
-                "No BRAINWIRES.md file found in current directory.\n\n\
-                    Create a BRAINWIRES.md file to add project-specific instructions.\n\
+                "No RULLAMA.md file found in current directory.\n\n\
+                    Create a RULLAMA.md file to add project-specific instructions.\n\
                     You can use @file.md syntax to import other markdown files."
                     .to_string(),
             )),
             Ok(content) => {
                 let message = format!(
-                    "Loaded project instructions from BRAINWIRES.md:\n\n{}\n\n\
+                    "Loaded project instructions from RULLAMA.md:\n\n{}\n\n\
                     These instructions will guide my responses for this project.",
                     content.trim()
                 );
                 Ok(CommandResult::Message(message))
             }
             Err(e) => {
-                anyhow::bail!("Failed to load BRAINWIRES.md: {}", e)
+                anyhow::bail!("Failed to load RULLAMA.md: {}", e)
             }
         }
     }

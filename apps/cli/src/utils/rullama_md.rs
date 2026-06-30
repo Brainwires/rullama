@@ -1,11 +1,11 @@
-//! BRAINWIRES.md / CLAUDE.md Parser
+//! RULLAMA.md / CLAUDE.md Parser
 //!
 //! Parses project-specific instruction files with @file.md import support.
 //!
 //! # Auto-discovery
 //!
 //! [`discover_project_instructions`] walks from the working directory toward
-//! the filesystem root collecting `BRAINWIRES.md` and `CLAUDE.md` files,
+//! the filesystem root collecting `RULLAMA.md` and `CLAUDE.md` files,
 //! then adds global instructions from `~/.claude/` and `~/.rullama/`.
 //! This matches Claude Code's behaviour so users migrating from Claude Code
 //! get their existing `CLAUDE.md` picked up automatically.
@@ -13,7 +13,7 @@
 //! Precedence (highest wins when rules conflict — we just concatenate, the
 //! model applies later rules on top of earlier ones):
 //!
-//! 1. Global user rules (`~/.claude/CLAUDE.md`, `~/.rullama/CLAUDE.md`, `~/.rullama/BRAINWIRES.md`).
+//! 1. Global user rules (`~/.claude/CLAUDE.md`, `~/.rullama/CLAUDE.md`, `~/.rullama/RULLAMA.md`).
 //! 2. Ancestor directories, outermost first, working toward cwd.
 //! 3. The cwd files themselves (applied last so they override ancestors).
 
@@ -31,9 +31,9 @@ const MAX_WALK_UP_DEPTH: usize = 32;
 
 /// Instruction file names we recognize, in lookup priority order.
 ///
-/// When both `BRAINWIRES.md` and `CLAUDE.md` live in the same directory, both
-/// are loaded (BRAINWIRES.md first as the native name) — we don't pick one.
-const INSTRUCTION_FILENAMES: &[&str] = &["BRAINWIRES.md", "CLAUDE.md"];
+/// When both `RULLAMA.md` and `CLAUDE.md` live in the same directory, both
+/// are loaded (RULLAMA.md first as the native name) — we don't pick one.
+const INSTRUCTION_FILENAMES: &[&str] = &["RULLAMA.md", "CLAUDE.md"];
 
 /// A single loaded instruction source.
 #[derive(Debug, Clone)]
@@ -42,9 +42,9 @@ pub struct InstructionSource {
     pub contents: String,
 }
 
-/// Parse a BRAINWIRES.md file and resolve all @file.md imports
+/// Parse a RULLAMA.md file and resolve all @file.md imports
 pub fn load_rullama_instructions(base_path: &Path) -> Result<String> {
-    let rullama_path = base_path.join("BRAINWIRES.md");
+    let rullama_path = base_path.join("RULLAMA.md");
 
     if !rullama_path.exists() {
         return Ok(String::new());
@@ -56,7 +56,7 @@ pub fn load_rullama_instructions(base_path: &Path) -> Result<String> {
 
 /// Discover and load all project and global instruction files.
 ///
-/// Walks from `cwd` toward the filesystem root, collecting `BRAINWIRES.md`
+/// Walks from `cwd` toward the filesystem root, collecting `RULLAMA.md`
 /// and `CLAUDE.md` files along the way. Also reads any files present in
 /// `~/.claude/` and `~/.rullama/` as global user-level instructions.
 ///
@@ -96,7 +96,7 @@ pub fn render_instructions(sources: &[InstructionSource]) -> String {
     let mut out = String::new();
     out.push_str("## Project and User Instructions\n\n");
     out.push_str(
-        "The following instructions come from CLAUDE.md / BRAINWIRES.md files in your working directory tree and user home. Follow them unless they conflict with the user's current message.\n\n",
+        "The following instructions come from CLAUDE.md / RULLAMA.md files in your working directory tree and user home. Follow them unless they conflict with the user's current message.\n\n",
     );
     for src in sources {
         out.push_str(&format!("### From {}\n\n", src.path.display()));
@@ -275,10 +275,10 @@ mod tests {
     #[test]
     fn discover_finds_cwd_rullama_md() {
         let tmp = TempDir::new().unwrap();
-        write(&tmp.path().join("BRAINWIRES.md"), "project rule here\n");
+        write(&tmp.path().join("RULLAMA.md"), "project rule here\n");
 
         let sources = discover_project_instructions(tmp.path());
-        assert!(!sources.is_empty(), "expected to find BRAINWIRES.md");
+        assert!(!sources.is_empty(), "expected to find RULLAMA.md");
         assert!(
             sources
                 .iter()

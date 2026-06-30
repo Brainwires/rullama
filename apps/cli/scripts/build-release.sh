@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Build and upload Brainwires CLI releases for Linux/Windows platforms
+# Build and upload rullama CLI releases for Linux/Windows platforms
 # This script is triggered by the CI webhook when a tag is pushed
 #
 # Usage:
@@ -39,7 +39,7 @@ else
 fi
 
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}Brainwires CLI Release Build${NC}"
+echo -e "${GREEN}rullama CLI Release Build${NC}"
 echo -e "${GREEN}Version: ${CLI_VERSION}${NC}"
 if [ "$TARGET_FILTER" != "all" ]; then
     echo -e "${GREEN}Target: ${TARGET_FILTER}${NC}"
@@ -189,7 +189,7 @@ build_and_upload_windows() {
         return 1
     }
 
-    local BINARY_PATH="target/${TARGET}/release/brainwires.exe"
+    local BINARY_PATH="target/${TARGET}/release/rullama.exe"
 
     if [ -f "$BINARY_PATH" ]; then
         # Create archive (zip for Windows)

@@ -476,10 +476,10 @@ pub fn register_builtin_commands(registry: &mut CommandRegistry) {
         .with_arg("mode".to_string(), Some("Approval mode: suggest, auto-edit, or full-auto".to_string()), false)
     );
 
-    // /rullama - Load project instructions from BRAINWIRES.md
+    // /rullama - Load project instructions from RULLAMA.md
     registry.register(Command::builtin(
         "rullama".to_string(),
-        "Load project-specific instructions from BRAINWIRES.md (supports @file.md imports)"
+        "Load project-specific instructions from RULLAMA.md (supports @file.md imports)"
             .to_string(),
         "".to_string(),
     ));
