@@ -1,19 +1,23 @@
 # rullama-native
 
-A closed-source, paid **.NET / Avalonia** port of [rullama](https://github.com/Brainwires/rullama) — on-device Gemma 4 inference (pure Rust + wgpu) for **macOS, Windows, Linux** desktop, with **Android** (and later **iOS**) heads. It reuses the published Rust crates (`rullama`, `rullama-finetune` v0.5) via a native C-ABI bridge rather than reimplementing inference.
+The **`apps/native/`** app of the [rullama](https://github.com/Brainwires/rullama)
+monorepo — a **.NET / Avalonia** front-end for on-device Gemma 4 inference (pure
+Rust + wgpu) on **macOS, Windows, Linux** desktop, with **Android** (and later
+**iOS**) heads. It links the engine crates (`rullama-engine` + `rullama-lora`, in
+the sibling `rullama-framework` repo) via a native C-ABI bridge rather than
+reimplementing inference. Shipped through the app stores; open source under the
+repo's dual MIT/Apache license.
 
 Avalonia was chosen over React Native because it builds the desktop app with the plain **.NET SDK** (no Xcode), so the full desktop product builds and runs on the current dev machine (Intel Mac / macOS Ventura) — and the validated Rust bridge carries over unchanged via P/Invoke.
 
-See the full design in `~/.claude/plans/this-folder-is-greenfield-eventual-bonbon.md`.
-
 ## Architecture (one line)
 
-`Avalonia UI (XAML + C# MVVM)` → `RustCore (P/Invoke / DllImport)` → `rust-core (C-ABI shim)` → `rullama 0.5 (wgpu: Metal/DX12/Vulkan)`. The native `Model` is `!Send`, so each model handle owns one OS thread for its lifetime; all engine calls are marshalled to that thread inside Rust.
+`Avalonia UI (XAML + C# MVVM)` → `RustCore (P/Invoke / DllImport)` → `rust-core (C-ABI shim)` → `rullama-engine (wgpu: Metal/DX12/Vulkan)`. The native `Model` is `!Send`, so each model handle owns one OS thread for its lifetime; all engine calls are marshalled to that thread inside Rust.
 
 ## Layout
 
 ```
-rust-core/                 Rust C-ABI shim over rullama 0.5 (cdylib + staticlib + rlib)
+rust-core/                 Rust C-ABI shim over rullama-engine (cdylib + staticlib + rlib)
   src/lib.rs               owning-thread command loop; M0: wgpu probe
   include/rullama_ffi.h    cbindgen-generated header (reference for the C ABI)
 app/                       .NET / Avalonia solution (Rullama.sln)
@@ -55,8 +59,6 @@ Verified end-to-end on an Intel Mac (no Xcode), against real models:
 
 **Known caveats (hardware-bound, not code):** this 2017 AMD GPU runs ~1 tok/s, so big prompts/training are slow. **Live mic capture** (push-to-talk/VAD) is the one unbuilt piece — it needs a microphone to implement + verify; the audio-understanding backend it feeds (`rl_encode_audio`) is done and verified via file input.
 
-Stage 2 (fine-tuning, RAG, voice-cloning, ROME/MEMIT, mobile) is planned next.
-
 ## Develop
 
 ```bash
@@ -78,4 +80,9 @@ dotnet run --project Rullama.Desktop
 scripts/package-macos.sh            # → dist/Rullama.app (unsigned, self-contained)
 # distribute: codesign + notarytool with an Apple Developer ID
 ```
-Windows/Linux packaging + signed builds run in CI (`.github/workflows/ci.yml`).
+Windows/Linux packaging + signed builds run in the monorepo's root CI.
+
+## License
+
+Dual-licensed under either of MIT or Apache-2.0 at your option — the same terms
+as the rest of the [rullama](https://github.com/Brainwires/rullama) repo.

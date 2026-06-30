@@ -1,18 +1,17 @@
 # rullama-cli
 
 > The agentic CLI of the **rullama** product family (installed binary: `rullama`).
-> Extracted from the `rullama-framework` monorepo into its own repo. It builds
-> on the **rullama** platform crates, resolved via path to a sibling
-> `../rullama-framework` checkout (these flip to crates.io version pins once
-> the harness is published). Deeper rebrand of internal "rullama" strings is a
-> follow-up; the crate + binary are renamed.
+> Lives at `apps/cli/` in the [rullama](https://github.com/Brainwires/rullama)
+> monorepo. It builds on the platform crates from the sibling `rullama-framework`
+> repo, resolved via path-deps (`../../../rullama-framework`); these flip to
+> crates.io version pins once the harness is published.
 
 An AI-powered agentic CLI tool for autonomous coding assistance, built in Rust.
 
 ## Features
 
 - 🤖 **Multi-Agent Architecture**: Orchestrator and worker agents for complex task decomposition
-- 🔐 **Authentication**: Seamless integration with Brainwires Studio backend
+- 🔐 **Authentication**: BYOK — bring your own provider key (Anthropic / OpenAI / Google / Ollama-local / …)
 - 🛠️ **Rich Tool System**: File operations, bash execution, git integration, web operations
 - 🔌 **MCP Client**: Connect to Model Context Protocol servers for extended functionality
 - 💬 **Flexible Chat Modes**: Interactive, single-shot, batch, TUI, and MCP server modes
@@ -25,7 +24,7 @@ An AI-powered agentic CLI tool for autonomous coding assistance, built in Rust.
 - 🌲 **Plan Branching**: Create sub-plans, merge branches, and view plan hierarchies
 - 📄 **Plan Templates**: Save and reuse plan templates with variable substitution
 - 🔍 **Plan Search**: Semantic search across all stored plans
-- 🌐 **Remote Control**: Control CLI agents from the web interface via secure bridge
+- 🌐 **Remote Control** *(legacy, off by default)*: control CLI agents over a cloud relay — behind the `remote-bridge` feature; the hosted backend is discontinued
 - 🌳 **Collapsible Journal Tree**: TUI Journal view renders conversation as a navigable, collapsible tree (Turn → Message → ToolCall → SubAgentSpawn) with vim-style `j/k/h/l` navigation
 - 🔭 **Sub-Agent Viewer** (`Ctrl+B`): Live split-pane view of running sub-agents with status icons, activity detail, and direct IPC messaging
 - 🧪 **Local LLM Inference** *(optional)*: Run models locally via the framework's `rullama-provider` crate (`--features llama-cpp-2`)
@@ -213,7 +212,7 @@ cat questions.txt | rullama chat --batch --format=json > results.json
 git diff | rullama chat --prompt "Summarize these changes" --quiet
 ```
 
-For comprehensive documentation on all chat modes, see [docs/CLI_CHAT_MODES.md](docs/CLI_CHAT_MODES.md).
+For comprehensive documentation on all chat modes, see [docs/interface/CLI_CHAT_MODES.md](docs/interface/CLI_CHAT_MODES.md).
 
 ### Configuration
 
@@ -250,54 +249,32 @@ List available tools:
 rullama mcp tools
 ```
 
-### Remote Control
+### Remote Control *(legacy — off by default)*
 
-Control your CLI agents remotely from the Brainwires Studio web interface.
+> The remote bridge let you drive CLI agents from a web UI over a cloud relay.
+> The hosted backend (Brainwires Studio) is **discontinued**, so this is disabled
+> by default and gated behind the `remote-bridge` cargo feature. The code is kept
+> because a similar capability is likely to return — point `--url` at your own
+> compatible relay to use it.
 
-#### Setup
-
-```bash
-# Enable remote control
-rullama remote config --enabled true
-
-# Set your API key (from Brainwires Studio account settings)
-rullama remote config --api-key bw_prod_xxxxx
-
-# Start the bridge
-rullama remote start
-```
-
-#### Commands
+Build with the feature, then configure the bridge against your own backend:
 
 ```bash
-rullama remote start      # Start the bridge
-rullama remote stop       # Stop the bridge
-rullama remote status     # Check connection status
-rullama remote config     # View/modify settings
+cargo build --release --features remote-bridge
+rullama remote config --enabled true --url <your-relay-url> --api-key <your-key>
+rullama remote start      # start | stop | status | config
 ```
-
-#### Configuration Options
 
 | Option | Description |
 |--------|-------------|
-| `--enabled true/false` | Enable/disable remote bridge |
-| `--url <backend-url>` | Set backend URL |
-| `--api-key <key>` | Set API key for authentication |
-| `--heartbeat <seconds>` | Set heartbeat interval |
+| `--enabled true/false` | Enable/disable the remote bridge |
+| `--url <backend-url>` | Relay backend URL (no default — discontinued hosted one removed) |
+| `--api-key <key>` | API key for the relay |
+| `--heartbeat <seconds>` | Heartbeat interval |
 
-#### Usage
-
-1. **CLI side**: Configure and start the bridge:
-   ```bash
-   rullama remote config --enabled true --api-key <your-key>
-   rullama remote start
-   ```
-
-2. **Web side**: Navigate to `/cli/remote` in Brainwires Studio to see and control your connected agents
-
-The bridge collects status from all running agents and reports to the backend. You can then view agent status, send messages, execute slash commands, and cancel operations from the web interface.
-
-For detailed architecture documentation, see [docs/IPC_AND_REMOTE_CONTROL.md](docs/IPC_AND_REMOTE_CONTROL.md).
+The bridge reports running-agent status to the backend and accepts messages,
+slash commands, and cancellations. For the protocol/architecture, see
+[docs/distributed-swarms/IPC_AND_REMOTE_CONTROL.md](docs/distributed-swarms/IPC_AND_REMOTE_CONTROL.md).
 
 ### View Models
 
@@ -359,7 +336,7 @@ rullama chat
 > /project:git-search bug fix 20
 ```
 
-For detailed documentation, see [docs/SLASH_COMMANDS_RAG.md](docs/SLASH_COMMANDS_RAG.md).
+For detailed documentation, see [docs/interface/SLASH_COMMANDS_RAG.md](docs/interface/SLASH_COMMANDS_RAG.md).
 
 ### Task Management Commands
 
@@ -526,7 +503,7 @@ rullama CLI features an advanced context management system that provides effecti
 - **Efficient**: Only retrieves what's relevant, preserving token budget
 - **Persistent**: Conversations survive across sessions via LanceDB storage
 
-For technical details, see [docs/INFINITE_CONTEXT.md](docs/INFINITE_CONTEXT.md).
+For technical details, see [docs/infinite-context/INFINITE_CONTEXT.md](docs/infinite-context/INFINITE_CONTEXT.md).
 
 ## Configuration
 
@@ -537,7 +514,6 @@ Configuration is stored in `~/.rullama/config.json`:
   "provider": "anthropic",
   "model": "claude-3-5-sonnet-20241022",
   "permission_mode": "auto",
-  "backend_url": "https://brainwires.studio",
   "temperature": 0.7,
   "max_tokens": 4096
 }
@@ -545,16 +521,14 @@ Configuration is stored in `~/.rullama/config.json`:
 
 ## Supported Providers
 
-Provider integrations are supplied by the framework's `rullama-provider` crate:
+Provider integrations are supplied by the framework's `rullama-provider` crate
+(BYOK — bring your own key):
 
 - **Anthropic** (Claude models)
 - **OpenAI** (GPT models, o1)
 - **Google** (Gemini models)
-- **Ollama** (Local models)
-
-The CLI adds one additional provider:
-
-- **Brainwires Studio** (`BrainwiresHttpProvider`) — multi-provider backend that routes requests through the Studio API
+- **Ollama** (local models)
+- …plus Groq, Together, Fireworks, MiniMax, Amazon Bedrock, and Google Vertex AI.
 
 ## Development
 
@@ -585,14 +559,10 @@ cargo run -- chat
 
 ## Architecture
 
-rullama CLI is built on the **rullama framework**, a submodule of 32 crates exposed through a feature-gated facade.
-
-### rullama framework (`crates/rullama-framework/`)
-
-The framework provides all core capabilities. The CLI depends on a single facade crate:
+rullama CLI is built on the **rullama-framework** platform crates, exposed through a feature-gated facade. The CLI depends on a single facade crate from the sibling repo:
 
 ```toml
-rullama = { path = "crates/rullama-framework/crates/rullama", features = ["full"] }
+rullama = { path = "../../../rullama-framework/crates/rullama", features = ["full"] }
 ```
 
 The framework crates, grouped by function:
@@ -616,7 +586,8 @@ The CLI adds application-specific code on top of the framework:
 
 ## License
 
-MIT
+Dual-licensed under either of MIT or Apache-2.0 at your option — the same terms
+as the rest of the [rullama](https://github.com/Brainwires/rullama) repo.
 
 ## Contributing
 

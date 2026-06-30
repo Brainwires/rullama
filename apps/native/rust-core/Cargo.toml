@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
 publish = false
-description = "C-ABI FFI shim over the rullama-engine crate, consumed by the React Native JSI TurboModule."
+description = "C-ABI FFI shim over the rullama-engine crate, consumed by the .NET/Avalonia app via P/Invoke."
 
 [lib]
 name = "rullama_core"
