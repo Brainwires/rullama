@@ -1,7 +1,8 @@
-/target
-# rullama-devserver is excluded from the workspace (see top-level Cargo.toml)
-# so it builds into its own target/ + Cargo.lock under its crate dir.
-/dev-server/target
+# Rust build artifacts — any `target/` dir at any depth. Covers the root xtask
+# workspace AND the `dev-server/` crate (the devserver is excluded from the
+# workspace per the top-level Cargo.toml, so it builds into its own
+# `dev-server/target/` + `dev-server/Cargo.lock`).
+target/
 /dev-server/Cargo.lock
 **/*.rs.bk
 Cargo.lock.bak
