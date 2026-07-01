@@ -37,7 +37,7 @@ pub async fn fallback_handler(State(state): State<Arc<AppState>>, req: Request) 
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!(
-                    "dist/ not built; run `pnpm --filter rullama-web build` (looked in {})",
+                    "dist/ not built; run `pnpm -C apps/web build` (looked in {})",
                     dist_dir.display()
                 ),
             )

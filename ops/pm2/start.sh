@@ -75,13 +75,18 @@ else
     echo "[pm2-start] no engine checkout at $ENGINE_DIR — serving prebuilt pkg/ as-is."
 fi
 
-echo "[pm2-start] rebuilding web/dist (vite)…"
-if (cd apps/web && pnpm exec vite build); then
+echo "[pm2-start] rebuilding web/dist (emit-version + vite)…"
+# emit-version FIRST so the fresh public/version.json is bundled into dist/ —
+# the PWA update banner (usePwaUpdate.ts) boots off /version.json, so a rebuild
+# that skips it leaves clients unaware a new deploy is live. We intentionally
+# skip `tsc -b` (unlike `pnpm build`) so a type error doesn't crash-loop the
+# restart — vite still emits a working bundle.
+if (cd apps/web && node scripts/emit-version.mjs && pnpm exec vite build); then
     echo "[pm2-start] web/dist rebuilt ✓"
 else
-    # Don't crash-loop the server on a TS error — serve the last good dist and
-    # warn loudly. Fix the build, then `pm2 restart` again.
-    echo "[pm2-start] ⚠ vite build FAILED — serving the previous web/dist. Fix the error and restart." >&2
+    # Don't crash-loop the server on a build error — serve the last good dist
+    # and warn loudly. Fix the build, then `pm2 restart` again.
+    echo "[pm2-start] ⚠ web build FAILED — serving the previous web/dist. Fix the error and restart." >&2
 fi
 
 echo "[pm2-start] launching rullama-devserver (--public, static dist)"
