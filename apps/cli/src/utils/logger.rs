@@ -69,7 +69,7 @@ pub fn init_with_options(enable_output: bool, quiet: bool) {
     let _ = std::fs::create_dir_all(&log_dir);
 
     // Create file appender with daily rotation
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "brainwires.log");
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "rullama.log");
     let (non_blocking_file, _guard) = tracing_appender::non_blocking(file_appender);
 
     // Filter level based on environment. Explicit `RUST_LOG` always wins so
@@ -223,7 +223,7 @@ fn get_log_directory() -> Result<PathBuf, std::env::VarError> {
 pub fn get_current_log_file() -> Option<PathBuf> {
     let log_dir = get_log_directory().ok()?;
     let date = chrono::Local::now().format("%Y-%m-%d");
-    Some(log_dir.join(format!("brainwires.log.{}", date)))
+    Some(log_dir.join(format!("rullama.log.{}", date)))
 }
 
 #[cfg(test)]

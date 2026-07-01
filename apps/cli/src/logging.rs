@@ -1,5 +1,5 @@
 // File logging with daily rotation to ~/.rullama/logs/
-// Logs to file: ~/.rullama/logs/brainwires.log.YYYY-MM-DD
+// Logs to file: ~/.rullama/logs/rullama.log.YYYY-MM-DD
 //! Comprehensive logging system for rullama-cli
 //!
 //! Logs to both stdout and rotating files in ~/.rullama/logs/
@@ -15,7 +15,7 @@ pub fn init_logging() -> Result<()> {
     std::fs::create_dir_all(&log_dir)?;
 
     // Create file appender with daily rotation
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "brainwires.log");
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "rullama.log");
     let (non_blocking_file, _guard) = tracing_appender::non_blocking(file_appender);
 
     // Create stdout appender
@@ -60,5 +60,5 @@ fn get_log_directory() -> Result<PathBuf> {
 pub fn get_current_log_file() -> Result<PathBuf> {
     let log_dir = get_log_directory()?;
     let date = chrono::Local::now().format("%Y-%m-%d");
-    Ok(log_dir.join(format!("brainwires.log.{}", date)))
+    Ok(log_dir.join(format!("rullama.log.{}", date)))
 }

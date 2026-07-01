@@ -25,7 +25,7 @@ for scalars, arrays concatenate):
    `.gitignore`.
 
 "Project root" is the first ancestor of your current directory containing one
-of `.git`, `.rullama/`, `BRAINWIRES.md`, or `CLAUDE.md`.
+of `.git`, `.rullama/`, `RULLAMA.md`, or `CLAUDE.md`.
 
 Malformed JSON in any single file is logged via `tracing` and skipped — one bad
 file never disables every other rule.
@@ -229,7 +229,7 @@ entries (e.g., from a manual `rm`) prune automatically.
 ### Opt-out
 
 Set `RULLAMA_DISABLE_AUTO_MEMORY=1` to skip memory injection for one run.
-Mirrors `RULLAMA_DISABLE_AUTO_INSTRUCTIONS` for `BRAINWIRES.md`/`CLAUDE.md`.
+Mirrors `RULLAMA_DISABLE_AUTO_INSTRUCTIONS` for `RULLAMA.md`/`CLAUDE.md`.
 
 ---
 

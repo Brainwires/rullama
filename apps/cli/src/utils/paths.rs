@@ -83,21 +83,21 @@ impl PlatformPaths {
         }
     }
 
-    /// Get Brainwires-specific data directory
+    /// Get rullama-specific data directory
     ///
     /// Returns: {data_dir}/rullama
     pub fn rullama_data_dir() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("rullama"))
     }
 
-    /// Get Brainwires-specific cache directory
+    /// Get rullama-specific cache directory
     ///
     /// Returns: {cache_dir}/rullama
     pub fn rullama_cache_dir() -> Result<PathBuf> {
         Ok(Self::cache_dir()?.join("rullama"))
     }
 
-    /// Get Brainwires-specific config directory
+    /// Get rullama-specific config directory
     ///
     /// Returns: {config_dir}/rullama
     pub fn rullama_config_dir() -> Result<PathBuf> {

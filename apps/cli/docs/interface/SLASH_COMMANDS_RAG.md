@@ -448,4 +448,4 @@ The AI assistant can use these commands to explore your codebase and provide inf
 
 - [MCP Server Documentation](MCP_SERVER.md)
 - [Configuration Guide](../README.md#configuration)
-- [Slash Commands Reference](../BRAINWIRES.md#slash-commands)
+- [Slash Commands Reference](../RULLAMA.md#slash-commands)
