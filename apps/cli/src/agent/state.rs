@@ -24,9 +24,7 @@ use crate::utils::checkpoint::CheckpointManager;
 use crate::utils::paths::PlatformPaths;
 use crate::utils::system_prompt::build_system_prompt;
 use rullama::agent_network::ipc::{AgentMessage, DisplayMessage};
-use rullama::knowledge::bks_pks::{
-    BehavioralKnowledgeCache, LearningCollector, detect_correction,
-};
+use rullama::knowledge::bks_pks::{BehavioralKnowledgeCache, LearningCollector, detect_correction};
 
 /// Core agent state that persists across viewer attach/detach cycles
 pub struct AgentState {

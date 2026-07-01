@@ -1647,7 +1647,10 @@ impl App {
         if single_line.len() <= max_len {
             single_line
         } else {
-            format!("{}...", &single_line[..max_len.saturating_sub(3)])
+            format!(
+                "{}...",
+                crate::utils::truncate_on_char_boundary(&single_line, max_len.saturating_sub(3))
+            )
         }
     }
 

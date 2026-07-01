@@ -31,14 +31,14 @@ use std::thread::JoinHandle;
 use rullama_engine::api::{Model, RomeIterativeHparams};
 use rullama_engine::backend::WgpuCtx;
 use rullama_engine::embed::EmbeddingModel;
-use rullama_engine::imagegen::{FileBlobSource, ImageBundle, VaeConfig, rgb_chw_to_rgba8};
-use tokenizers::Tokenizer;
 use rullama_engine::gguf::{FileFetcher, TensorFetcher};
+use rullama_engine::imagegen::{FileBlobSource, ImageBundle, VaeConfig, rgb_chw_to_rgba8};
 use rullama_engine::sampling::SamplingOptions;
 use rullama_engine::styletts2_clone::StyleTtsClone;
 use rullama_engine::tts::KokoroTts;
 use rullama_lora::session::TrainingSession;
 use rullama_lora::shared::config::{LoraConfig, LrScheduler, TrainingHyperparams};
+use tokenizers::Tokenizer;
 
 // ---------------------------------------------------------------------------
 // Thread-local last-error (set on, and read from, the calling thread)
@@ -98,7 +98,9 @@ unsafe fn c_str<'a>(p: *const c_char) -> Result<&'a str, &'static str> {
     if p.is_null() {
         return Err("null string");
     }
-    unsafe { CStr::from_ptr(p) }.to_str().map_err(|_| "invalid utf-8")
+    unsafe { CStr::from_ptr(p) }
+        .to_str()
+        .map_err(|_| "invalid utf-8")
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +250,12 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
                     limits.max_storage_buffer_binding_size,
                 )));
             }
-            Command::LoadPath { path, max_ctx, text_only, reply } => {
+            Command::LoadPath {
+                path,
+                max_ctx,
+                text_only,
+                reply,
+            } => {
                 let res = (|| -> Result<Model, String> {
                     let fetcher = FileFetcher::open(std::path::Path::new(&path))
                         .map_err(|e| format!("{e}"))?;
@@ -273,14 +280,18 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
             }
             Command::Encode { text, reply } => {
                 // Fall back to the trainer's model so tokenization works during training.
-                let mref = model.as_ref().or_else(|| trainer.as_ref().map(|t| t.model()));
+                let mref = model
+                    .as_ref()
+                    .or_else(|| trainer.as_ref().map(|t| t.model()));
                 let _ = reply.send(match mref {
                     Some(m) => Ok(m.encode_tokens(&text)),
                     None => Err("no model loaded".into()),
                 });
             }
             Command::TokenStr { id, reply } => {
-                let mref = model.as_ref().or_else(|| trainer.as_ref().map(|t| t.model()));
+                let mref = model
+                    .as_ref()
+                    .or_else(|| trainer.as_ref().map(|t| t.model()));
                 let _ = reply.send(mref.and_then(|m| m.token_str_native(id)));
             }
             Command::SetSampling { opts, reply } => {
@@ -296,13 +307,20 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
                 let _ = reply.send(());
             }
             Command::VocabSize(reply) => {
-                let mref = model.as_ref().or_else(|| trainer.as_ref().map(|t| t.model()));
+                let mref = model
+                    .as_ref()
+                    .or_else(|| trainer.as_ref().map(|t| t.model()));
                 let _ = reply.send(mref.map_or(0, |m| m.vocab_size_native()));
             }
             Command::Position(reply) => {
                 let _ = reply.send(model.as_ref().map_or(0, |m| m.position_native()));
             }
-            Command::Generate { prompt, max_new, cb, reply } => {
+            Command::Generate {
+                prompt,
+                max_new,
+                cb,
+                reply,
+            } => {
                 let Some(m) = model.as_mut() else {
                     let _ = reply.send(Err("no model loaded".into()));
                     continue;
@@ -330,14 +348,27 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
             }
             Command::Sentinels { audio, reply } => {
                 let r = model.as_ref().and_then(|m| {
-                    if audio { m.audio_sentinel_ids_native() } else { m.image_sentinel_ids_native() }
+                    if audio {
+                        m.audio_sentinel_ids_native()
+                    } else {
+                        m.image_sentinel_ids_native()
+                    }
                 });
                 let _ = reply.send(r);
             }
             Command::ImageSoftCount { h, w, reply } => {
-                let _ = reply.send(model.as_ref().and_then(|m| m.image_soft_token_count_native(h, w)));
+                let _ = reply.send(
+                    model
+                        .as_ref()
+                        .and_then(|m| m.image_soft_token_count_native(h, w)),
+                );
             }
-            Command::EncodeImage { pixels, h, w, reply } => {
+            Command::EncodeImage {
+                pixels,
+                h,
+                w,
+                reply,
+            } => {
                 let res = match model.as_mut() {
                     Some(m) => pollster::block_on(m.encode_image_native(&pixels, h, w, None))
                         .map_err(|e| format!("{e}")),
@@ -347,13 +378,21 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
             }
             Command::EncodeAudio { pcm, reply } => {
                 let res = match model.as_mut() {
-                    Some(m) => pollster::block_on(m.encode_audio_native(&pcm)).map_err(|e| format!("{e}")),
+                    Some(m) => {
+                        pollster::block_on(m.encode_audio_native(&pcm)).map_err(|e| format!("{e}"))
+                    }
                     None => Err("no model loaded".into()),
                 };
                 let _ = reply.send(res);
             }
             Command::GenerateSpliced {
-                prompt, sentinel_begin, soft, d_text, max_new, cb, reply,
+                prompt,
+                sentinel_begin,
+                soft,
+                d_text,
+                max_new,
+                cb,
+                reply,
             } => {
                 let Some(m) = model.as_mut() else {
                     let _ = reply.send(Err("no model loaded".into()));
@@ -384,39 +423,68 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
                 })();
                 let _ = reply.send(res);
             }
-            Command::TrainerBegin { rank, alpha, dropout, target_modules, max_seq_len, learning_rate, reply } => {
+            Command::TrainerBegin {
+                rank,
+                alpha,
+                dropout,
+                target_modules,
+                max_seq_len,
+                learning_rate,
+                reply,
+            } => {
                 let Some(m) = model.take() else {
                     let _ = reply.send(Err("no model loaded".into()));
                     continue;
                 };
-                let mut lora = LoraConfig::default();
-                lora.rank = rank;
-                lora.alpha = alpha;
-                lora.dropout = dropout;
-                if !target_modules.is_empty() { lora.target_modules = target_modules; }
-                let mut hp = TrainingHyperparams::default();
-                hp.epochs = 1;
-                hp.batch_size = 1;
-                hp.gradient_accumulation_steps = 1;
-                hp.warmup_steps = 0;
-                hp.lr_scheduler = LrScheduler::Constant;
-                hp.max_seq_len = max_seq_len;
-                hp.learning_rate = learning_rate;
+                let lora = LoraConfig {
+                    rank,
+                    alpha,
+                    dropout,
+                    target_modules: if target_modules.is_empty() {
+                        LoraConfig::default().target_modules
+                    } else {
+                        target_modules
+                    },
+                    ..Default::default()
+                };
+                let hp = TrainingHyperparams {
+                    epochs: 1,
+                    batch_size: 1,
+                    gradient_accumulation_steps: 1,
+                    warmup_steps: 0,
+                    lr_scheduler: LrScheduler::Constant,
+                    max_seq_len,
+                    learning_rate,
+                    ..Default::default()
+                };
                 match TrainingSession::new(m, lora, hp) {
-                    Ok(t) => { trainer = Some(t); let _ = reply.send(Ok(())); }
-                    Err(e) => { let _ = reply.send(Err(format!("{e:?}"))); } // model consumed on error
+                    Ok(t) => {
+                        trainer = Some(t);
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(format!("{e:?}")));
+                    } // model consumed on error
                 }
             }
-            Command::TrainerStep { input_ids, target, reply } => {
+            Command::TrainerStep {
+                input_ids,
+                target,
+                reply,
+            } => {
                 let r = match trainer.as_mut() {
-                    Some(t) => pollster::block_on(t.step(&input_ids, target)).map_err(|e| format!("{e:?}")),
+                    Some(t) => {
+                        pollster::block_on(t.step(&input_ids, target)).map_err(|e| format!("{e:?}"))
+                    }
                     None => Err("no trainer (call rl_trainer_begin)".into()),
                 };
                 let _ = reply.send(r);
             }
             Command::TrainerSaveAdapter { reply } => {
                 let r = match trainer.as_ref() {
-                    Some(t) => pollster::block_on(t.save_adapter_to_bytes()).map_err(|e| format!("{e:?}")),
+                    Some(t) => {
+                        pollster::block_on(t.save_adapter_to_bytes()).map_err(|e| format!("{e:?}"))
+                    }
                     None => Err("no trainer".into()),
                 };
                 let _ = reply.send(r);
@@ -429,21 +497,39 @@ fn worker(rx: mpsc::Receiver<Command>, cancel: Arc<AtomicBool>) {
                 let _ = reply.send(r);
             }
             Command::ClearAdapter(reply) => {
-                if let Some(m) = model.as_mut() { m.clear_adapter_native(); }
+                if let Some(m) = model.as_mut() {
+                    m.clear_adapter_native();
+                }
                 let _ = reply.send(());
             }
-            Command::RomeEdit { prompt, subject, target, layer, reply } => {
+            Command::RomeEdit {
+                prompt,
+                subject,
+                target,
+                layer,
+                reply,
+            } => {
                 let r = (|| -> Result<(), String> {
                     let m = model.as_mut().ok_or("no model loaded")?;
                     let prompt_ids = m.encode_tokens(&prompt);
-                    let t = if target.starts_with(' ') { target.clone() } else { format!(" {target}") };
+                    let t = if target.starts_with(' ') {
+                        target.clone()
+                    } else {
+                        format!(" {target}")
+                    };
                     let target_ids = m.encode_tokens(&t);
                     let target_id = *target_ids.first().ok_or("empty target")?;
-                    let pos = m.find_subject_last_pos(&prompt_ids, &subject)
+                    let pos = m
+                        .find_subject_last_pos(&prompt_ids, &subject)
                         .ok_or("subject not found in prompt")?;
                     pollster::block_on(m.rome_edit_iterative_native(
-                        &prompt_ids, pos, layer, target_id, RomeIterativeHparams::default(),
-                    )).map_err(|e| format!("{e}"))?;
+                        &prompt_ids,
+                        pos,
+                        layer,
+                        target_id,
+                        RomeIterativeHparams::default(),
+                    ))
+                    .map_err(|e| format!("{e}"))?;
                     Ok(())
                 })();
                 let _ = reply.send(r);
@@ -466,7 +552,10 @@ fn decode_loop(
         if cancel.load(Ordering::SeqCst) || m.is_eos_native(cur) {
             break;
         }
-        let piece = m.token_str_native(cur).unwrap_or_default().replace('\u{2581}', " ");
+        let piece = m
+            .token_str_native(cur)
+            .unwrap_or_default()
+            .replace('\u{2581}', " ");
         let cpiece = CString::new(piece).unwrap_or_default();
         (cb.f)(cb.ctx, cur, cpiece.as_ptr(), 0);
         produced += 1;
@@ -846,7 +935,11 @@ unsafe fn sentinels(m: *mut RlModel, audio: bool, begin: *mut u32, end: *mut u32
 /// # Safety
 /// `m` valid; `begin`/`end` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rl_image_sentinel_ids(m: *mut RlModel, begin: *mut u32, end: *mut u32) -> i32 {
+pub unsafe extern "C" fn rl_image_sentinel_ids(
+    m: *mut RlModel,
+    begin: *mut u32,
+    end: *mut u32,
+) -> i32 {
     unsafe { sentinels(m, false, begin, end) }
 }
 
@@ -854,7 +947,11 @@ pub unsafe extern "C" fn rl_image_sentinel_ids(m: *mut RlModel, begin: *mut u32,
 /// # Safety
 /// `m` valid; `begin`/`end` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rl_audio_sentinel_ids(m: *mut RlModel, begin: *mut u32, end: *mut u32) -> i32 {
+pub unsafe extern "C" fn rl_audio_sentinel_ids(
+    m: *mut RlModel,
+    begin: *mut u32,
+    end: *mut u32,
+) -> i32 {
     unsafe { sentinels(m, true, begin, end) }
 }
 
@@ -887,8 +984,17 @@ pub unsafe extern "C" fn rl_encode_image(
         set_last_error("null out");
         return -2;
     }
-    let pixels = if pixels.is_null() { Vec::new() } else { unsafe { std::slice::from_raw_parts(pixels, n) }.to_vec() };
-    match call(m, |reply| Command::EncodeImage { pixels, h, w, reply }) {
+    let pixels = if pixels.is_null() {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(pixels, n) }.to_vec()
+    };
+    match call(m, |reply| Command::EncodeImage {
+        pixels,
+        h,
+        w,
+        reply,
+    }) {
         Ok(Ok(v)) => {
             put_f32(v, out, out_len);
             0
@@ -916,7 +1022,11 @@ pub unsafe extern "C" fn rl_encode_audio(
         set_last_error("null out");
         return -2;
     }
-    let pcm = if pcm.is_null() { Vec::new() } else { unsafe { std::slice::from_raw_parts(pcm, n) }.to_vec() };
+    let pcm = if pcm.is_null() {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(pcm, n) }.to_vec()
+    };
     match call(m, |reply| Command::EncodeAudio { pcm, reply }) {
         Ok(Ok(v)) => {
             put_f32(v, out, out_len);
@@ -935,7 +1045,12 @@ pub unsafe extern "C" fn rl_encode_audio(
 /// # Safety
 /// `bytes`/`n` a valid array; `out`/`out_len` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rl_decode_wav(bytes: *const u8, n: usize, out: *mut *mut f32, out_len: *mut usize) -> i32 {
+pub unsafe extern "C" fn rl_decode_wav(
+    bytes: *const u8,
+    n: usize,
+    out: *mut *mut f32,
+    out_len: *mut usize,
+) -> i32 {
     if bytes.is_null() || out.is_null() || out_len.is_null() {
         set_last_error("null");
         return -2;
@@ -972,8 +1087,16 @@ pub unsafe extern "C" fn rl_generate_spliced(
     cb: TokenFn,
     ctx: *mut c_void,
 ) -> i32 {
-    let prompt = if prompt.is_null() || n == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(prompt, n) }.to_vec() };
-    let soft = if soft.is_null() || soft_len == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(soft, soft_len) }.to_vec() };
+    let prompt = if prompt.is_null() || n == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(prompt, n) }.to_vec()
+    };
+    let soft = if soft.is_null() || soft_len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(soft, soft_len) }.to_vec()
+    };
     let cb = TokenCb { f: cb, ctx };
     match call(m, |reply| Command::GenerateSpliced {
         prompt,
@@ -1000,9 +1123,20 @@ pub unsafe extern "C" fn rl_generate_spliced(
 const TTS_SAMPLE_RATE: u32 = 24_000;
 
 enum TtsCommand {
-    Load { bytes: Vec<u8>, reply: Sender<Result<(), String>> },
-    SetLexicon { gold: Vec<u8>, silver: Vec<u8>, reply: Sender<()> },
-    Synthesize { text: String, voice: String, reply: Sender<Result<Vec<f32>, String>> },
+    Load {
+        bytes: Vec<u8>,
+        reply: Sender<Result<(), String>>,
+    },
+    SetLexicon {
+        gold: Vec<u8>,
+        silver: Vec<u8>,
+        reply: Sender<()>,
+    },
+    Synthesize {
+        text: String,
+        voice: String,
+        reply: Sender<Result<Vec<f32>, String>>,
+    },
     Shutdown,
 }
 
@@ -1011,20 +1145,33 @@ fn tts_worker(rx: mpsc::Receiver<TtsCommand>) {
     for cmd in rx {
         match cmd {
             TtsCommand::Load { bytes, reply } => {
-                let r = pollster::block_on(KokoroTts::load_native(bytes)).map_err(|e| format!("{e}"));
+                let r =
+                    pollster::block_on(KokoroTts::load_native(bytes)).map_err(|e| format!("{e}"));
                 match r {
-                    Ok(t) => { tts = Some(t); let _ = reply.send(Ok(())); }
-                    Err(e) => { let _ = reply.send(Err(e)); }
+                    Ok(t) => {
+                        tts = Some(t);
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
                 }
             }
-            TtsCommand::SetLexicon { gold, silver, reply } => {
-                if let Some(t) = tts.as_mut() { t.set_lexicon_native(&gold, &silver); }
+            TtsCommand::SetLexicon {
+                gold,
+                silver,
+                reply,
+            } => {
+                if let Some(t) = tts.as_mut() {
+                    t.set_lexicon_native(&gold, &silver);
+                }
                 let _ = reply.send(());
             }
             TtsCommand::Synthesize { text, voice, reply } => {
                 let r = match tts.as_mut() {
                     Some(t) => {
-                        let (pcm, _oov) = pollster::block_on(t.synthesize_native(&text, &voice, None));
+                        let (pcm, _oov) =
+                            pollster::block_on(t.synthesize_native(&text, &voice, None));
                         Ok(pcm)
                     }
                     None => Err("tts not loaded".into()),
@@ -1045,8 +1192,14 @@ pub struct RlTts {
 #[unsafe(no_mangle)]
 pub extern "C" fn rl_tts_create() -> *mut RlTts {
     let (tx, rx) = mpsc::channel();
-    match std::thread::Builder::new().name("rullama-tts".into()).spawn(move || tts_worker(rx)) {
-        Ok(handle) => Box::into_raw(Box::new(RlTts { tx, handle: Some(handle) })),
+    match std::thread::Builder::new()
+        .name("rullama-tts".into())
+        .spawn(move || tts_worker(rx))
+    {
+        Ok(handle) => Box::into_raw(Box::new(RlTts {
+            tx,
+            handle: Some(handle),
+        })),
         Err(e) => {
             set_last_error(format!("failed to spawn tts thread: {e}"));
             std::ptr::null_mut()
@@ -1058,10 +1211,14 @@ pub extern "C" fn rl_tts_create() -> *mut RlTts {
 /// `t` must be NULL or a handle from `rl_tts_create`, unused afterward.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rl_tts_free(t: *mut RlTts) {
-    if t.is_null() { return; }
+    if t.is_null() {
+        return;
+    }
     let mut b = unsafe { Box::from_raw(t) };
     let _ = b.tx.send(TtsCommand::Shutdown);
-    if let Some(h) = b.handle.take() { let _ = h.join(); }
+    if let Some(h) = b.handle.take() {
+        let _ = h.join();
+    }
 }
 
 fn tts_call<T>(t: *mut RlTts, make: impl FnOnce(Sender<T>) -> TtsCommand) -> Result<T, i32> {
@@ -1074,7 +1231,10 @@ fn tts_call<T>(t: *mut RlTts, make: impl FnOnce(Sender<T>) -> TtsCommand) -> Res
         set_last_error("tts worker gone");
         return Err(-2);
     }
-    rx.recv().map_err(|_| { set_last_error("tts dropped reply"); -3 })
+    rx.recv().map_err(|_| {
+        set_last_error("tts dropped reply");
+        -3
+    })
 }
 
 /// Load the Kokoro GGUF from a path.
@@ -1082,11 +1242,26 @@ fn tts_call<T>(t: *mut RlTts, make: impl FnOnce(Sender<T>) -> TtsCommand) -> Res
 /// `t` valid; `path` a valid C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rl_tts_load_path(t: *mut RlTts, path: *const c_char) -> i32 {
-    let path = match unsafe { c_str(path) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
-    let bytes = match std::fs::read(&path) { Ok(b) => b, Err(e) => { set_last_error(format!("read {path}: {e}")); return -6; } };
+    let path = match unsafe { c_str(path) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            set_last_error(format!("read {path}: {e}"));
+            return -6;
+        }
+    };
     match tts_call(t, |reply| TtsCommand::Load { bytes, reply }) {
         Ok(Ok(())) => 0,
-        Ok(Err(e)) => { set_last_error(e); -6 }
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
         Err(c) => c,
     }
 }
@@ -1095,12 +1270,32 @@ pub unsafe extern "C" fn rl_tts_load_path(t: *mut RlTts, path: *const c_char) ->
 /// # Safety
 /// `t` valid; paths valid C strings.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rl_tts_set_lexicon(t: *mut RlTts, gold_path: *const c_char, silver_path: *const c_char) -> i32 {
-    let gp = match unsafe { c_str(gold_path) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
-    let sp = match unsafe { c_str(silver_path) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+pub unsafe extern "C" fn rl_tts_set_lexicon(
+    t: *mut RlTts,
+    gold_path: *const c_char,
+    silver_path: *const c_char,
+) -> i32 {
+    let gp = match unsafe { c_str(gold_path) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
+    let sp = match unsafe { c_str(silver_path) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
     let gold = std::fs::read(&gp).unwrap_or_default();
     let silver = std::fs::read(&sp).unwrap_or_default();
-    match tts_call(t, |reply| TtsCommand::SetLexicon { gold, silver, reply }) {
+    match tts_call(t, |reply| TtsCommand::SetLexicon {
+        gold,
+        silver,
+        reply,
+    }) {
         Ok(()) => 0,
         Err(c) => c,
     }
@@ -1110,13 +1305,40 @@ pub unsafe extern "C" fn rl_tts_set_lexicon(t: *mut RlTts, gold_path: *const c_c
 /// # Safety
 /// `t` valid; `text`/`voice` valid C strings; `out`/`out_len` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rl_tts_synthesize(t: *mut RlTts, text: *const c_char, voice: *const c_char, out: *mut *mut f32, out_len: *mut usize) -> i32 {
-    if out.is_null() || out_len.is_null() { set_last_error("null out"); return -2; }
-    let text = match unsafe { c_str(text) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
-    let voice = match unsafe { c_str(voice) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+pub unsafe extern "C" fn rl_tts_synthesize(
+    t: *mut RlTts,
+    text: *const c_char,
+    voice: *const c_char,
+    out: *mut *mut f32,
+    out_len: *mut usize,
+) -> i32 {
+    if out.is_null() || out_len.is_null() {
+        set_last_error("null out");
+        return -2;
+    }
+    let text = match unsafe { c_str(text) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
+    let voice = match unsafe { c_str(voice) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
     match tts_call(t, |reply| TtsCommand::Synthesize { text, voice, reply }) {
-        Ok(Ok(pcm)) => { put_f32(pcm, out, out_len); 0 }
-        Ok(Err(e)) => { set_last_error(e); -6 }
+        Ok(Ok(pcm)) => {
+            put_f32(pcm, out, out_len);
+            0
+        }
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
         Err(c) => c,
     }
 }
@@ -1134,10 +1356,24 @@ pub extern "C" fn rl_tts_sample_rate(_t: *mut RlTts) -> u32 {
 // ---------------------------------------------------------------------------
 
 enum CloneCommand {
-    Load { bytes: Vec<u8>, reply: Sender<Result<(), String>> },
-    SetLexicon { gold: Vec<u8>, silver: Vec<u8>, reply: Sender<()> },
-    EncodeVoice { pcm: Vec<f32>, reply: Sender<Result<Vec<f32>, String>> },
-    Synthesize { text: String, voice: Vec<f32>, reply: Sender<Result<Vec<f32>, String>> },
+    Load {
+        bytes: Vec<u8>,
+        reply: Sender<Result<(), String>>,
+    },
+    SetLexicon {
+        gold: Vec<u8>,
+        silver: Vec<u8>,
+        reply: Sender<()>,
+    },
+    EncodeVoice {
+        pcm: Vec<f32>,
+        reply: Sender<Result<Vec<f32>, String>>,
+    },
+    Synthesize {
+        text: String,
+        voice: Vec<f32>,
+        reply: Sender<Result<Vec<f32>, String>>,
+    },
     Shutdown,
 }
 
@@ -1146,14 +1382,26 @@ fn clone_worker(rx: mpsc::Receiver<CloneCommand>) {
     for cmd in rx {
         match cmd {
             CloneCommand::Load { bytes, reply } => {
-                let r = pollster::block_on(StyleTtsClone::load_native(bytes)).map_err(|e| format!("{e}"));
+                let r = pollster::block_on(StyleTtsClone::load_native(bytes))
+                    .map_err(|e| format!("{e}"));
                 match r {
-                    Ok(c) => { clone = Some(c); let _ = reply.send(Ok(())); }
-                    Err(e) => { let _ = reply.send(Err(e)); }
+                    Ok(c) => {
+                        clone = Some(c);
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
                 }
             }
-            CloneCommand::SetLexicon { gold, silver, reply } => {
-                if let Some(c) = clone.as_mut() { c.set_lexicon_native(&gold, &silver); }
+            CloneCommand::SetLexicon {
+                gold,
+                silver,
+                reply,
+            } => {
+                if let Some(c) = clone.as_mut() {
+                    c.set_lexicon_native(&gold, &silver);
+                }
                 let _ = reply.send(());
             }
             CloneCommand::EncodeVoice { pcm, reply } => {
@@ -1184,9 +1432,18 @@ pub struct RlClone {
 #[unsafe(no_mangle)]
 pub extern "C" fn rl_clone_create() -> *mut RlClone {
     let (tx, rx) = mpsc::channel();
-    match std::thread::Builder::new().name("rullama-clone".into()).spawn(move || clone_worker(rx)) {
-        Ok(handle) => Box::into_raw(Box::new(RlClone { tx, handle: Some(handle) })),
-        Err(e) => { set_last_error(format!("failed to spawn clone thread: {e}")); std::ptr::null_mut() }
+    match std::thread::Builder::new()
+        .name("rullama-clone".into())
+        .spawn(move || clone_worker(rx))
+    {
+        Ok(handle) => Box::into_raw(Box::new(RlClone {
+            tx,
+            handle: Some(handle),
+        })),
+        Err(e) => {
+            set_last_error(format!("failed to spawn clone thread: {e}"));
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -1194,17 +1451,30 @@ pub extern "C" fn rl_clone_create() -> *mut RlClone {
 /// `t` must be NULL or a handle from `rl_clone_create`, unused afterward.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rl_clone_free(t: *mut RlClone) {
-    if t.is_null() { return; }
+    if t.is_null() {
+        return;
+    }
     let mut b = unsafe { Box::from_raw(t) };
     let _ = b.tx.send(CloneCommand::Shutdown);
-    if let Some(h) = b.handle.take() { let _ = h.join(); }
+    if let Some(h) = b.handle.take() {
+        let _ = h.join();
+    }
 }
 
 fn clone_call<T>(t: *mut RlClone, make: impl FnOnce(Sender<T>) -> CloneCommand) -> Result<T, i32> {
-    let Some(c) = (unsafe { t.as_ref() }) else { set_last_error("null clone handle"); return Err(-1); };
+    let Some(c) = (unsafe { t.as_ref() }) else {
+        set_last_error("null clone handle");
+        return Err(-1);
+    };
     let (tx, rx) = mpsc::channel();
-    if c.tx.send(make(tx)).is_err() { set_last_error("clone worker gone"); return Err(-2); }
-    rx.recv().map_err(|_| { set_last_error("clone dropped reply"); -3 })
+    if c.tx.send(make(tx)).is_err() {
+        set_last_error("clone worker gone");
+        return Err(-2);
+    }
+    rx.recv().map_err(|_| {
+        set_last_error("clone dropped reply");
+        -3
+    })
 }
 
 /// Load the StyleTTS2 GGUF from a path.
@@ -1212,11 +1482,26 @@ fn clone_call<T>(t: *mut RlClone, make: impl FnOnce(Sender<T>) -> CloneCommand) 
 /// `t` valid; `path` a valid C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rl_clone_load_path(t: *mut RlClone, path: *const c_char) -> i32 {
-    let path = match unsafe { c_str(path) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
-    let bytes = match std::fs::read(&path) { Ok(b) => b, Err(e) => { set_last_error(format!("read {path}: {e}")); return -6; } };
+    let path = match unsafe { c_str(path) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            set_last_error(format!("read {path}: {e}"));
+            return -6;
+        }
+    };
     match clone_call(t, |reply| CloneCommand::Load { bytes, reply }) {
         Ok(Ok(())) => 0,
-        Ok(Err(e)) => { set_last_error(e); -6 }
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
         Err(c) => c,
     }
 }
@@ -1225,12 +1510,32 @@ pub unsafe extern "C" fn rl_clone_load_path(t: *mut RlClone, path: *const c_char
 /// # Safety
 /// `t` valid; paths valid C strings.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rl_clone_set_lexicon(t: *mut RlClone, gold_path: *const c_char, silver_path: *const c_char) -> i32 {
-    let gp = match unsafe { c_str(gold_path) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
-    let sp = match unsafe { c_str(silver_path) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
+pub unsafe extern "C" fn rl_clone_set_lexicon(
+    t: *mut RlClone,
+    gold_path: *const c_char,
+    silver_path: *const c_char,
+) -> i32 {
+    let gp = match unsafe { c_str(gold_path) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
+    let sp = match unsafe { c_str(silver_path) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
     let gold = std::fs::read(&gp).unwrap_or_default();
     let silver = std::fs::read(&sp).unwrap_or_default();
-    match clone_call(t, |reply| CloneCommand::SetLexicon { gold, silver, reply }) {
+    match clone_call(t, |reply| CloneCommand::SetLexicon {
+        gold,
+        silver,
+        reply,
+    }) {
         Ok(()) => 0,
         Err(c) => c,
     }
@@ -1240,12 +1545,31 @@ pub unsafe extern "C" fn rl_clone_set_lexicon(t: *mut RlClone, gold_path: *const
 /// # Safety
 /// `t` valid; `pcm`/`n` a valid array; `out`/`out_len` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rl_clone_encode_voice(t: *mut RlClone, pcm: *const f32, n: usize, out: *mut *mut f32, out_len: *mut usize) -> i32 {
-    if out.is_null() || out_len.is_null() { set_last_error("null out"); return -2; }
-    let pcm = if pcm.is_null() || n == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(pcm, n) }.to_vec() };
+pub unsafe extern "C" fn rl_clone_encode_voice(
+    t: *mut RlClone,
+    pcm: *const f32,
+    n: usize,
+    out: *mut *mut f32,
+    out_len: *mut usize,
+) -> i32 {
+    if out.is_null() || out_len.is_null() {
+        set_last_error("null out");
+        return -2;
+    }
+    let pcm = if pcm.is_null() || n == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(pcm, n) }.to_vec()
+    };
     match clone_call(t, |reply| CloneCommand::EncodeVoice { pcm, reply }) {
-        Ok(Ok(v)) => { put_f32(v, out, out_len); 0 }
-        Ok(Err(e)) => { set_last_error(e); -6 }
+        Ok(Ok(v)) => {
+            put_f32(v, out, out_len);
+            0
+        }
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
         Err(c) => c,
     }
 }
@@ -1254,13 +1578,39 @@ pub unsafe extern "C" fn rl_clone_encode_voice(t: *mut RlClone, pcm: *const f32,
 /// # Safety
 /// `t` valid; `text` a valid C string; `voice`/`voice_len` a valid array; `out`/`out_len` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rl_clone_synthesize(t: *mut RlClone, text: *const c_char, voice: *const f32, voice_len: usize, out: *mut *mut f32, out_len: *mut usize) -> i32 {
-    if out.is_null() || out_len.is_null() { set_last_error("null out"); return -2; }
-    let text = match unsafe { c_str(text) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
-    let voice = if voice.is_null() || voice_len == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(voice, voice_len) }.to_vec() };
+pub unsafe extern "C" fn rl_clone_synthesize(
+    t: *mut RlClone,
+    text: *const c_char,
+    voice: *const f32,
+    voice_len: usize,
+    out: *mut *mut f32,
+    out_len: *mut usize,
+) -> i32 {
+    if out.is_null() || out_len.is_null() {
+        set_last_error("null out");
+        return -2;
+    }
+    let text = match unsafe { c_str(text) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
+    let voice = if voice.is_null() || voice_len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(voice, voice_len) }.to_vec()
+    };
     match clone_call(t, |reply| CloneCommand::Synthesize { text, voice, reply }) {
-        Ok(Ok(pcm)) => { put_f32(pcm, out, out_len); 0 }
-        Ok(Err(e)) => { set_last_error(e); -6 }
+        Ok(Ok(pcm)) => {
+            put_f32(pcm, out, out_len);
+            0
+        }
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
         Err(c) => c,
     }
 }
@@ -1278,9 +1628,16 @@ pub extern "C" fn rl_clone_sample_rate(_t: *mut RlClone) -> u32 {
 // ---------------------------------------------------------------------------
 
 enum EmbedCommand {
-    Load { bytes: Vec<u8>, reply: Sender<Result<(), String>> },
+    Load {
+        bytes: Vec<u8>,
+        reply: Sender<Result<(), String>>,
+    },
     Dim(Sender<u32>),
-    Embed { text: String, target_dim: usize, reply: Sender<Result<Vec<f32>, String>> },
+    Embed {
+        text: String,
+        target_dim: usize,
+        reply: Sender<Result<Vec<f32>, String>>,
+    },
     Shutdown,
 }
 
@@ -1289,18 +1646,29 @@ fn embed_worker(rx: mpsc::Receiver<EmbedCommand>) {
     for cmd in rx {
         match cmd {
             EmbedCommand::Load { bytes, reply } => {
-                let r = pollster::block_on(EmbeddingModel::load_native(bytes)).map_err(|e| format!("{e}"));
+                let r = pollster::block_on(EmbeddingModel::load_native(bytes))
+                    .map_err(|e| format!("{e}"));
                 match r {
-                    Ok(m) => { model = Some(m); let _ = reply.send(Ok(())); }
-                    Err(e) => { let _ = reply.send(Err(e)); }
+                    Ok(m) => {
+                        model = Some(m);
+                        let _ = reply.send(Ok(()));
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
                 }
             }
             EmbedCommand::Dim(reply) => {
                 let _ = reply.send(model.as_ref().map_or(0, |m| m.dim_native()));
             }
-            EmbedCommand::Embed { text, target_dim, reply } => {
+            EmbedCommand::Embed {
+                text,
+                target_dim,
+                reply,
+            } => {
                 let r = match model.as_ref() {
-                    Some(m) => pollster::block_on(m.embed_native(&text, target_dim)).map_err(|e| format!("{e}")),
+                    Some(m) => pollster::block_on(m.embed_native(&text, target_dim))
+                        .map_err(|e| format!("{e}")),
                     None => Err("embedding model not loaded".into()),
                 };
                 let _ = reply.send(r);
@@ -1319,9 +1687,18 @@ pub struct RlEmbed {
 #[unsafe(no_mangle)]
 pub extern "C" fn rl_embed_create() -> *mut RlEmbed {
     let (tx, rx) = mpsc::channel();
-    match std::thread::Builder::new().name("rullama-embed".into()).spawn(move || embed_worker(rx)) {
-        Ok(handle) => Box::into_raw(Box::new(RlEmbed { tx, handle: Some(handle) })),
-        Err(e) => { set_last_error(format!("failed to spawn embed thread: {e}")); std::ptr::null_mut() }
+    match std::thread::Builder::new()
+        .name("rullama-embed".into())
+        .spawn(move || embed_worker(rx))
+    {
+        Ok(handle) => Box::into_raw(Box::new(RlEmbed {
+            tx,
+            handle: Some(handle),
+        })),
+        Err(e) => {
+            set_last_error(format!("failed to spawn embed thread: {e}"));
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -1329,17 +1706,30 @@ pub extern "C" fn rl_embed_create() -> *mut RlEmbed {
 /// `t` must be NULL or a handle from `rl_embed_create`, unused afterward.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rl_embed_free(t: *mut RlEmbed) {
-    if t.is_null() { return; }
+    if t.is_null() {
+        return;
+    }
     let mut b = unsafe { Box::from_raw(t) };
     let _ = b.tx.send(EmbedCommand::Shutdown);
-    if let Some(h) = b.handle.take() { let _ = h.join(); }
+    if let Some(h) = b.handle.take() {
+        let _ = h.join();
+    }
 }
 
 fn embed_call<T>(t: *mut RlEmbed, make: impl FnOnce(Sender<T>) -> EmbedCommand) -> Result<T, i32> {
-    let Some(e) = (unsafe { t.as_ref() }) else { set_last_error("null embed handle"); return Err(-1); };
+    let Some(e) = (unsafe { t.as_ref() }) else {
+        set_last_error("null embed handle");
+        return Err(-1);
+    };
     let (tx, rx) = mpsc::channel();
-    if e.tx.send(make(tx)).is_err() { set_last_error("embed worker gone"); return Err(-2); }
-    rx.recv().map_err(|_| { set_last_error("embed dropped reply"); -3 })
+    if e.tx.send(make(tx)).is_err() {
+        set_last_error("embed worker gone");
+        return Err(-2);
+    }
+    rx.recv().map_err(|_| {
+        set_last_error("embed dropped reply");
+        -3
+    })
 }
 
 /// Load the embedding GGUF from a path.
@@ -1347,11 +1737,26 @@ fn embed_call<T>(t: *mut RlEmbed, make: impl FnOnce(Sender<T>) -> EmbedCommand) 
 /// `t` valid; `path` a valid C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rl_embed_load_path(t: *mut RlEmbed, path: *const c_char) -> i32 {
-    let path = match unsafe { c_str(path) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
-    let bytes = match std::fs::read(&path) { Ok(b) => b, Err(e) => { set_last_error(format!("read {path}: {e}")); return -6; } };
+    let path = match unsafe { c_str(path) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            set_last_error(format!("read {path}: {e}"));
+            return -6;
+        }
+    };
     match embed_call(t, |reply| EmbedCommand::Load { bytes, reply }) {
         Ok(Ok(())) => 0,
-        Ok(Err(e)) => { set_last_error(e); -6 }
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
         Err(c) => c,
     }
 }
@@ -1368,12 +1773,37 @@ pub unsafe extern "C" fn rl_embed_dim(t: *mut RlEmbed) -> u32 {
 /// # Safety
 /// `t` valid; `text` a valid C string; `out`/`out_len` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rl_embed(t: *mut RlEmbed, text: *const c_char, target_dim: usize, out: *mut *mut f32, out_len: *mut usize) -> i32 {
-    if out.is_null() || out_len.is_null() { set_last_error("null out"); return -2; }
-    let text = match unsafe { c_str(text) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
-    match embed_call(t, |reply| EmbedCommand::Embed { text, target_dim, reply }) {
-        Ok(Ok(v)) => { put_f32(v, out, out_len); 0 }
-        Ok(Err(e)) => { set_last_error(e); -6 }
+pub unsafe extern "C" fn rl_embed(
+    t: *mut RlEmbed,
+    text: *const c_char,
+    target_dim: usize,
+    out: *mut *mut f32,
+    out_len: *mut usize,
+) -> i32 {
+    if out.is_null() || out_len.is_null() {
+        set_last_error("null out");
+        return -2;
+    }
+    let text = match unsafe { c_str(text) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
+    match embed_call(t, |reply| EmbedCommand::Embed {
+        text,
+        target_dim,
+        reply,
+    }) {
+        Ok(Ok(v)) => {
+            put_f32(v, out, out_len);
+            0
+        }
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
         Err(c) => c,
     }
 }
@@ -1415,14 +1845,27 @@ pub unsafe extern "C" fn rl_trainer_begin(
     learning_rate: f64,
 ) -> i32 {
     let mods = match unsafe { c_str(target_modules) } {
-        Ok(s) => s.split(',').map(|x| x.trim().to_owned()).filter(|x| !x.is_empty()).collect::<Vec<_>>(),
+        Ok(s) => s
+            .split(',')
+            .map(|x| x.trim().to_owned())
+            .filter(|x| !x.is_empty())
+            .collect::<Vec<_>>(),
         Err(_) => Vec::new(),
     };
     match call(m, |reply| Command::TrainerBegin {
-        rank, alpha, dropout, target_modules: mods, max_seq_len, learning_rate, reply,
+        rank,
+        alpha,
+        dropout,
+        target_modules: mods,
+        max_seq_len,
+        learning_rate,
+        reply,
     }) {
         Ok(Ok(())) => 0,
-        Ok(Err(e)) => { set_last_error(e); -6 }
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
         Err(c) => c,
     }
 }
@@ -1438,11 +1881,28 @@ pub unsafe extern "C" fn rl_trainer_step(
     target: u32,
     out_loss: *mut f32,
 ) -> i32 {
-    if out_loss.is_null() { set_last_error("null out"); return -2; }
-    let ids = if input_ids.is_null() || n == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(input_ids, n) }.to_vec() };
-    match call(m, |reply| Command::TrainerStep { input_ids: ids, target, reply }) {
-        Ok(Ok(loss)) => { unsafe { *out_loss = loss }; 0 }
-        Ok(Err(e)) => { set_last_error(e); -6 }
+    if out_loss.is_null() {
+        set_last_error("null out");
+        return -2;
+    }
+    let ids = if input_ids.is_null() || n == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(input_ids, n) }.to_vec()
+    };
+    match call(m, |reply| Command::TrainerStep {
+        input_ids: ids,
+        target,
+        reply,
+    }) {
+        Ok(Ok(loss)) => {
+            unsafe { *out_loss = loss };
+            0
+        }
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
         Err(c) => c,
     }
 }
@@ -1451,11 +1911,24 @@ pub unsafe extern "C" fn rl_trainer_step(
 /// # Safety
 /// `m` valid; `out`/`out_len` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rl_trainer_save_adapter(m: *mut RlModel, out: *mut *mut u8, out_len: *mut usize) -> i32 {
-    if out.is_null() || out_len.is_null() { set_last_error("null out"); return -2; }
+pub unsafe extern "C" fn rl_trainer_save_adapter(
+    m: *mut RlModel,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if out.is_null() || out_len.is_null() {
+        set_last_error("null out");
+        return -2;
+    }
     match call(m, |reply| Command::TrainerSaveAdapter { reply }) {
-        Ok(Ok(bytes)) => { put_bytes(bytes, out, out_len); 0 }
-        Ok(Err(e)) => { set_last_error(e); -6 }
+        Ok(Ok(bytes)) => {
+            put_bytes(bytes, out, out_len);
+            0
+        }
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
         Err(c) => c,
     }
 }
@@ -1466,10 +1939,17 @@ pub unsafe extern "C" fn rl_trainer_save_adapter(m: *mut RlModel, out: *mut *mut
 /// `m` valid; `bytes`/`n` a valid array.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rl_load_adapter(m: *mut RlModel, bytes: *const u8, n: usize) -> i32 {
-    let bytes = if bytes.is_null() || n == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(bytes, n) }.to_vec() };
+    let bytes = if bytes.is_null() || n == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(bytes, n) }.to_vec()
+    };
     match call(m, |reply| Command::LoadAdapter { bytes, reply }) {
         Ok(Ok(slots)) => slots as i32,
-        Ok(Err(e)) => { set_last_error(e); -6 }
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
         Err(c) => c,
     }
 }
@@ -1497,12 +1977,39 @@ pub unsafe extern "C" fn rl_rome_edit(
     target: *const c_char,
     layer: u32,
 ) -> i32 {
-    let prompt = match unsafe { c_str(prompt) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
-    let subject = match unsafe { c_str(subject) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
-    let target = match unsafe { c_str(target) } { Ok(s) => s.to_owned(), Err(e) => { set_last_error(e); return -5; } };
-    match call(m, |reply| Command::RomeEdit { prompt, subject, target, layer, reply }) {
+    let prompt = match unsafe { c_str(prompt) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
+    let subject = match unsafe { c_str(subject) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
+    let target = match unsafe { c_str(target) } {
+        Ok(s) => s.to_owned(),
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
+    match call(m, |reply| Command::RomeEdit {
+        prompt,
+        subject,
+        target,
+        layer,
+        reply,
+    }) {
         Ok(Ok(())) => 0,
-        Ok(Err(e)) => { set_last_error(e); -6 }
+        Ok(Err(e)) => {
+            set_last_error(e);
+            -6
+        }
         Err(c) => c,
     }
 }
@@ -1536,7 +2043,11 @@ fn json_to_dynamic(v: &serde_json::Value) -> rhai::Dynamic {
             .map(rhai::Dynamic::from)
             .unwrap_or_else(|| n.as_f64().unwrap_or(0.0).into()),
         Value::String(s) => s.clone().into(),
-        Value::Array(a) => a.iter().map(json_to_dynamic).collect::<rhai::Array>().into(),
+        Value::Array(a) => a
+            .iter()
+            .map(json_to_dynamic)
+            .collect::<rhai::Array>()
+            .into(),
         Value::Object(o) => {
             let mut m = rhai::Map::new();
             for (k, val) in o {
@@ -1560,7 +2071,9 @@ fn run_orchestrator(script: &str, cached_json: &str, tool_names: &str) -> serde_
     } else {
         match serde_json::from_str(cached_json) {
             Ok(m) => m,
-            Err(e) => return serde_json::json!({"status":"error","error":format!("bad cache json: {e}")}),
+            Err(e) => {
+                return serde_json::json!({"status":"error","error":format!("bad cache json: {e}")});
+            }
         }
     };
     let cache = Rc::new(cache);
@@ -1570,7 +2083,11 @@ fn run_orchestrator(script: &str, cached_json: &str, tool_names: &str) -> serde_
     engine.set_max_operations(2_000_000);
     engine.set_max_call_levels(64);
 
-    for name in tool_names.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+    for name in tool_names
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let name = name.to_string();
         // arity-1: tool("arg")
         {
@@ -1578,7 +2095,7 @@ fn run_orchestrator(script: &str, cached_json: &str, tool_names: &str) -> serde_
             let cache = Rc::clone(&cache);
             let missed = Rc::clone(&missed);
             engine.register_fn(
-                &name.clone(),
+                name.clone(),
                 move |arg: rhai::ImmutableString| -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
                     let key = format!("{name}\u{1}{arg}");
                     if let Some(v) = cache.get(&key) {
@@ -1596,7 +2113,7 @@ fn run_orchestrator(script: &str, cached_json: &str, tool_names: &str) -> serde_
             let cache = Rc::clone(&cache);
             let missed = Rc::clone(&missed);
             engine.register_fn(
-                &name.clone(),
+                name.clone(),
                 move || -> Result<rhai::Dynamic, Box<rhai::EvalAltResult>> {
                     let key = format!("{name}\u{1}");
                     if let Some(v) = cache.get(&key) {
@@ -1643,9 +2160,27 @@ pub unsafe extern "C" fn rl_orch_run(
         set_last_error("null out");
         return -2;
     }
-    let script = match unsafe { c_str(script) } { Ok(s) => s, Err(e) => { set_last_error(e); return -5; } };
-    let cached = match unsafe { c_str(cached_json) } { Ok(s) => s, Err(e) => { set_last_error(e); return -5; } };
-    let names = match unsafe { c_str(tool_names) } { Ok(s) => s, Err(e) => { set_last_error(e); return -5; } };
+    let script = match unsafe { c_str(script) } {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
+    let cached = match unsafe { c_str(cached_json) } {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
+    let names = match unsafe { c_str(tool_names) } {
+        Ok(s) => s,
+        Err(e) => {
+            set_last_error(e);
+            return -5;
+        }
+    };
     let envelope = run_orchestrator(script, cached, names);
     unsafe { *out = into_c_string(envelope.to_string()) };
     0
@@ -1672,6 +2207,9 @@ struct ImgProgressCb {
 }
 unsafe impl Send for ImgProgressCb {}
 
+/// Generated image reply: raw RGBA bytes plus width and height, or an error.
+type ImgGenResult = Result<(Vec<u8>, u32, u32), String>;
+
 enum ImgCommand {
     Load {
         dir: String,
@@ -1686,7 +2224,7 @@ enum ImgCommand {
         steps: usize,
         seed: u64,
         cb: ImgProgressCb,
-        reply: Sender<Result<(Vec<u8>, u32, u32), String>>,
+        reply: Sender<ImgGenResult>,
     },
     Shutdown,
 }
@@ -1720,7 +2258,17 @@ fn imagegen_worker(rx: mpsc::Receiver<ImgCommand>) {
                 })();
                 let _ = reply.send(res);
             }
-            ImgCommand::Generate { prompt, neg, cfg_scale, lh, lw, steps, seed, cb, reply } => {
+            ImgCommand::Generate {
+                prompt,
+                neg,
+                cfg_scale,
+                lh,
+                lw,
+                steps,
+                seed,
+                cb,
+                reply,
+            } => {
                 let res = (|| -> Result<(Vec<u8>, u32, u32), String> {
                     let b = bundle.as_ref().ok_or("no image model loaded")?;
                     let tk = tokenizer.as_ref().ok_or("no tokenizer loaded")?;
@@ -1742,13 +2290,20 @@ fn imagegen_worker(rx: mpsc::Receiver<ImgCommand>) {
                             .get_ids()
                             .to_vec()
                     };
-                    let mut prog = |stage: &str, i: usize, n: usize| {
+                    let prog = |stage: &str, i: usize, n: usize| {
                         if let Ok(cs) = CString::new(stage) {
                             (cb.f)(cb.ctx, i as u32, n as u32, cs.as_ptr());
                         }
                     };
                     let rgb = pollster::block_on(b.generate(
-                        &tokens, &neg_tokens, cfg_scale, lh, lw, steps, seed, Some(&mut prog),
+                        &tokens,
+                        &neg_tokens,
+                        cfg_scale,
+                        lh,
+                        lw,
+                        steps,
+                        seed,
+                        Some(&prog),
                     ))
                     .map_err(|e| format!("generate: {e}"))?;
                     let (h, w) = (lh * down, lw * down);
@@ -1775,7 +2330,10 @@ pub extern "C" fn rl_imagegen_create() -> *mut RlImageGen {
         .name("rullama-imagegen".into())
         .spawn(move || imagegen_worker(rx))
     {
-        Ok(handle) => Box::into_raw(Box::new(RlImageGen { tx, handle: Some(handle) })),
+        Ok(handle) => Box::into_raw(Box::new(RlImageGen {
+            tx,
+            handle: Some(handle),
+        })),
         Err(e) => {
             set_last_error(format!("failed to spawn imagegen thread: {e}"));
             std::ptr::null_mut()
@@ -1873,7 +2431,9 @@ pub unsafe extern "C" fn rl_imagegen_generate(
             return -5;
         }
     };
-    let neg = unsafe { c_str(neg_prompt) }.map(str::to_owned).unwrap_or_default();
+    let neg = unsafe { c_str(neg_prompt) }
+        .map(str::to_owned)
+        .unwrap_or_default();
     let (tx, rx) = mpsc::channel();
     let cmd = ImgCommand::Generate {
         prompt,
@@ -1923,7 +2483,9 @@ mod tests {
         let mut out: *mut c_char = std::ptr::null_mut();
         let rc = unsafe { rl_wgpu_probe(&mut out) };
         assert_eq!(rc, 0, "probe failed: rc={rc}");
-        let desc = unsafe { CStr::from_ptr(out) }.to_string_lossy().into_owned();
+        let desc = unsafe { CStr::from_ptr(out) }
+            .to_string_lossy()
+            .into_owned();
         eprintln!("probe: {desc}");
         assert!(desc.contains("adapter="));
         unsafe { rl_free_str(out) };
@@ -1973,10 +2535,14 @@ mod tests {
 
         let cache = r#"{"get_weather\u0001Tokyo":{"temp_c":25}}"#;
         let e2 = run_orchestrator(script, cache, names);
-        assert_eq!(e2["status"], "needed", "branch should re-evaluate to air quality");
+        assert_eq!(
+            e2["status"], "needed",
+            "branch should re-evaluate to air quality"
+        );
         assert_eq!(e2["needed"][0]["name"], "get_air_quality");
 
-        let cache2 = r#"{"get_weather\u0001Tokyo":{"temp_c":25},"get_air_quality\u0001Tokyo":"good"}"#;
+        let cache2 =
+            r#"{"get_weather\u0001Tokyo":{"temp_c":25},"get_air_quality\u0001Tokyo":"good"}"#;
         let e3 = run_orchestrator(script, cache2, names);
         assert_eq!(e3["status"], "final");
         assert_eq!(e3["final"], "good");
@@ -2022,7 +2588,8 @@ mod tests {
 
         unsafe { rl_set_sampling(m, 0.0, 0, 1.0, 1.0, 0) }; // greedy
 
-        let prompt = "<start_of_turn>user\nSay hello in one word.<end_of_turn>\n<start_of_turn>model\n";
+        let prompt =
+            "<start_of_turn>user\nSay hello in one word.<end_of_turn>\n<start_of_turn>model\n";
         let cprompt = CString::new(prompt).unwrap();
         let mut ids: *mut u32 = std::ptr::null_mut();
         let mut nn: usize = 0;
@@ -2036,13 +2603,22 @@ mod tests {
             let s = if piece.is_null() {
                 String::new()
             } else {
-                unsafe { CStr::from_ptr(piece) }.to_string_lossy().into_owned()
+                unsafe { CStr::from_ptr(piece) }
+                    .to_string_lossy()
+                    .into_owned()
             };
             eprintln!("tok #{count}: {tok} = {s:?}");
         }
         let mut count: u32 = 0;
         let produced = unsafe {
-            rl_generate(m, ids, nn, 16, on_tok, &mut count as *mut u32 as *mut c_void)
+            rl_generate(
+                m,
+                ids,
+                nn,
+                16,
+                on_tok,
+                &mut count as *mut u32 as *mut c_void,
+            )
         };
         assert!(produced > 0, "no tokens produced: {}", last_error_str());
         assert_eq!(produced as u32, count);

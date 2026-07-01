@@ -1,8 +1,8 @@
 use anyhow::Result;
+use chrono::Utc;
 use rullama_cli::storage::{
     CachedEmbeddingProvider, LanceDatabase, MessageMetadata, MessageStore, VectorDatabase,
 };
-use chrono::Utc;
 use std::sync::Arc;
 
 /// Test basic message storage and retrieval with embeddings

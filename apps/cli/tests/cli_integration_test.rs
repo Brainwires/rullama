@@ -50,11 +50,7 @@ fn test_config_help() {
 
 #[test]
 fn test_config_list_empty() {
-    rullama_cmd()
-        .arg("config")
-        .arg("--list")
-        .assert()
-        .success();
+    rullama_cmd().arg("config").arg("--list").assert().success();
     // Config might show defaults even when empty
 }
 

@@ -12,8 +12,8 @@ use crate::types::message::{Message, MessageContent, Role};
 use crate::utils::context_builder::{ContextBuilder, ContextBuilderConfig};
 use crate::utils::entity_extraction::{EntityExtractor, EntityStore};
 use anyhow::{Context, Result};
-use rullama::knowledge::RelationshipGraph;
 use chrono::Utc;
+use rullama::knowledge::RelationshipGraph;
 use std::path::Path;
 use std::sync::Arc;
 

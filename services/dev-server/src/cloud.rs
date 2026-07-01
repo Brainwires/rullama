@@ -15,12 +15,12 @@
 
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::Path as AxumPath;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 
 use crate::state::AppState;
 
@@ -58,9 +58,17 @@ async fn options_204() -> impl IntoResponse {
 /// Streams the response body verbatim (SSE when the client asked for
 /// `stream:true`). The request JSON body is forwarded as-is — the browser
 /// already shapes the OpenAI-compatible payload.
-async fn post_chat(AxumPath(provider): AxumPath<String>, headers: HeaderMap, body: Bytes) -> Response {
+async fn post_chat(
+    AxumPath(provider): AxumPath<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let Some(base) = upstream_base(&provider) else {
-        return (StatusCode::BAD_REQUEST, format!("unknown provider: {provider}")).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("unknown provider: {provider}"),
+        )
+            .into_response();
     };
     let key = match cloud_key(&headers) {
         Some(k) => k,
@@ -83,7 +91,11 @@ async fn post_chat(AxumPath(provider): AxumPath<String>, headers: HeaderMap, bod
 /// still streamed for code uniformity.
 async fn get_models(AxumPath(provider): AxumPath<String>, headers: HeaderMap) -> Response {
     let Some(base) = upstream_base(&provider) else {
-        return (StatusCode::BAD_REQUEST, format!("unknown provider: {provider}")).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("unknown provider: {provider}"),
+        )
+            .into_response();
     };
     let key = match cloud_key(&headers) {
         Some(k) => k,
@@ -120,7 +132,10 @@ fn relay(resp: Result<reqwest::Response, reqwest::Error>, default_ct: &str) -> R
         Ok(r) => r,
         Err(e) => {
             // Deliberately do NOT include the key or full request in the error.
-            return (StatusCode::BAD_GATEWAY, format!("cloud upstream unreachable: {e}"))
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("cloud upstream unreachable: {e}"),
+            )
                 .into_response();
         }
     };

@@ -33,6 +33,17 @@ use crate::types::tool::{ToolContext, ToolContextExt, ToolUse};
 /// Logging callback type for tool execution messages
 pub type LogCallback = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// Boxed future returned by [`send_continuation_request`]: the concatenated
+/// assistant text plus the token usage accumulated across the continuation
+/// turn(s).
+type ContinuationFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<(String, crate::types::message::Usage)>>
+            + Send
+            + 'a,
+    >,
+>;
+
 /// Default logger that writes to stderr (for CLI mode)
 pub fn default_logger() -> LogCallback {
     Arc::new(|msg: &str| {
@@ -47,8 +58,9 @@ pub fn default_logger() -> LogCallback {
 /// `tool_output` are appended to `context.conversation_history`, then the next
 /// turn is streamed via `provider`. Any further chained tool calls the model
 /// emits are executed locally and the conversation is re-streamed until the
-/// model produces a plain-text turn. The concatenated assistant text is
-/// returned.
+/// model produces a plain-text turn. Returns the concatenated assistant text
+/// together with the token usage accumulated across every continuation turn
+/// (so callers can feed it to the cost tracker — see [`Usage`]).
 ///
 /// The `logger` callback emits tool execution status messages. Use
 /// `default_logger()` for CLI mode, or a custom callback for TUI mode.
@@ -69,7 +81,7 @@ pub fn send_continuation_request<'a>(
     tool_output: &'a str,
     _accumulated_history: &'a [serde_json::Value],
     logger: LogCallback,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
+) -> ContinuationFuture<'a> {
     Box::pin(async move {
         use crate::types::message::{ContentBlock, Message, MessageContent, Role};
 
@@ -86,7 +98,10 @@ pub fn send_continuation_request<'a>(
             name: None,
             metadata: None,
         });
-        history.push(Message::tool_result(call_id.to_string(), tool_output.to_string()));
+        history.push(Message::tool_result(
+            call_id.to_string(),
+            tool_output.to_string(),
+        ));
 
         run_provider_continuation(provider, context, history, logger).await
     })
@@ -99,9 +114,15 @@ async fn run_provider_continuation(
     context: &AgentContext,
     mut history: Vec<crate::types::message::Message>,
     logger: LogCallback,
-) -> Result<String> {
+) -> Result<(String, crate::types::message::Usage)> {
     use crate::types::message::{ContentBlock, Message, MessageContent, Role, StreamChunk};
     use crate::types::provider::ChatOptions;
+
+    // Accumulate token usage across every continuation turn so the caller can
+    // record it. Providers emit `StreamChunk::Usage` once per stream with that
+    // turn's totals; each chained tool call opens a new stream, so we sum.
+    let mut acc_prompt: u32 = 0;
+    let mut acc_completion: u32 = 0;
 
     // System prompt carried through every continuation turn.
     let system_prompt = context
@@ -149,7 +170,11 @@ async fn run_provider_continuation(
                     break;
                 }
                 StreamChunk::Done => break,
-                // Usage / other tool formats / compaction events are not needed here.
+                StreamChunk::Usage(usage) => {
+                    acc_prompt = acc_prompt.saturating_add(usage.prompt_tokens);
+                    acc_completion = acc_completion.saturating_add(usage.completion_tokens);
+                }
+                // Other tool formats / compaction events are not needed here.
                 _ => {}
             }
         }
@@ -178,7 +203,7 @@ async fn run_provider_continuation(
         let truncated_output = if result.content.len() > MAX_TOOL_OUTPUT_CHARS {
             format!(
                 "{}\n\n[Output truncated: {} of {} chars]",
-                &result.content[..MAX_TOOL_OUTPUT_CHARS],
+                crate::utils::truncate_on_char_boundary(&result.content, MAX_TOOL_OUTPUT_CHARS),
                 MAX_TOOL_OUTPUT_CHARS,
                 result.content.len()
             )
@@ -205,7 +230,10 @@ async fn run_provider_continuation(
         history.push(Message::tool_result(call_id, truncated_output));
     }
 
-    Ok(result_text)
+    Ok((
+        result_text,
+        crate::types::message::Usage::new(acc_prompt, acc_completion),
+    ))
 }
 
 #[cfg(test)]

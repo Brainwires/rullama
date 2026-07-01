@@ -103,7 +103,10 @@ pub async fn process_chat_stream(
                     // Limit tool output to prevent context window overflow
                     const MAX_TOOL_OUTPUT_CHARS: usize = 10_000;
                     let truncated_output = if result.content.len() > MAX_TOOL_OUTPUT_CHARS {
-                        let truncated = &result.content[..MAX_TOOL_OUTPUT_CHARS];
+                        let truncated = crate::utils::truncate_on_char_boundary(
+                            &result.content,
+                            MAX_TOOL_OUTPUT_CHARS,
+                        );
                         let lines_count = result.content.lines().count();
                         let truncated_lines = truncated.lines().count();
                         format!(
@@ -126,7 +129,10 @@ pub async fn process_chat_stream(
                         );
                     } else {
                         let preview = if truncated_output.len() > 200 {
-                            format!("{}...", &truncated_output[..200])
+                            format!(
+                                "{}...",
+                                crate::utils::truncate_on_char_boundary(&truncated_output, 200)
+                            )
                         } else {
                             truncated_output.clone()
                         };
@@ -142,7 +148,7 @@ pub async fn process_chat_stream(
                         s.set_message("Processing tool result...");
                     }
 
-                    let continuation_text = send_continuation_request(
+                    let (continuation_text, continuation_usage) = send_continuation_request(
                         provider,
                         context,
                         model,
@@ -158,6 +164,16 @@ pub async fn process_chat_stream(
                     .await?;
 
                     full_text.push_str(&continuation_text);
+
+                    // Fold the continuation turn(s)' token usage into the running
+                    // totals so `rullama cost` accounts for tool-continuation cost.
+                    if continuation_usage.total_tokens > 0 {
+                        total_prompt_tokens =
+                            total_prompt_tokens.saturating_add(continuation_usage.prompt_tokens);
+                        total_completion_tokens = total_completion_tokens
+                            .saturating_add(continuation_usage.completion_tokens);
+                        got_usage = true;
+                    }
 
                     // Tool execution complete - stop reading from original stream
                     break;

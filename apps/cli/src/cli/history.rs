@@ -343,6 +343,9 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     if text.len() <= max_len {
         text.to_string()
     } else {
-        format!("{}...", &text[..max_len])
+        format!(
+            "{}...",
+            crate::utils::truncate_on_char_boundary(text, max_len)
+        )
     }
 }

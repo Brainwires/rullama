@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use tokio::net::UnixListener;
 use tokio::sync::{RwLock, broadcast};
 
+use super::AgentState;
 use crate::commands::executor::{CommandAction, CommandResult};
 use crate::config::ConfigManager;
 use crate::ipc::get_agent_socket_path;
@@ -19,7 +20,6 @@ use rullama::agent_network::ipc::{
     AgentMessage, Handshake, HandshakeResponse, IpcConnection, LockChangeType, LockInfo,
     ResourceLockType, ViewerMessage,
 };
-use super::AgentState;
 
 /// Agent process that manages a single session
 pub struct AgentProcess {
@@ -1589,7 +1589,7 @@ async fn process_queued_messages(
         tracing::info!(
             "Processing queued message {}: {}",
             msg.id,
-            &msg.content[..msg.content.len().min(50)]
+            crate::utils::truncate_on_char_boundary(&msg.content, 50)
         );
 
         // Get required state for processing
@@ -1827,7 +1827,10 @@ async fn stream_with_tool_execution(
                 // Limit tool output to prevent context overflow
                 const MAX_TOOL_OUTPUT_CHARS: usize = 10_000;
                 let truncated_output = if tool_result.content.len() > MAX_TOOL_OUTPUT_CHARS {
-                    let truncated = &tool_result.content[..MAX_TOOL_OUTPUT_CHARS];
+                    let truncated = crate::utils::truncate_on_char_boundary(
+                        &tool_result.content,
+                        MAX_TOOL_OUTPUT_CHARS,
+                    );
                     format!(
                         "{}\n\n[Output truncated: {} of {} characters]",
                         truncated,
@@ -1846,7 +1849,10 @@ async fn stream_with_tool_execution(
                         None
                     } else {
                         Some(if truncated_output.len() > 200 {
-                            format!("{}...", &truncated_output[..200])
+                            format!(
+                                "{}...",
+                                crate::utils::truncate_on_char_boundary(&truncated_output, 200)
+                            )
                         } else {
                             truncated_output.clone()
                         })

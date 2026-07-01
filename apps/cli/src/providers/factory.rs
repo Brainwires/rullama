@@ -392,8 +392,8 @@ mod tests {
 
     #[test]
     fn effective_provider_flag_beats_config() {
-        let p = ProviderFactory::effective_provider(Some("anthropic"), ProviderType::Ollama)
-            .unwrap();
+        let p =
+            ProviderFactory::effective_provider(Some("anthropic"), ProviderType::Ollama).unwrap();
         assert_eq!(p, ProviderType::Anthropic);
     }
 

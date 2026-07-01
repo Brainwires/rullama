@@ -6,7 +6,9 @@ use super::*;
 fn test_default_config() {
     let config = Config::default();
     assert_eq!(config.permission_mode, PermissionMode::Auto);
-    assert_eq!(config.model, "claude-haiku-4-5-20251001");
+    // The default model tracks the BYOK default provider (Ollama), so assert
+    // against `default_model()` rather than a hardcoded cloud model.
+    assert_eq!(config.model, default_model());
 }
 
 #[test]
@@ -21,7 +23,7 @@ fn test_config_serialization() {
 #[test]
 fn test_default_values() {
     let config = Config::default();
-    assert_eq!(config.model, "claude-haiku-4-5-20251001");
+    assert_eq!(config.model, default_model());
     assert_eq!(config.permission_mode, PermissionMode::Auto);
     assert_eq!(config.temperature, 0.7);
     assert_eq!(config.max_tokens, 4096);
@@ -63,7 +65,9 @@ fn test_config_updates() {
 
 #[test]
 fn test_default_functions() {
-    assert_eq!(default_model(), "claude-haiku-4-5-20251001");
+    // `default_model()` stays coherent with the default provider (Ollama).
+    assert_eq!(default_model(), ProviderType::Ollama.default_model());
+    assert!(!default_model().is_empty());
     assert_eq!(default_temperature(), 0.7);
     assert_eq!(default_max_tokens(), 4096);
     assert!(!default_backend_url().is_empty());
@@ -669,7 +673,6 @@ fn test_stale_model_migrated_on_load() {
     // Load: the in-memory migration must swap to the current default.
     let loaded = ConfigManager::load_from_file(&config_path).unwrap();
     assert_eq!(loaded.model, default_model());
-    assert_eq!(loaded.model, "claude-haiku-4-5-20251001");
 
     // Invariant: the file on disk is NOT silently rewritten — persistence is
     // user-initiated via `config --set`.

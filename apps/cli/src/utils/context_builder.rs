@@ -833,9 +833,7 @@ impl ContextBuilder {
     /// Formatted string for injection, or empty string if PKS disabled or no facts
     pub fn build_personal_context(&self, user_query: Option<&str>) -> String {
         use crate::utils::paths::PlatformPaths;
-        use rullama::knowledge::bks_pks::personal::{
-            PersonalFactMatcher, PersonalKnowledgeCache,
-        };
+        use rullama::knowledge::bks_pks::personal::{PersonalFactMatcher, PersonalKnowledgeCache};
 
         if !self.config.enable_personal_knowledge {
             return String::new();

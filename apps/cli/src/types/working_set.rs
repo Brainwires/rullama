@@ -448,7 +448,10 @@ impl WorkingSet {
                         // Truncate to fit
                         let max_chars = remaining * 4;
                         let truncated_content = if content.len() > max_chars {
-                            format!("{}...\n[TRUNCATED - file too large]", &content[..max_chars])
+                            format!(
+                                "{}...\n[TRUNCATED - file too large]",
+                                crate::utils::truncate_on_char_boundary(&content, max_chars)
+                            )
                         } else {
                             content
                         };

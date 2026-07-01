@@ -61,8 +61,13 @@ fn dev() -> ExitCode {
     // so what's served always matches source. Local-dev mode reverse-proxies to
     // Vite (builds on the fly), so there's nothing to pre-build there.
     if forwarded.iter().any(|a| a == "--public") {
-        eprintln!("$ pnpm -C apps/web build   (refreshing web/dist/ for the --public static serve)");
-        match Command::new("pnpm").args(["-C", "apps/web", "build"]).status() {
+        eprintln!(
+            "$ pnpm -C apps/web build   (refreshing web/dist/ for the --public static serve)"
+        );
+        match Command::new("pnpm")
+            .args(["-C", "apps/web", "build"])
+            .status()
+        {
             Ok(s) if s.success() => {}
             Ok(s) => eprintln!(
                 "xtask: web build failed (exit {}); serving the existing web/dist/ as-is",

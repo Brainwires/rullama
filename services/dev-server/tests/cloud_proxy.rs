@@ -39,7 +39,8 @@ fn post_chat(uri: &str, key: Option<&str>) -> Request<Body> {
     if let Some(k) = key {
         b = b.header("x-cloud-key", k);
     }
-    b.body(Body::from(r#"{"model":"x","messages":[]}"#)).unwrap()
+    b.body(Body::from(r#"{"model":"x","messages":[]}"#))
+        .unwrap()
 }
 
 #[tokio::test]
@@ -86,8 +87,8 @@ async fn disabled_cloud_route_is_absent() {
     let root = td.path().to_path_buf();
     std::fs::create_dir_all(root.join("crates")).unwrap();
     std::fs::create_dir_all(root.join("pkg")).unwrap();
-    std::fs::create_dir_all(root.join("web/dist")).unwrap();
-    std::fs::write(root.join("web/dist/index.html"), "<!doctype html>").unwrap();
+    std::fs::create_dir_all(root.join("apps/web/dist")).unwrap();
+    std::fs::write(root.join("apps/web/dist/index.html"), "<!doctype html>").unwrap();
     std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
     let models = root.join("models");
     std::fs::create_dir_all(models.join("blobs")).unwrap();

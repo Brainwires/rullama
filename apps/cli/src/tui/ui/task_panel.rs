@@ -71,7 +71,10 @@ pub fn draw_task_panel(f: &mut Frame, app: &App, area: Rect) {
             // Truncate text to fit panel width (leave room for icon and padding)
             let max_text_width = inner_area.width.saturating_sub(4) as usize;
             let display_text = if text.len() > max_text_width {
-                format!("{}...", &text[..max_text_width.saturating_sub(3)])
+                format!(
+                    "{}...",
+                    crate::utils::truncate_on_char_boundary(text, max_text_width.saturating_sub(3))
+                )
             } else {
                 text.clone()
             };

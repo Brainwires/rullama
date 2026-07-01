@@ -261,7 +261,10 @@ fn draw_panel(
         // Truncate if too long
         let max_name_len = inner.width.saturating_sub(10) as usize;
         let display_name = if file_name.len() > max_name_len {
-            format!("{}...", &file_name[..max_name_len.saturating_sub(3)])
+            format!(
+                "{}...",
+                crate::utils::truncate_on_char_boundary(&file_name, max_name_len.saturating_sub(3))
+            )
         } else {
             file_name
         };

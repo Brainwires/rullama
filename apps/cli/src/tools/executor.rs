@@ -84,9 +84,8 @@ pub struct ToolExecutor {
     /// Remote bridge for permission relay (dangerous tool approval via web UI).
     /// LEGACY: discontinued Studio remote-bridge, gated behind `remote-bridge`.
     #[cfg(feature = "remote-bridge")]
-    remote_bridge: Option<
-        std::sync::Arc<tokio::sync::RwLock<rullama::agent_network::remote::RemoteBridge>>,
-    >,
+    remote_bridge:
+        Option<std::sync::Arc<tokio::sync::RwLock<rullama::agent_network::remote::RemoteBridge>>>,
     /// Organization-level blocked tools (enforced client-side)
     org_blocked_tools: Vec<String>,
     /// Whether org policy forces permission relay for all dangerous tools
@@ -183,9 +182,7 @@ impl ToolExecutor {
     #[cfg(feature = "remote-bridge")]
     pub fn set_remote_bridge(
         &mut self,
-        bridge: std::sync::Arc<
-            tokio::sync::RwLock<rullama::agent_network::remote::RemoteBridge>,
-        >,
+        bridge: std::sync::Arc<tokio::sync::RwLock<rullama::agent_network::remote::RemoteBridge>>,
     ) {
         self.remote_bridge = Some(bridge);
     }
@@ -195,10 +192,7 @@ impl ToolExecutor {
     /// These override local settings for blocked tools, forced permission relay,
     /// and audit logging. The server also enforces these server-side, but
     /// client-side enforcement provides faster UX feedback.
-    pub fn apply_org_policies(
-        &mut self,
-        policies: &rullama::agent_network::remote::OrgPolicies,
-    ) {
+    pub fn apply_org_policies(&mut self, policies: &rullama::agent_network::remote::OrgPolicies) {
         self.org_blocked_tools = policies.blocked_tools.clone();
         self.org_permission_relay_required = policies.permission_relay_required;
         self.org_audit_all_commands = policies.audit_all_commands;

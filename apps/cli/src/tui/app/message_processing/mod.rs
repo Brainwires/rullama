@@ -1046,7 +1046,8 @@ impl App {
                 // Limit tool output to prevent context window overflow
                 const MAX_TOOL_OUTPUT_CHARS: usize = 10_000;
                 let truncated_output = if result.len() > MAX_TOOL_OUTPUT_CHARS {
-                    let truncated = &result[..MAX_TOOL_OUTPUT_CHARS];
+                    let truncated =
+                        crate::utils::truncate_on_char_boundary(&result, MAX_TOOL_OUTPUT_CHARS);
                     format!(
                         "{}\n\n[Output truncated: {} of {} characters]",
                         truncated,
@@ -1148,7 +1149,9 @@ impl App {
 
             // Send result back via channel
             match result {
-                Ok(continuation_text) => {
+                // The continuation turn's token usage (`_usage`) is not tracked
+                // in the TUI path — no cost tracker is wired into this async task.
+                Ok((continuation_text, _usage)) => {
                     // Send the continuation text as streaming content
                     let _ = tx.send(StreamEvent::Text(continuation_text));
                     let _ = tx.send(StreamEvent::Done);

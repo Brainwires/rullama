@@ -312,16 +312,22 @@ async fn find_blob_path(state: &AppState, name_tag: &str) -> Option<PathBuf> {
     // Kokoro TTS GGUF is not an Ollama model — serve the local file so the PWA can
     // pull it via ?localBlob (bypassing the R2 CDN). Override path via KOKORO_GGUF.
     if name_tag == "kokoro:82m" {
-        let p = std::env::var("KOKORO_GGUF").map(PathBuf::from).unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/kokoro/kokoro-82m-f16.gguf")
-        });
+        let p = std::env::var("KOKORO_GGUF")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                    .join(".cache/kokoro/kokoro-82m-f16.gguf")
+            });
         return p.is_file().then_some(p);
     }
     // StyleTTS2-LibriTTS voice-cloning GGUF (f32). Override path via STYLETTS2_GGUF.
     if name_tag == "styletts2:libritts" {
-        let p = std::env::var("STYLETTS2_GGUF").map(PathBuf::from).unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache/styletts2/styletts2-libritts-f32.gguf")
-        });
+        let p = std::env::var("STYLETTS2_GGUF")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                    .join(".cache/styletts2/styletts2-libritts-f32.gguf")
+            });
         return p.is_file().then_some(p);
     }
     let models = discover_models(state).await;

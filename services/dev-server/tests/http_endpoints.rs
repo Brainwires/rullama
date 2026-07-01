@@ -79,7 +79,7 @@ fn build_fixture() -> Fixture {
     // with Cargo.toml + crates/ + examples/.
     let stub = root.join("repo-stub");
     std::fs::create_dir_all(stub.join("crates")).unwrap();
-    std::fs::create_dir_all(stub.join("web/dist")).unwrap();
+    std::fs::create_dir_all(stub.join("apps/web/dist")).unwrap();
     std::fs::create_dir_all(stub.join("pkg")).unwrap();
     std::fs::write(stub.join("Cargo.toml"), "[workspace]\n").unwrap();
     // Drop a tiny fixture file in pkg/ so /pkg/* tests have something to

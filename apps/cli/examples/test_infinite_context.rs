@@ -5,10 +5,10 @@
 /// This creates a test conversation, stores messages with embeddings,
 /// and demonstrates semantic search retrieval.
 use anyhow::Result;
+use chrono::Utc;
 use rullama_cli::storage::{
     CachedEmbeddingProvider, LanceDatabase, MessageMetadata, MessageStore, VectorDatabase,
 };
-use chrono::Utc;
 use std::sync::Arc;
 
 #[tokio::main]

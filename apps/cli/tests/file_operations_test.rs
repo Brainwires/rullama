@@ -1,9 +1,9 @@
 // Integration tests for file operations
 mod common;
 
+use common::create_test_dir;
 use rullama_cli::tools::FileOpsTool;
 use rullama_cli::types::tool::ToolContext;
-use common::create_test_dir;
 use serde_json::json;
 use std::fs;
 

@@ -1,5 +1,4 @@
 pub mod ambiguity_effectiveness;
-pub mod rullama_md;
 pub mod checkpoint;
 pub mod completion_detector;
 pub mod context_builder;
@@ -12,6 +11,57 @@ pub mod importance;
 pub mod logger;
 pub mod memory;
 pub mod paths;
+pub mod rullama_md;
+
+/// Truncate `s` to at most `max` bytes **without splitting a multi-byte
+/// UTF-8 character**. Returns the largest prefix `&s[..n]` with `n <= max`
+/// that ends on a char boundary.
+///
+/// Plain byte slicing (`&s[..max]`) panics when `max` lands in the middle
+/// of a code point — a real hazard for arbitrary tool output, which is
+/// frequently UTF-8 (emoji, CJK, accented text). Use this anywhere tool
+/// output is capped for context/display.
+pub fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        &s[..s.floor_char_boundary(max)]
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_on_char_boundary;
+
+    #[test]
+    fn shorter_than_max_is_unchanged() {
+        assert_eq!(truncate_on_char_boundary("hello", 10), "hello");
+        assert_eq!(truncate_on_char_boundary("hello", 5), "hello");
+    }
+
+    #[test]
+    fn ascii_truncates_exactly() {
+        assert_eq!(truncate_on_char_boundary("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn never_splits_a_multibyte_char() {
+        // "€" is 3 bytes; a byte-slice at 1 or 2 would panic.
+        let s = "a€b€c";
+        for max in 0..=s.len() {
+            let out = truncate_on_char_boundary(s, max);
+            assert!(out.len() <= max);
+            assert!(s.starts_with(out));
+        }
+    }
+
+    #[test]
+    fn boundary_inside_euro_backs_up() {
+        let s = "€€"; // 6 bytes, boundaries at 0,3,6
+        assert_eq!(truncate_on_char_boundary(s, 4), "€"); // 4 -> back to 3
+        assert_eq!(truncate_on_char_boundary(s, 5), "€"); // 5 -> back to 3
+    }
+}
 
 /// Test-only helpers. Keep truly shared state here so tests in different
 /// modules can coordinate access to process-global resources (env vars,

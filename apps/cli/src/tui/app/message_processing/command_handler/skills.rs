@@ -463,7 +463,10 @@ Describe how to use this skill and what it does.
 fn truncate_description(s: &str, max_len: usize) -> String {
     let first_line = s.lines().next().unwrap_or(s);
     if first_line.len() > max_len {
-        format!("{}...", &first_line[..max_len.saturating_sub(3)])
+        format!(
+            "{}...",
+            crate::utils::truncate_on_char_boundary(first_line, max_len.saturating_sub(3))
+        )
     } else {
         first_line.to_string()
     }

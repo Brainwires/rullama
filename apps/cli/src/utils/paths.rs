@@ -616,8 +616,7 @@ impl PlatformPaths {
     pub fn ensure_project_rullama_dir() -> Result<PathBuf> {
         let dir = Self::project_rullama_dir()?;
         if !dir.exists() {
-            std::fs::create_dir_all(&dir)
-                .context("Failed to create project .rullama directory")?;
+            std::fs::create_dir_all(&dir).context("Failed to create project .rullama directory")?;
         }
         Ok(dir)
     }

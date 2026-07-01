@@ -194,9 +194,7 @@ impl OrchestratorAgent {
     }
 
     /// Get reference to the last generated prompt (for learning/debugging)
-    pub fn last_generated_prompt(
-        &self,
-    ) -> Option<&rullama::prompting::generator::GeneratedPrompt> {
+    pub fn last_generated_prompt(&self) -> Option<&rullama::prompting::generator::GeneratedPrompt> {
         self.last_generated_prompt.as_ref()
     }
 
