@@ -238,20 +238,24 @@ impl ModelRegistry {
                     .find(|m| m.is_default)
                     .or_else(|| models.first())
                     .map(|m| m.id.clone())
-                    .unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string())
+                    .unwrap_or_else(Self::default_model_sync)
             }
-            Err(_) => {
-                // Fallback to a small, cheap model the backend actually lists.
-                "claude-haiku-4-5-20251001".to_string()
-            }
+            // No live model list: fall back to the default provider's default
+            // model (see `default_model_sync`).
+            Err(_) => Self::default_model_sync(),
         }
     }
 
     /// Get default model synchronously (fallback only)
     /// This should only be used where async is not possible
     /// Note: This is only used as a last resort. The config file should have the default.
+    ///
+    /// The default model follows the default provider — each provider owns its
+    /// default (`ProviderType::default_model`), and the config default provider
+    /// is Ollama. This delegates to the single source of truth in
+    /// `config::manager` so there is no second, provider-blind default.
     pub fn default_model_sync() -> String {
-        "claude-haiku-4-5-20251001".to_string()
+        crate::config::manager::default_model()
     }
 
     /// Fetch models from backend API
@@ -304,8 +308,11 @@ mod tests {
 
     #[test]
     fn test_default_model_sync() {
+        // The sync default follows the default provider (Ollama), so it must
+        // match the single source of truth rather than a hardcoded model.
         let model = ModelRegistry::default_model_sync();
-        assert_eq!(model, "claude-haiku-4-5-20251001");
+        assert_eq!(model, crate::config::manager::default_model());
+        assert!(!model.is_empty());
     }
 
     #[test]
