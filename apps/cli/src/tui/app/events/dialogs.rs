@@ -781,7 +781,7 @@ impl App {
         &mut self,
         event: Event,
     ) -> Result<()> {
-        use crate::tui::hotkey_content::BrainwiresHotkeyProvider;
+        use crate::tui::hotkey_content::RullamaHotkeyProvider;
         use ratatui_interact::components::hotkey_dialog::{
             HotkeyDialogAction, handle_hotkey_dialog_key, handle_hotkey_dialog_mouse,
         };
@@ -812,7 +812,7 @@ impl App {
                 }
                 HotkeyDialogAction::EntrySelected { .. } => {
                     // Show toast with selected hotkey info
-                    let provider = BrainwiresHotkeyProvider;
+                    let provider = RullamaHotkeyProvider;
                     if let Some(entry) = state.get_selected_entry(&provider) {
                         let msg = format!(
                             "{}: {} [{}]",

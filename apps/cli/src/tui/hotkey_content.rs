@@ -251,9 +251,9 @@ impl HotkeyCategoryTrait for HotkeyCategory {
 ///
 /// Implements `HotkeyProvider` from ratatui_interact to supply hotkey data
 /// to the generic hotkey dialog component.
-pub struct BrainwiresHotkeyProvider;
+pub struct RullamaHotkeyProvider;
 
-impl HotkeyProvider for BrainwiresHotkeyProvider {
+impl HotkeyProvider for RullamaHotkeyProvider {
     type Category = HotkeyCategory;
 
     fn entries_for_category(&self, category: Self::Category) -> Vec<HotkeyEntryData> {

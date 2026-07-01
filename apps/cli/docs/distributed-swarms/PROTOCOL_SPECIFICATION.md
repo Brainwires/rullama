@@ -1750,7 +1750,7 @@ Agent A:
 ```json
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "BrainwiresRemoteConfig",
+  "title": "RemoteBridgeConfig",
   "type": "object",
   "properties": {
     "remote": {

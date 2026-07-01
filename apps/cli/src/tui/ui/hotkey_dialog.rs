@@ -7,7 +7,7 @@ use ratatui::{Frame, layout::Rect};
 
 use ratatui_interact::components::hotkey_dialog::{HotkeyDialog, HotkeyDialogStyle};
 
-use crate::tui::{app::App, hotkey_content::BrainwiresHotkeyProvider};
+use crate::tui::{app::App, hotkey_content::RullamaHotkeyProvider};
 
 /// Draw the hotkey dialog overlay.
 pub fn draw_hotkey_dialog(f: &mut Frame, app: &mut App, _area: Rect) {
@@ -15,7 +15,7 @@ pub fn draw_hotkey_dialog(f: &mut Frame, app: &mut App, _area: Rect) {
         return;
     };
 
-    let provider = BrainwiresHotkeyProvider;
+    let provider = RullamaHotkeyProvider;
     let style = HotkeyDialogStyle::default();
 
     let dialog = HotkeyDialog::new(state, &provider, &style);
