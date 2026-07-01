@@ -1,0 +1,55 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Rullama.ViewModels"
+             x:Class="Rullama.Views.SettingsView"
+             x:DataType="vm:SettingsViewModel"
+             Background="{StaticResource Background}">
+  <Design.DataContext>
+    <vm:SettingsViewModel />
+  </Design.DataContext>
+
+  <ScrollViewer>
+    <StackPanel Margin="24" Spacing="16" MaxWidth="720" HorizontalAlignment="Center">
+      <TextBlock Classes="h1" Text="Settings" />
+
+      <!-- Environment -->
+      <TextBlock Classes="label" Text="ENVIRONMENT" />
+      <Button Classes="primary" Content="Probe GPU"
+              Command="{Binding ProbeCommand}" IsEnabled="{Binding !IsBusy}"
+              HorizontalAlignment="Left" />
+      <Border Classes="card" Padding="16">
+        <StackPanel Spacing="6">
+          <TextBlock Classes="mono" Text="{Binding Environment}" TextWrapping="Wrap"
+                     Foreground="{StaticResource MutedForeground}" />
+          <TextBlock Classes="mono" FontSize="11" Text="{Binding RuntimeInfo}" TextWrapping="Wrap"
+                     Foreground="{StaticResource MutedForeground}" />
+        </StackPanel>
+      </Border>
+
+      <!-- Data -->
+      <TextBlock Classes="label" Text="DATA" />
+      <Border Classes="card" Padding="16">
+        <StackPanel Spacing="8">
+          <TextBlock Classes="mono" FontSize="11" Foreground="{StaticResource MutedForeground}"
+                     Text="{Binding DataDir}" TextWrapping="Wrap" />
+          <TextBlock Classes="muted" Text="{Binding DiskFree}" />
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button Classes="outline sm" Content="Open data folder" Command="{Binding OpenDataFolderCommand}" />
+            <Button Classes="destructive sm" Content="Reset chat data" Command="{Binding ResetChatDataCommand}" />
+          </StackPanel>
+          <TextBlock Classes="muted" Text="{Binding DataStatus}" TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <!-- About -->
+      <TextBlock Classes="label" Text="ABOUT" />
+      <Border Classes="card" Padding="16">
+        <StackPanel Spacing="4">
+          <TextBlock><Run Text="rullama" FontWeight="SemiBold" Foreground="{StaticResource Foreground}" /><Run Text="  v" Foreground="{StaticResource MutedForeground}" /><Run Text="{Binding AppVersion}" Foreground="{StaticResource MutedForeground}" /></TextBlock>
+          <TextBlock Classes="muted" FontSize="11"><Run Text="rust-core " /><Run Text="{Binding CoreVersion}" /></TextBlock>
+          <TextBlock Classes="muted" Text="On-device Gemma 4 — pure Rust + wgpu." />
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

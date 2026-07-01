@@ -35,14 +35,14 @@ fi
 
 echo "==> building rullama-devserver (release)"
 cargo build \
-    --manifest-path crates/rullama-devserver/Cargo.toml \
+    --manifest-path services/dev-server/Cargo.toml \
     --release
 
-if [ ! -f "web/dist/index.html" ]; then
+if [ ! -f "apps/web/dist/index.html" ]; then
     echo "==> dist/ missing; building PWA"
-    (cd web && pnpm install --frozen-lockfile && pnpm exec vite build)
+    (cd apps/web && pnpm install --frozen-lockfile && pnpm exec vite build)
 else
-    echo "==> dist/ present; skipping PWA build (rebuild with: cd web && pnpm exec vite build)"
+    echo "==> dist/ present; skipping PWA build (rebuild with: cd apps/web && pnpm exec vite build)"
 fi
 
 echo "==> stopping any prior PM2 entry"

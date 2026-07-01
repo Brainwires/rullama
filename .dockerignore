@@ -1,7 +1,9 @@
 # Build artifacts — re-generated inside the image
 target/
-pkg/
 dist/
+# NOTE: pkg/ (the wasm bundle) is NOT ignored — the image no longer builds it
+# (the engine lives in the sibling rullama-framework repo). It must be prebuilt
+# on the host and shipped in the build context; the Dockerfile COPYs it.
 
 # VCS / editor / OS
 .git/

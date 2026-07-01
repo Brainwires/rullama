@@ -1,0 +1,76 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Rullama.ViewModels"
+             xmlns:c="using:Rullama.Controls"
+             x:Class="Rullama.Views.ImageView"
+             x:DataType="vm:ImageViewModel"
+             Background="{StaticResource Background}">
+  <Design.DataContext>
+    <vm:ImageViewModel />
+  </Design.DataContext>
+
+  <Grid ColumnDefinitions="*,340">
+    <!-- Center: prompt + output -->
+    <DockPanel Grid.Column="0" Margin="16">
+      <StackPanel DockPanel.Dock="Top" Spacing="8">
+        <TextBlock Classes="h1" Text="Image generation" />
+        <TextBlock Classes="muted" TextWrapping="Wrap" Text="{Binding Status}" />
+        <ProgressBar IsVisible="{Binding IsBusy}" Minimum="0" Maximum="1" Value="{Binding Progress}" />
+      </StackPanel>
+
+      <!-- Composer -->
+      <Border DockPanel.Dock="Bottom" Margin="0,8,0,0">
+        <Grid ColumnDefinitions="*,Auto">
+          <TextBox Grid.Column="0" Margin="0,0,6,0"
+                   Watermark="Describe the image…"
+                   Text="{Binding Prompt, Mode=TwoWay}"
+                   AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="100" />
+          <Button Grid.Column="1" Classes="primary" Content="Generate"
+                  Command="{Binding GenerateCommand}" VerticalAlignment="Bottom" />
+        </Grid>
+      </Border>
+
+      <!-- Output -->
+      <Border Background="{StaticResource Card}" CornerRadius="{StaticResource RadiusMd}"
+              Margin="0,8" Padding="8">
+        <Image Source="{Binding GeneratedImage}" Stretch="Uniform"
+               HorizontalAlignment="Center" VerticalAlignment="Center" />
+      </Border>
+    </DockPanel>
+
+    <!-- Right: model + settings -->
+    <Border Grid.Column="1" Background="{StaticResource Card}"
+            BorderBrush="{StaticResource Border}" BorderThickness="1,0,0,0">
+      <ScrollViewer>
+        <StackPanel Margin="10" Spacing="12">
+          <TextBlock Classes="label" Text="IMAGE MODEL" />
+          <TextBlock Classes="muted" FontSize="11" TextWrapping="Wrap"
+                     Text="An Ollama MLX image model (per-tensor safetensors blobs) — e.g. z-image-turbo. Pick its directory." />
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBox Grid.Column="0" Margin="0,0,6,0" Watermark="/path/to/z-image-turbo"
+                     Text="{Binding ModelDir, Mode=TwoWay}" />
+            <Button Grid.Column="1" Classes="outline" Content="Browse…" Click="Browse_Click" />
+          </Grid>
+          <Button Classes="primary" Content="Load model" Command="{Binding LoadCommand}"
+                  HorizontalAlignment="Left" />
+
+          <TextBlock Classes="label" Text="GENERATION" Margin="0,8,0,0" />
+          <StackPanel Spacing="4">
+            <TextBlock Classes="label" Text="NEGATIVE PROMPT (OPTIONAL)" />
+            <TextBox Text="{Binding NegativePrompt, Mode=TwoWay}"
+                     AcceptsReturn="True" TextWrapping="Wrap" MinHeight="40"
+                     Watermark="blank = no CFG" />
+          </StackPanel>
+          <c:LabeledSlider Label="CFG SCALE" Minimum="1" Maximum="12" Step="0.5"
+                           Format="0.0" Value="{Binding CfgScale, Mode=TwoWay}" />
+          <c:LabeledSlider Label="SIZE (LATENT, ×8 = PX)" Minimum="8" Maximum="128" Step="8"
+                           Format="0" Value="{Binding LatentSize, Mode=TwoWay}" />
+          <c:LabeledSlider Label="SEED" Minimum="0" Maximum="100000" Step="1"
+                           Format="0" Value="{Binding Seed, Mode=TwoWay}" />
+          <c:LabeledSlider Label="STEPS" Minimum="1" Maximum="50" Step="1"
+                           Format="0" Value="{Binding Steps, Mode=TwoWay}" />
+        </StackPanel>
+      </ScrollViewer>
+    </Border>
+  </Grid>
+</UserControl>

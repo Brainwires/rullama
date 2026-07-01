@@ -1,0 +1,54 @@
+[package]
+name        = "rullama-devserver"
+version     = "0.1.0"
+edition     = "2024"
+rust-version = "1.91"
+license     = "MIT OR Apache-2.0"
+repository  = "https://github.com/Brainwires/rullama"
+publish     = false
+description = "Native dev server for the rullama PWA — replaces the Python http.server scripts, adds Rust → WASM watch + reload."
+
+[lib]
+name = "rullama_devserver"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rullama-devserver"
+path = "src/bin/server.rs"
+
+[dev-dependencies]
+tempfile      = "3"
+tower         = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+sha2          = "0.10"
+
+[dependencies]
+axum         = { version = "0.7", features = ["ws", "http2", "macros"] }
+tokio        = { version = "1", features = ["full"] }
+tower        = { version = "0.5" }
+tower-http   = { version = "0.6", features = ["trace", "set-header", "limit", "timeout"] }
+hyper        = { version = "1", features = ["full"] }
+hyper-util   = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
+http-body-util = "0.1"
+notify       = { version = "6", default-features = false, features = ["macos_fsevent"] }
+httparse     = "1.9"
+serde        = { version = "1.0.228", features = ["derive"] }
+serde_json   = "1.0.149"
+tracing      = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+# Outbound HTTPS client for the BYOK cloud proxy (/api/cloud/*). The
+# existing hyper-util client is HTTP-only; reqwest brings rustls TLS +
+# `bytes_stream()` for relaying provider SSE. rustls avoids a system
+# OpenSSL dep. Dev-path only — Docker uses nginx → a Cloudflare Worker.
+reqwest      = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2"] }
+bytes        = "1"
+mime_guess   = "2"
+clap         = { version = "4", features = ["derive"] }
+ctrlc        = "3"
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+strip         = "debuginfo"

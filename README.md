@@ -1,29 +1,55 @@
 # rullama
 
-Browser-resident **Gemma 4 inference** in pure Rust → WebAssembly + WebGPU.
-Loads the same GGUF blobs Ollama already has on disk, runs the forward pass on
-your local GPU through hand-written WGSL, never touches a remote server.
+The **rullama apps** — the consumer product family, all running **Gemma 4 on your
+local GPU** (with optional cloud providers). This repo holds three front-ends:
 
-The intent is a **PWA-pluggable inference engine**, not a port of Ollama-the-server.
-Ollama has 275K LOC of Go that wraps llama.cpp via CGO plus model registry, CLI,
-conversion tooling, multimodal pipelines — almost none of which apply to a
-browser library. What survives the scope cut is the *core inference path* over
-Ollama's storage format.
+- **`apps/web/`** — a browser-resident AI **PWA** (React + Vite + Tailwind + Workbox)
+  that runs inference **in the browser** via WebGPU + WASM. Chat (text / vision /
+  audio-input), a Knowledge tab (drop docs → embed → RAG), a Fine-tune tab
+  (in-browser LoRA), and a Voice tab — your data never has to leave the device.
+- **`apps/native/`** — the **desktop + mobile** app (.NET / Avalonia) with a Rust
+  `rust-core` C-ABI shim. Ships to the app stores.
+- **`apps/cli/`** — the **agentic CLI** (BYOK providers, tools, MCP, sessions).
 
-## Workspace
+All three build on the **[rullama-framework](https://github.com/Brainwires/rullama-framework)**
+platform — the OSS inference **engine** (`rullama-engine` + the `rullama-lora`
+trainer) and agent **harness** (`rullama-*` crates: agents, tools, memory, RAG,
+providers, MCP). The engine + harness live in that sibling repo, not here.
 
-A two-crate Cargo workspace:
+> **One brand — rullama — across the stack**, all at `rullama.com`.
+> **Brainwires** is the company / GitHub org, not a project name. See the
+> canonical topology doc:
+> [`rullama-framework/docs/ARCHITECTURE-engine-harness.md`](https://github.com/Brainwires/rullama-framework/blob/main/docs/ARCHITECTURE-engine-harness.md).
 
-| Crate              | Path                       | Target       | Status   |
-|--------------------|----------------------------|--------------|----------|
-| `rullama`          | `crates/rullama`           | wasm + native | release-track |
-| `rullama-finetune` | `crates/rullama-finetune`  | wasm + native | LoRA SGD over the same wgpu kernels; PWA exposes `TrainingSession` in the Fine-tune tab |
+## How each app builds on rullama-framework
 
-The iOS bench harness (`tools/ios-bench`) is a sibling crate excluded from the
-workspace so `cargo build --workspace --target wasm32-unknown-unknown` doesn't
-try to compile its staticlib for wasm.
+| App | Consumes the platform via |
+|-----|---------------------------|
+| `apps/web/` | the engine's **wasm bundle** at `/pkg/rullama.js` (built from `rullama-framework/engine/rullama-lora`), driven in a Worker; cloud via the BYOK `/api/cloud/*` proxy. |
+| `apps/native/` | the **C-ABI** `rust-core` shim linking `rullama-engine` + `rullama-lora` directly (P/Invoke — no HTTP, no wasm). |
+| `apps/cli/` | **path-deps** the `rullama-framework` harness crates (its own Cargo workspace). |
 
-## What works today
+The dev-server can also host the engine over an OpenAI-compatible
+`/v1/chat/completions` endpoint for any local client.
+
+## Layout
+
+| Path | What it is |
+|------|------------|
+| `apps/web/` | The PWA (React + Vite + Tailwind + Workbox SW). Imports the engine wasm bundle from `/pkg/rullama.js`. |
+| `apps/native/` | Desktop + mobile app: `app/` (.NET / Avalonia) + `rust-core/` (C-ABI cdylib over the engine). Own build; excluded from the root workspace. |
+| `apps/cli/` | The agentic CLI — its own Cargo workspace (own `Cargo.lock`), path-deps `../../../rullama-framework`. Excluded from the root workspace. |
+| `services/dev-server/` | The dev/serve HTTP server (Vite proxy, `/api/blob`, `/api/models`, `/api/cloud/*`, `/pkg/*`, cross-repo wasm-bundle watcher). Excluded from the workspace; run via `--manifest-path`. |
+| `services/worker/` | Cloudflare Worker — the production BYOK cloud proxy (deployed standalone via `wrangler`). |
+| `xtask/` | `cargo dev` + `cargo docker:*` dispatcher (std-only). The root workspace is just this. |
+| `pkg/` | The engine wasm bundle (built artifact, `--out-name rullama`; gitignored, at the repo root). |
+
+The inference engine + LoRA trainer live in the
+[rullama-framework](https://github.com/Brainwires/rullama-framework) repo as
+`rullama-engine` / `rullama-lora` (an isolated `engine/` wasm32 sub-workspace).
+The iOS bench harness moved there too (`engine/tools/ios-bench`).
+
+## `apps/web/` — what works today
 
 - ✅ **`gemma4:e2b` text inference on the desktop** loads end-to-end and
   generates greedy output bit-identical to Ollama. (`gemma4:e4b` is
@@ -48,7 +74,7 @@ try to compile its staticlib for wasm.
 - ✅ **Encoder chained + per-layer submits** (M7 + M15) — one CommandEncoder
   spans each transformer layer, submitted incrementally so the GPU drains
   smoothly even on tight-RAM phones.
-- ✅ **In-browser LoRA fine-tuning (`rullama-finetune`, wasm + native).**
+- ✅ **In-browser LoRA fine-tuning (`rullama-lora`, wasm + native).**
   Backward kernels for matmul Q4_K / Q6_K, rmsnorm, rope, geglu, attention,
   cross-entropy; Adam optimizer over GPU buffers; rank-r LoRA on attention
   + FFN projections. 200-step overfit-one drops loss from ~17.7 → 0 on the
@@ -61,7 +87,7 @@ try to compile its staticlib for wasm.
   currently skips the vision/audio towers to fit in shared RAM. Lazy
   upload for those is a follow-up.
 
-## Quickstart
+## `apps/web/` — running the browser PWA
 
 You need:
 - Rust ≥ 1.91 + `wasm-pack` (`cargo install wasm-pack --locked --version 0.13.1`)
@@ -69,33 +95,35 @@ You need:
   Safari 17.4+ for phones)
 - Ollama installed locally with `gemma4:e2b` pulled (`ollama pull gemma4:e2b`)
 
-### Build the wasm bundle
+### Get the wasm bundle (from the engine)
+
+The engine bundle is built from a **sibling rullama-framework engine checkout**. With
+`../rullama-framework/engine` present, `cargo dev` rebuilds it automatically
+when engine source changes; otherwise build it once:
 
 ```sh
-# Unified bundle — exposes both inference (`Model`) and training
-# (`TrainingSession`) wasm-bindgen surfaces. Built from `rullama-finetune`
-# because that's the crate that re-exports both. `--out-name rullama` keeps
-# the JS entry at `pkg/rullama.js` for PWA import compatibility.
-wasm-pack build crates/rullama-finetune --target web --release \
-    --out-dir ../../pkg --out-name rullama
-
-# Inference-only variant (smaller bundle, no TrainingSession). Use when
-# shipping a chat-only deployment.
-wasm-pack build crates/rullama --target web --release --out-dir ../../pkg
+# Unified bundle — inference (`Model`) + training (`TrainingSession`) surfaces.
+# Run inside the engine checkout. --out-name rullama keeps pkg/rullama.js stable.
+# Override the location with RULLAMA_ENGINE_DIR.
+cd ../rullama-framework/engine
+wasm-pack build rullama-lora --target web --release \
+    --out-dir ../../rullama/pkg --out-name rullama
 ```
 
-This emits `pkg/rullama.js` + `pkg/rullama_bg.wasm` + TypeScript typings.
+This emits `pkg/rullama.js` + `pkg/rullama_bg.wasm` + TypeScript typings into
+the app's `pkg/`. (Engine internals — kernels, GGUF, towers, parity — are
+documented in the rullama-framework engine repo.)
 
-### Two example PWAs
+### The PWA
 
-The user-facing browser app lives in `web/` — a production-quality React + Vite
+The user-facing browser app lives in `apps/web/` — a production-quality React + Vite
 + Tailwind + Workbox chat PWA (service-worker offline shell, restart dialog on
 deploys, attachment UI, conversation history in OPFS + SQLite via
 `rsqlite-wasm`) built against the shared wasm bundle.
 
 ```sh
 # React / Vite PWA — auto-runs the wasm bundle build via `pnpm dev`.
-cd web
+cd apps/web
 pnpm install
 pnpm dev                 # https://localhost:5173/
 ```
@@ -117,13 +145,57 @@ The PWA is fully drivable from the Mac via Apple's `safaridriver`:
 #                                  Feature Flags → WebGPU = on
 # Then on the Mac:
 safaridriver -p 4444 &
-./web/serve-iphone.sh            # HTTPS serve reachable from the phone's Safari
-./web/test/iphone-test.sh        # navigate → Load → chat → log perf
+./apps/web/serve-iphone.sh            # HTTPS serve reachable from the phone's Safari
+./apps/web/test/iphone-test.sh        # navigate → Load → chat → log perf
 ```
 
 `/tmp/rullama-page.log` collects beacon traces from the page (`[chat]`,
 `[pe]`, `[tg]`, `[gen]`, `[wkr]`, `[rs]`) so any regression in a phone
 run leaves a server-side trail even after a WebContent crash.
+
+## `apps/native/` — the desktop + mobile app
+
+A **.NET 9 / Avalonia 11** app (`apps/native/app/`, `Rullama.sln`) over a Rust
+**C-ABI shim** (`apps/native/rust-core/`, a `cdylib`/`staticlib`) that links the engine
+crates directly — no HTTP, no wasm. Runs on macOS / Windows / Linux desktop
+(builds with the plain `dotnet` SDK, no Xcode) plus an Android head; iOS needs
+Xcode 16. The engine `Model` is `!Send`, so each handle owns one OS thread and
+calls are marshalled to it inside Rust (`Avalonia → RustCore P/Invoke → rust-core
+→ rullama-engine` on wgpu Metal/DX12/Vulkan). Chat, multimodal, tools, voice
+(Kokoro TTS), in-app model downloads, LoRA fine-tuning, RAG, voice-cloning, and
+ROME editing are wired. Shipped through the app stores.
+
+```bash
+cd apps/native
+cargo build --manifest-path rust-core/Cargo.toml --release   # build the C-ABI core
+./scripts/build-rust.sh release                              # stage the native lib
+dotnet run --project app/Rullama.ProbeSmoke                  # verify the P/Invoke path
+dotnet run --project app/Rullama.Desktop                     # run the desktop app
+```
+
+`rust-core` is excluded from the root workspace (it links wgpu); it path-deps
+`../../../../rullama-framework/engine/{rullama-engine,rullama-lora}`. See
+[`apps/native/README.md`](apps/native/README.md) for the full toolchain + heads.
+
+## `apps/cli/` — the agentic CLI
+
+An AI agentic coding CLI (installed binary: **`rullama`**) — multi-agent
+orchestrator/worker decomposition, a rich tool system (file/bash/git/web), an MCP
+client, interactive / single-shot / batch / TUI modes, plan + task management, and
+semantic conversation memory. **BYOK**: on first run it prompts you to pick a
+provider (Ollama-local / OpenAI / Anthropic / …) — no hosted account.
+
+```bash
+cd apps/cli
+cargo build --release
+cargo install --path .        # installs the `rullama` binary
+rullama                       # first run: pick + configure a provider
+```
+
+`apps/cli/` is its own Cargo workspace (own `Cargo.lock`), excluded from the root and
+path-depping the `../../../rullama-framework` harness crates. The legacy Studio
+remote-bridge (web control of CLI agents) is kept behind the off-by-default
+`remote-bridge` feature. See [`apps/cli/README.md`](apps/cli/README.md).
 
 ## Docker / deploy
 
@@ -147,65 +219,46 @@ a corresponding line in `.cargo/config.toml`. The compose file's
 `OLLAMA_MODELS_DIR` env var picks the host's model store; defaults to
 `/usr/share/ollama/.ollama/models`.
 
-## Native sanity checks
+## Engine parity checks (run from rullama-framework)
 
-The same code paths run natively against host wgpu (Metal on macOS, Vulkan on
-Linux). Useful for parity testing without a browser:
+The engine's native parity examples (`greedy_parity`, `model_api`,
+`chained_smoke`, …) run the same code paths against host wgpu (Metal on macOS,
+Vulkan on Linux) without a browser. **They live with the engine**, not in this
+repo — run them from the sibling
+[`rullama-framework`](https://github.com/Brainwires/rullama-framework) engine
+checkout against `rullama-engine`, e.g.:
 
 ```sh
-# Greedy parity vs Ollama (CPU oracle)
-cargo run -p rullama --release --features cpu-reference --example greedy_parity -- \
+cd ../rullama-framework/engine
+cargo run -p rullama-engine --release --example greedy_parity -- \
     ~/.ollama/models/blobs/sha256-<digest> "Hi" 5
-
-# Full-stack chat through the public Model API
-cargo run -p rullama --release --features cpu-reference --example model_api -- \
-    ~/.ollama/models/blobs/sha256-<digest> "Hi" --greedy --max=16
-
-# Standalone chained forward (M7 perf path)
-cargo run -p rullama --release --features cpu-reference --example chained_smoke -- \
-    ~/.ollama/models/blobs/sha256-<digest> "Hi" --max=8
 ```
 
-`--features cpu-reference` is now a no-op (the f32 oracle is always built); the
-flag is kept so existing scripts keep working.
+See the engine repo's README for the full list.
 
 ## Fine-tuning
 
-`rullama-finetune` runs LoRA SGD against the live wgpu kernels — no Burn, no
+`rullama-lora` runs LoRA SGD against the live wgpu kernels — no Burn, no
 PyTorch, no separate runtime. Scope: rank-r LoRAs on
 `attn_q` / `attn_k` / `attn_v` / `attn_o` and the FFN projections, Adam, global
 L2 grad clipping, gradient accumulation, mixed precision, gradient
 checkpointing. PerPosition CE is a single-forward variant with a ~C/2 speedup
 vs. the multi-forward path.
 
-**In the browser:** the unified wasm bundle (see [Build](#build-the-wasm-bundle))
+**In the browser:** the unified wasm bundle (see [Get the wasm bundle](#get-the-wasm-bundle-from-the-engine))
 exposes `TrainingSession` to JS alongside `Model`. The Fine-tune tab in
-`web/` drives a full session — dataset upload, hyperparam UI, live
+`apps/web/` drives a full session — dataset upload, hyperparam UI, live
 loss chart, save adapter to OPFS as safetensors. The same `Model` that's
 loaded for inference accepts the trained adapter via `Model.loadAdapter(bytes)`
 (re-runs in the chat tab against the adapted weights).
 
-**Native:**
+**Native:** the native trainer examples (`overfit_one`, `train_jsonl`,
+`eval_adapter`) live with the engine now — run them from the rullama-framework engine
+repo against `rullama-lora` (e.g.
+`cargo run -p rullama-lora --release --example overfit_one -- <gguf>`). See
+the engine repo's README.
 
-```sh
-# Overfit a single (prompt, target) pair — acceptance test that the
-# backward path and Adam are wired correctly.
-cargo run -p rullama-finetune --release --example overfit_one -- \
-    ~/.ollama/models/blobs/sha256-<digest>
-
-# Train on a JSONL dataset. See `crates/rullama-finetune/examples/data/echo.jsonl`
-# for the format; env knobs documented in the example's docstring.
-cargo run -p rullama-finetune --release --example train_jsonl -- \
-    ~/.ollama/models/blobs/sha256-<digest> \
-    crates/rullama-finetune/examples/data/echo.jsonl
-
-# End-to-end smoke: train an adapter, save safetensors, reload via the
-# public Model API, run a generation against the adapted weights.
-cargo run -p rullama-finetune --release --example eval_adapter -- \
-    ~/.ollama/models/blobs/sha256-<digest> /path/to/adapter.safetensors
-```
-
-## Architecture
+## Web app architecture (`apps/web/`)
 
 ```
 PWA (host page) ──┐
@@ -215,7 +268,7 @@ PWA (host page) ──┐
   │   ▶ owns FileSystemSyncAccessHandle for the GGUF                │
   │   ▶ owns the wasm Model handle                                  │
   │     ┌──────────────────────────────────────────────────────┐    │
-  │     │ wasm32 (Rust, the rullama crate)                     │    │
+  │     │ wasm32 (Rust, the rullama-engine bundle)             │    │
   │     │   Model.loadFromOpfs(read_fn, total)                 │    │
   │     │           │                                          │    │
   │     │           ▼                                          │    │
@@ -252,11 +305,12 @@ exposes `FileSystemSyncAccessHandle` in Worker contexts, and the Worker
 isolates inference from main-thread page-watchdog reapers.
 
 The reference Go implementation lives in Ollama's tree under
-`model/models/gemma4/`. Every op in `crates/rullama/src/reference/forward.rs`
+`model/models/gemma4/`. Every op in the engine's `reference/forward.rs`
 (CPU oracle), `forward_chained.rs` (production GPU forward),
-`multimodal/vision.rs`, and `multimodal/audio.rs` corresponds 1:1.
+`multimodal/vision.rs`, and `multimodal/audio.rs` corresponds 1:1 — see the
+`rullama-engine` crate in the [`rullama-framework`](../rullama-framework) repo.
 
-## Performance
+## Web app performance (`apps/web/`)
 
 Measurements as of M15:
 
@@ -282,79 +336,6 @@ Other capability notes captured during iPhone validation:
 - `subgroups` ✗ — A18 has SIMDgroup hardware but Safari's WebGPU doesn't
   surface WGSL subgroup ops yet. Vision attention falls through to the
   no-subgroup HPD-f16 kernel automatically.
-
-## Layout
-
-```
-crates/rullama/
-├── src/
-│   ├── api.rs                    # JS-facing Model: load / loadFromUrl / loadFromOpfs[TextOnly] / loadAdapter / clearAdapter
-│   ├── lora.rs                   # InferenceAdapter — parses the safetensors blob TrainingSession writes
-│   ├── backend/
-│   │   ├── context.rs            # WgpuCtx (device, queue, adapter limits)
-│   │   ├── dispatch.rs           # cached + chained kernel dispatchers (incl. backward + Adam)
-│   │   ├── pipelines.rs          # one ComputePipeline per kernel (built once)
-│   │   ├── weight_cache.rs       # lazy GPU upload, per-tile range fetch on big tensors
-│   │   ├── matmul.rs / elementwise.rs / spike.rs    # one-shot dispatchers (parity tests)
-│   ├── gguf/
-│   │   ├── reader.rs             # GGUF v3 parser (header + tensor descriptors)
-│   │   ├── fetcher.rs            # TensorFetcher trait + In-memory / HttpRange / Opfs impls
-│   │   ├── tensor.rs             # dequant_tensor_to_f32 / dequant_row_to_f32 (sync + async)
-│   │   ├── quant.rs / dtype.rs / value.rs
-│   ├── kernels/wgsl/             # 70+ hand-written compute shaders (text + vision + audio + backward)
-│   ├── model/config.rs           # Gemma4Config: parses gemma4.* metadata keys
-│   ├── multimodal/
-│   │   ├── vision.rs             # ViT forward (16 blocks, 768d, ClippableLinear)
-│   │   ├── audio.rs              # Conformer forward (12 blocks, 1024d, block-local attention)
-│   │   └── audio_features.rs     # WAV → 128-bin log-mel (realfft)
-│   ├── reference/
-│   │   ├── forward.rs            # CPU f32 forward (parity oracle)
-│   │   ├── forward_gpu.rs        # M3-era GPU forward with per-kernel readbacks (oracle)
-│   │   ├── forward_chained.rs    # M7 production GPU forward, per-layer submits (M15)
-│   │   ├── ops.rs / weights.rs
-│   ├── sampling.rs               # temperature, top-k, top-p, rep penalty
-│   ├── template/gemma4_small.rs  # chat-template renderer (matches Ollama)
-│   └── tokenizer/                # GGUF BPE tokenizer (Ollama-bit-exact)
-└── examples/
-    ├── greedy_parity.rs          # CPU forward greedy vs Ollama
-    ├── chained_smoke.rs          # standalone Forward driver
-    ├── model_api.rs              # public Model API end-to-end
-    ├── vision_parity.rs          # vision tower vs Ollama (M11)
-    ├── audio_parity.rs           # audio tower vs Ollama (M13)
-    ├── matmul_bench.rs           # native wgpu matmul microbench
-    └── inspect.rs / decode_ids.rs / encode_check.rs / list_tensors.rs / …
-
-crates/rullama-finetune/
-├── src/
-│   ├── shared/                   # vendored config / error / progress types
-│   ├── dataset_loader.rs         # JSONL parser + Tokenizer trait
-│   ├── lr_schedule.rs            # warmup + linear / cosine / cosine-warm-restarts
-│   ├── lora.rs                   # per-LoRA GPU state (A / B), grad buffers
-│   ├── scratch.rs                # per-step GPU scratch buffers for backward
-│   ├── wasm_bindgen_api.rs       # JS-facing TrainingSession (wasm32 only)
-│   └── session.rs                # TrainingSession — forward → loss → backward → Adam
-└── examples/
-    ├── overfit_one.rs            # single-pair acceptance test
-    ├── train_jsonl.rs            # JSONL dataset trainer
-    ├── eval_adapter.rs           # load a trained safetensors blob and generate
-    └── data/echo.jsonl
-
-examples/
-├── web/                          # React + Vite + Tailwind + Workbox SW production demo
-│   └── src/components/FineTunePanel.tsx  # in-browser LoRA training tab over the loaded Model
-└── pwa/                          # Vanilla JS bench harness + safaridriver scripts
-    ├── index.html / bench.html
-    ├── inference-worker.js       # Dedicated Worker — owns Model + sync OPFS handle
-    ├── opfs-store.js             # OPFS download + read API (main-thread)
-    ├── opfs-writer-worker.js     # streams GGUF → OPFS via SyncAccessHandle.write
-    ├── serve.sh                  # dev HTTPS server + /api/log /api/blob endpoints
-    ├── run-on-iphone.sh / iphone-session-keeper.sh / clean-iphone.sh
-    └── bench-on-iphone.sh
-
-tools/ios-bench/                  # staticlib for Xcode — C-ABI rullama_run_bench
-docker/                           # nginx + R2 mirror configs
-scripts/                          # ops scripts (model upload, etc.)
-```
 
 ## License
 

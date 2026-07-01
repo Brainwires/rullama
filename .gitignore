@@ -1,8 +1,9 @@
-/target
-# rullama-devserver is excluded from the workspace (see top-level Cargo.toml)
-# so it builds into its own target/ + Cargo.lock under its crate dir.
-/crates/rullama-devserver/target
-/crates/rullama-devserver/Cargo.lock
+# Rust build artifacts — any `target/` dir at any depth. Covers the root xtask
+# workspace AND the `dev-server/` crate (the devserver is excluded from the
+# workspace per the top-level Cargo.toml, so it builds into its own
+# `services/dev-server/target/` + `services/dev-server/Cargo.lock`).
+target/
+/services/dev-server/Cargo.lock
 **/*.rs.bk
 Cargo.lock.bak
 
@@ -11,12 +12,12 @@ Cargo.lock.bak
 /dist
 
 # web (Vite + React + Hono PWA) — build artifacts and deps
-/web/node_modules
-/web/dist
-/web/dev-dist
-/web/.vite
-/web/tsconfig.tsbuildinfo
-/web/server/dist
+/apps/web/node_modules
+/apps/web/dist
+/apps/web/dev-dist
+/apps/web/.vite
+/apps/web/tsconfig.tsbuildinfo
+/apps/web/server/dist
 
 # editors / OS
 .DS_Store
@@ -36,3 +37,6 @@ Cargo.lock.bak
 
 # PM2-managed devserver log files
 /ops/pm2/*.log
+
+# Local model weight downloads (Z-Image-Turbo etc.) — never commit
+weights/

@@ -1,0 +1,37 @@
+namespace Rullama.Services;
+
+/// <summary>
+/// Tool-calling format constants. TOOL_SCHEMA_PROMPT must stay byte-identical to
+/// the crate's tool-schema.txt (the LoRA is trained with it as a system turn).
+/// Ported from web/src/lib/toolFormat.ts.
+/// </summary>
+public static class ToolFormat
+{
+    public const string ToolCallOpenPrefix = "<tool_call";
+    public const string ToolCallClose = "</tool_call>";
+
+    public static string ToolResponseBlock(string name, string summary)
+        => $"<tool_response for=\"{name}\">{summary}</tool_response>";
+
+    public const string ToolSchemaPrompt = """
+You have access to these tools:
+- set_timer(duration)
+- set_reminder(text, time)
+- get_weather(location)
+- get_weather_forecast(location, days)
+- get_air_quality(location)
+- get_astronomy(location)
+- search_wikipedia(query)
+- search_knowledge(query)
+- get_news(query)
+
+For weather: get_weather is current conditions; get_weather_forecast covers the next "days" days (1-10); get_air_quality is pollution/AQI; get_astronomy is sunrise, sunset, and moon. location is a city name, "lat,lon" coordinates, or omitted to mean the user's current location.
+search_wikipedia looks up facts on Wikipedia. search_knowledge searches the user's OWN uploaded documents (the Knowledge tab) — use it when they ask about their notes/files. get_news fetches recent headlines. set_timer and set_reminder take a relative time like "10 minutes".
+
+When the user's request matches one or more of these tools, reply with a tool call for each, in exactly this format:
+<tool_call>{"name": "<tool_name>", "arguments": { ... }}</tool_call>
+If several independent tools apply (e.g. "weather and air quality"), emit one <tool_call> block per tool, back to back. But when one step depends on another's result (e.g. "if the temperature is above 20°, show the air quality"), call ONLY the first tool now — you will be given its result and can then decide whether to call the next. Use the exact tool name and argument keys, and copy the user's own words into the values — do not convert units, do math, or round (e.g. "30 seconds" stays "30 seconds", not minutes).
+
+If no tool fits the request, just answer the user normally. Not every message is a tool call — reason and respond as usual when none applies.
+""";
+}

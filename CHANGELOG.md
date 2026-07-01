@@ -4,10 +4,138 @@ All notable changes to **rullama** are tracked here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-While the version stays in the 0.x series, only the modules listed in the
-[stability section of `lib.rs`](crates/rullama/src/lib.rs) (`api`, `error`,
-`sampling`, `lora`) are covered by semver. Everything else is `#[doc(hidden)]`
-and may move in any patch release.
+This changelog now tracks the **rullama app** (the PWA in `web/` + the
+`dev-server`). The inference engine moved to the sibling
+[`rullama-framework`](../rullama-framework) repo — its API stability / semver is
+documented there (`rullama-engine`), not here.
+
+## [Unreleased]
+
+### Multi-conversation chat — background generation + persistent cross-chat queue
+
+The PWA chat no longer locks the whole UI behind one global "busy" flag, so
+several conversations can be managed at once.
+
+- **Browse history while a reply streams.** The displayed messages reflect
+  only the active conversation; the running turn streams into a
+  per-conversation live buffer + the DB regardless of what's on screen.
+  Switching back to a still-generating chat overlays the live partial
+  (including tokens produced since the last DB flush) and resumes painting
+  live. Selecting a conversation is no longer blocked during generation.
+- **New chat shows up immediately.** Clicking *New* creates the conversation
+  row up front (with a reuse-one-empty guard so repeated clicks don't stack
+  duplicate "New chat" rows), and the first app launch starts with one empty
+  chat already present instead of a blank sidebar.
+- **Queue messages across chats.** Sending while a turn is in flight enqueues
+  the message instead of blocking; a single serial FIFO pump drains jobs one
+  at a time (the worker owns one KV cache, so generation stays inherently
+  serial). The sidebar shows per-conversation *generating* / *queued*
+  indicators, and Stop targets the conversation on screen — cancelling its
+  run or dropping its queued message without touching the others.
+- **The queue survives a reload.** Queued jobs — including their image/audio
+  attachment pixels/PCM — are persisted to OPFS (`queue_store.ts`, a per-job
+  generalization of the in-flight-media store) and rebuilt + drained on boot,
+  the same resume guarantee the running generation already had. Same-chat
+  queued sends chain off the finished prior answer.
+
+Internally the old global `busy` becomes `genActive` ("the engine is working
+somewhere"); `onSend` splits into a thin enqueue wrapper plus a parameterized
+`runJob` driven by the pump, which owns session ordering and the active flag.
+The diffusion and tool-calling paths are preserved. Not yet browser-tested
+end-to-end.
+
+### Image generation — Z-Image-Turbo (new `imagegen` engine)
+
+A first text-to-image engine lands as a sibling to the Gemma text path —
+pure Rust + WebGPU, streaming Z-Image-Turbo's weights from the CDN, no
+GGUF (image models are per-tensor safetensors, not K-quants). Single-stream
+S3-DiT denoiser + FLUX VAE + Qwen3 text encoder, flow-match Euler sampling
+with classifier-free guidance.
+
+- **Async-streaming GPU forwards.** All three components run on the GPU
+  (bf16 matmul for the dominant linears; norms / multi-axis interleaved RoPE
+  / attention / adaLN / GroupNorm / conv / upsample as their own kernels or
+  CPU glue) and stream their weights **per tensor** over a `BlobSource` —
+  the identical code runs native (`FileBlobSource`) and in-browser
+  (`HttpRangeBlobSource`), never holding a shard in memory. Each is validated
+  against its CPU oracle: VAE `max|GPU−CPU|` 4e-6, DiT 2e-5, Qwen3 encoder 0.0.
+- **`ImageModel`** — the 4th wasm-bindgen class (alongside `Model`,
+  `EmbeddingModel`, `DiffusionGemma`): `loadFromUrl(cdnBase)` streams the
+  `text_encoder` / `transformer` / `vae` components via HTTP `Range`;
+  `generate(tokens, negTokens, cfgScale, lh, lw, steps, seed)` returns RGBA8
+  pixels. The composed pipeline (`ImageBundle`) is validated end-to-end
+  natively on the real weights (caption → image).
+- **PWA Image tab.** Prompt / negative-prompt / size / steps / CFG / seed
+  controls, canvas output, PNG download. Tokenization is a dependency-free
+  in-worker Qwen2 byte-level BPE that fetches the model's `tokenizer.json`
+  (no `@huggingface/transformers`, no onnxruntime asset in the bundle).
+- **Weights on the CDN.** Z-Image-Turbo published to R2 at
+  `models.brainwires.dev/z-image-turbo`, byte-exact, serving HTTP `Range`.
+
+Not yet validated in-browser end-to-end (the model is ~31 GB), and the
+bf16 weights re-stream per denoise step — fp8 (~12 GB) + resident per-layer
+weights are the follow-up perf lever. FLUX.2 Klein is a planned second config.
+
+### Fixed — Kokoro TTS garbled any utterance longer than a few words
+
+Generated speech was clean for short phrases but garbled from start to finish
+on anything longer. The cause was not in the TTS path but in the shared GPU
+vector-scale dispatcher `scale_chained`: for buffers past the
+`65_535 × 64 = 4_194_240`-element workgroup-dispatch cap it chunked the work
+across several dispatches carrying a per-call `offset` uniform. All chunks
+share one bind-cache key (same pipeline + buffer) and therefore one cached
+uniform buffer; recorded into a single command encoder and submitted once,
+every chunk read the **last** chunk's offset, so only that chunk's slice got
+scaled and the rest kept its unscaled value. In the ISTFTNet generator the
+resblock average (`÷ num_kernels = ÷3`) runs over audio-resolution buffers
+(~6.2M elements for ~10 s of audio), leaving ~2/3 of the waveform at 3×
+amplitude → garble. Short clips (< 4.19M elements = one chunk) were unaffected.
+
+Fixed by replacing the offset-chunking loop with a single `wg_grid(n)` dispatch
+(offset 0) that spills the workgroup count into the y dimension like every
+other chained elementwise kernel. Long-phrase GPU-vs-CPU correlation goes
+0.45 → 0.998 (peak 13.7 → 0.50); short unchanged. Added a regression test that
+scales a 5M-element buffer and asserts every element is touched. The same
+scale path is used by the lm_head / embed_tokens LoRA targets.
+
+### Voice tab — generated clips and prompt survive a reload
+
+- **Generated clips persist across reloads.** Synthesized speech is now written
+  to OPFS (`tts-clips-store.ts`: per-clip `<id>.f32` PCM files + a
+  `manifest.json` of metadata) instead of living only in React state. The clip
+  list rebuilds from the manifest on mount. Only metadata (text, voice, sample
+  rate, length, timestamp) is kept in memory — each clip's PCM is lazily loaded
+  from OPFS when it is played or exported and released afterward, so a long
+  backlog of clips never sits in RAM. Delete removes both the file and the
+  manifest entry.
+- **The prompt survives a reload.** The Voice tab's text input is persisted to
+  `localStorage` (`usePersistedState`), so a half-typed prompt isn't lost on a
+  refresh.
+
+### Voice tab — interruptible synthesis + finer progress
+
+- **Stop generation mid-synthesis** (a distinct, destructive Stop button shown
+  only while generating — separate from the playback Stop). Cancellation is
+  cooperative, not a worker teardown: a module-global flag is flipped by a
+  wasm-bindgen *free* function (`ttsRequestCancel`) — which touches no model
+  object, so it lands even while the borrowed `&mut self` async synth is running
+  — and the forward polls it at each stage boundary, bailing out with an empty
+  buffer. The synth yields to the worker event loop at every GPU readback, so a
+  cancel posted mid-run takes effect at the next stage. The worker and loaded
+  model stay resident, so the next Generate is immediate (no re-download / no
+  re-init). Covers both engines (Kokoro + the StyleTTS2 clone).
+- **Mid-vocoder cancellation.** The ISTFTNet vocoder — the longest phase for long
+  audio — used to run as one GPU submit, so a Stop during it only landed after it
+  finished. It now submits once per upsample stage and yields (`setTimeout(0)`
+  macrotask, so the queued `cancel` message is actually dispatched) + polls
+  cancellation between stages, bailing immediately. Same per-stage cancellation in
+  the clone's GPU decoder (it already submitted per stage).
+- **More detailed progress + a live stage log.** Stage labels name what's actually
+  running — *analyzing text (G2P + PL-BERT)* → *predicting durations & prosody* →
+  *encoding phonemes* → *vocoding waveform (upsample 1/2 … 2/2)* → *finishing
+  (iSTFT)* (clone: *imagining delivery (style diffusion)* → *vocoding waveform (GPU
+  decoder)*). The progress area now shows the running sequence of these stages, not
+  just the current one.
 
 ## [0.5.0] — 2026-06-17
 

@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Rullama.CloneSmoke</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Rullama\Interop\RustCore.cs" Link="RustCore.cs" />
+    <Compile Include="..\Rullama\Interop\RustModel.cs" Link="RustModel.cs" />
+    <Compile Include="..\Rullama\Interop\RustClone.cs" Link="RustClone.cs" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <RustProfile Condition="'$(Configuration)' == 'Release'">release</RustProfile>
+    <RustProfile Condition="'$(RustProfile)' == ''">debug</RustProfile>
+    <RustCoreDir>$(MSBuildThisFileDirectory)..\..\rust-core\target\$(RustProfile)</RustCoreDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="$(RustCoreDir)\librullama_core.dylib" Condition="Exists('$(RustCoreDir)\librullama_core.dylib')">
+      <Link>librullama_core.dylib</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="$(RustCoreDir)\librullama_core.so" Condition="Exists('$(RustCoreDir)\librullama_core.so')">
+      <Link>librullama_core.so</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="$(RustCoreDir)\rullama_core.dll" Condition="Exists('$(RustCoreDir)\rullama_core.dll')">
+      <Link>rullama_core.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,36 @@
+[package]
+name = "rullama-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+publish = false
+description = "C-ABI FFI shim over the rullama-engine crate, consumed by the .NET/Avalonia app via P/Invoke."
+
+[lib]
+name = "rullama_core"
+# staticlib  -> desktop (macOS/Windows) + iOS static linking
+# cdylib     -> Android .so (later)
+# rlib       -> native unit/smoke tests in this crate
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+# The inference engine moved to the brainwires platform repo and was renamed
+# (the engine crates rullama-engine + rullama-lora, in rullama-framework). Path-dep
+# the sibling engine sub-workspace; flip to crates.io version pins
+# (rullama-engine = "0.6", rullama-lora = "0.6") once the engine publishes.
+[dependencies]
+rullama-engine = { path = "../../../../rullama-framework/engine/rullama-engine" }
+rullama-lora = { path = "../../../../rullama-framework/engine/rullama-lora" }
+pollster = "0.4"
+# M12: agentic tool-calling orchestration — run model-authored Rhai scripts that
+# call tools, with results memoized/replayed across the FFI boundary.
+rhai = "1.25"
+serde_json = "1"
+# M13: image generation — tokenize the Qwen3 caption for imagegen::ImageBundle.
+tokenizers = "0.22"
+
+# (No [patch.crates-io] needed: the engine crates are direct path deps above,
+# pointing at the sibling rullama-framework/engine sub-workspace.)
+
+[profile.release]
+# wgpu/inference want optimization even in "debug" iteration; keep release lean.
+opt-level = 3

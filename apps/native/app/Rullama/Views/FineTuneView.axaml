@@ -1,0 +1,50 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Rullama.ViewModels"
+             xmlns:c="using:Rullama.Controls"
+             x:Class="Rullama.Views.FineTuneView"
+             x:DataType="vm:FineTuneViewModel"
+             Background="{StaticResource Background}">
+  <Design.DataContext>
+    <vm:FineTuneViewModel />
+  </Design.DataContext>
+
+  <ScrollViewer>
+    <StackPanel Margin="24" Spacing="12" MaxWidth="700" HorizontalAlignment="Center">
+      <TextBlock Classes="h1" Text="Fine-tune (LoRA)" />
+      <TextBlock Classes="muted" TextWrapping="Wrap"
+                 Text="Trains a small LoRA adapter on this machine. Slow on this GPU — keep steps low. Save the adapter, then load it in Chat." />
+
+      <TextBlock Classes="label" Text="BASE MODEL" />
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBox Grid.Column="0" Margin="0,0,6,0" Text="{Binding ModelPath, Mode=TwoWay}"
+                 Watermark="/path/to/model.gguf" />
+        <Button Grid.Column="1" Classes="outline" Content="Browse…" Click="Browse_Click" />
+      </Grid>
+
+      <TextBlock Classes="label" Text="EXAMPLES (prompt =&gt; completion)" />
+      <TextBox Text="{Binding ExamplesText, Mode=TwoWay}" AcceptsReturn="True" TextWrapping="Wrap"
+               MinHeight="100" FontFamily="{StaticResource MonoFont}" FontSize="12" />
+
+      <c:LabeledSlider Label="RANK" Minimum="1" Maximum="32" Step="1" Format="0" Value="{Binding Rank, Mode=TwoWay}" />
+      <c:LabeledSlider Label="STEPS" Minimum="1" Maximum="200" Step="1" Format="0" Value="{Binding Steps, Mode=TwoWay}" />
+      <c:LabeledSlider Label="MAX SEQ LEN" Minimum="16" Maximum="512" Step="16" Format="0" Value="{Binding MaxSeqLen, Mode=TwoWay}" />
+      <StackPanel Spacing="2">
+        <TextBlock Classes="label" Text="LEARNING RATE" />
+        <TextBox Text="{Binding LearningRate, Mode=TwoWay}" Width="120" HorizontalAlignment="Left" />
+      </StackPanel>
+
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <Button Classes="primary" Content="Start training" Command="{Binding StartCommand}" IsVisible="{Binding !IsRunning}" />
+        <Button Classes="destructive" Content="Stop" Command="{Binding StopCommand}" IsVisible="{Binding IsRunning}" />
+        <Button Classes="outline" Content="Save adapter" Command="{Binding SaveAdapterCommand}" />
+      </StackPanel>
+
+      <ProgressBar IsVisible="{Binding IsRunning}" Minimum="0" Maximum="1" Value="{Binding Progress}" />
+      <Border Classes="card" Height="64" Padding="6">
+        <c:Sparkline Values="{Binding LossHistory}" Stroke="{StaticResource Primary}" />
+      </Border>
+      <TextBlock Classes="muted" Text="{Binding Status}" TextWrapping="Wrap" />
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>
